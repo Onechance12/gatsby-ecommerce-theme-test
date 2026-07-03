@@ -11,6 +11,7 @@ const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || proces
 const routes = new Map([
   ["GET /health", health],
   ["GET /openapi.json", openapi],
+  ["GET /privacy", privacy],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
   ["POST /jobnimbus/update-contact", updateContact],
@@ -25,7 +26,8 @@ createServer(async (req, res) => {
     if (!isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
     const body = req.method === "GET" ? {} : await readJson(req);
     const result = await handler(body);
-    send(res, 200, result);
+    if (typeof result === "string") sendText(res, 200, result);
+    else send(res, 200, result);
   } catch (error) {
     send(res, error.statusCode || 500, { error: error.message || String(error) });
   }
@@ -46,6 +48,18 @@ function health() {
 
 function openapi() {
   return { ...OPENAPI, servers: [{ url: PUBLIC_BASE_URL }] };
+}
+
+function privacy() {
+  return [
+    "JobNimbus ChatGPT Bridge Privacy Policy",
+    "",
+    "This private bridge is used by Chance Pearson to connect ChatGPT to JobNimbus operations data.",
+    "It does not sell or share data.",
+    "Requests are authenticated before JobNimbus data is accessed.",
+    "The bridge passes user-authorized requests to JobNimbus and returns the response to ChatGPT.",
+    "JobNimbus API keys and bridge tokens are stored as Render environment variables and are not exposed by this page."
+  ].join("\n");
 }
 
 async function searchContacts(input) {
@@ -328,7 +342,7 @@ function authorized(req) {
 }
 
 function isPublicRoute(method, pathname) {
-  return method === "GET" && pathname === "/openapi.json";
+  return method === "GET" && ["/openapi.json", "/privacy"].includes(pathname);
 }
 
 async function readJson(req) {
@@ -355,6 +369,11 @@ function send(res, status, body) {
   res.end(JSON.stringify(body, null, 2));
 }
 
+function sendText(res, status, text) {
+  res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+  res.end(text);
+}
+
 function stripTrailingSlash(value) {
   return String(value || "").replace(/\/+$/, "");
 }
@@ -369,17 +388,85 @@ const OPENAPI = {
   servers: [{ url: "https://jobnimbus-chatgpt-bridge.onrender.com" }],
   security: [{ bearerAuth: [] }],
   components: {
-    securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } }
+    securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
+    schemas: {
+      SearchRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Name, JobNimbus number, claim number, policy number, phone, email, or address to search for." },
+          limit: { type: "integer", minimum: 1, maximum: 25, default: 10 },
+          maxPages: { type: "integer", minimum: 1, maximum: 25, default: 10 }
+        },
+        required: ["query"]
+      },
+      ReviewFileRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Name, JobNimbus number, claim number, policy number, phone, email, or address for the file to review." }
+        },
+        required: ["query"]
+      },
+      UpdateContactRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          fields: { type: "object", additionalProperties: true, description: "Exact JobNimbus contact fields to update." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["query", "fields"]
+      },
+      CreateNoteRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          note: { type: "string", description: "Short JobNimbus note text." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["query", "note"]
+      }
+    }
   },
   paths: {
     "/health": { get: { operationId: "health", responses: { "200": { description: "OK" } } } },
-    "/jobnimbus/search": { post: { operationId: "searchJobNimbus", requestBody: jsonBody(), responses: { "200": { description: "Matches" } } } },
-    "/jobnimbus/review-file": { post: { operationId: "reviewJobNimbusFile", requestBody: jsonBody(), responses: { "200": { description: "File review" } } } },
-    "/jobnimbus/update-contact": { post: { operationId: "updateJobNimbusContact", requestBody: jsonBody(), responses: { "200": { description: "Dry run or update result" } } } },
-    "/jobnimbus/create-note": { post: { operationId: "createJobNimbusNote", requestBody: jsonBody(), responses: { "200": { description: "Dry run or note result" } } } }
+    "/privacy": { get: { operationId: "privacy", responses: { "200": { description: "Privacy policy" } } } },
+    "/jobnimbus/search": {
+      post: {
+        operationId: "searchJobNimbus",
+        requestBody: jsonBody("SearchRequest"),
+        responses: { "200": { description: "Matches" } }
+      }
+    },
+    "/jobnimbus/review-file": {
+      post: {
+        operationId: "reviewJobNimbusFile",
+        requestBody: jsonBody("ReviewFileRequest"),
+        responses: { "200": { description: "File review" } }
+      }
+    },
+    "/jobnimbus/update-contact": {
+      post: {
+        operationId: "updateJobNimbusContact",
+        requestBody: jsonBody("UpdateContactRequest"),
+        responses: { "200": { description: "Dry run or update result" } }
+      }
+    },
+    "/jobnimbus/create-note": {
+      post: {
+        operationId: "createJobNimbusNote",
+        requestBody: jsonBody("CreateNoteRequest"),
+        responses: { "200": { description: "Dry run or note result" } }
+      }
+    }
   }
 };
 
-function jsonBody() {
-  return { required: true, content: { "application/json": { schema: { type: "object", additionalProperties: true } } } };
+function jsonBody(schemaName) {
+  return {
+    required: true,
+    content: {
+      "application/json": {
+        schema: { $ref: `#/components/schemas/${schemaName}` }
+      }
+    }
+  };
 }
