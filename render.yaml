@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: jobnimbus-chatgpt-bridge
+    runtime: node
+    plan: starter
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: JOBNIMBUS_API_BASE_URL
+        value: https://app.jobnimbus.com/api1
+      - key: JOBNIMBUS_API_KEY
+        sync: false
+      - key: JOBNIMBUS_BRIDGE_TOKEN
+        sync: false
+      - key: BRIDGE_ALLOW_WRITES
+        value: "false"
