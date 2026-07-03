@@ -6,6 +6,7 @@ const API_BASE = stripTrailingSlash(process.env.JOBNIMBUS_API_BASE_URL || "https
 const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const ALLOW_WRITES = process.env.BRIDGE_ALLOW_WRITES === "true";
+const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://jobnimbus-chatgpt-bridge.onrender.com");
 
 const routes = new Map([
   ["GET /health", health],
@@ -21,7 +22,7 @@ createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
-    if (!authorized(req)) return send(res, 401, { error: "Unauthorized" });
+    if (!isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
     const body = req.method === "GET" ? {} : await readJson(req);
     const result = await handler(body);
     send(res, 200, result);
@@ -44,7 +45,7 @@ function health() {
 }
 
 function openapi() {
-  return OPENAPI;
+  return { ...OPENAPI, servers: [{ url: PUBLIC_BASE_URL }] };
 }
 
 async function searchContacts(input) {
@@ -326,6 +327,10 @@ function authorized(req) {
   return req.headers.authorization === `Bearer ${BRIDGE_TOKEN}`;
 }
 
+function isPublicRoute(method, pathname) {
+  return method === "GET" && pathname === "/openapi.json";
+}
+
 async function readJson(req) {
   let raw = "";
   for await (const chunk of req) raw += chunk;
@@ -361,7 +366,7 @@ function clamp(value, min, max) {
 const OPENAPI = {
   openapi: "3.1.0",
   info: { title: "JobNimbus ChatGPT Bridge", version: "0.1.0" },
-  servers: [{ url: "https://YOUR-RENDER-SERVICE.onrender.com" }],
+  servers: [{ url: "https://jobnimbus-chatgpt-bridge.onrender.com" }],
   security: [{ bearerAuth: [] }],
   components: {
     securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } }
