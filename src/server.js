@@ -52,7 +52,14 @@ async function searchContacts(input) {
   const limit = clamp(Number(input.limit || 10), 1, 25);
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 10) });
   const matches = contacts.filter((contact) => contactMatches(contact, query)).slice(0, limit);
-  return { query, count: matches.length, matches: matches.map(compactContact) };
+  const compactMatches = matches.map(compactContact);
+  return {
+    query,
+    count: compactMatches.length,
+    matches: compactMatches,
+    contacts: compactMatches,
+    jobs: []
+  };
 }
 
 async function reviewFile(input) {
@@ -170,9 +177,12 @@ async function jobNimbus(endpoint, options = {}) {
 function contactMatches(contact, query) {
   const haystack = [
     contact.jnid,
+    contact.id,
     contact.number,
     contact.recid,
     contact.display_name,
+    contact.name,
+    contact.description,
     contact.first_name,
     contact.last_name,
     contact.email,
@@ -190,7 +200,28 @@ function contactMatches(contact, query) {
     contact["Claim #"],
     contact["Policy #"]
   ].filter(Boolean).join(" ").toLowerCase();
-  return haystack.includes(query);
+  const fullRecord = safeStringify(contact).toLowerCase();
+  return haystack.includes(query) || fullRecord.includes(query);
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value) || "";
+  } catch {
+    return "";
+  }
+}
+
+function fieldValue(record, names) {
+  for (const name of names) {
+    if (record[name] !== undefined && record[name] !== null && record[name] !== "") return record[name];
+  }
+  const lowerMap = new Map(Object.entries(record).map(([key, value]) => [key.toLowerCase(), value]));
+  for (const name of names) {
+    const value = lowerMap.get(String(name).toLowerCase());
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
 }
 
 function compactContact(contact) {
@@ -202,14 +233,14 @@ function compactContact(contact) {
     address: [contact.address_line1, contact.city, contact.state_text, contact.zip].filter(Boolean).join(", "),
     phone: contact.mobile_phone || contact.home_phone || contact.work_phone || "",
     email: contact.email || "",
-    carrier: contact["Insurance Company"] || contact.cf_string_1 || "",
-    claimNumber: contact["Claim #"] || contact.cf_string_2 || "",
-    policyNumber: contact["Policy #"] || contact.cf_string_4 || "",
-    typeOfLoss: contact["Type Of Loss"] || contact.cf_string_5 || "",
-    dateOfLoss: contact["Date of Loss"] || contact.cf_date_1 || "",
-    adjusterName: contact["Carrier DA"] || contact.cf_string_7 || "",
-    adjusterPhone: contact["Carrier DA Contact #"] || contact.cf_string_8 || "",
-    adjusterEmail: contact["Carrier DA Email"] || contact.cf_string_9 || ""
+    carrier: fieldValue(contact, ["Insurance Company", "Carrier", "insurance_company", "cf_string_1"]),
+    claimNumber: fieldValue(contact, ["Claim #", "Claim Number", "claim_number", "cf_string_10", "cf_string_2"]),
+    policyNumber: fieldValue(contact, ["Policy #", "Policy Number", "policy_number", "cf_string_4", "cf_string_3"]),
+    typeOfLoss: fieldValue(contact, ["Type Of Loss", "Type of Loss", "Cause of Loss", "cf_string_5"]),
+    dateOfLoss: fieldValue(contact, ["Date of Loss", "DOL", "cf_date_1"]),
+    adjusterName: fieldValue(contact, ["Carrier DA", "Carrier Adjuster", "Adjuster", "cf_string_7"]),
+    adjusterPhone: fieldValue(contact, ["Carrier DA Contact #", "Adjuster Phone", "cf_string_8"]),
+    adjusterEmail: fieldValue(contact, ["Carrier DA Email", "Adjuster Email", "cf_string_9"])
   };
 }
 
