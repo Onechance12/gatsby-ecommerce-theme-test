@@ -9,6 +9,9 @@
     "bridge": "node src/server.js",
     "check": "node --check src/server.js"
   },
+  "dependencies": {
+    "pdf-parse": "^1.1.1"
+  },
   "engines": {
     "node": ">=20"
   }

@@ -16,8 +16,13 @@ const routes = new Map([
   ["POST /jobnimbus/review-file", reviewFile],
   ["POST /jobnimbus/assigned-files", assignedFiles],
   ["POST /jobnimbus/assigned-counts", assignedCounts],
+  ["POST /jobnimbus/document-text", documentText],
   ["POST /jobnimbus/update-contact", updateContact],
-  ["POST /jobnimbus/create-note", createNote]
+  ["POST /jobnimbus/create-note", createNote],
+  ["POST /jobnimbus/create-task", createTask],
+  ["POST /jobnimbus/update-task", updateTask],
+  ["POST /jobnimbus/create-calendar-event", createCalendarEvent],
+  ["POST /jobnimbus/update-calendar-event", updateCalendarEvent]
 ]);
 
 createServer(async (req, res) => {
@@ -150,6 +155,31 @@ async function updateContact(input) {
   return { mode: "executed", file: compactContact(contact), result };
 }
 
+async function documentText(input) {
+  const query = required(input.query, "query");
+  const documentQuery = String(input.documentQuery || input.documentId || "").trim();
+  const maxChars = clamp(Number(input.maxChars || 12000), 1000, 50000);
+  const { contact } = await findOneContact(query);
+  const documents = await listRelated("/files", contact.jnid, 100);
+  const document = selectDocument(documents, documentQuery);
+  if (!document) {
+    return {
+      file: compactContact(contact),
+      error: documentQuery ? `No matching document found for: ${documentQuery}` : "No documents found on this file.",
+      availableDocuments: documents.map(compactDocument).slice(0, 50)
+    };
+  }
+  const downloaded = await downloadJobNimbusFile(document);
+  const extracted = await extractDocumentText(downloaded, document, maxChars);
+  return {
+    file: compactContact(contact),
+    document: compactDocument(document),
+    contentType: downloaded.contentType,
+    bytes: downloaded.bytes.length,
+    ...extracted
+  };
+}
+
 async function createNote(input) {
   if (input.execute === true && !ALLOW_WRITES) {
     badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute notes.");
@@ -166,6 +196,84 @@ async function createNote(input) {
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/activities", body } };
   const result = await jobNimbus("/activities", { method: "POST", body });
   return { mode: "executed", file: compactContact(contact), result };
+}
+
+async function createTask(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute tasks.");
+  }
+  const query = required(input.query, "query");
+  const title = required(input.title || input.subject, "title");
+  const { contact } = await findOneContact(query);
+  const body = cleanObject({
+    title,
+    subject: title,
+    description: input.description || input.note || "",
+    note: input.note || input.description || "",
+    date_start: toUnixSeconds(input.dateStart || input.dueDate),
+    date_end: toUnixSeconds(input.dateEnd || input.dueDate),
+    is_completed: Boolean(input.completed || false),
+    record_type_name: input.recordTypeName || "Task",
+    primary: { id: contact.jnid },
+    related: [{ id: contact.jnid }]
+  });
+  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/tasks", body } };
+  const result = await jobNimbus("/tasks", { method: "POST", body });
+  return { mode: "executed", file: compactContact(contact), result };
+}
+
+async function updateTask(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute task updates.");
+  }
+  const taskId = String(input.taskId || input.id || "").trim();
+  if (!taskId) badRequest("taskId is required");
+  const fields = input.fields;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
+  const body = normalizeDateFields(fields);
+  if (input.execute !== true) return { mode: "dry_run", plan: { endpoint: `/tasks/${taskId}`, body } };
+  const result = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`, { method: "PUT", body });
+  return { mode: "executed", taskId, result };
+}
+
+async function createCalendarEvent(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute calendar events.");
+  }
+  const query = required(input.query, "query");
+  const title = required(input.title || input.subject, "title");
+  const dateStart = toUnixSeconds(required(input.dateStart || input.start, "dateStart"));
+  const dateEnd = toUnixSeconds(input.dateEnd || input.end) || dateStart;
+  const { contact } = await findOneContact(query);
+  const body = cleanObject({
+    title,
+    subject: title,
+    note: input.note || input.description || "",
+    description: input.description || input.note || "",
+    location: input.location || compactContact(contact).address,
+    date_start: dateStart,
+    date_end: dateEnd,
+    record_type_name: input.recordTypeName || "Event",
+    primary: { id: contact.jnid },
+    related: [{ id: contact.jnid }]
+  });
+  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/activities", body } };
+  const result = await jobNimbus("/activities", { method: "POST", body });
+  return { mode: "executed", file: compactContact(contact), result };
+}
+
+async function updateCalendarEvent(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute calendar event updates.");
+  }
+  const eventId = String(input.eventId || input.activityId || input.id || "").trim();
+  if (!eventId) badRequest("eventId is required");
+  const fields = input.fields;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
+  const body = normalizeDateFields(fields);
+  if (input.execute !== true) return { mode: "dry_run", plan: { endpoint: `/activities/${eventId}`, body } };
+  const result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
+  return { mode: "executed", eventId, result };
 }
 
 async function findOneContact(query) {
@@ -231,6 +339,99 @@ function referencesContact(item, contactId) {
   const ids = [];
   for (const key of ["primary", "related", "customer", "contact"]) collectIds(item?.[key], ids);
   return ids.includes(contactId);
+}
+
+function selectDocument(documents, documentQuery) {
+  if (!documents.length) return null;
+  if (!documentQuery) return documents[0];
+  const needle = documentQuery.toLowerCase();
+  return documents.find((doc) => String(doc.jnid || doc.id || "").toLowerCase() === needle)
+    || documents.find((doc) => documentMatches(doc, needle))
+    || null;
+}
+
+function documentMatches(doc, needle) {
+  return [
+    doc.jnid,
+    doc.id,
+    doc.name,
+    doc.filename,
+    doc.file_name,
+    doc.description,
+    doc.record_type_name,
+    doc.type
+  ].filter(Boolean).join(" ").toLowerCase().includes(needle);
+}
+
+async function downloadJobNimbusFile(doc) {
+  const id = doc.jnid || doc.id;
+  if (!id) badRequest("Selected document does not have a JobNimbus file id.");
+  const response = await fetch(`https://app.jobnimbus.com/files/${encodeURIComponent(id)}`, {
+    headers: { authorization: `Bearer ${API_KEY}` }
+  });
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!response.ok) {
+    const text = bytes.toString("utf8", 0, Math.min(bytes.length, 500));
+    const error = new Error(`JobNimbus file download ${response.status}: ${text}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return {
+    bytes,
+    contentType: response.headers.get("content-type") || "",
+    filename: doc.name || doc.filename || doc.file_name || ""
+  };
+}
+
+async function extractDocumentText(downloaded, doc, maxChars) {
+  const filename = String(downloaded.filename || doc.name || doc.filename || doc.file_name || "").toLowerCase();
+  const contentType = String(downloaded.contentType || "").toLowerCase();
+  const looksPdf = contentType.includes("pdf") || filename.endsWith(".pdf");
+  const looksText = contentType.startsWith("text/") || /\.(txt|csv|json|xml|html|md)$/i.test(filename);
+
+  if (looksPdf) {
+    try {
+      const pdfParseModule = await import("pdf-parse");
+      const pdfParse = pdfParseModule.default || pdfParseModule;
+      const parsed = await pdfParse(downloaded.bytes);
+      const text = cleanExtractedText(parsed.text || "").slice(0, maxChars);
+      return {
+        extraction: "pdf-parse",
+        pageCount: parsed.numpages || parsed.numrender || null,
+        truncated: (parsed.text || "").length > maxChars,
+        text
+      };
+    } catch (error) {
+      return {
+        extraction: "failed",
+        error: `PDF extraction failed: ${error.message}. Install/verify pdf-parse on Render or use Drive/file tools for this document.`,
+        text: ""
+      };
+    }
+  }
+
+  if (looksText) {
+    const raw = downloaded.bytes.toString("utf8");
+    return {
+      extraction: "plain-text",
+      truncated: raw.length > maxChars,
+      text: cleanExtractedText(raw).slice(0, maxChars)
+    };
+  }
+
+  return {
+    extraction: "unsupported",
+    error: "This file type is not currently text-extractable by the bridge. Use Drive/file tools or download metadata only.",
+    text: ""
+  };
+}
+
+function cleanExtractedText(text) {
+  return String(text || "")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
 }
 
 function isInsuranceFile(contact) {
@@ -377,6 +578,39 @@ function compactTask(task) {
   };
 }
 
+function cleanObject(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ""));
+}
+
+function normalizeDateFields(fields) {
+  const body = { ...fields };
+  for (const [inputKey, outputKey] of [
+    ["dateStart", "date_start"],
+    ["start", "date_start"],
+    ["dueDate", "date_start"],
+    ["dateEnd", "date_end"],
+    ["end", "date_end"]
+  ]) {
+    if (body[inputKey] !== undefined) {
+      body[outputKey] = toUnixSeconds(body[inputKey]);
+      delete body[inputKey];
+    }
+  }
+  return cleanObject(body);
+}
+
+function toUnixSeconds(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 9999999999 ? Math.floor(value / 1000) : Math.floor(value);
+  }
+  const text = String(value).trim();
+  if (/^\d+$/.test(text)) return toUnixSeconds(Number(text));
+  const parsed = Date.parse(text);
+  if (Number.isNaN(parsed)) badRequest(`Invalid date/time: ${value}`);
+  return Math.floor(parsed / 1000);
+}
+
 function compactDocument(doc) {
   return {
     id: doc.jnid || doc.id,
@@ -490,6 +724,15 @@ const OPENAPI = {
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 }
         }
       },
+      DocumentTextRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
+          maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 12000 }
+        },
+        required: ["query"]
+      },
       UpdateContactRequest: {
         type: "object",
         properties: {
@@ -507,6 +750,52 @@ const OPENAPI = {
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["query", "note"]
+      },
+      CreateTaskRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          title: { type: "string", description: "Task title." },
+          description: { type: "string", description: "Task details." },
+          note: { type: "string", description: "Optional task note/details." },
+          dueDate: { type: "string", description: "Due date/time as ISO string, natural date string, or Unix timestamp." },
+          dateStart: { type: "string", description: "Start date/time as ISO string, natural date string, or Unix timestamp." },
+          dateEnd: { type: "string", description: "End date/time as ISO string, natural date string, or Unix timestamp." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["query", "title"]
+      },
+      UpdateTaskRequest: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "JobNimbus task id." },
+          fields: { type: "object", additionalProperties: true, description: "Task fields to update. Supports dateStart/dateEnd/dueDate aliases." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["taskId", "fields"]
+      },
+      CreateCalendarEventRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          title: { type: "string", description: "Calendar event title." },
+          dateStart: { type: "string", description: "Start date/time as ISO string, natural date string, or Unix timestamp." },
+          dateEnd: { type: "string", description: "End date/time as ISO string, natural date string, or Unix timestamp." },
+          location: { type: "string", description: "Event location. Defaults to the file property address." },
+          description: { type: "string", description: "Event details." },
+          note: { type: "string", description: "Optional event note/details." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["query", "title", "dateStart"]
+      },
+      UpdateCalendarEventRequest: {
+        type: "object",
+        properties: {
+          eventId: { type: "string", description: "JobNimbus activity/event id." },
+          fields: { type: "object", additionalProperties: true, description: "Calendar event fields to update. Supports dateStart/dateEnd aliases." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["eventId", "fields"]
       }
     }
   },
@@ -541,6 +830,13 @@ const OPENAPI = {
         responses: { "200": { description: "Assigned JobNimbus counts and grouping" } }
       }
     },
+    "/jobnimbus/document-text": {
+      post: {
+        operationId: "extractJobNimbusDocumentText",
+        requestBody: jsonBody("DocumentTextRequest"),
+        responses: { "200": { description: "Extracted text from a related JobNimbus document when supported." } }
+      }
+    },
     "/jobnimbus/update-contact": {
       post: {
         operationId: "updateJobNimbusContact",
@@ -553,6 +849,34 @@ const OPENAPI = {
         operationId: "createJobNimbusNote",
         requestBody: jsonBody("CreateNoteRequest"),
         responses: { "200": { description: "Dry run or note result" } }
+      }
+    },
+    "/jobnimbus/create-task": {
+      post: {
+        operationId: "createJobNimbusTask",
+        requestBody: jsonBody("CreateTaskRequest"),
+        responses: { "200": { description: "Dry run or task creation result" } }
+      }
+    },
+    "/jobnimbus/update-task": {
+      post: {
+        operationId: "updateJobNimbusTask",
+        requestBody: jsonBody("UpdateTaskRequest"),
+        responses: { "200": { description: "Dry run or task update result" } }
+      }
+    },
+    "/jobnimbus/create-calendar-event": {
+      post: {
+        operationId: "createJobNimbusCalendarEvent",
+        requestBody: jsonBody("CreateCalendarEventRequest"),
+        responses: { "200": { description: "Dry run or calendar event creation result" } }
+      }
+    },
+    "/jobnimbus/update-calendar-event": {
+      post: {
+        operationId: "updateJobNimbusCalendarEvent",
+        requestBody: jsonBody("UpdateCalendarEventRequest"),
+        responses: { "200": { description: "Dry run or calendar event update result" } }
       }
     }
   }
