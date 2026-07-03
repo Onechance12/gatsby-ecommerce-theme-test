@@ -17,6 +17,7 @@ const routes = new Map([
   ["POST /jobnimbus/assigned-files", assignedFiles],
   ["POST /jobnimbus/assigned-counts", assignedCounts],
   ["POST /jobnimbus/document-text", documentText],
+  ["POST /jobnimbus/document-review", documentReview],
   ["POST /jobnimbus/update-contact", updateContact],
   ["POST /jobnimbus/create-note", createNote],
   ["POST /jobnimbus/create-task", createTask],
@@ -177,6 +178,37 @@ async function documentText(input) {
     contentType: downloaded.contentType,
     bytes: downloaded.bytes.length,
     ...extracted
+  };
+}
+
+async function documentReview(input) {
+  const query = required(input.query, "query");
+  const documentQuery = String(input.documentQuery || input.documentId || "").trim();
+  const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
+  const { contact } = await findOneContact(query);
+  const documents = await listRelated("/files", contact.jnid, 100);
+  const document = selectDocument(documents, documentQuery);
+  if (!document) {
+    return {
+      file: compactContact(contact),
+      error: documentQuery ? `No matching document found for: ${documentQuery}` : "No documents found on this file.",
+      availableDocuments: documents.map(compactDocument).slice(0, 50)
+    };
+  }
+  const downloaded = await downloadJobNimbusFile(document);
+  const extracted = await extractDocumentText(downloaded, document, maxChars);
+  const review = reviewExtractedDocument(extracted.text || "", document, compactContact(contact));
+  return {
+    file: compactContact(contact),
+    document: compactDocument(document),
+    contentType: downloaded.contentType,
+    bytes: downloaded.bytes.length,
+    extraction: extracted.extraction,
+    pageCount: extracted.pageCount || null,
+    truncated: Boolean(extracted.truncated),
+    extractionError: extracted.error || "",
+    textPreview: (extracted.text || "").slice(0, clamp(Number(input.previewChars || 4000), 500, 12000)),
+    review
   };
 }
 
@@ -432,6 +464,205 @@ function cleanExtractedText(text) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{4,}/g, "\n\n\n")
     .trim();
+}
+
+function reviewExtractedDocument(text, document, file) {
+  const normalized = cleanExtractedText(text);
+  const documentName = compactDocument(document).name;
+  const type = classifyDocument(documentName, normalized);
+  const extractedFields = extractCommonClaimFields(normalized);
+  const estimate = extractEstimateFields(normalized);
+  const coverage = extractCoverageFields(normalized);
+  const conflicts = findFieldConflicts(file, extractedFields);
+  const textQuality = assessTextQuality(normalized);
+  const suggestedUses = suggestDocumentUses(type, extractedFields, estimate, coverage, textQuality);
+  return {
+    documentType: type,
+    textQuality,
+    extractedFields,
+    estimate,
+    coverage,
+    conflictsWithJobNimbus: conflicts,
+    suggestedUses,
+    needsOcr: textQuality.needsOcr,
+    notes: buildDocumentReviewNotes(type, textQuality, conflicts)
+  };
+}
+
+function classifyDocument(name, text) {
+  const haystack = `${name}\n${text}`.toLowerCase();
+  if (/\b(declarations?|dec page|policy)\b/.test(haystack)) return "policy_or_declarations";
+  if (/\btdi\b|texas department of insurance|property insurance notice/.test(haystack)) return "tdi_or_notice_form";
+  if (/\bxactimate\b|estimate|replacement cost value|actual cash value|depreciation/.test(haystack)) return "estimate_or_scope";
+  if (/\bappraisal\b|umpire|appraiser|demand/.test(haystack)) return "appraisal_document";
+  if (/\bclaim number|claim #|loss date|date of loss|adjuster\b/.test(haystack)) return "carrier_claim_document";
+  if (!text.trim()) return "unreadable_or_image_only";
+  return "unknown_text_document";
+}
+
+function extractCommonClaimFields(text) {
+  return cleanObject({
+    carrier: firstMatch(text, [
+      /(?:insurance company|insurer|company)\s*[:#-]?\s*([A-Z][A-Za-z0-9&.,' -]{2,70})/i,
+      /\b(State Farm|Allstate|Travelers|Liberty Mutual|USAA|Texas Farm Bureau|Farmers|Nationwide|Progressive|Chubb|Safeco|National Summit)\b/i
+    ]),
+    policyNumber: normalizePolicy(firstMatch(text, [
+      /(?:policy(?:\s*(?:number|no\.?|#))?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9 -]{4,40})/i,
+      /\bpolicy\s+([A-Z0-9][A-Z0-9 -]{4,40})/i
+    ])),
+    claimNumber: normalizePolicy(firstMatch(text, [
+      /(?:claim(?:\s*(?:number|no\.?|#))?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9 -]{4,40})/i,
+      /\bclaim\s+([A-Z0-9][A-Z0-9 -]{4,40})/i
+    ])),
+    dateOfLoss: firstDate(text, [
+      /(?:date of loss|loss date|dol)\s*[:#-]?\s*([A-Za-z0-9,/-]{6,24})/i
+    ]),
+    effectiveDate: firstDate(text, [
+      /(?:effective date|policy period|coverage period)\s*[:#-]?\s*([A-Za-z0-9,/-]{6,24})/i
+    ]),
+    expirationDate: firstDate(text, [
+      /(?:expiration date|expires|to)\s*[:#-]?\s*([A-Za-z0-9,/-]{6,24})/i
+    ]),
+    namedInsured: firstMatch(text, [
+      /(?:named insured|insured name|insured)\s*[:#-]?\s*([A-Z][A-Za-z.,' -]{3,80})/i
+    ]),
+    propertyAddress: extractAddress(text),
+    adjusterName: firstMatch(text, [
+      /(?:adjuster|claims representative|claim representative)\s*[:#-]?\s*([A-Z][A-Za-z.' -]{3,60})/i
+    ]),
+    adjusterPhone: firstMatch(text, [
+      /(?:adjuster|claims representative|phone|tel|mobile)[^\n]{0,40}?(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/i
+    ]),
+    adjusterEmail: firstMatch(text, [
+      /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/i
+    ])
+  });
+}
+
+function extractEstimateFields(text) {
+  return cleanObject({
+    rcv: firstMoney(text, [
+      /(?:replacement cost value|rcv|total rcv)\s*[:#-]?\s*\$?\s*([\d,]+\.\d{2})/i
+    ]),
+    acv: firstMoney(text, [
+      /(?:actual cash value|acv|total acv)\s*[:#-]?\s*\$?\s*([\d,]+\.\d{2})/i
+    ]),
+    depreciation: firstMoney(text, [
+      /(?:depreciation|recoverable depreciation)\s*[:#-]?\s*\$?\s*([\d,]+\.\d{2})/i
+    ]),
+    deductible: firstMoney(text, [
+      /(?:deductible)\s*[:#-]?\s*\$?\s*([\d,]+\.\d{2})/i
+    ]),
+    netClaim: firstMoney(text, [
+      /(?:net claim|net actual cash value|net acv)\s*[:#-]?\s*\$?\s*([\d,]+\.\d{2})/i
+    ])
+  });
+}
+
+function extractCoverageFields(text) {
+  return cleanObject({
+    dwellingLimit: firstMoney(text, [
+      /(?:dwelling|coverage a|cov a)[^\n$]{0,50}\$?\s*([\d,]+(?:\.\d{2})?)/i
+    ]),
+    otherStructuresLimit: firstMoney(text, [
+      /(?:other structures|coverage b|cov b)[^\n$]{0,50}\$?\s*([\d,]+(?:\.\d{2})?)/i
+    ]),
+    personalPropertyLimit: firstMoney(text, [
+      /(?:personal property|coverage c|cov c)[^\n$]{0,50}\$?\s*([\d,]+(?:\.\d{2})?)/i
+    ]),
+    lossOfUseLimit: firstMoney(text, [
+      /(?:loss of use|coverage d|cov d)[^\n$]{0,50}\$?\s*([\d,]+(?:\.\d{2})?)/i
+    ]),
+    windHailDeductible: firstMoney(text, [
+      /(?:wind\/hail|wind and hail|hail|wind)[^\n$]{0,80}(?:deductible)[^\n$]{0,40}\$?\s*([\d,]+(?:\.\d{2})?)/i
+    ]),
+    allOtherPerilsDeductible: firstMoney(text, [
+      /(?:all other perils|aop)[^\n$]{0,80}(?:deductible)[^\n$]{0,40}\$?\s*([\d,]+(?:\.\d{2})?)/i
+    ])
+  });
+}
+
+function assessTextQuality(text) {
+  const chars = text.length;
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const hasUsefulText = words >= 25;
+  return {
+    chars,
+    words,
+    hasUsefulText,
+    needsOcr: !hasUsefulText,
+    confidence: hasUsefulText ? (words > 200 ? "high" : "medium") : "low"
+  };
+}
+
+function suggestDocumentUses(type, fields, estimate, coverage, quality) {
+  const uses = [];
+  if (quality.needsOcr) uses.push("Needs OCR/visual review before relying on this document.");
+  if (fields.policyNumber) uses.push("Can support updating/confirming JobNimbus policy number.");
+  if (fields.claimNumber) uses.push("Can support updating/confirming JobNimbus claim number.");
+  if (fields.dateOfLoss) uses.push("Can support date-of-loss confirmation.");
+  if (fields.adjusterEmail || fields.adjusterPhone) uses.push("Can support adjuster contact cleanup.");
+  if (Object.keys(estimate).length) uses.push("Can support estimate/payment/appraisal gap review.");
+  if (Object.keys(coverage).length) uses.push("Can support coverage/deductible review.");
+  if (type === "policy_or_declarations") uses.push("Use to verify active coverage period, named insured, policy number, and deductibles.");
+  if (type === "estimate_or_scope") uses.push("Use to summarize scope totals and compare against carrier/payment.");
+  return uses;
+}
+
+function buildDocumentReviewNotes(type, quality, conflicts) {
+  const notes = [];
+  if (quality.needsOcr) notes.push("No reliable text was extracted. This is probably scanned/photo-based or image-only.");
+  if (conflicts.length) notes.push("Some extracted values conflict with existing JobNimbus fields; do not update without approval.");
+  if (type === "unknown_text_document") notes.push("Document type was not confidently classified; review text preview before acting.");
+  return notes;
+}
+
+function findFieldConflicts(file, fields) {
+  const checks = [
+    ["policyNumber", "policyNumber", "policy #"],
+    ["claimNumber", "claimNumber", "claim #"],
+    ["dateOfLoss", "dateOfLoss", "DOL"],
+    ["carrier", "carrier", "carrier"]
+  ];
+  const conflicts = [];
+  for (const [fileKey, fieldKey, label] of checks) {
+    if (!file[fileKey] || !fields[fieldKey]) continue;
+    if (normalizeCompare(file[fileKey]) !== normalizeCompare(fields[fieldKey])) {
+      conflicts.push({ field: label, jobNimbus: file[fileKey], document: fields[fieldKey] });
+    }
+  }
+  return conflicts;
+}
+
+function firstMatch(text, patterns) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1].trim().replace(/\s{2,}/g, " ");
+  }
+  return "";
+}
+
+function firstMoney(text, patterns) {
+  const value = firstMatch(text, patterns);
+  return value ? `$${value.replace(/[^\d.,]/g, "")}` : "";
+}
+
+function firstDate(text, patterns) {
+  const value = firstMatch(text, patterns);
+  return value ? value.replace(/\s{2,}/g, " ").trim() : "";
+}
+
+function normalizePolicy(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function normalizeCompare(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function extractAddress(text) {
+  const match = text.match(/\b\d{2,6}\s+[A-Za-z0-9 .'-]+(?:st|street|rd|road|dr|drive|ave|avenue|ln|lane|ct|court|cir|circle|way|blvd|boulevard|trl|trail|pkwy|parkway)\b[^\n,]*(?:,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s*\d{5})?/i);
+  return match ? match[0].trim().replace(/\s{2,}/g, " ") : "";
 }
 
 function isInsuranceFile(contact) {
@@ -733,6 +964,16 @@ const OPENAPI = {
         },
         required: ["query"]
       },
+      DocumentReviewRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
+          maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 20000 },
+          previewChars: { type: "integer", minimum: 500, maximum: 12000, default: 4000 }
+        },
+        required: ["query"]
+      },
       UpdateContactRequest: {
         type: "object",
         properties: {
@@ -835,6 +1076,13 @@ const OPENAPI = {
         operationId: "extractJobNimbusDocumentText",
         requestBody: jsonBody("DocumentTextRequest"),
         responses: { "200": { description: "Extracted text from a related JobNimbus document when supported." } }
+      }
+    },
+    "/jobnimbus/document-review": {
+      post: {
+        operationId: "reviewJobNimbusDocument",
+        requestBody: jsonBody("DocumentReviewRequest"),
+        responses: { "200": { description: "No-API document review with extracted text preview, likely fields, conflicts, and suggested uses." } }
       }
     },
     "/jobnimbus/update-contact": {
