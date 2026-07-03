@@ -11,6 +11,10 @@ const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const ALLOW_WRITES = process.env.BRIDGE_ALLOW_WRITES === "true";
 const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://jobnimbus-chatgpt-bridge.onrender.com");
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
+const GMAIL_USER = process.env.GMAIL_USER || "me";
 
 const routes = new Map([
   ["GET /health", health],
@@ -27,7 +31,11 @@ const routes = new Map([
   ["POST /jobnimbus/create-task", createTask],
   ["POST /jobnimbus/update-task", updateTask],
   ["POST /jobnimbus/create-calendar-event", createCalendarEvent],
-  ["POST /jobnimbus/update-calendar-event", updateCalendarEvent]
+  ["POST /jobnimbus/update-calendar-event", updateCalendarEvent],
+  ["POST /gmail/search", gmailSearch],
+  ["POST /gmail/thread", gmailThread],
+  ["POST /gmail/draft", gmailDraft],
+  ["POST /gmail/send", gmailSend]
 ]);
 
 createServer(async (req, res) => {
@@ -54,6 +62,7 @@ function health() {
     ok: true,
     service: "jobnimbus-chatgpt-bridge",
     jobNimbusConfigured: Boolean(API_KEY),
+    gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
     writesAllowed: ALLOW_WRITES,
     ocrMode: "poppler+tesseract"
   };
@@ -319,6 +328,99 @@ async function updateCalendarEvent(input) {
   if (input.execute !== true) return { mode: "dry_run", plan: { endpoint: `/activities/${eventId}`, body } };
   const result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
   return { mode: "executed", eventId, result };
+}
+
+async function gmailSearch(input) {
+  const query = required(input.query, "query");
+  const limit = clamp(Number(input.limit || 10), 1, 25);
+  const messages = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`);
+  const rows = Array.isArray(messages.messages) ? messages.messages : [];
+  const hydrated = [];
+  for (const row of rows) {
+    const message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`);
+    hydrated.push(compactGmailMessage(message));
+  }
+  return {
+    query,
+    count: hydrated.length,
+    messages: hydrated,
+    threads: groupGmailMessagesByThread(hydrated)
+  };
+}
+
+async function gmailThread(input) {
+  const threadId = required(input.threadId, "threadId");
+  const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
+  const messages = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
+  return {
+    id: thread.id || threadId,
+    historyId: thread.historyId || "",
+    messageCount: messages.length,
+    messages,
+    assistantRead: buildGmailAssistantRead(messages)
+  };
+}
+
+async function gmailDraft(input) {
+  const to = required(input.to, "to");
+  const subject = required(input.subject, "subject");
+  const body = required(input.body, "body");
+  const cc = String(input.cc || "").trim();
+  const bcc = String(input.bcc || "").trim();
+  const threadId = String(input.threadId || "").trim();
+  const raw = buildRawEmail({ to, cc, bcc, subject, body });
+  const draftBody = { message: cleanObject({ raw, threadId }) };
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      plan: {
+        endpoint: "/gmail/v1/users/me/drafts",
+        to,
+        cc,
+        bcc,
+        subject,
+        body,
+        threadId
+      }
+    };
+  }
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to create Gmail drafts.");
+  const result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts`, {
+    method: "POST",
+    body: draftBody
+  });
+  return { mode: "executed", draft: compactGmailDraft(result) };
+}
+
+async function gmailSend(input) {
+  const to = required(input.to, "to");
+  const subject = required(input.subject, "subject");
+  const body = required(input.body, "body");
+  const cc = String(input.cc || "").trim();
+  const bcc = String(input.bcc || "").trim();
+  const threadId = String(input.threadId || "").trim();
+  const raw = buildRawEmail({ to, cc, bcc, subject, body });
+  const sendBody = cleanObject({ raw, threadId });
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      plan: {
+        endpoint: "/gmail/v1/users/me/messages/send",
+        to,
+        cc,
+        bcc,
+        subject,
+        body,
+        threadId
+      }
+    };
+  }
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
+  const result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/send`, {
+    method: "POST",
+    body: sendBody
+  });
+  return { mode: "executed", message: compactGmailMessage(result) };
 }
 
 async function findOneContact(query) {
@@ -873,6 +975,209 @@ async function jobNimbus(endpoint, options = {}) {
   return json;
 }
 
+async function gmailApi(endpoint, options = {}) {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+    badRequest("Gmail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in Render.");
+  }
+  const token = await getGoogleAccessToken();
+  const response = await fetch(`https://gmail.googleapis.com${endpoint}`, {
+    method: options.method || "GET",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json"
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const text = await response.text();
+  let json;
+  try { json = text ? JSON.parse(text) : null; } catch { json = text; }
+  if (!response.ok) {
+    const error = new Error(`Gmail API ${response.status}: ${typeof json === "string" ? json : JSON.stringify(json)}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return json;
+}
+
+async function getGoogleAccessToken() {
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: GOOGLE_REFRESH_TOKEN,
+      grant_type: "refresh_token"
+    })
+  });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok || !json.access_token) {
+    const error = new Error(`Google OAuth ${response.status}: ${JSON.stringify(json)}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return json.access_token;
+}
+
+function compactGmailMessage(message) {
+  const headers = gmailHeaders(message);
+  return {
+    id: message.id || "",
+    threadId: message.threadId || "",
+    historyId: message.historyId || "",
+    internalDate: message.internalDate || "",
+    date: headers.date || "",
+    from: headers.from || "",
+    to: headers.to || "",
+    cc: headers.cc || "",
+    subject: headers.subject || "",
+    snippet: message.snippet || ""
+  };
+}
+
+function compactGmailFullMessage(message) {
+  return {
+    ...compactGmailMessage(message),
+    plainText: extractGmailBody(message.payload, "text/plain").slice(0, 12000),
+    htmlText: stripHtml(extractGmailBody(message.payload, "text/html")).slice(0, 6000),
+    attachments: listGmailAttachments(message.payload)
+  };
+}
+
+function compactGmailDraft(draft) {
+  return {
+    id: draft.id || "",
+    message: draft.message ? compactGmailMessage(draft.message) : null
+  };
+}
+
+function gmailHeaders(message) {
+  const headers = Array.isArray(message?.payload?.headers) ? message.payload.headers : [];
+  const out = {};
+  for (const header of headers) {
+    const key = String(header.name || "").toLowerCase();
+    if (["from", "to", "cc", "subject", "date"].includes(key)) out[key] = header.value || "";
+  }
+  return out;
+}
+
+function groupGmailMessagesByThread(messages) {
+  const map = new Map();
+  for (const message of messages) {
+    if (!map.has(message.threadId)) {
+      map.set(message.threadId, {
+        threadId: message.threadId,
+        subject: message.subject,
+        from: message.from,
+        date: message.date,
+        latestSnippet: message.snippet,
+        messageIds: []
+      });
+    }
+    map.get(message.threadId).messageIds.push(message.id);
+  }
+  return [...map.values()];
+}
+
+function buildGmailAssistantRead(messages) {
+  const latest = messages[messages.length - 1] || {};
+  const combined = messages
+    .map((message) => `From: ${message.from}\nDate: ${message.date}\nSubject: ${message.subject}\n${message.plainText || message.htmlText || message.snippet}`)
+    .join("\n\n---\n\n");
+  return {
+    latestFrom: latest.from || "",
+    latestDate: latest.date || "",
+    latestSubject: latest.subject || "",
+    possibleClaimNumbers: uniqueMatches(combined, /\b(?:claim(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*)?([A-Z0-9]{2,4}[- ]?[A-Z0-9]{3,6}[- ]?[A-Z0-9]{2,6})\b/gi, 1).slice(0, 10),
+    possiblePolicyNumbers: uniqueMatches(combined, /\b(?:policy(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*)?([A-Z0-9][A-Z0-9 -]{5,40})\b/gi, 1).slice(0, 10),
+    emails: uniqueMatches(combined, /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi, 1).slice(0, 20),
+    phones: uniqueMatches(combined, /(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/g, 1).slice(0, 20),
+    attachmentCount: messages.reduce((sum, message) => sum + message.attachments.length, 0)
+  };
+}
+
+function extractGmailBody(part, mimeType) {
+  if (!part) return "";
+  const chunks = [];
+  walkGmailParts(part, (item) => {
+    if (item.mimeType === mimeType && item.body?.data) chunks.push(base64UrlDecode(item.body.data));
+  });
+  return cleanExtractedText(chunks.join("\n\n"));
+}
+
+function listGmailAttachments(part) {
+  const attachments = [];
+  walkGmailParts(part, (item) => {
+    if (item.filename && item.body?.attachmentId) {
+      attachments.push({
+        filename: item.filename,
+        mimeType: item.mimeType || "",
+        attachmentId: item.body.attachmentId,
+        size: item.body.size || 0
+      });
+    }
+  });
+  return attachments;
+}
+
+function walkGmailParts(part, visitor) {
+  visitor(part);
+  for (const child of Array.isArray(part.parts) ? part.parts : []) walkGmailParts(child, visitor);
+}
+
+function buildRawEmail({ to, cc, bcc, subject, body }) {
+  const headers = [
+    `To: ${to}`,
+    cc ? `Cc: ${cc}` : "",
+    bcc ? `Bcc: ${bcc}` : "",
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8"
+  ].filter(Boolean);
+  return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${body}`);
+}
+
+function base64UrlDecode(value) {
+  return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(String(value || ""), "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function stripHtml(value) {
+  return String(value || "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function uniqueMatches(text, pattern, group = 0) {
+  const seen = new Set();
+  const out = [];
+  for (const match of String(text || "").matchAll(pattern)) {
+    const value = String(match[group] || "").trim();
+    const key = normalizeCompare(value);
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
 function contactMatches(contact, query) {
   const haystack = [
     contact.jnid,
@@ -1193,6 +1498,34 @@ const OPENAPI = {
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["eventId", "fields"]
+      },
+      GmailSearchRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Gmail search query. Use Gmail operators like from:, to:, subject:, newer_than:, older_than:, has:attachment, or plain client/claim terms." },
+          limit: { type: "integer", minimum: 1, maximum: 25, default: 10 }
+        },
+        required: ["query"]
+      },
+      GmailThreadRequest: {
+        type: "object",
+        properties: {
+          threadId: { type: "string", description: "Gmail thread id returned by searchGmail." }
+        },
+        required: ["threadId"]
+      },
+      GmailMessageRequest: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Recipient email address or comma-separated addresses." },
+          cc: { type: "string", description: "Optional CC recipients." },
+          bcc: { type: "string", description: "Optional BCC recipients." },
+          subject: { type: "string", description: "Email subject. For insurance emails, use claim number only when applicable." },
+          body: { type: "string", description: "Plain text email body." },
+          threadId: { type: "string", description: "Optional Gmail thread id to reply in an existing thread." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["to", "subject", "body"]
       }
     }
   },
@@ -1281,6 +1614,34 @@ const OPENAPI = {
         operationId: "updateJobNimbusCalendarEvent",
         requestBody: jsonBody("UpdateCalendarEventRequest"),
         responses: { "200": { description: "Dry run or calendar event update result" } }
+      }
+    },
+    "/gmail/search": {
+      post: {
+        operationId: "searchGmail",
+        requestBody: jsonBody("GmailSearchRequest"),
+        responses: { "200": { description: "Matching Gmail messages and grouped threads." } }
+      }
+    },
+    "/gmail/thread": {
+      post: {
+        operationId: "readGmailThread",
+        requestBody: jsonBody("GmailThreadRequest"),
+        responses: { "200": { description: "Full Gmail thread with parsed text and attachment metadata." } }
+      }
+    },
+    "/gmail/draft": {
+      post: {
+        operationId: "createGmailDraft",
+        requestBody: jsonBody("GmailMessageRequest"),
+        responses: { "200": { description: "Dry run or created Gmail draft." } }
+      }
+    },
+    "/gmail/send": {
+      post: {
+        operationId: "sendGmail",
+        requestBody: jsonBody("GmailMessageRequest"),
+        responses: { "200": { description: "Dry run or sent Gmail message." } }
       }
     }
   }
