@@ -14,6 +14,8 @@ const routes = new Map([
   ["GET /privacy", privacy],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
+  ["POST /jobnimbus/assigned-files", assignedFiles],
+  ["POST /jobnimbus/assigned-counts", assignedCounts],
   ["POST /jobnimbus/update-contact", updateContact],
   ["POST /jobnimbus/create-note", createNote]
 ]);
@@ -91,6 +93,46 @@ async function reviewFile(input) {
     documents: documents.map(compactDocument),
     alternatives: alternatives.map(compactContact),
     assistantRead: buildAssistantRead(contact, activities, tasks, documents)
+  };
+}
+
+async function assignedFiles(input = {}) {
+  const ownerId = String(input.ownerId || "fc95a213f70e4c9daddc5fa366be9941").trim();
+  const activeOnly = input.activeOnly !== false;
+  const limit = clamp(Number(input.limit || 100), 1, 250);
+  const contacts = await listContacts({ maxPages: Number(input.maxPages || 25) });
+  const files = contacts
+    .filter((contact) => isInsuranceFile(contact))
+    .filter((contact) => assignedTo(contact, ownerId))
+    .filter((contact) => !activeOnly || isOpenActive(contact))
+    .sort(fileSort)
+    .slice(0, limit)
+    .map(compactContact);
+  return {
+    ownerId,
+    ownerName: ownerId === "fc95a213f70e4c9daddc5fa366be9941" ? "Chance Pearson" : "",
+    activeOnly,
+    count: files.length,
+    files
+  };
+}
+
+async function assignedCounts(input = {}) {
+  const ownerId = String(input.ownerId || "fc95a213f70e4c9daddc5fa366be9941").trim();
+  const contacts = await listContacts({ maxPages: Number(input.maxPages || 25) });
+  const assigned = contacts
+    .filter((contact) => isInsuranceFile(contact))
+    .filter((contact) => assignedTo(contact, ownerId));
+  const active = assigned.filter(isOpenActive);
+  return {
+    ownerId,
+    ownerName: ownerId === "fc95a213f70e4c9daddc5fa366be9941" ? "Chance Pearson" : "",
+    totalAssigned: assigned.length,
+    activeAssigned: active.length,
+    closedOrInactive: assigned.length - active.length,
+    byStatus: countBy(active, (contact) => contact.status_name || "Unknown"),
+    byCarrier: countBy(active, (contact) => fieldValue(contact, ["Insurance Company", "Carrier", "insurance_company", "cf_string_1"]) || "Unknown"),
+    files: active.sort(fileSort).slice(0, clamp(Number(input.sampleLimit || 25), 1, 100)).map(compactContact)
   };
 }
 
@@ -189,6 +231,31 @@ function referencesContact(item, contactId) {
   const ids = [];
   for (const key of ["primary", "related", "customer", "contact"]) collectIds(item?.[key], ids);
   return ids.includes(contactId);
+}
+
+function isInsuranceFile(contact) {
+  return String(contact.record_type_name || "").toLowerCase() === "insurance";
+}
+
+function assignedTo(contact, ownerId) {
+  return (Array.isArray(contact.owners) ? contact.owners : []).some((owner) => String(owner?.id || owner?.jnid || owner) === ownerId);
+}
+
+function isOpenActive(contact) {
+  return contact.is_active !== false && contact.is_archived !== true && contact.is_closed !== true;
+}
+
+function fileSort(a, b) {
+  return Number(b.date_updated || 0) - Number(a.date_updated || 0);
+}
+
+function countBy(rows, keyFn) {
+  const counts = {};
+  for (const row of rows) {
+    const key = String(keyFn(row) || "Unknown");
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
 }
 
 function collectIds(value, ids) {
@@ -406,6 +473,23 @@ const OPENAPI = {
         },
         required: ["query"]
       },
+      AssignedFilesRequest: {
+        type: "object",
+        properties: {
+          ownerId: { type: "string", description: "JobNimbus owner/user id. Defaults to Chance Pearson." },
+          activeOnly: { type: "boolean", default: true, description: "When true, excludes closed, archived, and inactive files." },
+          limit: { type: "integer", minimum: 1, maximum: 250, default: 100 },
+          maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 }
+        }
+      },
+      AssignedCountsRequest: {
+        type: "object",
+        properties: {
+          ownerId: { type: "string", description: "JobNimbus owner/user id. Defaults to Chance Pearson." },
+          sampleLimit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
+          maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 }
+        }
+      },
       UpdateContactRequest: {
         type: "object",
         properties: {
@@ -441,6 +525,20 @@ const OPENAPI = {
         operationId: "reviewJobNimbusFile",
         requestBody: jsonBody("ReviewFileRequest"),
         responses: { "200": { description: "File review" } }
+      }
+    },
+    "/jobnimbus/assigned-files": {
+      post: {
+        operationId: "listAssignedJobNimbusFiles",
+        requestBody: jsonBody("AssignedFilesRequest"),
+        responses: { "200": { description: "Assigned JobNimbus files" } }
+      }
+    },
+    "/jobnimbus/assigned-counts": {
+      post: {
+        operationId: "countAssignedJobNimbusFiles",
+        requestBody: jsonBody("AssignedCountsRequest"),
+        responses: { "200": { description: "Assigned JobNimbus counts and grouping" } }
       }
     },
     "/jobnimbus/update-contact": {
