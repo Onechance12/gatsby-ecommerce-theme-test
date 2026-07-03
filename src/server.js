@@ -124,7 +124,7 @@ async function listContacts({ maxPages }) {
   for (let page = 0; page < maxPages; page++) {
     const offset = page * pageSize;
     const batch = await jobNimbus(`/contacts?size=${pageSize}&from=${offset}`);
-    const rows = Array.isArray(batch) ? batch : batch.results || batch.data || [];
+    const rows = unwrapList(batch, "contacts");
     all.push(...rows);
     if (rows.length < pageSize) break;
   }
@@ -132,9 +132,42 @@ async function listContacts({ maxPages }) {
 }
 
 async function listRelated(endpoint, contactId, limit) {
-  const rows = await jobNimbus(`${endpoint}?size=1000&from=0`);
-  const list = Array.isArray(rows) ? rows : rows.results || rows.data || [];
+  const rows = await jobNimbus(`${endpoint}?size=1000&from=0&related=${encodeURIComponent(contactId)}`);
+  const list = unwrapList(rows, endpoint.replace("/", ""));
   return list.filter((item) => referencesContact(item, contactId)).slice(0, limit);
+}
+
+function unwrapList(payload, name) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  const candidates = [
+    name,
+    singular(name),
+    "results",
+    "data",
+    "items",
+    "contacts",
+    "contact",
+    "jobs",
+    "job",
+    "tasks",
+    "task",
+    "activities",
+    "activity",
+    "files",
+    "file"
+  ];
+  for (const key of candidates) {
+    if (Array.isArray(payload[key])) return payload[key];
+  }
+  return [];
+}
+
+function singular(name) {
+  if (name === "activities") return "activity";
+  if (name === "files") return "files";
+  if (name.endsWith("s")) return name.slice(0, -1);
+  return name;
 }
 
 function referencesContact(item, contactId) {
