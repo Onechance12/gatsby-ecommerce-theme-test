@@ -1,4 +1,8 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -50,7 +54,8 @@ function health() {
     ok: true,
     service: "jobnimbus-chatgpt-bridge",
     jobNimbusConfigured: Boolean(API_KEY),
-    writesAllowed: ALLOW_WRITES
+    writesAllowed: ALLOW_WRITES,
+    ocrMode: "poppler+tesseract"
   };
 }
 
@@ -160,6 +165,7 @@ async function documentText(input) {
   const query = required(input.query, "query");
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 12000), 1000, 50000);
+  const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
   const { contact } = await findOneContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
@@ -171,7 +177,10 @@ async function documentText(input) {
     };
   }
   const downloaded = await downloadJobNimbusFile(document);
-  const extracted = await extractDocumentText(downloaded, document, maxChars);
+  const extracted = await extractDocumentText(downloaded, document, maxChars, {
+    forceOcr: input.forceOcr === true,
+    maxOcrPages
+  });
   return {
     file: compactContact(contact),
     document: compactDocument(document),
@@ -185,6 +194,7 @@ async function documentReview(input) {
   const query = required(input.query, "query");
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
+  const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
   const { contact } = await findOneContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
@@ -196,7 +206,10 @@ async function documentReview(input) {
     };
   }
   const downloaded = await downloadJobNimbusFile(document);
-  const extracted = await extractDocumentText(downloaded, document, maxChars);
+  const extracted = await extractDocumentText(downloaded, document, maxChars, {
+    forceOcr: input.forceOcr === true,
+    maxOcrPages
+  });
   const review = reviewExtractedDocument(extracted.text || "", document, compactContact(contact));
   return {
     file: compactContact(contact),
@@ -415,31 +428,78 @@ async function downloadJobNimbusFile(doc) {
   };
 }
 
-async function extractDocumentText(downloaded, doc, maxChars) {
+async function extractDocumentText(downloaded, doc, maxChars, options = {}) {
   const filename = String(downloaded.filename || doc.name || doc.filename || doc.file_name || "").toLowerCase();
   const contentType = String(downloaded.contentType || "").toLowerCase();
   const looksPdf = contentType.includes("pdf") || filename.endsWith(".pdf");
+  const looksImage = contentType.startsWith("image/") || /\.(png|jpe?g|tiff?|bmp|webp)$/i.test(filename);
   const looksText = contentType.startsWith("text/") || /\.(txt|csv|json|xml|html|md)$/i.test(filename);
 
   if (looksPdf) {
+    let pdfText = "";
+    let pageCount = null;
+    let pdfError = "";
     try {
       const pdfParseModule = await import("pdf-parse");
       const pdfParse = pdfParseModule.default || pdfParseModule;
       const parsed = await pdfParse(downloaded.bytes);
-      const text = cleanExtractedText(parsed.text || "").slice(0, maxChars);
-      return {
-        extraction: "pdf-parse",
-        pageCount: parsed.numpages || parsed.numrender || null,
-        truncated: (parsed.text || "").length > maxChars,
-        text
-      };
+      pdfText = cleanExtractedText(parsed.text || "");
+      pageCount = parsed.numpages || parsed.numrender || null;
+      if (!options.forceOcr && hasUsefulExtractedText(pdfText)) {
+        return {
+          extraction: "pdf-parse",
+          pageCount,
+          truncated: pdfText.length > maxChars,
+          ocrAttempted: false,
+          text: pdfText.slice(0, maxChars)
+        };
+      }
     } catch (error) {
+      pdfError = error.message;
+    }
+
+    const ocr = await ocrPdf(downloaded.bytes, {
+      filename,
+      maxPages: options.maxOcrPages || 5,
+      maxChars
+    });
+    const combinedText = cleanExtractedText([pdfText, ocr.text].filter(Boolean).join("\n\n"));
+    if (combinedText) {
       return {
-        extraction: "failed",
-        error: `PDF extraction failed: ${error.message}. Install/verify pdf-parse on Render or use Drive/file tools for this document.`,
-        text: ""
+        extraction: pdfText ? "pdf-parse+ocr" : "ocr",
+        pageCount,
+        truncated: combinedText.length > maxChars || Boolean(ocr.truncated),
+        ocrAttempted: true,
+        ocrPages: ocr.pages,
+        ocrErrors: ocr.errors,
+        text: combinedText.slice(0, maxChars),
+        error: pdfError && !ocr.text ? `PDF extraction failed: ${pdfError}` : ""
       };
     }
+
+    return {
+      extraction: "failed",
+      pageCount,
+      truncated: false,
+      ocrAttempted: true,
+      ocrPages: ocr.pages,
+      ocrErrors: ocr.errors,
+      error: `No usable text extracted. PDF error: ${pdfError || "none"}. OCR error: ${ocr.errors.join("; ") || "no text returned"}.`,
+      text: ""
+    };
+  }
+
+  if (looksImage) {
+    const ocr = await ocrImage(downloaded.bytes, { filename, maxChars });
+    return {
+      extraction: ocr.text ? "ocr" : "failed",
+      truncated: Boolean(ocr.truncated),
+      ocrAttempted: true,
+      ocrPages: ocr.pages,
+      ocrErrors: ocr.errors,
+      error: ocr.text ? "" : `OCR returned no usable text. ${ocr.errors.join("; ")}`,
+      text: ocr.text.slice(0, maxChars)
+    };
   }
 
   if (looksText) {
@@ -447,6 +507,7 @@ async function extractDocumentText(downloaded, doc, maxChars) {
     return {
       extraction: "plain-text",
       truncated: raw.length > maxChars,
+      ocrAttempted: false,
       text: cleanExtractedText(raw).slice(0, maxChars)
     };
   }
@@ -456,6 +517,97 @@ async function extractDocumentText(downloaded, doc, maxChars) {
     error: "This file type is not currently text-extractable by the bridge. Use Drive/file tools or download metadata only.",
     text: ""
   };
+}
+
+function hasUsefulExtractedText(text) {
+  return text.split(/\s+/).filter(Boolean).length >= 25;
+}
+
+async function ocrPdf(bytes, options) {
+  const dir = await mkdtemp(path.join(tmpdir(), "jn-ocr-"));
+  const inputPath = path.join(dir, sanitizeFilename(options.filename || "document.pdf", ".pdf"));
+  const prefix = path.join(dir, "page");
+  const errors = [];
+  try {
+    await writeFile(inputPath, bytes);
+    const convert = await runCommand("pdftoppm", [
+      "-png",
+      "-r",
+      "200",
+      "-f",
+      "1",
+      "-l",
+      String(options.maxPages || 5),
+      inputPath,
+      prefix
+    ]);
+    if (convert.stderr) errors.push(convert.stderr.trim());
+    const files = (await readdir(dir))
+      .filter((file) => /^page-\d+\.png$/i.test(file))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    const pageTexts = [];
+    for (const file of files) {
+      const imagePath = path.join(dir, file);
+      const result = await runCommand("tesseract", [imagePath, "stdout", "--psm", "6"]);
+      if (result.stderr) errors.push(`${file}: ${result.stderr.trim()}`);
+      pageTexts.push(result.stdout);
+      if (cleanExtractedText(pageTexts.join("\n\n")).length >= options.maxChars) break;
+    }
+    const text = cleanExtractedText(pageTexts.join("\n\n"));
+    return {
+      text: text.slice(0, options.maxChars),
+      truncated: text.length > options.maxChars,
+      pages: files.length,
+      errors: errors.filter(Boolean)
+    };
+  } catch (error) {
+    return { text: "", truncated: false, pages: 0, errors: [error.message] };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function ocrImage(bytes, options) {
+  const dir = await mkdtemp(path.join(tmpdir(), "jn-ocr-"));
+  const inputPath = path.join(dir, sanitizeFilename(options.filename || "image.png", ".png"));
+  try {
+    await writeFile(inputPath, bytes);
+    const result = await runCommand("tesseract", [inputPath, "stdout", "--psm", "6"]);
+    const text = cleanExtractedText(result.stdout);
+    return {
+      text: text.slice(0, options.maxChars),
+      truncated: text.length > options.maxChars,
+      pages: text ? 1 : 0,
+      errors: result.stderr ? [result.stderr.trim()] : []
+    };
+  } catch (error) {
+    return { text: "", truncated: false, pages: 0, errors: [error.message] };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function sanitizeFilename(name, fallbackExt) {
+  const safe = String(name || "document")
+    .replace(/[/\\?%*:|"<>]/g, "-")
+    .replace(/\s+/g, "-")
+    .slice(0, 120);
+  return /\.[a-z0-9]{2,5}$/i.test(safe) ? safe : `${safe}${fallbackExt}`;
+}
+
+function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${command} exited ${code}: ${stderr || stdout}`));
+    });
+  });
 }
 
 function cleanExtractedText(text) {
@@ -960,7 +1112,9 @@ const OPENAPI = {
         properties: {
           query: { type: "string", description: "File/client identifier." },
           documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
-          maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 12000 }
+          maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 12000 },
+          forceOcr: { type: "boolean", default: false, description: "When true, OCR is attempted even if PDF text extraction finds text." },
+          maxOcrPages: { type: "integer", minimum: 1, maximum: 20, default: 5, description: "Maximum PDF pages to OCR." }
         },
         required: ["query"]
       },
@@ -970,7 +1124,9 @@ const OPENAPI = {
           query: { type: "string", description: "File/client identifier." },
           documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
           maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 20000 },
-          previewChars: { type: "integer", minimum: 500, maximum: 12000, default: 4000 }
+          previewChars: { type: "integer", minimum: 500, maximum: 12000, default: 4000 },
+          forceOcr: { type: "boolean", default: false, description: "When true, OCR is attempted even if PDF text extraction finds text." },
+          maxOcrPages: { type: "integer", minimum: 1, maximum: 20, default: 5, description: "Maximum PDF pages to OCR." }
         },
         required: ["query"]
       },
