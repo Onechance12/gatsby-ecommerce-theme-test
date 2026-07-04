@@ -61,6 +61,26 @@ POST /handoff/complete
 
 Use this when a separate ChatGPT chat has Gmail/Quo context and needs to pass structured findings to the JobNimbus assistant. The bridge stores handoffs in a small JSON file, intended as a lightweight queue rather than permanent records.
 
+## Bundled JobNimbus Updates
+
+Use `POST /jobnimbus/process-update` when one workflow should update fields, move status, and add a note together.
+
+Example:
+
+```json
+{
+  "query": "1634",
+  "fields": {
+    "Claim Number": "0000222459"
+  },
+  "status": "Submitted Awaiting Confirmation",
+  "note": "Claim filed and updated with claim #0000222459. Waiting for carrier to assign an adjuster.",
+  "execute": false
+}
+```
+
+Set `execute:true` only after approval and only when `BRIDGE_ALLOW_WRITES=true`.
+
 ## Gmail OAuth
 
 Create a Google OAuth client with Gmail API enabled, then run:

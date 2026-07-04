@@ -34,6 +34,7 @@ const routes = new Map([
   ["POST /jobnimbus/document-review", documentReview],
   ["POST /jobnimbus/update-contact", updateContact],
   ["POST /jobnimbus/update-status", updateStatus],
+  ["POST /jobnimbus/process-update", processUpdate],
   ["POST /jobnimbus/create-note", createNote],
   ["POST /jobnimbus/create-task", createTask],
   ["POST /jobnimbus/update-task", updateTask],
@@ -320,6 +321,45 @@ async function updateStatus(input) {
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
   return { mode: "executed", file: compactContact(contact), result };
+}
+
+async function processUpdate(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute bundled JobNimbus updates.");
+  }
+  const query = required(input.query || input.job || input.client, "query");
+  const fields = input.fields && typeof input.fields === "object" && !Array.isArray(input.fields) ? input.fields : {};
+  const status = String(input.status || input.statusName || input.workflowStatus || "").trim();
+  const note = String(input.note || input.internalNote || "").trim();
+  if (!Object.keys(fields).length && !status && !note) {
+    badRequest("At least one of fields, status, or note is required.");
+  }
+  const { contact } = await findOneContact(query);
+  const file = compactContact(contact);
+  const contactBody = cleanObject({ ...fields, ...(status ? { status_name: status } : {}) });
+  const noteBody = note ? {
+    note,
+    date_created: Math.floor(Date.now() / 1000),
+    record_type_name: "Note",
+    primary: { id: contact.jnid }
+  } : null;
+  const plan = {
+    file,
+    updates: cleanObject({
+      contact: Object.keys(contactBody).length ? { endpoint: `/contacts/${contact.jnid}`, body: contactBody } : null,
+      note: noteBody ? { endpoint: "/activities", body: noteBody } : null
+    })
+  };
+  if (input.execute !== true) return { mode: "dry_run", ...plan };
+
+  const results = {};
+  if (Object.keys(contactBody).length) {
+    results.contact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: contactBody });
+  }
+  if (noteBody) {
+    results.note = await jobNimbus("/activities", { method: "POST", body: noteBody });
+  }
+  return { mode: "executed", file, results };
 }
 
 async function documentText(input) {
@@ -1658,6 +1698,25 @@ const OPENAPI = {
         },
         required: ["query", "status"]
       },
+      ProcessUpdateRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier. Can be name, JobNimbus number, claim number, policy number, phone, email, or address." },
+          job: { type: "string", description: "Alias for query." },
+          client: { type: "string", description: "Alias for query." },
+          fields: {
+            type: "object",
+            additionalProperties: true,
+            description: "Exact JobNimbus contact fields to update. Use known field keys for claim number, carrier, policy number, adjuster name/phone/email, date of loss, and custom fields."
+          },
+          status: { type: "string", description: "Optional JobNimbus workflow/status name to set." },
+          statusName: { type: "string", description: "Alias for status." },
+          workflowStatus: { type: "string", description: "Alias for status." },
+          note: { type: "string", description: "Optional internal JobNimbus note to create." },
+          internalNote: { type: "string", description: "Alias for note." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run plan only. True requires bridge writes to be enabled." }
+        }
+      },
       CreateNoteRequest: {
         type: "object",
         properties: {
@@ -1857,6 +1916,13 @@ const OPENAPI = {
         operationId: "updateJobNimbusStatus",
         requestBody: jsonBody("UpdateStatusRequest"),
         responses: { "200": { description: "Dry run or status update result" } }
+      }
+    },
+    "/jobnimbus/process-update": {
+      post: {
+        operationId: "processJobNimbusUpdate",
+        requestBody: jsonBody("ProcessUpdateRequest"),
+        responses: { "200": { description: "Dry run or bundled JobNimbus field/status/note update result" } }
       }
     },
     "/jobnimbus/create-note": {
