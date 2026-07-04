@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,11 +16,16 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GMAIL_USER = process.env.GMAIL_USER || "me";
+const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-handoffs.json");
 
 const routes = new Map([
   ["GET /health", health],
   ["GET /openapi.json", openapi],
   ["GET /privacy", privacy],
+  ["GET /handoff", handoffPage],
+  ["POST /handoff", createHandoff],
+  ["POST /handoff/pending", pendingHandoffs],
+  ["POST /handoff/complete", completeHandoff],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
   ["POST /jobnimbus/assigned-files", assignedFiles],
@@ -27,6 +33,7 @@ const routes = new Map([
   ["POST /jobnimbus/document-text", documentText],
   ["POST /jobnimbus/document-review", documentReview],
   ["POST /jobnimbus/update-contact", updateContact],
+  ["POST /jobnimbus/update-status", updateStatus],
   ["POST /jobnimbus/create-note", createNote],
   ["POST /jobnimbus/create-task", createTask],
   ["POST /jobnimbus/update-task", updateTask],
@@ -46,7 +53,8 @@ createServer(async (req, res) => {
     if (!isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
     const body = req.method === "GET" ? {} : await readJson(req);
     const result = await handler(body);
-    if (typeof result === "string") sendText(res, 200, result);
+    if (result?.html) sendHtml(res, 200, result.html);
+    else if (typeof result === "string") sendText(res, 200, result);
     else send(res, 200, result);
   } catch (error) {
     send(res, error.statusCode || 500, { error: error.message || String(error) });
@@ -82,6 +90,136 @@ function privacy() {
     "The bridge passes user-authorized requests to JobNimbus and returns the response to ChatGPT.",
     "JobNimbus API keys and bridge tokens are stored as Render environment variables and are not exposed by this page."
   ].join("\n");
+}
+
+function handoffPage() {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JobNimbus Handoff Inbox</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #101114; color: #f4f4f5; }
+    main { max-width: 920px; margin: 0 auto; padding: 28px 18px 48px; }
+    h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: 0; }
+    p { color: #c7c9d1; line-height: 1.45; }
+    label { display: block; margin: 18px 0 8px; color: #d9dbe3; font-weight: 600; }
+    input, textarea, button { width: 100%; box-sizing: border-box; border-radius: 8px; border: 1px solid #3a3d46; background: #17191f; color: #f4f4f5; font: inherit; }
+    input { padding: 12px; }
+    textarea { min-height: 330px; padding: 12px; resize: vertical; }
+    button { margin-top: 16px; padding: 12px 14px; background: #2f6fed; border-color: #2f6fed; cursor: pointer; font-weight: 700; }
+    button.secondary { background: #242732; border-color: #3a3d46; }
+    pre { white-space: pre-wrap; background: #17191f; border: 1px solid #30333d; padding: 14px; border-radius: 8px; min-height: 48px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>JobNimbus Handoff Inbox</h1>
+    <p>Paste Gmail/Quo findings from another ChatGPT chat here. The JobNimbus assistant can then read the pending handoffs and turn them into approval-ready actions.</p>
+
+    <label for="token">Bridge Token</label>
+    <input id="token" type="password" autocomplete="off" placeholder="Paste bridge token">
+
+    <div class="row">
+      <div>
+        <label for="source">Source</label>
+        <input id="source" value="regular-chat" placeholder="regular-chat, gmail, quo">
+      </div>
+      <div>
+        <label for="client">Client/File</label>
+        <input id="client" placeholder="Optional client name, job number, claim number">
+      </div>
+    </div>
+
+    <label for="payload">Handoff Text or JSON</label>
+    <textarea id="payload" placeholder='Example: {"client":"Rosa Sanchez","summary":"Adjuster replied...","recommendedActions":["Send LOR"],"needsApproval":true}'></textarea>
+
+    <button id="submit">Submit Handoff</button>
+    <button class="secondary" id="pending">Load Pending</button>
+
+    <label for="result">Result</label>
+    <pre id="result"></pre>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function headers() {
+      return { "content-type": "application/json", "authorization": "Bearer " + $("token").value.trim() };
+    }
+    function parsePayload(text) {
+      try { return JSON.parse(text); } catch { return { text }; }
+    }
+    $("submit").addEventListener("click", async () => {
+      $("result").textContent = "Submitting...";
+      const body = {
+        source: $("source").value.trim() || "regular-chat",
+        client: $("client").value.trim(),
+        payload: parsePayload($("payload").value.trim())
+      };
+      const res = await fetch("/handoff", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      $("result").textContent = JSON.stringify(await res.json(), null, 2);
+    });
+    $("pending").addEventListener("click", async () => {
+      $("result").textContent = "Loading...";
+      const res = await fetch("/handoff/pending", { method: "POST", headers: headers(), body: JSON.stringify({ limit: 25 }) });
+      $("result").textContent = JSON.stringify(await res.json(), null, 2);
+    });
+  </script>
+</body>
+</html>`;
+  return { html };
+}
+
+async function createHandoff(input) {
+  const handoffs = await readHandoffStore();
+  const payload = normalizeHandoffPayload(input);
+  const handoff = {
+    id: randomUUID(),
+    status: "pending",
+    source: payload.source,
+    client: payload.client,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    completedAt: "",
+    payload: payload.payload,
+    assistantRead: buildHandoffAssistantRead(payload)
+  };
+  handoffs.unshift(handoff);
+  await writeHandoffStore(handoffs);
+  return { created: true, handoff };
+}
+
+async function pendingHandoffs(input = {}) {
+  const limit = clamp(Number(input.limit || 25), 1, 100);
+  const includeCompleted = input.includeCompleted === true;
+  const clientQuery = normalizeCompare(input.client || input.query || "");
+  const handoffs = await readHandoffStore();
+  const matches = handoffs
+    .filter((handoff) => includeCompleted || handoff.status !== "completed")
+    .filter((handoff) => !clientQuery || normalizeCompare(`${handoff.client} ${JSON.stringify(handoff.payload)}`).includes(clientQuery))
+    .slice(0, limit);
+  return {
+    count: matches.length,
+    handoffs: matches,
+    assistantRead: matches.map((handoff) => handoff.assistantRead).join("\n\n---\n\n")
+  };
+}
+
+async function completeHandoff(input) {
+  const id = required(input.id || input.handoffId, "id");
+  const completionNote = String(input.completionNote || input.note || "").trim();
+  const handoffs = await readHandoffStore();
+  const handoff = handoffs.find((row) => row.id === id);
+  if (!handoff) badRequest(`No handoff found for id: ${id}`);
+  handoff.status = "completed";
+  handoff.completedAt = new Date().toISOString();
+  handoff.updatedAt = handoff.completedAt;
+  handoff.completionNote = completionNote;
+  await writeHandoffStore(handoffs);
+  return { completed: true, handoff };
 }
 
 async function searchContacts(input) {
@@ -167,6 +305,20 @@ async function updateContact(input) {
   const plan = { endpoint: `/contacts/${contact.jnid}`, fields };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: fields });
+  return { mode: "executed", file: compactContact(contact), result };
+}
+
+async function updateStatus(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute status updates.");
+  }
+  const query = required(input.query, "query");
+  const status = required(input.status || input.statusName || input.workflowStatus, "status");
+  const { contact } = await findOneContact(query);
+  const body = { status_name: status };
+  const plan = { endpoint: `/contacts/${contact.jnid}`, body };
+  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
+  const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
   return { mode: "executed", file: compactContact(contact), result };
 }
 
@@ -954,6 +1106,52 @@ function collectIds(value, ids) {
   }
 }
 
+function normalizeHandoffPayload(input = {}) {
+  const payload = input.payload && typeof input.payload === "object" ? input.payload : {
+    text: String(input.text || input.summary || input.message || "").trim()
+  };
+  const source = String(input.source || payload.source || "regular-chat").trim();
+  const client = String(input.client || input.query || payload.client || payload.file || payload.name || "").trim();
+  if (!client && !JSON.stringify(payload).trim()) badRequest("client or payload is required");
+  return { source, client, payload };
+}
+
+function buildHandoffAssistantRead({ source, client, payload }) {
+  const summary = String(payload.summary || payload.text || payload.message || "").trim();
+  const recommendedActions = Array.isArray(payload.recommendedActions)
+    ? payload.recommendedActions
+    : Array.isArray(payload.recommended_actions)
+      ? payload.recommended_actions
+      : [];
+  const sources = Array.isArray(payload.sources) ? payload.sources : Array.isArray(payload.source) ? payload.source : [source];
+  const lines = [
+    `Handoff source: ${sources.filter(Boolean).join(", ") || source}`,
+    `Client/file: ${client || "unspecified"}`,
+    summary ? `Summary: ${summary}` : "",
+    payload.issue || payload.bottleneck ? `Issue/bottleneck: ${payload.issue || payload.bottleneck}` : "",
+    recommendedActions.length ? `Recommended actions:\n${recommendedActions.map((item, index) => `${index + 1}. ${String(item)}`).join("\n")}` : "",
+    payload.needsApproval !== undefined ? `Needs approval: ${Boolean(payload.needsApproval || payload.needs_approval)}` : "",
+    `Raw payload: ${JSON.stringify(payload, null, 2)}`
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+async function readHandoffStore() {
+  try {
+    const raw = await readFile(HANDOFF_STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function writeHandoffStore(handoffs) {
+  await mkdir(path.dirname(HANDOFF_STORE_PATH), { recursive: true });
+  await writeFile(HANDOFF_STORE_PATH, JSON.stringify(handoffs.slice(0, 500), null, 2));
+}
+
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
   const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -1331,7 +1529,7 @@ function authorized(req) {
 }
 
 function isPublicRoute(method, pathname) {
-  return method === "GET" && ["/openapi.json", "/privacy"].includes(pathname);
+  return method === "GET" && ["/openapi.json", "/privacy", "/handoff"].includes(pathname);
 }
 
 async function readJson(req) {
@@ -1361,6 +1559,11 @@ function send(res, status, body) {
 function sendText(res, status, text) {
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
   res.end(text);
+}
+
+function sendHtml(res, status, html) {
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  res.end(html);
 }
 
 function stripTrailingSlash(value) {
@@ -1439,10 +1642,21 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "File/client identifier." },
-          fields: { type: "object", additionalProperties: true, description: "Exact JobNimbus contact fields to update." },
+          fields: { type: "object", additionalProperties: true, description: "Exact JobNimbus contact fields to update. Use for claim number, carrier, policy number, adjuster name, adjuster phone, adjuster email, date of loss, and known custom field keys." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["query", "fields"]
+      },
+      UpdateStatusRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          status: { type: "string", description: "JobNimbus workflow/status name, such as Submitted Awaiting Confirmation or Awaiting 2 Key Confirmations." },
+          statusName: { type: "string", description: "Alias for status." },
+          workflowStatus: { type: "string", description: "Alias for status." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+        },
+        required: ["query", "status"]
       },
       CreateNoteRequest: {
         type: "object",
@@ -1526,12 +1740,69 @@ const OPENAPI = {
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["to", "subject", "body"]
+      },
+      CreateHandoffRequest: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Source system or chat, such as regular-chat, gmail, quo, or ChatGPT Gmail/Quo chat." },
+          client: { type: "string", description: "Optional client/file name, JobNimbus number, claim number, policy number, phone, email, or address." },
+          payload: {
+            type: "object",
+            additionalProperties: true,
+            description: "Structured handoff payload from another chat. Include summary, source details, recommendedActions, needsApproval, drafts, or raw text."
+          },
+          text: { type: "string", description: "Plain text handoff if no structured payload is available." }
+        }
+      },
+      PendingHandoffsRequest: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
+          query: { type: "string", description: "Optional client/file search over pending handoffs." },
+          client: { type: "string", description: "Optional client/file search over pending handoffs." },
+          includeCompleted: { type: "boolean", default: false }
+        }
+      },
+      CompleteHandoffRequest: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Handoff id returned by listPendingHandoffs." },
+          handoffId: { type: "string", description: "Alias for id." },
+          completionNote: { type: "string", description: "Optional note describing how the handoff was processed." },
+          note: { type: "string", description: "Alias for completionNote." }
+        }
       }
     }
   },
   paths: {
     "/health": { get: { operationId: "health", responses: { "200": { description: "OK" } } } },
     "/privacy": { get: { operationId: "privacy", responses: { "200": { description: "Privacy policy" } } } },
+    "/handoff": {
+      get: {
+        operationId: "handoffInboxPage",
+        security: [],
+        responses: { "200": { description: "Human paste-in page for Gmail/Quo handoffs." } }
+      },
+      post: {
+        operationId: "createHandoff",
+        requestBody: jsonBody("CreateHandoffRequest"),
+        responses: { "200": { description: "Created handoff for the JobNimbus assistant to process." } }
+      }
+    },
+    "/handoff/pending": {
+      post: {
+        operationId: "listPendingHandoffs",
+        requestBody: jsonBody("PendingHandoffsRequest"),
+        responses: { "200": { description: "Pending handoffs from Gmail/Quo or other chats." } }
+      }
+    },
+    "/handoff/complete": {
+      post: {
+        operationId: "completeHandoff",
+        requestBody: jsonBody("CompleteHandoffRequest"),
+        responses: { "200": { description: "Marks a handoff as completed after it is processed." } }
+      }
+    },
     "/jobnimbus/search": {
       post: {
         operationId: "searchJobNimbus",
@@ -1579,6 +1850,13 @@ const OPENAPI = {
         operationId: "updateJobNimbusContact",
         requestBody: jsonBody("UpdateContactRequest"),
         responses: { "200": { description: "Dry run or update result" } }
+      }
+    },
+    "/jobnimbus/update-status": {
+      post: {
+        operationId: "updateJobNimbusStatus",
+        requestBody: jsonBody("UpdateStatusRequest"),
+        responses: { "200": { description: "Dry run or status update result" } }
       }
     },
     "/jobnimbus/create-note": {
