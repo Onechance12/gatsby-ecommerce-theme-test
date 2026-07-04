@@ -56,10 +56,13 @@ Action/API endpoints:
 ```text
 POST /handoff          public create-only intake
 POST /handoff/pending
+POST /handoff/get
+POST /handoff/process
 POST /handoff/complete
 ```
 
 Use this when a separate ChatGPT chat has Gmail/Quo context and needs to pass structured findings to the JobNimbus assistant. The bridge stores handoffs in a small JSON file, intended as a lightweight queue rather than permanent records.
+`/handoff/process` dry-runs by default and executes only when `execute: true` is provided and bridge writes are enabled.
 
 ## Bundled JobNimbus Updates
 

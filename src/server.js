@@ -25,6 +25,8 @@ const routes = new Map([
   ["GET /handoff", handoffPage],
   ["POST /handoff", createHandoff],
   ["POST /handoff/pending", pendingHandoffs],
+  ["POST /handoff/get", getHandoff],
+  ["POST /handoff/process", processHandoff],
   ["POST /handoff/complete", completeHandoff],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
@@ -212,17 +214,40 @@ async function pendingHandoffs(input = {}) {
   };
 }
 
+async function getHandoff(input) {
+  const id = required(input.id || input.handoffId, "id");
+  const handoff = await findHandoffById(id);
+  return { handoff, assistantRead: handoff.assistantRead };
+}
+
+async function processHandoff(input) {
+  const id = required(input.id || input.handoffId, "id");
+  const handoff = await findHandoffById(id);
+  const update = extractHandoffJobNimbusUpdate(handoff, input);
+  if (!update) {
+    return {
+      mode: "no_action",
+      handoff,
+      error: "No jobNimbusUpdate payload found. Add payload.jobNimbusUpdate with query, fields, status, and/or note."
+    };
+  }
+  const execute = input.execute === true || update.execute === true;
+  const result = await processUpdate({ ...update, execute });
+  if (execute && input.completeOnSuccess !== false) {
+    const completionNote = String(input.completionNote || "Processed through processHandoff.").trim();
+    await markHandoffComplete(handoff.id, completionNote);
+  }
+  return {
+    mode: execute ? "executed" : "dry_run",
+    handoff,
+    result
+  };
+}
+
 async function completeHandoff(input) {
   const id = required(input.id || input.handoffId, "id");
   const completionNote = String(input.completionNote || input.note || "").trim();
-  const handoffs = await readHandoffStore();
-  const handoff = handoffs.find((row) => row.id === id);
-  if (!handoff) badRequest(`No handoff found for id: ${id}`);
-  handoff.status = "completed";
-  handoff.completedAt = new Date().toISOString();
-  handoff.updatedAt = handoff.completedAt;
-  handoff.completionNote = completionNote;
-  await writeHandoffStore(handoffs);
+  const handoff = await markHandoffComplete(id, completionNote);
   return { completed: true, handoff };
 }
 
@@ -1195,6 +1220,49 @@ async function writeHandoffStore(handoffs) {
   await writeFile(HANDOFF_STORE_PATH, JSON.stringify(handoffs.slice(0, 500), null, 2));
 }
 
+async function findHandoffById(id) {
+  const handoffs = await readHandoffStore();
+  const handoff = handoffs.find((row) => row.id === id);
+  if (!handoff) badRequest(`No handoff found for id: ${id}`);
+  return handoff;
+}
+
+function extractHandoffJobNimbusUpdate(handoff, input = {}) {
+  const payload = handoff?.payload && typeof handoff.payload === "object" ? handoff.payload : {};
+  const update = payload.jobNimbusUpdate || payload.jobNimbus_update || payload.jobnimbusUpdate;
+  const directUpdate = payload.query || payload.fields || payload.status || payload.note
+    ? {
+        query: payload.query,
+        fields: payload.fields,
+        status: payload.status,
+        note: payload.note,
+        execute: payload.execute
+      }
+    : null;
+  const selected = update && typeof update === "object" ? update : directUpdate;
+  if (!selected) return null;
+  return cleanObject({
+    ...selected,
+    query: input.query || selected.query || selected.job || selected.client || handoff.client,
+    fields: input.fields || selected.fields,
+    status: input.status || input.statusName || input.workflowStatus || selected.status || selected.statusName || selected.workflowStatus,
+    note: input.note || input.internalNote || selected.note || selected.internalNote,
+    execute: input.execute === true || selected.execute === true
+  });
+}
+
+async function markHandoffComplete(id, completionNote = "") {
+  const handoffs = await readHandoffStore();
+  const handoff = handoffs.find((row) => row.id === id);
+  if (!handoff) badRequest(`No handoff found for id: ${id}`);
+  handoff.status = "completed";
+  handoff.completedAt = new Date().toISOString();
+  handoff.updatedAt = handoff.completedAt;
+  handoff.completionNote = completionNote;
+  await writeHandoffStore(handoffs);
+  return handoff;
+}
+
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
   const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -1826,6 +1894,30 @@ const OPENAPI = {
           includeCompleted: { type: "boolean", default: false }
         }
       },
+      GetHandoffRequest: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Handoff id returned by createHandoff or listPendingHandoffs." },
+          handoffId: { type: "string", description: "Alias for id." }
+        }
+      },
+      ProcessHandoffRequest: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Handoff id returned by createHandoff or listPendingHandoffs." },
+          handoffId: { type: "string", description: "Alias for id." },
+          query: { type: "string", description: "Override file/client identifier if the handoff did not include one." },
+          fields: { type: "object", additionalProperties: true, description: "Override or provide exact JobNimbus contact fields to update." },
+          status: { type: "string", description: "Override or provide JobNimbus workflow/status name to set." },
+          statusName: { type: "string", description: "Alias for status." },
+          workflowStatus: { type: "string", description: "Alias for status." },
+          note: { type: "string", description: "Override or provide internal JobNimbus note text." },
+          internalNote: { type: "string", description: "Alias for note." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." },
+          completeOnSuccess: { type: "boolean", default: true, description: "When executing, mark the handoff completed after a successful update." },
+          completionNote: { type: "string", description: "Optional note saved when marking the handoff complete." }
+        }
+      },
       CompleteHandoffRequest: {
         type: "object",
         properties: {
@@ -1857,6 +1949,20 @@ const OPENAPI = {
         operationId: "listPendingHandoffs",
         requestBody: jsonBody("PendingHandoffsRequest"),
         responses: { "200": { description: "Pending handoffs from Gmail/Quo or other chats." } }
+      }
+    },
+    "/handoff/get": {
+      post: {
+        operationId: "getHandoff",
+        requestBody: jsonBody("GetHandoffRequest"),
+        responses: { "200": { description: "Returns one handoff by id." } }
+      }
+    },
+    "/handoff/process": {
+      post: {
+        operationId: "processHandoff",
+        requestBody: jsonBody("ProcessHandoffRequest"),
+        responses: { "200": { description: "Dry-runs or executes a JobNimbus update embedded in a handoff." } }
       }
     },
     "/handoff/complete": {
