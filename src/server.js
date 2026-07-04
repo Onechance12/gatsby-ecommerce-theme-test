@@ -123,7 +123,7 @@ function handoffPage() {
     <p>Paste Gmail/Quo findings from another ChatGPT chat here. The JobNimbus assistant can then read the pending handoffs and turn them into approval-ready actions.</p>
 
     <label for="token">Bridge Token</label>
-    <input id="token" type="password" autocomplete="off" placeholder="Paste bridge token">
+    <input id="token" type="password" autocomplete="off" placeholder="Optional for submitting; required to load pending">
 
     <div class="row">
       <div>
@@ -148,7 +148,10 @@ function handoffPage() {
   <script>
     const $ = (id) => document.getElementById(id);
     function headers() {
-      return { "content-type": "application/json", "authorization": "Bearer " + $("token").value.trim() };
+      const token = $("token").value.trim();
+      return token
+        ? { "content-type": "application/json", "authorization": "Bearer " + token }
+        : { "content-type": "application/json" };
     }
     function parsePayload(text) {
       try { return JSON.parse(text); } catch { return { text }; }
@@ -1569,7 +1572,8 @@ function authorized(req) {
 }
 
 function isPublicRoute(method, pathname) {
-  return method === "GET" && ["/openapi.json", "/privacy", "/handoff"].includes(pathname);
+  return (method === "GET" && ["/openapi.json", "/privacy", "/handoff"].includes(pathname))
+    || (method === "POST" && pathname === "/handoff");
 }
 
 async function readJson(req) {

@@ -11,7 +11,7 @@ It includes a handoff inbox so another ChatGPT chat with Gmail/Quo access can pa
 - Leave `BRIDGE_ALLOW_WRITES=false` until you intentionally want approved write actions.
 - Write endpoints are dry-run unless the request includes `execute:true` and Render has `BRIDGE_ALLOW_WRITES=true`.
 - Gmail draft/send endpoints are also dry-run unless `execute:true` and `BRIDGE_ALLOW_WRITES=true`.
-- The handoff inbox requires the bridge bearer token for create/list/complete actions.
+- The handoff inbox allows public handoff creation so browser agents can submit Gmail/Quo findings. Listing/completing handoffs still requires the bridge bearer token.
 
 ## Render
 
@@ -45,7 +45,7 @@ HANDOFF_STORE_PATH=/tmp/jobnimbus-chatgpt-handoffs.json
 
 ## Handoff Inbox
 
-Human paste-in page:
+Human/agent paste-in page:
 
 ```text
 /handoff
@@ -54,7 +54,7 @@ Human paste-in page:
 Action/API endpoints:
 
 ```text
-POST /handoff
+POST /handoff          public create-only intake
 POST /handoff/pending
 POST /handoff/complete
 ```
