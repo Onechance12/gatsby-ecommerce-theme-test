@@ -41,6 +41,8 @@ Optional env vars:
 
 ```text
 HANDOFF_STORE_PATH=/tmp/jobnimbus-chatgpt-handoffs.json
+HANDOFF_UPLOAD_DIR=/tmp/jobnimbus-chatgpt-handoff-uploads
+MAX_JSON_BODY_BYTES=12582912
 ```
 
 ## Handoff Inbox
@@ -55,6 +57,7 @@ Action/API endpoints:
 
 ```text
 POST /handoff          public create-only intake
+POST /handoff/chunk    public chunked intake for large JSON/text handoffs
 POST /handoff/pending
 POST /handoff/get
 POST /handoff/process
@@ -62,6 +65,7 @@ POST /handoff/complete
 ```
 
 Use this when a separate ChatGPT chat has Gmail/Quo context and needs to pass structured findings to the JobNimbus assistant. The bridge stores handoffs in a small JSON file, intended as a lightweight queue rather than permanent records.
+Use `/handoff/chunk` when the payload is too large for one browser/GPT action request. Send `index`, `total`, `chunk`, and reuse the returned `uploadId` for remaining chunks.
 `/handoff/process` dry-runs by default and executes only when `execute: true` is provided and bridge writes are enabled.
 
 ## Bundled JobNimbus Updates

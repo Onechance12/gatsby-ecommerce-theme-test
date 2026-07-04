@@ -17,6 +17,8 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GMAIL_USER = process.env.GMAIL_USER || "me";
 const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-handoffs.json");
+const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-handoff-uploads");
+const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
 
 const routes = new Map([
   ["GET /health", health],
@@ -24,6 +26,7 @@ const routes = new Map([
   ["GET /privacy", privacy],
   ["GET /handoff", handoffPage],
   ["POST /handoff", createHandoff],
+  ["POST /handoff/chunk", createHandoffChunk],
   ["POST /handoff/pending", pendingHandoffs],
   ["POST /handoff/get", getHandoff],
   ["POST /handoff/process", processHandoff],
@@ -139,6 +142,7 @@ function handoffPage() {
     </div>
 
     <label for="payload">Handoff Text or JSON</label>
+    <input id="payloadFile" type="file" accept=".json,.txt,application/json,text/plain">
     <textarea id="payload" placeholder='Example: {"client":"Rosa Sanchez","summary":"Adjuster replied...","recommendedActions":["Send LOR"],"needsApproval":true}'></textarea>
 
     <button id="submit">Submit Handoff</button>
@@ -158,13 +162,35 @@ function handoffPage() {
     function parsePayload(text) {
       try { return JSON.parse(text); } catch { return { text }; }
     }
+    $("payloadFile").addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      $("payload").value = await file.text();
+    });
     $("submit").addEventListener("click", async () => {
       $("result").textContent = "Submitting...";
-      const body = {
-        source: $("source").value.trim() || "regular-chat",
-        client: $("client").value.trim(),
-        payload: parsePayload($("payload").value.trim())
-      };
+      const source = $("source").value.trim() || "regular-chat";
+      const client = $("client").value.trim();
+      const payloadText = $("payload").value.trim();
+      if (payloadText.length > 700000) {
+        let uploadId = "";
+        const chunkSize = 450000;
+        const total = Math.ceil(payloadText.length / chunkSize);
+        for (let index = 0; index < total; index += 1) {
+          const chunk = payloadText.slice(index * chunkSize, (index + 1) * chunkSize);
+          const res = await fetch("/handoff/chunk", {
+            method: "POST",
+            headers: headers(),
+            body: JSON.stringify({ uploadId, source, client, index, total, chunk })
+          });
+          const result = await res.json();
+          $("result").textContent = JSON.stringify(result, null, 2);
+          if (!res.ok) return;
+          uploadId = result.uploadId;
+        }
+        return;
+      }
+      const body = { source, client, payload: parsePayload(payloadText) };
       const res = await fetch("/handoff", { method: "POST", headers: headers(), body: JSON.stringify(body) });
       $("result").textContent = JSON.stringify(await res.json(), null, 2);
     });
@@ -196,6 +222,49 @@ async function createHandoff(input) {
   handoffs.unshift(handoff);
   await writeHandoffStore(handoffs);
   return { created: true, handoff };
+}
+
+async function createHandoffChunk(input) {
+  const uploadId = normalizeUploadId(input.uploadId || randomUUID());
+  const index = Number(input.index);
+  const total = Number(input.total);
+  const chunk = String(input.chunk ?? "");
+  if (!Number.isInteger(index) || index < 0) badRequest("index must be a zero-based integer");
+  if (!Number.isInteger(total) || total < 1 || total > 1000) badRequest("total must be between 1 and 1000");
+  if (index >= total) badRequest("index must be less than total");
+  if (!chunk) badRequest("chunk is required");
+
+  const dir = path.join(HANDOFF_UPLOAD_DIR, uploadId);
+  await mkdir(dir, { recursive: true });
+  const metaPath = path.join(dir, "meta.json");
+  const metadata = cleanObject({
+    uploadId,
+    source: String(input.source || "regular-chat").trim(),
+    client: String(input.client || "").trim(),
+    total,
+    createdAt: new Date().toISOString()
+  });
+  if (index === 0) await writeFile(metaPath, JSON.stringify(metadata, null, 2));
+  await writeFile(path.join(dir, `${index}.part`), chunk);
+
+  const received = (await readdir(dir)).filter((name) => name.endsWith(".part")).length;
+  if (received < total) return { uploadId, complete: false, received, total };
+
+  const savedMeta = await readJsonFile(metaPath, metadata);
+  const chunks = [];
+  for (let part = 0; part < total; part += 1) {
+    chunks.push(await readFile(path.join(dir, `${part}.part`), "utf8"));
+  }
+  const raw = chunks.join("");
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch {}
+  const handoff = await createHandoff({
+    source: savedMeta.source || metadata.source,
+    client: savedMeta.client || metadata.client,
+    ...(parsed && typeof parsed === "object" ? { payload: parsed } : { text: raw })
+  });
+  await rm(dir, { recursive: true, force: true });
+  return { uploadId, complete: true, received, total, handoff };
 }
 
 async function pendingHandoffs(input = {}) {
@@ -1220,6 +1289,20 @@ async function writeHandoffStore(handoffs) {
   await writeFile(HANDOFF_STORE_PATH, JSON.stringify(handoffs.slice(0, 500), null, 2));
 }
 
+async function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(await readFile(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeUploadId(value) {
+  const uploadId = String(value || "").trim();
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(uploadId)) badRequest("uploadId may only contain letters, numbers, underscore, or hyphen");
+  return uploadId;
+}
+
 async function findHandoffById(id) {
   const handoffs = await readHandoffStore();
   const handoff = handoffs.find((row) => row.id === id);
@@ -1641,12 +1724,21 @@ function authorized(req) {
 
 function isPublicRoute(method, pathname) {
   return (method === "GET" && ["/openapi.json", "/privacy", "/handoff"].includes(pathname))
-    || (method === "POST" && pathname === "/handoff");
+    || (method === "POST" && ["/handoff", "/handoff/chunk"].includes(pathname));
 }
 
 async function readJson(req) {
   let raw = "";
-  for await (const chunk of req) raw += chunk;
+  let bytes = 0;
+  for await (const chunk of req) {
+    bytes += chunk.length;
+    if (bytes > MAX_JSON_BODY_BYTES) {
+      const error = new Error(`Request body too large. Limit is ${MAX_JSON_BODY_BYTES} bytes.`);
+      error.statusCode = 413;
+      throw error;
+    }
+    raw += chunk;
+  }
   if (!raw.trim()) return {};
   try { return JSON.parse(raw); } catch { badRequest("Request body must be valid JSON."); }
 }
@@ -1885,6 +1977,18 @@ const OPENAPI = {
           text: { type: "string", description: "Plain text handoff if no structured payload is available." }
         }
       },
+      CreateHandoffChunkRequest: {
+        type: "object",
+        properties: {
+          uploadId: { type: "string", description: "Optional upload id returned from the first chunk. Omit on the first chunk." },
+          source: { type: "string", description: "Source system or chat, such as regular-chat, gmail, quo, or ChatGPT Gmail/Quo chat." },
+          client: { type: "string", description: "Optional client/file name, JobNimbus number, claim number, policy number, phone, email, or address." },
+          index: { type: "integer", minimum: 0, description: "Zero-based chunk index." },
+          total: { type: "integer", minimum: 1, maximum: 1000, description: "Total number of chunks in the upload." },
+          chunk: { type: "string", description: "Raw JSON/text slice for this chunk. The bridge assembles all chunks and creates one handoff." }
+        },
+        required: ["index", "total", "chunk"]
+      },
       PendingHandoffsRequest: {
         type: "object",
         properties: {
@@ -1942,6 +2046,14 @@ const OPENAPI = {
         operationId: "createHandoff",
         requestBody: jsonBody("CreateHandoffRequest"),
         responses: { "200": { description: "Created handoff for the JobNimbus assistant to process." } }
+      }
+    },
+    "/handoff/chunk": {
+      post: {
+        operationId: "createHandoffChunk",
+        security: [],
+        requestBody: jsonBody("CreateHandoffChunkRequest"),
+        responses: { "200": { description: "Receives one large handoff chunk and creates the handoff when all chunks arrive." } }
       }
     },
     "/handoff/pending": {
