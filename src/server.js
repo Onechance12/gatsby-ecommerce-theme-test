@@ -86,13 +86,18 @@ const voiceWebSocketServer = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", "http://localhost");
-  if (url.pathname !== VOICE_STREAM_PATH) {
+  if (url.pathname !== VOICE_STREAM_PATH && !url.pathname.startsWith(`${VOICE_STREAM_PATH}/`)) {
     socket.destroy();
     return;
   }
 
   if (!voiceStreamAuthorized(url)) {
-    console.log(JSON.stringify({ type: "twilio_stream_rejected", reason: "invalid_stream_token" }));
+    console.log(JSON.stringify({
+      type: "twilio_stream_rejected",
+      reason: "invalid_stream_token",
+      pathHasToken: url.pathname.startsWith(`${VOICE_STREAM_PATH}/`),
+      queryHasToken: url.searchParams.has("token")
+    }));
     socket.destroy();
     return;
   }
@@ -2044,9 +2049,7 @@ function voiceStreamUrl() {
   const base = VOICE_PUBLIC_BASE_URL || PUBLIC_BASE_URL;
   const url = `${base.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}${VOICE_STREAM_PATH}`;
   if (!VOICE_STREAM_TOKEN) return url;
-  const parsed = new URL(url);
-  parsed.searchParams.set("token", VOICE_STREAM_TOKEN);
-  return parsed.toString();
+  return `${url}/${encodeURIComponent(VOICE_STREAM_TOKEN)}`;
 }
 
 function voiceStreamUrlWithContext({ goal, prompt }) {
@@ -2058,7 +2061,10 @@ function voiceStreamUrlWithContext({ goal, prompt }) {
 
 function voiceStreamAuthorized(url) {
   if (!VOICE_STREAM_TOKEN) return true;
-  return url.searchParams.get("token") === VOICE_STREAM_TOKEN;
+  const pathToken = url.pathname.startsWith(`${VOICE_STREAM_PATH}/`)
+    ? decodeURIComponent(url.pathname.slice(`${VOICE_STREAM_PATH}/`.length))
+    : "";
+  return pathToken === VOICE_STREAM_TOKEN || url.searchParams.get("token") === VOICE_STREAM_TOKEN;
 }
 
 async function createTwilioRealtimeCall({ to, from, streamUrl }) {
