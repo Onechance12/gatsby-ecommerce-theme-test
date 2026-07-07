@@ -44,6 +44,7 @@ const routes = new Map([
   ["GET /voice/twiml", voiceTwiml],
   ["POST /voice/outbound-call", outboundVoiceCall],
   ["POST /voice/transcript", voiceTranscript],
+  ["POST /voice/transcripts", voiceTranscripts],
   ["POST /handoff", createHandoff],
   ["POST /handoff/chunk", createHandoffChunk],
   ["POST /handoff/pending", pendingHandoffs],
@@ -168,7 +169,7 @@ function voiceTwiml() {
 async function outboundVoiceCall(input) {
   const to = normalizePhone(input.to || TWILIO_VERIFIED_TEST_NUMBER);
   const from = normalizePhone(input.from || TWILIO_FROM_NUMBER);
-  const goal = String(input.goal || "test").trim();
+  const goal = String(input.goal || "general_call").trim();
   const prompt = String(input.prompt || "").trim();
   const voice = normalizeRealtimeVoice(input.voice || OPENAI_VOICE);
   const callId = randomUUID();
@@ -253,6 +254,24 @@ async function voiceTranscript(input) {
     call: summarizeVoiceCallLog(log),
     turns: log.turns,
     transcript: log.turns.map((turn) => `${turn.speaker}: ${turn.text}`).join("\n")
+  };
+}
+
+async function voiceTranscripts(input = {}) {
+  const limit = clamp(Number(input.limit || 10), 1, 50);
+  const status = String(input.status || "").trim().toLowerCase();
+  const calls = Array.from(voiceCallLogs.values())
+    .filter((log) => !status || String(log.status || "").toLowerCase() === status)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .slice(0, limit)
+    .map((log) => ({
+      call: summarizeVoiceCallLog(log),
+      transcript: log.turns.map((turn) => `${turn.speaker}: ${turn.text}`).join("\n"),
+      turns: log.turns
+    }));
+  return {
+    count: calls.length,
+    calls
   };
 }
 
@@ -2100,7 +2119,7 @@ function voiceContext(req) {
   const url = new URL(req.url || "/", "http://localhost");
   return {
     callId: url.searchParams.get("callId") || "",
-    goal: url.searchParams.get("goal") || "test",
+    goal: url.searchParams.get("goal") || "general_call",
     prompt: url.searchParams.get("prompt") || "",
     voice: normalizeRealtimeVoice(url.searchParams.get("voice") || OPENAI_VOICE)
   };
@@ -2112,17 +2131,31 @@ function voiceCallId(req) {
 
 function voiceInstructions(req) {
   const { goal, prompt } = voiceContext(req);
+  const isTest = /^test(?:_|$)/i.test(goal);
+  const operationalInstructions = [
+    "You are Chance Pearson's live phone assistant for property insurance claim operations.",
+    "You are calling on behalf of Chance Pearson, a public adjuster, to move the insurance claim forward.",
+    "Your job is to complete the exact call objective in the call context, not to test the phone connection.",
+    "Start the call by stating the specific purpose from the call context.",
+    "If you reach an IVR/menu, listen to the full prompt before responding. Use short spoken answers like: claims, property claim, existing claim, new claim, representative, or agent.",
+    "If the IVR requires keypad-only input, say that keypad input is required and wait; do not invent information.",
+    "If speaking to a human, be concise and professional. Identify as assisting Chance Pearson and ask for the specific result from the call context.",
+    "Use only verified facts included in the call context. If a required fact is missing, ask for the minimum needed to continue.",
+    "Capture claim number, adjuster name, phone, email, inspection date/time, document submission email, and next steps when provided.",
+    "Do not mention internal tools, APIs, tokens, implementation details, OpenAI, Twilio, or testing unless this is explicitly a test call.",
+    "Do not claim to be the homeowner."
+  ];
+  const testInstructions = [
+    "You are Chance Pearson's live voice assistant for a connection test.",
+    "This is explicitly a test call.",
+    "Start by saying: Hey Chance, the OpenAI voice connection is live. I can hear you when you speak.",
+    "Ask one simple confirmation question, then stop."
+  ];
   return [
-    "You are Chance Pearson's live voice assistant for property insurance claim operations.",
-    "This call may be a test unless the call context clearly says otherwise.",
-    "Speak naturally in short sentences. Ask one question at a time.",
-    "If calling a carrier, immediately state the purpose of the call and use only the verified claim packet facts in the call context.",
-    "If this is a test call, say you are testing the live phone connection and ask Chance one simple confirmation question.",
-    "Do not mention internal tools, APIs, tokens, or implementation details.",
-    "Do not claim to be the homeowner. If asked who you are, say you are assisting Chance Pearson.",
-    "For a test call, start by saying: Hey Chance, the OpenAI voice connection is live. I can hear you when you speak.",
+    ...(isTest ? testInstructions : operationalInstructions),
+    "Speak naturally in short sentences. Ask one question at a time. Do not ramble.",
     `Call goal: ${goal}`,
-    prompt ? `Additional call context: ${prompt}` : ""
+    prompt ? `Call context and instructions: ${prompt}` : "No detailed call context was provided. Ask what the call is about before proceeding."
   ].filter(Boolean).join("\n\n");
 }
 
@@ -2137,7 +2170,7 @@ function voiceStreamUrlWithContext({ goal, prompt, voice, callId }) {
   const parsed = new URL(voiceStreamUrl());
   if (callId) parsed.searchParams.set("callId", String(callId));
   if (goal) parsed.searchParams.set("goal", String(goal).slice(0, 160));
-  if (prompt) parsed.searchParams.set("prompt", String(prompt).slice(0, 1200));
+  if (prompt) parsed.searchParams.set("prompt", String(prompt).slice(0, 3000));
   if (voice) parsed.searchParams.set("voice", normalizeRealtimeVoice(voice));
   return parsed.toString();
 }
@@ -2530,9 +2563,9 @@ const OPENAPI = {
         properties: {
           to: { type: "string", description: "Destination phone number in E.164 or US 10-digit format. Defaults to the configured verified test number if omitted." },
           from: { type: "string", description: "Optional Twilio from number. Defaults to configured TWILIO_FROM_NUMBER." },
-          goal: { type: "string", description: "Short call goal, such as file_new_claim, claim_status, or test." },
+          goal: { type: "string", description: "Short call goal, such as file_new_claim, claim_status, send_lor_destination, schedule_inspection, or test. Use test only for connection tests." },
           voice: { type: "string", description: "Optional OpenAI Realtime voice. Use cedar for the best deeper/more masculine test voice; marin and cedar are recommended quality voices." },
-          prompt: { type: "string", description: "Concise but complete call packet. Include: who the assistant is, exact call purpose, insured/property/carrier/policy/DOL/claim facts, what to ask for, what to avoid saying, and the desired result. Keep it focused to control OpenAI voice usage." },
+          prompt: { type: "string", description: "Concise but complete call packet. Include: who the assistant is, exact call purpose, insured/property/carrier/policy/DOL/claim facts, what to ask for, what to avoid saying, IVR/menu guidance, and the desired result. The current voice bridge can speak IVR answers but cannot press keypad digits yet. Keep it focused to control OpenAI voice usage." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True places the call and requires explicit user approval plus ALLOW_VOICE_CALLS=true." }
         }
       },
@@ -2542,6 +2575,13 @@ const OPENAPI = {
           callId: { type: "string", description: "Bridge call id returned by placeRealtimeVoiceCall." },
           sid: { type: "string", description: "Twilio call SID returned by placeRealtimeVoiceCall." },
           twilioCallSid: { type: "string", description: "Alias for sid." }
+        }
+      },
+      VoiceTranscriptsRequest: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
+          status: { type: "string", description: "Optional recent call status filter, such as connected, closed, stopped, or created." }
         }
       },
       CreateHandoffRequest: {
@@ -2628,6 +2668,13 @@ const OPENAPI = {
         operationId: "getVoiceCallTranscript",
         requestBody: jsonBody("VoiceTranscriptRequest"),
         responses: { "200": { description: "Returns the stored transcript for a recent Twilio/OpenAI realtime voice call." } }
+      }
+    },
+    "/voice/transcripts": {
+      post: {
+        operationId: "listRecentVoiceCallTranscripts",
+        requestBody: jsonBody("VoiceTranscriptsRequest"),
+        responses: { "200": { description: "Returns recent stored transcripts for Twilio/OpenAI realtime voice calls." } }
       }
     },
     "/handoff": {
