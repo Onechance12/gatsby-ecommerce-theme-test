@@ -92,6 +92,7 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   if (!voiceStreamAuthorized(url)) {
+    console.log(JSON.stringify({ type: "twilio_stream_rejected", reason: "invalid_stream_token" }));
     socket.destroy();
     return;
   }
@@ -1861,10 +1862,7 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
   const openAiSocket = new WebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(OPENAI_REALTIME_MODEL)}`,
     {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
-      }
+      headers: openAiRealtimeHeaders()
     }
   );
 
@@ -1944,7 +1942,14 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
   openAiSocket.on("error", (error) => {
     console.log(JSON.stringify({ type: "openai_socket_error", message: error.message }));
   });
-  openAiSocket.on("close", cleanup);
+  openAiSocket.on("close", (code, reason) => {
+    console.log(JSON.stringify({
+      type: "openai_socket_closed",
+      code,
+      reason: Buffer.isBuffer(reason) ? reason.toString("utf8") : String(reason || "")
+    }));
+    cleanup();
+  });
 
   twilioSocket.on("message", (raw) => {
     const event = parseSocketJson(raw);
@@ -1977,7 +1982,16 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
   twilioSocket.on("error", (error) => {
     console.log(JSON.stringify({ type: "twilio_socket_error", message: error.message }));
   });
-  twilioSocket.on("close", cleanup);
+  twilioSocket.on("close", (code, reason) => {
+    console.log(JSON.stringify({
+      type: "twilio_socket_closed",
+      callSid,
+      streamSid,
+      code,
+      reason: Buffer.isBuffer(reason) ? reason.toString("utf8") : String(reason || "")
+    }));
+    cleanup();
+  });
 
   function maybeSendGreeting() {
     if (greetingSent || !openAiReady || !twilioStarted) return;
@@ -2000,6 +2014,14 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
       twilioSocket.close();
     }
   }
+}
+
+function openAiRealtimeHeaders() {
+  const headers = { Authorization: `Bearer ${OPENAI_API_KEY}` };
+  if (!/^gpt-realtime-2(?:$|-)/.test(OPENAI_REALTIME_MODEL)) {
+    headers["OpenAI-Beta"] = "realtime=v1";
+  }
+  return headers;
 }
 
 function voiceInstructions(req) {
