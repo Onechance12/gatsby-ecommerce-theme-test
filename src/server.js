@@ -32,6 +32,9 @@ const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
 const TWILIO_STATUS_CALLBACK_URL = process.env.TWILIO_STATUS_CALLBACK_URL || "";
 const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "";
 const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
+const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
+const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
+const voiceCallLogs = new Map();
 
 const routes = new Map([
   ["GET /health", health],
@@ -40,6 +43,7 @@ const routes = new Map([
   ["GET /handoff", handoffPage],
   ["GET /voice/twiml", voiceTwiml],
   ["POST /voice/outbound-call", outboundVoiceCall],
+  ["POST /voice/transcript", voiceTranscript],
   ["POST /handoff", createHandoff],
   ["POST /handoff/chunk", createHandoffChunk],
   ["POST /handoff/pending", pendingHandoffs],
@@ -166,14 +170,18 @@ async function outboundVoiceCall(input) {
   const from = normalizePhone(input.from || TWILIO_FROM_NUMBER);
   const goal = String(input.goal || "test").trim();
   const prompt = String(input.prompt || "").trim();
+  const voice = normalizeRealtimeVoice(input.voice || OPENAI_VOICE);
+  const callId = randomUUID();
   const execute = input.execute === true;
-  const streamUrl = voiceStreamUrlWithContext({ goal, prompt });
+  const streamUrl = voiceStreamUrlWithContext({ goal, prompt, voice, callId });
 
   const plan = {
     from,
     to,
     streamUrl,
     goal,
+    voice,
+    callId,
     prompt: prompt ? "[set]" : "(not set)",
     execute,
     requirements: {
@@ -208,16 +216,43 @@ async function outboundVoiceCall(input) {
     };
   }
 
+  initVoiceCallLog(callId, { to, from, goal, prompt, voice });
   const result = await createTwilioRealtimeCall({ to, from, streamUrl, goal, prompt });
+  const log = voiceCallLogs.get(callId);
+  if (log) {
+    log.twilioCallSid = result.sid;
+    log.status = result.status || "created";
+    log.updatedAt = new Date().toISOString();
+  }
   return {
     mode: "executed",
     call: {
+      callId,
       sid: result.sid,
       status: result.status,
       to: result.to,
       from: result.from,
       direction: result.direction
     }
+  };
+}
+
+async function voiceTranscript(input) {
+  const id = String(input.callId || input.sid || input.twilioCallSid || "").trim();
+  if (!id) badRequest("callId or sid is required");
+  const log = voiceCallLogs.get(id) || Array.from(voiceCallLogs.values()).find((item) => item.twilioCallSid === id);
+  if (!log) {
+    return {
+      found: false,
+      id,
+      message: "No transcript found. Render memory may have restarted, or the call may not have connected to the media stream."
+    };
+  }
+  return {
+    found: true,
+    call: summarizeVoiceCallLog(log),
+    turns: log.turns,
+    transcript: log.turns.map((turn) => `${turn.speaker}: ${turn.text}`).join("\n")
   };
 }
 
@@ -1853,6 +1888,13 @@ function isPublicRoute(method, pathname) {
 function bridgeTwilioToOpenAI(twilioSocket, req) {
   let streamSid = "";
   let callSid = "";
+  const callId = voiceCallId(req);
+  const log = ensureVoiceCallLog(callId, {
+    goal: voiceContext(req).goal,
+    prompt: voiceContext(req).prompt,
+    voice: voiceContext(req).voice
+  });
+  let assistantTranscript = "";
   let openAiReady = false;
   let twilioStarted = false;
   let greetingSent = false;
@@ -1881,6 +1923,9 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
         audio: {
           input: {
             format: { type: "audio/pcmu" },
+            transcription: {
+              model: OPENAI_INPUT_TRANSCRIPTION_MODEL
+            },
             turn_detection: {
               type: "server_vad",
               threshold: 0.5,
@@ -1890,7 +1935,7 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
           },
           output: {
             format: { type: "audio/pcmu" },
-            voice: OPENAI_VOICE
+            voice: voiceContext(req).voice
           }
         }
       }
@@ -1918,12 +1963,26 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
       return;
     }
 
+    if (event.type === "response.audio_transcript.delta" || event.type === "response.output_audio_transcript.delta") {
+      if (event.delta) assistantTranscript += event.delta;
+      return;
+    }
+
     if (event.type === "response.done") {
       assistantSpeaking = false;
+      if (assistantTranscript.trim()) {
+        appendVoiceTurn(log, "assistant", assistantTranscript.trim());
+        assistantTranscript = "";
+      }
       console.log(JSON.stringify({
         type: "openai_response_done",
         status: event.response?.status || null
       }));
+      return;
+    }
+
+    if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
+      appendVoiceTurn(log, "caller", event.transcript.trim());
       return;
     }
 
@@ -1963,6 +2022,10 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
     if (event.event === "start") {
       streamSid = event.start?.streamSid || "";
       callSid = event.start?.callSid || "";
+      log.twilioCallSid = callSid;
+      log.streamSid = streamSid;
+      log.status = "connected";
+      log.updatedAt = new Date().toISOString();
       twilioStarted = true;
       console.log(JSON.stringify({ type: "twilio_stream_started", callSid, streamSid }));
       maybeSendGreeting();
@@ -1979,6 +2042,8 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
     }
 
     if (event.event === "stop") {
+      log.status = "stopped";
+      log.updatedAt = new Date().toISOString();
       console.log(JSON.stringify({ type: "twilio_stream_stopped", callSid, streamSid }));
       cleanup();
     }
@@ -2012,6 +2077,8 @@ function bridgeTwilioToOpenAI(twilioSocket, req) {
   function cleanup() {
     if (closed) return;
     closed = true;
+    log.status = log.status === "connected" ? "closed" : log.status;
+    log.updatedAt = new Date().toISOString();
     if (openAiSocket.readyState === WebSocket.OPEN || openAiSocket.readyState === WebSocket.CONNECTING) {
       openAiSocket.close();
     }
@@ -2029,14 +2096,28 @@ function openAiRealtimeHeaders() {
   return headers;
 }
 
-function voiceInstructions(req) {
+function voiceContext(req) {
   const url = new URL(req.url || "/", "http://localhost");
-  const goal = url.searchParams.get("goal") || "test";
-  const prompt = url.searchParams.get("prompt") || "";
+  return {
+    callId: url.searchParams.get("callId") || "",
+    goal: url.searchParams.get("goal") || "test",
+    prompt: url.searchParams.get("prompt") || "",
+    voice: normalizeRealtimeVoice(url.searchParams.get("voice") || OPENAI_VOICE)
+  };
+}
+
+function voiceCallId(req) {
+  return voiceContext(req).callId || randomUUID();
+}
+
+function voiceInstructions(req) {
+  const { goal, prompt } = voiceContext(req);
   return [
     "You are Chance Pearson's live voice assistant for property insurance claim operations.",
     "This call may be a test unless the call context clearly says otherwise.",
     "Speak naturally in short sentences. Ask one question at a time.",
+    "If calling a carrier, immediately state the purpose of the call and use only the verified claim packet facts in the call context.",
+    "If this is a test call, say you are testing the live phone connection and ask Chance one simple confirmation question.",
     "Do not mention internal tools, APIs, tokens, or implementation details.",
     "Do not claim to be the homeowner. If asked who you are, say you are assisting Chance Pearson.",
     "For a test call, start by saying: Hey Chance, the OpenAI voice connection is live. I can hear you when you speak.",
@@ -2052,10 +2133,12 @@ function voiceStreamUrl() {
   return `${url}/${encodeURIComponent(VOICE_STREAM_TOKEN)}`;
 }
 
-function voiceStreamUrlWithContext({ goal, prompt }) {
+function voiceStreamUrlWithContext({ goal, prompt, voice, callId }) {
   const parsed = new URL(voiceStreamUrl());
+  if (callId) parsed.searchParams.set("callId", String(callId));
   if (goal) parsed.searchParams.set("goal", String(goal).slice(0, 160));
   if (prompt) parsed.searchParams.set("prompt", String(prompt).slice(0, 1200));
+  if (voice) parsed.searchParams.set("voice", normalizeRealtimeVoice(voice));
   return parsed.toString();
 }
 
@@ -2065,6 +2148,65 @@ function voiceStreamAuthorized(url) {
     ? decodeURIComponent(url.pathname.slice(`${VOICE_STREAM_PATH}/`.length))
     : "";
   return pathToken === VOICE_STREAM_TOKEN || url.searchParams.get("token") === VOICE_STREAM_TOKEN;
+}
+
+function normalizeRealtimeVoice(value) {
+  const voice = String(value || "").trim().toLowerCase();
+  return REALTIME_VOICES.has(voice) ? voice : OPENAI_VOICE;
+}
+
+function initVoiceCallLog(callId, context) {
+  const log = ensureVoiceCallLog(callId, context);
+  log.status = "created";
+  log.updatedAt = new Date().toISOString();
+  return log;
+}
+
+function ensureVoiceCallLog(callId, context = {}) {
+  const id = callId || randomUUID();
+  if (!voiceCallLogs.has(id)) {
+    voiceCallLogs.set(id, {
+      callId: id,
+      twilioCallSid: "",
+      streamSid: "",
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      context: cleanObject({
+        to: context.to,
+        from: context.from,
+        goal: context.goal,
+        prompt: context.prompt ? "[set]" : "",
+        voice: context.voice
+      }),
+      turns: []
+    });
+  }
+  return voiceCallLogs.get(id);
+}
+
+function appendVoiceTurn(log, speaker, text) {
+  const cleanText = String(text || "").replace(/\s+/g, " ").trim();
+  if (!cleanText) return;
+  log.turns.push({
+    speaker,
+    text: cleanText,
+    at: new Date().toISOString()
+  });
+  log.updatedAt = new Date().toISOString();
+}
+
+function summarizeVoiceCallLog(log) {
+  return {
+    callId: log.callId,
+    twilioCallSid: log.twilioCallSid,
+    streamSid: log.streamSid,
+    status: log.status,
+    createdAt: log.createdAt,
+    updatedAt: log.updatedAt,
+    context: log.context,
+    turnCount: log.turns.length
+  };
 }
 
 async function createTwilioRealtimeCall({ to, from, streamUrl }) {
@@ -2389,8 +2531,17 @@ const OPENAPI = {
           to: { type: "string", description: "Destination phone number in E.164 or US 10-digit format. Defaults to the configured verified test number if omitted." },
           from: { type: "string", description: "Optional Twilio from number. Defaults to configured TWILIO_FROM_NUMBER." },
           goal: { type: "string", description: "Short call goal, such as file_new_claim, claim_status, or test." },
-          prompt: { type: "string", description: "Concise call instructions or claim packet facts. Keep short to control OpenAI voice usage." },
+          voice: { type: "string", description: "Optional OpenAI Realtime voice. Use cedar for the best deeper/more masculine test voice; marin and cedar are recommended quality voices." },
+          prompt: { type: "string", description: "Concise but complete call packet. Include: who the assistant is, exact call purpose, insured/property/carrier/policy/DOL/claim facts, what to ask for, what to avoid saying, and the desired result. Keep it focused to control OpenAI voice usage." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True places the call and requires explicit user approval plus ALLOW_VOICE_CALLS=true." }
+        }
+      },
+      VoiceTranscriptRequest: {
+        type: "object",
+        properties: {
+          callId: { type: "string", description: "Bridge call id returned by placeRealtimeVoiceCall." },
+          sid: { type: "string", description: "Twilio call SID returned by placeRealtimeVoiceCall." },
+          twilioCallSid: { type: "string", description: "Alias for sid." }
         }
       },
       CreateHandoffRequest: {
@@ -2470,6 +2621,13 @@ const OPENAPI = {
         operationId: "placeRealtimeVoiceCall",
         requestBody: jsonBody("VoiceCallRequest"),
         responses: { "200": { description: "Dry-run plan or executed Twilio/OpenAI realtime voice call." } }
+      }
+    },
+    "/voice/transcript": {
+      post: {
+        operationId: "getVoiceCallTranscript",
+        requestBody: jsonBody("VoiceTranscriptRequest"),
+        responses: { "200": { description: "Returns the stored transcript for a recent Twilio/OpenAI realtime voice call." } }
       }
     },
     "/handoff": {
