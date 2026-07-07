@@ -26,6 +26,12 @@ const OPENAI_VOICE = process.env.OPENAI_VOICE || "marin";
 const VOICE_PUBLIC_BASE_URL = stripTrailingSlash(process.env.VOICE_PUBLIC_BASE_URL || PUBLIC_BASE_URL);
 const VOICE_STREAM_TOKEN = process.env.VOICE_STREAM_TOKEN || BRIDGE_TOKEN || "";
 const VOICE_STREAM_PATH = "/voice/twilio-stream";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
+const TWILIO_STATUS_CALLBACK_URL = process.env.TWILIO_STATUS_CALLBACK_URL || "";
+const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "";
+const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
 
 const routes = new Map([
   ["GET /health", health],
@@ -33,6 +39,7 @@ const routes = new Map([
   ["GET /privacy", privacy],
   ["GET /handoff", handoffPage],
   ["GET /voice/twiml", voiceTwiml],
+  ["POST /voice/outbound-call", outboundVoiceCall],
   ["POST /handoff", createHandoff],
   ["POST /handoff/chunk", createHandoffChunk],
   ["POST /handoff/pending", pendingHandoffs],
@@ -114,7 +121,9 @@ function health() {
       model: OPENAI_REALTIME_MODEL,
       voice: OPENAI_VOICE,
       streamUrl: voiceStreamUrl(),
-      streamAuth: VOICE_STREAM_TOKEN ? "token_required" : "disabled"
+      streamAuth: VOICE_STREAM_TOKEN ? "token_required" : "disabled",
+      twilioConfigured: Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER),
+      callsAllowed: ALLOW_VOICE_CALLS
     }
   };
 }
@@ -144,6 +153,66 @@ function voiceTwiml() {
     "  </Connect>",
     "</Response>"
   ].join("");
+}
+
+async function outboundVoiceCall(input) {
+  const to = normalizePhone(input.to || TWILIO_VERIFIED_TEST_NUMBER);
+  const from = normalizePhone(input.from || TWILIO_FROM_NUMBER);
+  const goal = String(input.goal || "test").trim();
+  const prompt = String(input.prompt || "").trim();
+  const execute = input.execute === true;
+  const streamUrl = voiceStreamUrlWithContext({ goal, prompt });
+
+  const plan = {
+    from,
+    to,
+    streamUrl,
+    goal,
+    prompt: prompt ? "[set]" : "(not set)",
+    execute,
+    requirements: {
+      twilioAccountSid: Boolean(TWILIO_ACCOUNT_SID),
+      twilioAuthToken: Boolean(TWILIO_AUTH_TOKEN),
+      openaiApiKey: Boolean(OPENAI_API_KEY),
+      fromNumber: Boolean(from),
+      toNumber: Boolean(to),
+      publicWssStreamUrl: /^wss:\/\//i.test(streamUrl),
+      allowVoiceCalls: ALLOW_VOICE_CALLS
+    }
+  };
+
+  const missing = Object.entries(plan.requirements)
+    .filter(([, ok]) => !ok)
+    .map(([name]) => name);
+
+  if (!execute) {
+    return {
+      mode: "dry_run",
+      plan,
+      instruction: "This did not place a call. Set execute:true only after user approval."
+    };
+  }
+
+  if (missing.length) {
+    return {
+      mode: "blocked",
+      plan,
+      missing,
+      reason: "Realtime voice calls require Twilio credentials, OpenAI credentials, ALLOW_VOICE_CALLS=true, and a public wss:// stream URL."
+    };
+  }
+
+  const result = await createTwilioRealtimeCall({ to, from, streamUrl, goal, prompt });
+  return {
+    mode: "executed",
+    call: {
+      sid: result.sid,
+      status: result.status,
+      to: result.to,
+      from: result.from,
+      direction: result.direction
+    }
+  };
 }
 
 function handoffPage() {
@@ -1958,9 +2027,68 @@ function voiceStreamUrl() {
   return parsed.toString();
 }
 
+function voiceStreamUrlWithContext({ goal, prompt }) {
+  const parsed = new URL(voiceStreamUrl());
+  if (goal) parsed.searchParams.set("goal", String(goal).slice(0, 160));
+  if (prompt) parsed.searchParams.set("prompt", String(prompt).slice(0, 1200));
+  return parsed.toString();
+}
+
 function voiceStreamAuthorized(url) {
   if (!VOICE_STREAM_TOKEN) return true;
   return url.searchParams.get("token") === VOICE_STREAM_TOKEN;
+}
+
+async function createTwilioRealtimeCall({ to, from, streamUrl }) {
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(TWILIO_ACCOUNT_SID)}/Calls.json`;
+  const body = new URLSearchParams({
+    To: to,
+    From: from,
+    Twiml: [
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+      "<Response>",
+      "  <Connect>",
+      `    <Stream url="${escapeXml(streamUrl)}" />`,
+      "  </Connect>",
+      "</Response>"
+    ].join("")
+  });
+
+  if (TWILIO_STATUS_CALLBACK_URL) {
+    body.set("StatusCallback", TWILIO_STATUS_CALLBACK_URL);
+    body.set("StatusCallbackEvent", "initiated ringing answered completed");
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64")}`,
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body
+  });
+
+  const text = await response.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+  if (!response.ok) {
+    const error = new Error(json.message || `Twilio call failed with HTTP ${response.status}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+
+  return json;
+}
+
+function normalizePhone(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.startsWith("+")) return `+${text.slice(1).replace(/\D/g, "")}`;
+  const digits = text.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return text;
 }
 
 function sendOpenAI(socket, payload) {
@@ -2227,6 +2355,16 @@ const OPENAPI = {
         },
         required: ["to", "subject", "body"]
       },
+      VoiceCallRequest: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Destination phone number in E.164 or US 10-digit format. Defaults to the configured verified test number if omitted." },
+          from: { type: "string", description: "Optional Twilio from number. Defaults to configured TWILIO_FROM_NUMBER." },
+          goal: { type: "string", description: "Short call goal, such as file_new_claim, claim_status, or test." },
+          prompt: { type: "string", description: "Concise call instructions or claim packet facts. Keep short to control OpenAI voice usage." },
+          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True places the call and requires explicit user approval plus ALLOW_VOICE_CALLS=true." }
+        }
+      },
       CreateHandoffRequest: {
         type: "object",
         properties: {
@@ -2299,6 +2437,13 @@ const OPENAPI = {
   paths: {
     "/health": { get: { operationId: "health", responses: { "200": { description: "OK" } } } },
     "/privacy": { get: { operationId: "privacy", responses: { "200": { description: "Privacy policy" } } } },
+    "/voice/outbound-call": {
+      post: {
+        operationId: "placeRealtimeVoiceCall",
+        requestBody: jsonBody("VoiceCallRequest"),
+        responses: { "200": { description: "Dry-run plan or executed Twilio/OpenAI realtime voice call." } }
+      }
+    },
     "/handoff": {
       get: {
         operationId: "handoffInboxPage",
