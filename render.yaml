@@ -22,3 +22,13 @@ services:
         sync: false
       - key: GMAIL_USER
         value: me
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_REALTIME_MODEL
+        value: gpt-realtime
+      - key: OPENAI_VOICE
+        value: marin
+      - key: VOICE_PUBLIC_BASE_URL
+        value: https://jobnimbus-chatgpt-bridge.onrender.com
+      - key: VOICE_STREAM_TOKEN
+        sync: false

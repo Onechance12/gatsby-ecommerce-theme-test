@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { WebSocket, WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -19,12 +20,19 @@ const GMAIL_USER = process.env.GMAIL_USER || "me";
 const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-handoffs.json");
 const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-handoff-uploads");
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
+const OPENAI_VOICE = process.env.OPENAI_VOICE || "marin";
+const VOICE_PUBLIC_BASE_URL = stripTrailingSlash(process.env.VOICE_PUBLIC_BASE_URL || PUBLIC_BASE_URL);
+const VOICE_STREAM_TOKEN = process.env.VOICE_STREAM_TOKEN || BRIDGE_TOKEN || "";
+const VOICE_STREAM_PATH = "/voice/twilio-stream";
 
 const routes = new Map([
   ["GET /health", health],
   ["GET /openapi.json", openapi],
   ["GET /privacy", privacy],
   ["GET /handoff", handoffPage],
+  ["GET /voice/twiml", voiceTwiml],
   ["POST /handoff", createHandoff],
   ["POST /handoff/chunk", createHandoffChunk],
   ["POST /handoff/pending", pendingHandoffs],
@@ -51,7 +59,7 @@ const routes = new Map([
   ["POST /gmail/send", gmailSend]
 ]);
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     const handler = routes.get(`${req.method} ${url.pathname}`);
@@ -65,10 +73,32 @@ createServer(async (req, res) => {
   } catch (error) {
     send(res, error.statusCode || 500, { error: error.message || String(error) });
   }
-}).listen(PORT, HOST, () => {
+});
+
+const voiceWebSocketServer = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url || "/", "http://localhost");
+  if (url.pathname !== VOICE_STREAM_PATH) {
+    socket.destroy();
+    return;
+  }
+
+  if (!voiceStreamAuthorized(url)) {
+    socket.destroy();
+    return;
+  }
+
+  voiceWebSocketServer.handleUpgrade(req, socket, head, (webSocket) => {
+    bridgeTwilioToOpenAI(webSocket, req);
+  });
+});
+
+server.listen(PORT, HOST, () => {
   console.log(`JobNimbus ChatGPT bridge listening on http://${HOST}:${PORT}`);
   console.log(`Auth: ${BRIDGE_TOKEN ? "enabled" : "disabled"}`);
   console.log(`Writes: ${ALLOW_WRITES ? "enabled" : "dry-run only"}`);
+  console.log(`Voice stream: ${OPENAI_API_KEY ? "available" : "missing OPENAI_API_KEY"}`);
 });
 
 function health() {
@@ -78,7 +108,14 @@ function health() {
     jobNimbusConfigured: Boolean(API_KEY),
     gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
     writesAllowed: ALLOW_WRITES,
-    ocrMode: "poppler+tesseract"
+    ocrMode: "poppler+tesseract",
+    voice: {
+      available: Boolean(OPENAI_API_KEY),
+      model: OPENAI_REALTIME_MODEL,
+      voice: OPENAI_VOICE,
+      streamUrl: voiceStreamUrl(),
+      streamAuth: VOICE_STREAM_TOKEN ? "token_required" : "disabled"
+    }
   };
 }
 
@@ -96,6 +133,17 @@ function privacy() {
     "The bridge passes user-authorized requests to JobNimbus and returns the response to ChatGPT.",
     "JobNimbus API keys and bridge tokens are stored as Render environment variables and are not exposed by this page."
   ].join("\n");
+}
+
+function voiceTwiml() {
+  return [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<Response>",
+    "  <Connect>",
+    `    <Stream url="${escapeXml(voiceStreamUrl())}" />`,
+    "  </Connect>",
+    "</Response>"
+  ].join("");
 }
 
 function handoffPage() {
@@ -1723,8 +1771,214 @@ function authorized(req) {
 }
 
 function isPublicRoute(method, pathname) {
-  return (method === "GET" && ["/openapi.json", "/privacy", "/handoff"].includes(pathname))
+  return (method === "GET" && ["/openapi.json", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
     || (method === "POST" && ["/handoff", "/handoff/chunk"].includes(pathname));
+}
+
+function bridgeTwilioToOpenAI(twilioSocket, req) {
+  let streamSid = "";
+  let callSid = "";
+  let openAiReady = false;
+  let twilioStarted = false;
+  let greetingSent = false;
+  let assistantSpeaking = false;
+  let closed = false;
+
+  if (!OPENAI_API_KEY) {
+    twilioSocket.close(1011, "OPENAI_API_KEY is not configured");
+    return;
+  }
+
+  const openAiSocket = new WebSocket(
+    `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(OPENAI_REALTIME_MODEL)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "realtime=v1"
+      }
+    }
+  );
+
+  openAiSocket.on("open", () => {
+    sendOpenAI(openAiSocket, {
+      type: "session.update",
+      session: {
+        type: "realtime",
+        model: OPENAI_REALTIME_MODEL,
+        instructions: voiceInstructions(req),
+        audio: {
+          input: {
+            format: { type: "audio/pcmu" },
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 700
+            }
+          },
+          output: {
+            format: { type: "audio/pcmu" },
+            voice: OPENAI_VOICE
+          }
+        }
+      }
+    });
+  });
+
+  openAiSocket.on("message", (raw) => {
+    const event = parseSocketJson(raw);
+    if (!event) return;
+
+    if (event.type === "session.updated") {
+      openAiReady = true;
+      maybeSendGreeting();
+      return;
+    }
+
+    if (event.type === "response.audio.delta" || event.type === "response.output_audio.delta") {
+      if (!streamSid || !event.delta) return;
+      assistantSpeaking = true;
+      sendTwilio(twilioSocket, {
+        event: "media",
+        streamSid,
+        media: { payload: event.delta }
+      });
+      return;
+    }
+
+    if (event.type === "response.done") {
+      assistantSpeaking = false;
+      console.log(JSON.stringify({
+        type: "openai_response_done",
+        status: event.response?.status || null
+      }));
+      return;
+    }
+
+    if (event.type === "input_audio_buffer.speech_started") {
+      if (assistantSpeaking && streamSid) {
+        sendTwilio(twilioSocket, { event: "clear", streamSid });
+        sendOpenAI(openAiSocket, { type: "response.cancel" });
+      }
+      return;
+    }
+
+    if (event.type === "error") {
+      console.log(JSON.stringify({
+        type: "openai_realtime_error",
+        message: event.error?.message || "unknown error",
+        code: event.error?.code || null
+      }));
+    }
+  });
+
+  openAiSocket.on("error", (error) => {
+    console.log(JSON.stringify({ type: "openai_socket_error", message: error.message }));
+  });
+  openAiSocket.on("close", cleanup);
+
+  twilioSocket.on("message", (raw) => {
+    const event = parseSocketJson(raw);
+    if (!event) return;
+
+    if (event.event === "start") {
+      streamSid = event.start?.streamSid || "";
+      callSid = event.start?.callSid || "";
+      twilioStarted = true;
+      console.log(JSON.stringify({ type: "twilio_stream_started", callSid, streamSid }));
+      maybeSendGreeting();
+      return;
+    }
+
+    if (event.event === "media") {
+      if (!event.media?.payload) return;
+      sendOpenAI(openAiSocket, {
+        type: "input_audio_buffer.append",
+        audio: event.media.payload
+      });
+      return;
+    }
+
+    if (event.event === "stop") {
+      console.log(JSON.stringify({ type: "twilio_stream_stopped", callSid, streamSid }));
+      cleanup();
+    }
+  });
+
+  twilioSocket.on("error", (error) => {
+    console.log(JSON.stringify({ type: "twilio_socket_error", message: error.message }));
+  });
+  twilioSocket.on("close", cleanup);
+
+  function maybeSendGreeting() {
+    if (greetingSent || !openAiReady || !twilioStarted) return;
+    greetingSent = true;
+    sendOpenAI(openAiSocket, {
+      type: "response.create",
+      response: {
+        instructions: "Start the call now using the call context. Keep it short."
+      }
+    });
+  }
+
+  function cleanup() {
+    if (closed) return;
+    closed = true;
+    if (openAiSocket.readyState === WebSocket.OPEN || openAiSocket.readyState === WebSocket.CONNECTING) {
+      openAiSocket.close();
+    }
+    if (twilioSocket.readyState === WebSocket.OPEN || twilioSocket.readyState === WebSocket.CONNECTING) {
+      twilioSocket.close();
+    }
+  }
+}
+
+function voiceInstructions(req) {
+  const url = new URL(req.url || "/", "http://localhost");
+  const goal = url.searchParams.get("goal") || "test";
+  const prompt = url.searchParams.get("prompt") || "";
+  return [
+    "You are Chance Pearson's live voice assistant for property insurance claim operations.",
+    "This call may be a test unless the call context clearly says otherwise.",
+    "Speak naturally in short sentences. Ask one question at a time.",
+    "Do not mention internal tools, APIs, tokens, or implementation details.",
+    "Do not claim to be the homeowner. If asked who you are, say you are assisting Chance Pearson.",
+    "For a test call, start by saying: Hey Chance, the OpenAI voice connection is live. I can hear you when you speak.",
+    `Call goal: ${goal}`,
+    prompt ? `Additional call context: ${prompt}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+
+function voiceStreamUrl() {
+  const base = VOICE_PUBLIC_BASE_URL || PUBLIC_BASE_URL;
+  const url = `${base.replace(/^http:/, "ws:").replace(/^https:/, "wss:")}${VOICE_STREAM_PATH}`;
+  if (!VOICE_STREAM_TOKEN) return url;
+  const parsed = new URL(url);
+  parsed.searchParams.set("token", VOICE_STREAM_TOKEN);
+  return parsed.toString();
+}
+
+function voiceStreamAuthorized(url) {
+  if (!VOICE_STREAM_TOKEN) return true;
+  return url.searchParams.get("token") === VOICE_STREAM_TOKEN;
+}
+
+function sendOpenAI(socket, payload) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(payload));
+}
+
+function sendTwilio(socket, payload) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(payload));
+}
+
+function parseSocketJson(raw) {
+  try {
+    return JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw));
+  } catch {
+    return null;
+  }
 }
 
 async function readJson(req) {
@@ -1768,6 +2022,15 @@ function sendText(res, status, text) {
 function sendHtml(res, status, html) {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
   res.end(html);
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function stripTrailingSlash(value) {

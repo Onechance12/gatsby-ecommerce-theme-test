@@ -11,7 +11,8 @@
     "gmail:oauth": "node scripts/gmail-oauth.mjs"
   },
   "dependencies": {
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "ws": "^8.21.0"
   },
   "engines": {
     "node": ">=20"
