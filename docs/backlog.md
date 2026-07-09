@@ -153,3 +153,22 @@ agent; (b) pending-callback store + matcher; (c) teach the agent to REQUEST a
 callback (part of the carrier filing-method work in idea #4 — some carriers'
 IVRs offer it) and to answer-and-file on the inbound leg. Depends on idea #4
 (knowing each carrier's callback option) and the reusable agent (already built).
+
+## 6. Intake gaps flagged by the claim-call audit (2026-07-09)
+
+Two standard carrier filing questions have NO JobNimbus source field today, so
+the voice agent can only defer on them:
+
+- **Occupancy** — "owner occupied / who lives at the property?"
+- **Damage discovered** — "how/when was the damage first noticed?"
+
+**Fix (cheap):** add both to the client intake questions / JobNimbus custom
+fields so every new file carries them. Once fields exist, wire them into
+`buildClaimCallPacket` (they already have `{{occupancy}}` and
+`{{damageDiscovered}}` placeholders waiting in the agent prompt).
+
+Related: **storm time** now comes out of the DOL report
+(`recommendedStormTime`) and is fed to calls via `{{stormTime}}`. Decision made
+2026-07-09: write it into JobNimbus **on command only** (not automatically on
+every DOL run) — needs Chance to pick the target field (existing custom field
+vs. a note on the file) before the write tool is built.
