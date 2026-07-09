@@ -75,6 +75,32 @@ export async function runRetellResult(config, args) {
   });
 }
 
+// Every {{placeholder}} referenced in the Retell prompt. Kept in sync with
+// renderRetellPrompt — any placeholder missing a value at call time would be
+// spoken literally as "curly brace insured name", so we default them all.
+const PROMPT_PLACEHOLDERS = [
+  "objective",
+  "insuredName",
+  "propertyAddress",
+  "homeownerPhone",
+  "homeownerEmail",
+  "carrier",
+  "policyNumber",
+  "claimNumber",
+  "dateOfLoss",
+  "stormTime",
+  "causeOfLoss",
+  "adjuster",
+  "mortgageCompany",
+  "damageSummary",
+  "injuries",
+  "homeLivable",
+  "temporaryRepairs",
+  "contractorHired",
+  "occupancy",
+  "damageDiscovered"
+];
+
 function flattenFactsForDynamicVariables(packet) {
   const out = {};
   for (const [key, value] of Object.entries(packet.verifiedFileFacts || {})) {
@@ -84,9 +110,9 @@ function flattenFactsForDynamicVariables(packet) {
   // damageSummary is a separate packet field (array) — the generic prompt
   // references {{damageSummary}}, so pass it as a joined string per call.
   out.damageSummary = (packet.damageSummary || []).join(", ");
-  // stormTime is pulled from the DOL/storm report when available; default to
-  // "Missing" so the {{stormTime}} placeholder never renders literally.
-  if (!out.stormTime) out.stormTime = String(packet.stormTime ?? "Missing");
+  for (const key of PROMPT_PLACEHOLDERS) {
+    if (!out[key]) out[key] = "Missing";
+  }
   return out;
 }
 

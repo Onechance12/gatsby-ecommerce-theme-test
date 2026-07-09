@@ -27,6 +27,8 @@ export async function runClaimCallPrompt(config, args) {
 export function buildClaimCallPacket(review, options = {}) {
   const file = review.file;
   const goal = normalizeGoal(options.goal || DEFAULT_GOAL, review);
+  const causeOfLoss = file.typeOfLoss || inferCause(file);
+  const stormLike = /hail|wind|storm/i.test(causeOfLoss);
   const facts = {
     insuredName: file.customer || "Missing",
     propertyAddress: file.address || "Missing",
@@ -36,9 +38,21 @@ export function buildClaimCallPacket(review, options = {}) {
     policyNumber: file.policyNumber || "Missing",
     claimNumber: cleanClaimNumber(file.claimNumber) || "Missing / not filed",
     dateOfLoss: file.dateOfLoss || "Missing",
-    causeOfLoss: file.typeOfLoss || inferCause(file),
+    stormTime: options.stormTime || "Missing",
+    causeOfLoss,
     currentStatus: file.status || "Missing",
     adjuster: formatAdjuster(file),
+    mortgageCompany: file.mortgageCompany || "Missing",
+    // Standard rep questions on a new filing. Defaults are the truthful answers
+    // for a fresh storm claim; they print in the dry-run packet so Chance can
+    // review/override any of them (pass overrides in the call input) before dialing.
+    injuries: options.injuries || "No injuries reported",
+    homeLivable: options.homeLivable || (stormLike ? "Yes, the home is livable" : "Missing"),
+    temporaryRepairs: options.temporaryRepairs || "No temporary repairs have been made yet",
+    contractorHired: options.contractorHired ||
+      "No contractor hired - the policyholder has retained Wave Public Adjusting as their representative",
+    occupancy: options.occupancy || "Missing",
+    damageDiscovered: options.damageDiscovered || "Missing",
     carrierPhone: options.carrierPhone || "User will provide / caller should find claims phone if needed"
   };
 
