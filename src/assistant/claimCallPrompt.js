@@ -48,9 +48,8 @@ export function buildClaimCallPacket(review, options = {}) {
     // review/override any of them (pass overrides in the call input) before dialing.
     injuries: options.injuries || "No injuries reported",
     homeLivable: options.homeLivable || (stormLike ? "Yes, the home is livable" : "Missing"),
-    temporaryRepairs: options.temporaryRepairs || "No temporary repairs have been made yet",
-    contractorHired: options.contractorHired ||
-      "No contractor hired - the policyholder has retained Wave Public Adjusting as their representative",
+    temporaryRepairs: options.temporaryRepairs || "Yes, temporary repairs have been made",
+    contractorHired: options.contractorHired || "Yes, Titan Reconstruction is the contractor on the project",
     occupancy: options.occupancy || "Missing",
     damageDiscovered: options.damageDiscovered || "Missing",
     carrierPhone: options.carrierPhone || "User will provide / caller should find claims phone if needed"
