@@ -11,9 +11,27 @@ const STRONG_RADIUS_MILES = 15;
 const MIN_MEANINGFUL_HAIL = 1.0;
 const TARGET_HAIL = 1.5;
 
+// Same scope-selection pattern as fileReview.js's selectReviewsPath: honor an
+// explicit REVIEW_SCOPE, otherwise pick whichever normalized file is freshest.
+function selectFilesPath(config) {
+  const companyPath = path.join(config.paths.normalizedDir, "files.json");
+  const chancePath = path.join(config.paths.normalizedDir, "chance-files.json");
+  const scope = String(config.reviewScope || "auto").toLowerCase();
+
+  if (scope === "company" || scope === "all") return companyPath;
+  if (scope === "chance") return chancePath;
+
+  const candidates = [companyPath, chancePath]
+    .filter((candidate) => fs.existsSync(candidate))
+    .map((candidate) => ({ path: candidate, mtimeMs: fs.statSync(candidate).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  if (!candidates.length) throw new Error("No normalized files found. Run `npm run sweep` or `npm run chance:sweep` first.");
+  return candidates[0].path;
+}
+
 export async function runStormResearch(config = loadConfig(), args = []) {
   const options = parseArgs(args);
-  const files = readJson(path.join(config.paths.normalizedDir, "files.json"));
+  const files = readJson(selectFilesPath(config));
   const targets = findTargets(files, options.queries);
   const cacheDir = path.join(config.projectRoot, "work", "storm-research", "cache");
   fs.mkdirSync(cacheDir, { recursive: true });
