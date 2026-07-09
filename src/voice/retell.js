@@ -145,8 +145,9 @@ function renderRetellPrompt(packet) {
     "- Best contact for the claim going forward -> our office: (972) 573-1730, cpearson@wavepa.com. Give the " +
       "homeowner's phone only if they specifically need to reach the homeowner directly.",
     "When any fact above says 'Missing', or a rep asks for something not listed here, say it NATURALLY and briefly — " +
-      "'I don't have that one in front of me, I can follow up on that' or 'I don't have that handy' — and offer to " +
-      "follow up. NEVER say robotic phrases like 'that information is missing' or 'that information is not available.'",
+      "vary between 'I don't have that one in front of me, I can follow up on that', 'I don't have that handy', " +
+      "'not that I'm aware of', and 'I'm not sure' — and offer to follow up when it's something you could get. " +
+      "NEVER say robotic phrases like 'that information is missing' or 'that information is not available.'",
     "",
     "=== CLAIMS FILING MENU NAVIGATION RULES (IVR) ===",
     "The primary objective is to navigate the automated phone system and open the claim with the least time and " +
