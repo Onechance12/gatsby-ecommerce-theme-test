@@ -76,18 +76,24 @@ function normalizeRecordFile({ record, contact, sourceType, tasks, notes, activi
     homePhone: pick(contact.home_phone, record.home_phone, pickField(record, ["Home Phone"])),
     status: pick(record.status_name, record.status, record.stage, record.workflowStatus, "Unknown"),
     recordType: pick(record.record_type_name, record.type, sourceType),
-    carrier: pickField(record, ["carrier", "insuranceCarrier", "Insurance Company", "Insurance Carrier", "Carrier"]),
-    claimNumber: pickField(record, ["claimNumber", "claim_number", "Claim Number", "Claim #", "Claim No", "Claim No."]),
-    dateOfLoss: dateOnly(pickFieldRaw(record, ["dateOfLoss", "lossDate", "Date of Loss", "DOL", "Loss Date"])),
+    // Trailing cf_* aliases are the Titan/Wave account's generated custom-field
+    // names (see docs/operating-context.md). Human labels take priority; the
+    // cf_* codes are the fallback for fields JobNimbus returns only by code
+    // (e.g. Date of Loss = cf_date_1, Carrier DA = cf_string_7/8/9).
+    carrier: pickField(record, ["carrier", "insuranceCarrier", "Insurance Company", "Insurance Carrier", "Carrier", "cf_string_1"]),
+    claimNumber: pickField(record, ["claimNumber", "claim_number", "Claim Number", "Claim #", "Claim No", "Claim No.", "cf_string_2"]),
+    dateOfLoss: dateOnly(pickFieldRaw(record, ["dateOfLoss", "lossDate", "Date of Loss", "DOL", "Loss Date", "cf_date_1"])),
     adjuster: {
-      name: pickField(record, ["adjusterName", "Adjuster Name", "Adjuster", "Carrier DA", "Field Adjuster", "Desk Adjuster"]),
-      phone: pickField(record, ["adjusterPhone", "Adjuster Phone", "Adjuster Phone Number", "Carrier DA Contact #", "Field Adjuster Phone"]),
-      email: pickField(record, ["adjusterEmail", "Adjuster Email", "Carrier DA Email", "Field Adjuster Email", "Desk Adjuster Email"])
+      name: pickField(record, ["adjusterName", "Adjuster Name", "Adjuster", "Carrier DA", "Field Adjuster", "Desk Adjuster", "cf_string_7"]),
+      phone: pickField(record, ["adjusterPhone", "Adjuster Phone", "Adjuster Phone Number", "Carrier DA Contact #", "Field Adjuster Phone", "cf_string_8"]),
+      email: pickField(record, ["adjusterEmail", "Adjuster Email", "Carrier DA Email", "Field Adjuster Email", "Desk Adjuster Email", "cf_string_9"])
     },
     mortgageCompany: pickField(record, ["mortgageCompany", "Mortgage Company", "Mortgage", "Lienholder"]),
-    policyNumber: pickField(record, ["policyNumber", "Policy Number", "Policy #", "Policy No", "Policy No."]),
-    typeOfLoss: pickField(record, ["Type Of Loss", "Type of Loss", "Loss Type", "Cause of Loss"]),
-    deductibleAmount: pickField(record, ["Deductible Amount", "Deductible"]),
+    policyNumber: pickField(record, ["policyNumber", "Policy Number", "Policy #", "Policy No", "Policy No.", "cf_string_4"]),
+    typeOfLoss: pickField(record, ["Type Of Loss", "Type of Loss", "Loss Type", "Cause of Loss", "cf_string_5"]),
+    policyType: pickField(record, ["Type of Policy", "Policy Type", "cf_string_10"]),
+    hcnSalesRep: pickField(record, ["HCN Sales Rep", "HCN Sales Rep:", "cf_string_12"]),
+    deductibleAmount: pickField(record, ["Deductible Amount", "Deductible", "cf_long_1"]),
     daysInStatus: pickField(record, ["Days in Status", "daysInStatus"]),
     estimateStatus: pickField(record, ["Estimate Status", "Scope Status", "Estimate", "Scope"]),
     appraisalStatus: pickField(record, ["Appraisal Status", "Appraisal", "Appraisal Demand", "Appraisal Filed"]),

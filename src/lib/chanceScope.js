@@ -52,7 +52,14 @@ export function isChanceContact(contact, chanceUserIds = new Set()) {
 }
 
 function asRows(payload) {
-  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload)) {
+    // JobNimbus /account/users comes back as a single-item array wrapping
+    // { users: [...], date_updated } rather than a flat list of users.
+    if (payload.length === 1 && Array.isArray(payload[0]?.users)) {
+      return payload[0].users;
+    }
+    return payload;
+  }
   if (Array.isArray(payload?.results)) return payload.results;
   if (Array.isArray(payload?.users)) return payload.users;
   return payload ? [payload] : [];
