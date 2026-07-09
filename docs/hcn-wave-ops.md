@@ -145,6 +145,36 @@ address/dates; flag poor scans needing OCR) · Claim Filing Coordinator (assembl
 filing info for the AI voice agent; practical damages only) · Appraisal
 Coordinator · Communications Coordinator · Operations Approver.
 
+## Richard's standard (VP, from a real file audit — treat as law)
+
+Richard Rinella (VP, richard@wavepa.com) audits Chance's files. Direct quotes:
+
+- **"Sweep means all files touched, updated, problems attacked!"** A sweep is
+  not complete until *every* file has been moved forward — not just reviewed.
+  This is the definition the assistant must hold: surface each file's one next
+  action so none sit.
+- **"DO NOT LET FILES SIT FOR ANY REASON. YOU AS THE ASSIGNED ADJUSTER ARE IN
+  CHARGE OF ALL YOUR FILES. DO WHATEVER IS NECESSARY TO KEEP ALL FILES MOVING.
+  STUCK FILE = INEVITABLY UNHAPPY CLIENT AND/OR CANCELLED SALE!"** Files
+  untouched for ~2 weeks are flagged "NOT GOOD." If blocked waiting on Andrea or
+  Richard, **chase them down** — don't let the block be an excuse to stall.
+- **Data hygiene:** carrier adjuster name/phone go in their **own fields**
+  (Carrier DA / cf_string_7-9), NOT crammed into the claim-number field. Put each
+  value in its correct field.
+- Files must sit in the **correct status** (e.g. move a filed-and-awaiting file
+  to "Submitted Awaiting Confirmation" / "Awaiting 2 Key Confirmations").
+
+Context: Chance is relatively new ("a decent file count for a beginner"), so the
+assistant's job is to help him hit Richard's standard consistently — every file
+moving, correct statuses, clean fields, nothing sitting.
+
+## Watch for email-address typos (real, costs LORs)
+
+Chance's sent mail shows bounced LORs from address typos:
+`statefarm.fireclaims@` (should be `statefarmfireclaims@`), `calims@calims.` (should
+be `claims@claims.`). Always send to the verified address in
+`docs/templates-and-carriers.md`; if drafting, double-check the carrier address.
+
 ## 10. Operating standard (a good response)
 
 Uses current file data · identifies the bottleneck · recommends one primary next
