@@ -24,6 +24,7 @@ import { runClaimBrainAudit } from "./assistant/auditClaimBrain.js";
 import { runChanceReviewPackets } from "./assistant/chanceReviewPackets.js";
 import { runGmailTool } from "./google/gmail.js";
 import { runDriveTool } from "./google/drive.js";
+import { runQuoTool } from "./quo/quo.js";
 
 const command = process.argv[2] || "help";
 const commandArgs = process.argv.slice(3);
@@ -154,6 +155,11 @@ async function main() {
 
   if (command === "drive") {
     await runDriveTool(config, commandArgs);
+    return;
+  }
+
+  if (command === "quo") {
+    await runQuoTool(config, commandArgs);
     return;
   }
 

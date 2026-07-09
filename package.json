@@ -33,7 +33,8 @@
     "check": "node --check src/index.js && node src/selftest.js && node src/index.js doctor",
     "gmail": "node src/index.js gmail",
     "drive": "node src/index.js drive",
-    "google:oauth": "node scripts/google-oauth.mjs"
+    "google:oauth": "node scripts/google-oauth.mjs",
+    "quo": "node src/index.js quo"
   },
   "engines": {
     "node": ">=20"

@@ -129,7 +129,7 @@ What the assistant can touch, and what each is for:
 | **Google Drive** | Connected | Read templates (LOR, TDI, FIN535), estimates, dec pages |
 | **Google Calendar** | Connected | Sync inspection / adjuster-meeting / appraisal windows (America/Chicago) |
 | **Twilio + OpenAI** | Connected | **The claim-filing method** — AI voice agent calls the carrier to file claims / get claim #s / confirm status (replaces Mitra). Voice bridge exists; not yet wired to the file loop. |
-| **Quo** | Not yet integrated | Company-wide phone software — the record of ALL human calls/texts. Needed to know what's actually been communicated. Blocked on API docs. |
+| **Quo** (= OpenPhone) | **Integrated (read-only)** | `api.openphone.com/v1`, `Authorization: <key>` (no Bearer). Reads team phone lines, **texts**, **call logs**, and **transcripts of recorded calls**. `npm run quo -- history '{"phone":"..."}'` scans ALL team lines (homeowner contact runs through Andrea/Paula/Customer Service, not just Chance). Transcripts exist only for calls that were **recorded in Quo**. |
 
 ### Safety model (unchanged, applies everywhere)
 - Reads by default. JobNimbus writes require `ALLOW_JOBNIMBUS_WRITES=true` AND
@@ -156,8 +156,9 @@ What the assistant can touch, and what each is for:
 - **Twilio + OpenAI voice agent** is the claim-filing path (replaces Mitra) —
   wire it into the file loop so "claim not filed" can trigger an approved AI
   call to the carrier.
-- **Quo** read integration once API docs are available (system-of-record for
-  comms).
+- **Quo** read integration — DONE (texts, calls, transcripts across all lines).
+  Next: fold Quo history into file reviews / the approval queue as evidence
+  ("last homeowner contact: text 6 days ago via Andrea's line").
 - Port from the old `jobnimbus-bridge` branch: local OCR (pdftoppm+tesseract),
   bundled `process-update` action, handoff-inbox endpoints.
 - Revisit triage tuning: 41 of 53 files flagged High — confirm that reflects

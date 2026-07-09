@@ -62,5 +62,7 @@ exist: so the next session starts already knowing the business.
 JobNimbus API (live), Gmail (draft LORs / read threads), Google Drive (templates
 like the LOR), Google Calendar (inspections/appraisals), **Twilio + OpenAI (the
 claim-filing method — AI voice agent calls the carrier to file; replaces Mitra,
-which is no longer used)**. Quo (system-of-record for human calls/texts) is not
-yet integrated — blocked on API docs.
+which is no longer used)**. Quo (= OpenPhone; system-of-record for
+human calls/texts) is **integrated read-only** — `npm run quo -- history
+'{"phone":"..."}'` reads texts, call logs, and recorded-call transcripts across
+all team lines.

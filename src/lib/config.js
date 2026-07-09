@@ -11,6 +11,7 @@ export function loadConfig() {
 
   const secrets = [
     apiKey,
+    clean(env.QUO_API_KEY),
     clean(env.GOOGLE_CLIENT_SECRET),
     clean(env.GOOGLE_REFRESH_TOKEN),
     clean(env.OPENAI_API_KEY),
@@ -52,6 +53,10 @@ export function loadConfig() {
       reportsDir: path.join(projectRoot, "reports"),
       workDir: path.join(projectRoot, "work"),
       fixture: clean(env.JOBNIMBUS_FIXTURE_PATH) || path.join(projectRoot, "fixtures", "sample-data.json")
+    },
+    quo: {
+      apiKey: clean(env.QUO_API_KEY),
+      baseUrl: clean(env.QUO_API_BASE_URL).replace(/\/+$/, "") || "https://api.openphone.com/v1"
     },
     google: {
       clientId: clean(env.GOOGLE_CLIENT_ID),
