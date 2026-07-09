@@ -21,7 +21,8 @@ JobNimbus data on 2026-07-09, not assumed.
   - **Andrea Ramirez** — homeowner contact routing goes through her
   - **Office Admin** — payments / check handling / mortgage
   - **Estimator** — builds Xactimate/ESX scopes
-  - External: **Mitra / Replit** referenced for claim-packet filing
+  - Claim filing: done by the **AI voice agent (Twilio + OpenAI)** calling the
+    carrier directly. (Mitra/Replit was the old method — **no longer used**.)
 - **Current assistant scope:** Chance's files only (53 Insurance contacts of
   1,468 in the account). Broadening to all of Wave, then the whole Titan
   account, is planned but deliberately deferred.
@@ -127,8 +128,8 @@ What the assistant can touch, and what each is for:
 | **Gmail** | Connected | Read scheduling/notes/adjuster threads; **draft** LORs/FIN535/appraisal demands (send stays manual for now) |
 | **Google Drive** | Connected | Read templates (LOR, TDI, FIN535), estimates, dec pages |
 | **Google Calendar** | Connected | Sync inspection / adjuster-meeting / appraisal windows (America/Chicago) |
-| **Twilio** | Connected | AI outbound calls to carriers to file/check claims (separate build) |
-| **Quo** | Not yet integrated | Company-wide phone software — the record of ALL human calls/texts. Needed to know what's actually been communicated. Blocked on API docs + a voice-AI decision. |
+| **Twilio + OpenAI** | Connected | **The claim-filing method** — AI voice agent calls the carrier to file claims / get claim #s / confirm status (replaces Mitra). Voice bridge exists; not yet wired to the file loop. |
+| **Quo** | Not yet integrated | Company-wide phone software — the record of ALL human calls/texts. Needed to know what's actually been communicated. Blocked on API docs. |
 
 ### Safety model (unchanged, applies everywhere)
 - Reads by default. JobNimbus writes require `ALLOW_JOBNIMBUS_WRITES=true` AND
@@ -152,8 +153,11 @@ What the assistant can touch, and what each is for:
 - Wire **Gmail** (read for context + draft LORs) and **Drive** (real templates)
   — current priority.
 - **Calendar** sync of inspection/appraisal tasks.
+- **Twilio + OpenAI voice agent** is the claim-filing path (replaces Mitra) —
+  wire it into the file loop so "claim not filed" can trigger an approved AI
+  call to the carrier.
 - **Quo** read integration once API docs are available (system-of-record for
-  comms) + decide the voice-AI path for Twilio carrier calls.
+  comms).
 - Port from the old `jobnimbus-bridge` branch: local OCR (pdftoppm+tesseract),
   bundled `process-update` action, handoff-inbox endpoints.
 - Revisit triage tuning: 41 of 53 files flagged High — confirm that reflects
