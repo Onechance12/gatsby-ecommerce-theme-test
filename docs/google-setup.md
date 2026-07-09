@@ -2,16 +2,40 @@
 
 This gives the assistant its **own** Gmail + Drive access — durable, works
 headless and when the bridge is deployed (not dependent on the claude.ai
-connector). One-time setup. ~15 minutes.
+connector).
+
+## SHORTCUT — credentials probably already exist (phone-friendly)
+
+The old Codex bridge (branch `jobnimbus-bridge`, deployed as
+`jobnimbus-chatgpt-bridge` on Render) already used Google OAuth. That means a
+Client ID / Client Secret / Refresh Token were already minted. Recover them
+instead of redoing setup:
+
+1. **Render dashboard** (works on a phone): dashboard.render.com → the
+   `jobnimbus-chatgpt-bridge` service → **Environment** tab → reveal and copy
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`.
+2. Or on the Mac: the old project's `.env` has the same three values.
+3. Paste them to the assistant → they go into `.env` here. Done — no Google
+   Cloud Console needed.
+
+Caveat: the old refresh token's scopes were Gmail-only (readonly/compose/send —
+no Drive). Gmail will work immediately; for Drive, re-run the mint once with
+the same client (`npm run google:oauth`, which now includes drive.readonly).
 
 ## What you'll end up with (goes in `.env`, never committed)
 
 ```
-GOOGLE_OAUTH_CLIENT_ID=...apps.googleusercontent.com
-GOOGLE_OAUTH_CLIENT_SECRET=...
-GOOGLE_OAUTH_REFRESH_TOKEN=...
-GOOGLE_OAUTH_SCOPES=https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/drive.readonly
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REFRESH_TOKEN=...
+ALLOW_GMAIL_SEND=false   # drafts only; Chance sends
 ```
+
+CLI once configured: `npm run gmail -- search '{"query":"from:claims@claims.allstate.com"}'`,
+`npm run gmail -- draft '{...}'` (dry-run unless execute:true),
+`npm run drive -- search '{"query":"LOR"}'`, `npm run drive -- read '{"fileId":"..."}'`.
+Mint/refresh tokens: `npm run google:oauth` (needs a browser on the same
+machine; on the remote container, do the shortcut above instead).
 
 Start with these scopes (read + draft only — no sending, no editing yet):
 - `gmail.readonly` — read threads/messages (adjuster comms, scheduling context)

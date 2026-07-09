@@ -30,7 +30,10 @@
     "voice:server": "node src/index.js voice:server",
     "voice:realtime-call": "node src/index.js voice:realtime-call",
     "voice:test-call": "node src/index.js voice:test-call",
-    "check": "node --check src/index.js && node src/selftest.js && node src/index.js doctor"
+    "check": "node --check src/index.js && node src/selftest.js && node src/index.js doctor",
+    "gmail": "node src/index.js gmail",
+    "drive": "node src/index.js drive",
+    "google:oauth": "node scripts/google-oauth.mjs"
   },
   "engines": {
     "node": ">=20"

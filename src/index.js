@@ -22,6 +22,8 @@ import { runStormResearch } from "./assistant/stormResearch.js";
 import { runFileLedger } from "./assistant/fileLedger.js";
 import { runClaimBrainAudit } from "./assistant/auditClaimBrain.js";
 import { runChanceReviewPackets } from "./assistant/chanceReviewPackets.js";
+import { runGmailTool } from "./google/gmail.js";
+import { runDriveTool } from "./google/drive.js";
 
 const command = process.argv[2] || "help";
 const commandArgs = process.argv.slice(3);
@@ -142,6 +144,16 @@ async function main() {
 
   if (command === "chance:agents") {
     runChanceAgents();
+    return;
+  }
+
+  if (command === "gmail") {
+    await runGmailTool(config, commandArgs);
+    return;
+  }
+
+  if (command === "drive") {
+    await runDriveTool(config, commandArgs);
     return;
   }
 

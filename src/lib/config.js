@@ -11,6 +11,8 @@ export function loadConfig() {
 
   const secrets = [
     apiKey,
+    clean(env.GOOGLE_CLIENT_SECRET),
+    clean(env.GOOGLE_REFRESH_TOKEN),
     clean(env.OPENAI_API_KEY),
     clean(env.TWILIO_AUTH_TOKEN),
     clean(env.JOBNIMBUS_BRIDGE_TOKEN),
@@ -50,6 +52,12 @@ export function loadConfig() {
       reportsDir: path.join(projectRoot, "reports"),
       workDir: path.join(projectRoot, "work"),
       fixture: clean(env.JOBNIMBUS_FIXTURE_PATH) || path.join(projectRoot, "fixtures", "sample-data.json")
+    },
+    google: {
+      clientId: clean(env.GOOGLE_CLIENT_ID),
+      clientSecret: clean(env.GOOGLE_CLIENT_SECRET),
+      refreshToken: clean(env.GOOGLE_REFRESH_TOKEN),
+      allowSend: truthy(env.ALLOW_GMAIL_SEND)
     },
     openai: {
       apiKey: clean(env.OPENAI_API_KEY),
