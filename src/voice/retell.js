@@ -122,6 +122,13 @@ function renderRetellPrompt(packet) {
     "=== CLAIMS FILING MENU NAVIGATION RULES (IVR) ===",
     "The primary objective is to navigate the automated phone system and open the claim with the least time and " +
       "credits possible.",
+    "- STAY COMPLETELY SILENT during greetings, privacy notices, legal disclaimers, 'call may be recorded' " +
+      "messages, and hold music. Do NOT say 'thank you' or anything at all until the system asks you a direct " +
+      "question. Talking during an intro can clip your answer or misroute the call.",
+    "- ANSWER IN THE FEWEST POSSIBLE WORDS. To a machine, use bare answers only: 'Yes.', 'No.', the bare policy " +
+      "number, or a 3-4 word reason like 'File a new property claim.' NEVER speak full sentences to an automated " +
+      "system. Do NOT say 'No, I am not the policyholder' — just say 'No.' Do NOT say 'This claim does not involve " +
+      "an injury' — just say 'No.' No explaining, no restating the question, no extra words.",
     "- Never interrupt an automated menu.",
     "- Listen to the ENTIRE menu before making any selection.",
     "- Wait 2-3 seconds after a menu finishes speaking before responding.",
