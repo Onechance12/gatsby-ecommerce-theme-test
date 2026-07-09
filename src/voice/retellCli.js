@@ -84,6 +84,9 @@ function flattenFactsForDynamicVariables(packet) {
   // damageSummary is a separate packet field (array) — the generic prompt
   // references {{damageSummary}}, so pass it as a joined string per call.
   out.damageSummary = (packet.damageSummary || []).join(", ");
+  // stormTime is pulled from the DOL/storm report when available; default to
+  // "Missing" so the {{stormTime}} placeholder never renders literally.
+  if (!out.stormTime) out.stormTime = String(packet.stormTime ?? "Missing");
   return out;
 }
 
