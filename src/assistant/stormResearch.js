@@ -63,6 +63,7 @@ export async function runStormResearch(config = loadConfig(), args = []) {
       },
       geocode,
       recommendedDateOfLoss: candidates[0]?.date || "",
+      recommendedStormTime: candidates[0]?.stormTime || "",
       confidence: candidates[0]?.confidence || "none",
       reason: candidates[0]?.reason || "No nearby SPC hail/wind reports found in selected years.",
       candidates: candidates.slice(0, options.limit)
@@ -281,6 +282,7 @@ function scoreCandidate(candidate) {
     closestWindMiles: candidate.closestWindMiles === null ? "" : Number(candidate.closestWindMiles.toFixed(1)),
     closestDistanceMiles: Number(closestDistanceMiles.toFixed(1)),
     reason,
+    stormTime: computeStormWindow(candidate.reports, candidate.date),
     reports: candidate.reports
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
       .slice(0, 6)
@@ -295,6 +297,67 @@ function scoreCandidate(candidate) {
         comments: report.comments
       }))
   };
+}
+
+// SPC storm-report times are UTC (HHMM), filed on the convective day (12Z-12Z).
+// Convert to America/Chicago clock time. CDT (UTC-5) roughly Mar-Nov, else CST
+// (UTC-6). Subtracting the offset from a sub-12Z time naturally rolls it back to
+// the prior evening, which matches how these late-night reports actually read.
+function centralOffsetHours(dateIso) {
+  const month = Number((dateIso || "").slice(5, 7)) || 6;
+  return month >= 4 && month <= 10 ? 5 : 6; // simple DST approximation
+}
+
+function utcHhmmToCentralMinutes(hhmm, dateIso) {
+  const digits = String(hhmm || "").padStart(4, "0");
+  const h = Number(digits.slice(0, 2));
+  const m = Number(digits.slice(2, 4));
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  let total = h * 60 + m - centralOffsetHours(dateIso) * 60;
+  total = ((total % 1440) + 1440) % 1440; // wrap into 0-1439
+  return total;
+}
+
+function minutesToClock(total) {
+  let h = Math.floor(total / 60);
+  const m = total % 60;
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2, "0")} ${ampm}`;
+}
+
+function dayPart(total) {
+  const h = Math.floor(total / 60);
+  if (h < 12) return "morning";
+  if (h < 17) return "afternoon";
+  if (h < 21) return "evening";
+  return "night";
+}
+
+// Returns a short human phrase like "afternoon, ~2:15 PM–4:45 PM CT" (or "" if no
+// times). Only uses reports CLOSE to the property (a wide county-wide spread of
+// reports can span the whole day), so the window reflects when the storm hit
+// this location, not the whole convective day.
+function computeStormWindow(reports, dateIso) {
+  const withTime = (reports || [])
+    .filter((r) => Number.isFinite(r.distanceMiles) && r.time)
+    .sort((a, b) => a.distanceMiles - b.distanceMiles);
+  if (!withTime.length) return "";
+  // Keep the local cluster: reports within ~10 mi of the closest one, capped to
+  // the nearest 5 so a single far outlier can't stretch the window all day.
+  const closest = withTime[0].distanceMiles;
+  const local = withTime
+    .filter((r) => r.distanceMiles <= closest + 10)
+    .slice(0, 5);
+  const mins = local
+    .map((r) => utcHhmmToCentralMinutes(r.time, dateIso))
+    .filter((v) => v !== null)
+    .sort((a, b) => a - b);
+  if (!mins.length) return "";
+  const lo = mins[0];
+  const hi = mins[mins.length - 1];
+  if (lo === hi) return `${dayPart(lo)}, ~${minutesToClock(lo)} CT`;
+  return `${dayPart(lo)}, ~${minutesToClock(lo)}–${minutesToClock(hi)} CT`;
 }
 
 function normalizeSpcRow(row, type) {
@@ -350,6 +413,7 @@ function buildMarkdown(results) {
     lines.push(`- Address: ${result.file.address}`);
     lines.push(`- Existing DOL: ${result.file.existingDateOfLoss || "Missing"}`);
     lines.push(`- Recommended DOL: ${result.recommendedDateOfLoss || "No candidate"} (${result.confidence})`);
+    lines.push(`- Storm time (approx, Central): ${result.recommendedStormTime || "Unknown"}`);
     lines.push(`- Reason: ${result.reason}`);
     if (result.candidates.length) {
       lines.push("");
@@ -370,6 +434,7 @@ function buildConsoleSummary(results) {
       `${result.file.customer} #${result.file.number}`,
       `  address: ${result.file.address}`,
       `  recommended DOL: ${result.recommendedDateOfLoss || "none"} (${result.confidence})`,
+      `  storm time (approx CT): ${result.recommendedStormTime || "unknown"}`,
       `  reason: ${result.reason}`
     ].join("\n");
   }).join("\n\n");
