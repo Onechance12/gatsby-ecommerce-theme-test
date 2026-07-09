@@ -55,7 +55,7 @@ export async function runQuoTool(config, args) {
     const messages = await collectAcrossLines(config, lineIds, phone, "messages", nameById);
     if (tool === "messages") { printJson({ tool, phone, count: messages.length, messages }); return; }
     const calls = await collectAcrossLines(config, lineIds, phone, "calls", nameById);
-    const timeline = [...messages, ...calls].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    const timeline = [...messages, ...calls].sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)));
     printJson({ tool: "history", phone, messageCount: messages.length, callCount: calls.length, timeline });
     return;
   }
@@ -90,13 +90,13 @@ async function collectAcrossLines(config, lineIds, phone, kind, nameById) {
     }
     for (const row of payload.data || []) {
       if (kind === "messages") {
-        out.push({ type: "text", line: nameById[lineId], at: row.createdAt, direction: row.direction, text: (row.text || "").replace(/\s+/g, " ").trim() });
+        out.push({ type: "text", line: nameById[lineId], at: toCentral(row.createdAt), atUtc: row.createdAt, direction: row.direction, text: (row.text || "").replace(/\s+/g, " ").trim() });
       } else {
-        out.push({ type: "call", line: nameById[lineId], at: row.createdAt, direction: row.direction, status: row.status, durationSec: row.duration, aiHandled: row.aiHandled, id: row.id });
+        out.push({ type: "call", line: nameById[lineId], at: toCentral(row.createdAt), atUtc: row.createdAt, direction: row.direction, status: row.status, durationSec: row.duration, aiHandled: row.aiHandled, id: row.id });
       }
     }
   }
-  return out.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  return out.sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)));
 }
 
 async function hasRecording(config, callId) {
@@ -120,6 +120,22 @@ async function quoGet(config, endpoint) {
     throw new Error(`Quo API ${response.status}: ${config.redact(JSON.stringify(json)).slice(0, 300)}`);
   }
   return json;
+}
+
+// Quo returns createdAt as UTC ISO. Always display Central time to Chance —
+// showing raw UTC caused a real mix-up (a 1:44 PM call was reported as
+// "6:44 PM" because the UTC hour was shown unconverted).
+function toCentral(isoUtc) {
+  if (!isoUtc) return "";
+  try {
+    return new Date(isoUtc).toLocaleString("en-US", {
+      timeZone: "America/Chicago",
+      month: "numeric", day: "numeric", year: "numeric",
+      hour: "numeric", minute: "2-digit", hour12: true
+    });
+  } catch {
+    return isoUtc;
+  }
 }
 
 function toE164(value) {
