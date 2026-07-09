@@ -98,3 +98,58 @@ Quo/OpenPhone number via SIP so outbound AI calls originate from a Quo line.
 OpenPhone BYO-SIP support is the open question. First feasible version: a bridge
 that, on Retell's call-analyzed webhook, writes the summary+transcript to
 JobNimbus (and optionally Quo) automatically. Tabled.
+
+---
+
+## 4. Carrier-specific filing methods (feeds BOTH the dossiers AND the Retell agent)
+
+**The idea:** each carrier files claims differently (different phone tree, different
+info in different order). The AI caller must file "in the right manner" per carrier.
+
+**The data exists in Quo:** every recorded claim-filing call your team made IS
+that carrier's filing method. Carrier claims lines identified from JobNimbus
+adjuster fields (cf_string_8):
+- Allstate: 800-547-8676, 800-806-5570
+- State Farm: 844-458-4300, 866-787-8676
+- USAA: 210-531-8722 · Conifer: 386-610-9570 · Foremost: 469-512-5897 · Nationwide: 866-425-9200
+
+**Build:** mine Quo — pull the team's calls TO each carrier line, keep the
+recorded ones, pull transcripts, and extract per carrier: the IVR path (which
+digits to press, in order), what the carrier asks for and in what sequence, the
+"gotchas." Store as a `filingMethod` per carrier (part of the dossier in idea #1).
+
+**Two consumers:**
+1. Carrier dossier — a "How to file with <carrier>" section.
+2. Retell agent — pass the carrier's filing method as a per-call dynamic variable
+   (e.g. {{carrierFilingSteps}}) so the generic agent navigates THAT carrier's
+   specific IVR correctly instead of generically. Ties directly into the reusable
+   agent already built.
+
+---
+
+## 5. Callback handling (skip the hold — huge minute/token saver)
+
+**The idea:** many carriers offer "press X to request a callback instead of
+holding." Use it: the AI requests a callback to our Retell number, hangs up
+(stops burning minutes on hold), then ANSWERS when the carrier calls back and
+files the claim. Chance's insight — this is the most efficient way to use the AI.
+
+**Feasibility:**
+- ✅ Retell supports INBOUND agents — the AI can answer an incoming call. So
+  "have the AI pick up the callback and file appropriately" is possible.
+- ⚠️ Inbound isn't wired yet. The RoofOps Twilio trunk currently has termination
+  (outbound) but ZERO origination URLs — so callbacks to +18176867361 won't
+  reach Retell until we add Twilio Origination → Retell's inbound SIP and assign
+  the claim-filing agent as the number's inbound_agent.
+- ⚠️ THE HARD PART — context matching: when the carrier calls back, it has no
+  idea which claim it's about. We need a small "pending callbacks" store: when an
+  outbound call requests a callback for file X, record {carrierNumber, fileFacts,
+  requestedAt}. On the inbound callback, match by caller's number + recency and
+  load THAT file's facts as the inbound agent's dynamic variables so it files the
+  right claim. Handle one pending callback at a time in v1 to avoid collisions.
+
+**Build order:** (a) wire Twilio origination → Retell inbound + assign inbound
+agent; (b) pending-callback store + matcher; (c) teach the agent to REQUEST a
+callback (part of the carrier filing-method work in idea #4 — some carriers'
+IVRs offer it) and to answer-and-file on the inbound leg. Depends on idea #4
+(knowing each carrier's callback option) and the reusable agent (already built).
