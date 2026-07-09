@@ -16,6 +16,7 @@ import { runTwilioTestCall } from "./voice/twilioTestCall.js";
 import { runRealtimeVoiceServer } from "./voice/realtimeServer.js";
 import { runTwilioRealtimeCall } from "./voice/twilioRealtimeCall.js";
 import { runOpenAiTest } from "./voice/openaiTest.js";
+import { runRetellConfigure, runRetellCall, runRetellResult } from "./voice/retellCli.js";
 import { runActionTool } from "./assistant/actionTools.js";
 import { runChanceAgents, runChanceApprove, runChanceQueue } from "./assistant/chanceQueue.js";
 import { runStormResearch } from "./assistant/stormResearch.js";
@@ -125,6 +126,21 @@ async function main() {
     return;
   }
 
+  if (command === "retell:configure") {
+    await runRetellConfigure(config, commandArgs);
+    return;
+  }
+
+  if (command === "retell:call") {
+    await runRetellCall(config, commandArgs);
+    return;
+  }
+
+  if (command === "retell:result") {
+    await runRetellResult(config, commandArgs);
+    return;
+  }
+
   if (command === "chat:action") {
     await runActionTool(config, commandArgs);
     return;
@@ -194,6 +210,11 @@ async function main() {
     console.log(`- Voice server port: ${config.voice.serverPort}`);
     console.log(`- Voice public base URL: ${config.voice.publicBaseUrl || "(not set)"}`);
     console.log(`- Voice call execution: ${config.twilio.allowVoiceCalls ? "enabled" : "blocked by default"}`);
+    console.log(`- Retell API key: ${config.retell.apiKey ? "[set]" : "(not set)"}`);
+    console.log(`- Retell agent id: ${config.retell.agentId || "(not set)"}`);
+    console.log(`- Retell llm id: ${config.retell.llmId || "(not set)"}`);
+    console.log(`- Retell from number: ${config.retell.fromNumber || config.twilio.fromNumber || "(not set)"}`);
+    console.log(`- Retell call execution: ${config.retell.allowRetellCalls ? "enabled" : "blocked by default"} (FREE TRIAL account - test carefully)`);
     return;
   }
 
@@ -225,6 +246,12 @@ async function main() {
   console.log("  npm run voice:realtime-call -- '{\"to\":\"+18065551212\"}'");
   console.log("                         Dry-run a Twilio/OpenAI realtime voice call");
   console.log("  npm run openai:test   Verify the OpenAI API key without printing it");
+  console.log("  npm run retell:configure -- '{\"query\":\"Raj Thamizhan\",\"goal\":\"file_new_claim\"}'");
+  console.log("                         Dry-run (or, with execute:true, create/update) the Retell IVR-calling agent from a claim call packet");
+  console.log("  npm run retell:call -- '{\"query\":\"Raj Thamizhan\",\"to\":\"+18065551212\"}'");
+  console.log("                         Dry-run (or, with execute:true, place) an outbound Retell carrier call. FREE TRIAL - test with Chance's own cell first");
+  console.log("  npm run retell:result -- '{\"callId\":\"call_xyz\"}'");
+  console.log("                         Fetch a completed Retell call's transcript/result (does not update JobNimbus without Chance's approval)");
   console.log("  npm run chat:tool -- review_file '{\"query\":\"Rosa Sanchez\"}'");
   console.log("                         Return structured JSON for a chat assistant");
   console.log("  npm run chat:action -- list");

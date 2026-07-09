@@ -17,7 +17,8 @@ export function loadConfig() {
     clean(env.OPENAI_API_KEY),
     clean(env.TWILIO_AUTH_TOKEN),
     clean(env.JOBNIMBUS_BRIDGE_TOKEN),
-    clean(env.VOICE_STREAM_TOKEN)
+    clean(env.VOICE_STREAM_TOKEN),
+    clean(env.RETELL_API_KEY)
   ].filter(Boolean);
 
   return {
@@ -87,6 +88,19 @@ export function loadConfig() {
       port: intOr(env.PORT, 8788),
       token: clean(env.JOBNIMBUS_BRIDGE_TOKEN),
       allowWrites: truthy(env.BRIDGE_ALLOW_WRITES)
+    },
+    retell: {
+      // Retell AI (retellai.com) - outbound carrier IVR calling with a real press_digit
+      // DTMF tool, separate from the conversational LLM. See src/voice/retell.js.
+      apiKey: clean(env.RETELL_API_KEY),
+      agentId: clean(env.RETELL_AGENT_ID),
+      llmId: clean(env.RETELL_LLM_ID),
+      voiceId: clean(env.RETELL_VOICE_ID),
+      fromNumber: clean(env.RETELL_FROM_NUMBER),
+      terminationUri: clean(env.RETELL_TERMINATION_URI),
+      // Calls stay dry-run unless this is true AND the command passes execute:true.
+      // Chance's Retell account is on the FREE TRIAL - keep this false by default.
+      allowRetellCalls: truthy(env.ALLOW_RETELL_CALLS)
     },
     redact(text) {
       let output = String(text ?? "");

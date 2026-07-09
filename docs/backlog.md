@@ -80,3 +80,21 @@ detached structures) and grow the list over time.
 **Open question for Chance:** do you want this to feed INTO Xactimate (export a
 scope you paste in), or fully replace a first-draft estimate outside Xactimate?
 That changes the design.
+
+---
+
+## 3. Link Retell ↔ Quo (Chance's "ideal world")
+
+**The idea:** Retell's AI calls should live inside Quo (OpenPhone) like any human
+call — visible, recorded, reviewable in one place — not siloed in Retell.
+
+**What's free already:** if Retell dials a Quo number, that leg shows up in Quo.
+Retell also records + transcribes its own calls (GET /v2/get-call).
+
+**The real link (harder, separate systems):** after each Retell call, push its
+transcript/recording/outcome into Quo (as a note on the conversation) and/or
+into the JobNimbus file. Or explore whether the Retell "from" number can be a
+Quo/OpenPhone number via SIP so outbound AI calls originate from a Quo line.
+OpenPhone BYO-SIP support is the open question. First feasible version: a bridge
+that, on Retell's call-analyzed webhook, writes the summary+transcript to
+JobNimbus (and optionally Quo) automatically. Tabled.
