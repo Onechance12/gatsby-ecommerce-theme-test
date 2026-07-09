@@ -80,7 +80,10 @@ function flattenFactsForDynamicVariables(packet) {
   for (const [key, value] of Object.entries(packet.verifiedFileFacts || {})) {
     out[key] = String(value ?? "");
   }
-  out.objective = packet.objective;
+  out.objective = String(packet.objective ?? "");
+  // damageSummary is a separate packet field (array) — the generic prompt
+  // references {{damageSummary}}, so pass it as a joined string per call.
+  out.damageSummary = (packet.damageSummary || []).join(", ");
   return out;
 }
 

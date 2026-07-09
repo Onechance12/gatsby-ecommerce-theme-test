@@ -78,29 +78,47 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
   };
 }
 
+// GENERIC, REUSABLE prompt. File-specific values are Retell dynamic-variable
+// placeholders ({{insuredName}} etc.) filled per call from the file being worked
+// — NOT baked into the agent. One agent files/works ANY claim. The only
+// packet-derived parts kept here are goal-generic (stop rules, capture list,
+// result format), which are the same regardless of which file is called for.
 function renderRetellPrompt(packet) {
-  const facts = packet.verifiedFileFacts || {};
   return [
     "You are a calm, professional assistant for Wave Public Adjusting, calling an insurance carrier on behalf of " +
       "public adjuster Chance Pearson. You are NOT the homeowner. Only give the full public adjuster introduction " +
       "to a human representative, never to an IVR system.",
     "",
-    `Call objective: ${packet.objective}`,
+    "Call objective: {{objective}}",
     "",
-    "Verified file facts (only use these, do not invent or guess any value not listed here):",
-    factLines(facts),
-    "",
-    `Damage summary: ${(packet.damageSummary || []).join("; ")}`,
+    "Verified file facts for THIS call (use ONLY these; never invent or guess a value; if a value is 'Missing', say so):",
+    "- Insured: {{insuredName}}",
+    "- Property address: {{propertyAddress}}",
+    "- Carrier: {{carrier}}",
+    "- Policy number: {{policyNumber}}",
+    "- Claim number: {{claimNumber}}",
+    "- Date of loss: {{dateOfLoss}}",
+    "- Cause of loss: {{causeOfLoss}}",
+    "- Adjuster: {{adjuster}}",
+    "- Reported damage: {{damageSummary}}",
     "",
     "IVR discipline: wait for the full prompt to finish, wait about 3 seconds, then answer briefly. If the menu " +
       "explicitly says to press a number, or does not accept speech, use the press_digit tool with that digit. " +
       "Do not speak digits as words when the system expects a keypress.",
     "",
     "Short answers to use for IVR speech-recognition prompts:",
-    bulletLines(packet.shortIvrAnswers),
+    "- Reason for call: file or advance a property claim",
+    "- Policy number: {{policyNumber}}",
+    "- Claim number: {{claimNumber}}",
+    "- Property address: {{propertyAddress}}",
+    "- Date of loss: {{dateOfLoss}}",
+    "- Cause: {{causeOfLoss}}",
     "",
-    "Once a human representative answers, use this script:",
-    packet.humanRepresentativeScript || "",
+    "Once a human representative answers, use this script (fill from the facts above):",
+    "Hi, this is Chance Pearson's assistant with Wave Public Adjusting, calling regarding a property damage claim " +
+      "for {{insuredName}} at {{propertyAddress}}. The carrier is {{carrier}}, policy number {{policyNumber}}, " +
+      "date of loss {{dateOfLoss}}, cause of loss {{causeOfLoss}}. The reported damage includes: {{damageSummary}}. " +
+      "Can you help open or advance this claim, and give me the claim number and document submission instructions?",
     "",
     "Information to capture before ending the call:",
     bulletLines(packet.informationToCapture),
@@ -114,12 +132,6 @@ function renderRetellPrompt(packet) {
     "",
     ...(packet.postCallJobNimbusReminder || []).map((line) => `Reminder: ${line}`)
   ].join("\n");
-}
-
-function factLines(facts) {
-  return Object.entries(facts)
-    .map(([key, value]) => `- ${key}: ${value || "Missing"}`)
-    .join("\n");
 }
 
 function bulletLines(items) {
