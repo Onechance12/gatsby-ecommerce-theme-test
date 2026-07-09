@@ -94,7 +94,13 @@ function normalizeRecordFile({ record, contact, sourceType, tasks, notes, activi
     policyType: pickField(record, ["Type of Policy", "Policy Type", "cf_string_10"]),
     hcnSalesRep: pickField(record, ["HCN Sales Rep", "HCN Sales Rep:", "cf_string_12"]),
     deductibleAmount: pickField(record, ["Deductible Amount", "Deductible", "cf_long_1"]),
-    daysInStatus: pickField(record, ["Days in Status", "daysInStatus"]),
+    // Derive days-in-status from date_status_change (JobNimbus doesn't return the
+    // UI's "Days in Status" via API). This powers phase-aging / Richard's
+    // "don't let files sit" standard.
+    daysInStatus: pickField(record, ["Days in Status", "daysInStatus"]) ||
+      daysSince(record.date_status_change) ||
+      "",
+    statusChangedAt: dateOnly(record.date_status_change),
     estimateStatus: pickField(record, ["Estimate Status", "Scope Status", "Estimate", "Scope"]),
     appraisalStatus: pickField(record, ["Appraisal Status", "Appraisal", "Appraisal Demand", "Appraisal Filed"]),
     denialStatus: pickField(record, ["Denial Status", "Denied", "Denial Reason", "Coverage Decision"]),
@@ -269,4 +275,11 @@ function latestDate(values) {
 
 function isClosed(status) {
   return /closed|complete|done|cancel/i.test(status || "");
+}
+
+function daysSince(value) {
+  const date = parseDate(value);
+  if (!date || date.getTime() <= 0) return "";
+  const days = Math.floor((Date.now() - date.getTime()) / 86400000);
+  return days >= 0 ? String(days) : "";
 }

@@ -20,13 +20,23 @@ executes. Node.js, ESM, CLI in `src/index.js`.
 ## The operating loop (default way we work)
 
 1. `npm run chance:sweep` — pull + triage Chance's live files (needs `.env`)
-2. `npm run chance:queue` — build the approval queue
-3. Present the queue as a readable per-file summary (NOT raw JSON)
+2. `npm run chance:brief` — **read THIS, not raw data** (compact digest)
+3. Work the top of the brief; `npm run review:file -- "<name>"` only for files
+   actively being worked
 4. Chance **batch-approves** ("approve 1,3,5" / "all except 2")
 5. Execute approved JobNimbus writes; prepare Gmail drafts
 6. Chance does final send / spot-check
 
 On-demand only (no schedule). Scope = Chance's files only (for now).
+
+## Token efficiency (Chance pays per token — respect it)
+
+- Let the CLI do heavy lifting (sweeps/enrichment run free in code); read the
+  compact outputs (`chance:brief`, review:file), never raw data/*.json dumps.
+- Don't re-sweep if data/raw/chance is < ~1h old unless asked.
+- Don't re-read docs you already know from this file; don't dump full file
+  lists into chat — summarize buckets + the specific files being worked.
+- Prefer one batched script over many exploratory shell calls.
 
 ## Hard rules (do not break)
 

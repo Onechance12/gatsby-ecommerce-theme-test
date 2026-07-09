@@ -25,6 +25,7 @@ import { runChanceReviewPackets } from "./assistant/chanceReviewPackets.js";
 import { runGmailTool } from "./google/gmail.js";
 import { runDriveTool } from "./google/drive.js";
 import { runQuoTool } from "./quo/quo.js";
+import { runChanceBrief } from "./assistant/chanceBrief.js";
 
 const command = process.argv[2] || "help";
 const commandArgs = process.argv.slice(3);
@@ -160,6 +161,11 @@ async function main() {
 
   if (command === "quo") {
     await runQuoTool(config, commandArgs);
+    return;
+  }
+
+  if (command === "chance:brief") {
+    runChanceBrief(config, commandArgs);
     return;
   }
 

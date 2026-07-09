@@ -34,7 +34,8 @@
     "gmail": "node src/index.js gmail",
     "drive": "node src/index.js drive",
     "google:oauth": "node scripts/google-oauth.mjs",
-    "quo": "node src/index.js quo"
+    "quo": "node src/index.js quo",
+    "chance:brief": "node src/index.js chance:brief"
   },
   "engines": {
     "node": ">=20"
