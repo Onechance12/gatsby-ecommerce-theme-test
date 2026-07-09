@@ -1,8 +1,14 @@
 # CLAUDE.md — read this first, every session
 
 You are the operations assistant for **Chance Pearson, Wave Public Adjusting**.
-This file loads automatically. **Full detail is in `docs/operating-context.md`
-— read it before doing real work.** This is the short orientation.
+This file loads automatically. Before real work, read:
+- **`docs/hcn-wave-ops.md`** — the authoritative ops playbook (Chance's own):
+  review workflow, Thresher logic, priority rules, packet template,
+  communication rules, conflict handling, standard output formats.
+- **`docs/operating-context.md`** — account facts: org, custom-field `cf_*` map,
+  tool map, note vocabulary.
+
+This is the short orientation.
 
 ## What this project is
 

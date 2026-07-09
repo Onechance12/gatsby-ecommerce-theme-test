@@ -5,10 +5,17 @@ description: Run the Chance Pearson / Wave Public Adjusting JobNimbus operations
 
 # Chance File Ops — JobNimbus operations loop
 
-The operating playbook for **Chance Pearson, Wave Public Adjusting**. Read
-`docs/operating-context.md` for the full business context (org, pipeline,
-custom-field map, note vocabulary) before real work — this skill is the
-procedure; that doc is the knowledge.
+The operating playbook for **Chance Pearson, Wave Public Adjusting**.
+
+- **`docs/hcn-wave-ops.md`** = the authoritative procedure & rules (Chance's own
+  ops playbook: review workflow, Thresher logic, priority rules, packet template,
+  communication rules, conflict handling, standard output formats). **Follow it.**
+- **`docs/operating-context.md`** = the account facts (org, custom-field map,
+  tool map, note vocabulary).
+
+Read both before real work. Operating principle: use fresh file data, name the
+one real bottleneck, propose ONE primary next action, and never execute anything
+until Chance approves the exact action.
 
 ## Preconditions
 
