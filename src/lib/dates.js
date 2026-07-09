@@ -39,3 +39,21 @@ export function dateOnly(value) {
   const date = parseDate(value);
   return date ? date.toISOString().slice(0, 10) : "";
 }
+
+// Convert a calendar date (Date, "YYYY-MM-DD", or "MM/DD/YYYY") into a
+// JobNimbus-safe Unix-seconds epoch for date-only fields (e.g. Date of Loss).
+//
+// WHY THIS EXISTS: writing midnight UTC for a date renders as the PREVIOUS
+// day once JobNimbus displays it in the account's local (US Central) time
+// zone — e.g. 2026-04-25T00:00:00Z shows as "Apr 24" or even "Apr 23"
+// depending on the client's own timezone handling. Anchoring at NOON UTC
+// keeps the date stable across every US timezone. This bit us for real on
+// Robert Frazier's Date of Loss (sent as midnight, displayed as Apr 23
+// instead of Apr 25) — always use this helper for any JobNimbus date WRITE,
+// never hand-roll `Date.UTC(...)` at midnight.
+export function toJobNimbusDateEpoch(value) {
+  const date = parseDate(value);
+  if (!date) return undefined;
+  const noonUtc = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12, 0, 0);
+  return Math.floor(noonUtc / 1000);
+}
