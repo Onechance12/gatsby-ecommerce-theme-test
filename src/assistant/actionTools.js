@@ -25,6 +25,12 @@ const ACTION_DEFINITIONS = [
     description: "Update exact fields on one JobNimbus contact/file. Dry-run unless execute:true and ALLOW_JOBNIMBUS_WRITES=true.",
     input: { query: "string", fields: "object", execute: "boolean optional" },
     writes: ["JobNimbus contacts"]
+  },
+  {
+    name: "append_jobnimbus_description",
+    description: "Append a labeled line (e.g. 'Time of Loss: ...', 'Occupancy: ...') to a contact's Description field, without erasing what's already there. Dry-run unless execute:true and ALLOW_JOBNIMBUS_WRITES=true.",
+    input: { query: "string", label: "string", value: "string", execute: "boolean optional" },
+    writes: ["JobNimbus contacts (description)"]
   }
 ];
 
@@ -57,6 +63,8 @@ export async function runActionTool(config, args) {
     plan = planCreateTask(config, review, input);
   } else if (actionName === "update_jobnimbus_contact") {
     plan = planUpdateContact(config, review, input);
+  } else if (actionName === "append_jobnimbus_description") {
+    plan = await planAppendDescription(config, review, input);
   } else {
     throw new Error(`Unknown action tool: ${actionName}. Run \`npm run chat:action -- list\`.`);
   }
@@ -215,6 +223,40 @@ function planUpdateContact(config, review, input) {
     warnings: [
       "Field names must match JobNimbus exactly. Use dry-run first when updating custom fields or workflow/status values."
     ]
+  };
+}
+
+const DESCRIPTION_LABEL_PATTERN = (label) =>
+  new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:.*$`, "im");
+
+async function planAppendDescription(config, review, input) {
+  const label = required(input.label, "label");
+  const value = required(input.value, "value");
+
+  // Always read the live description (not the possibly-stale sweep snapshot) so
+  // we never clobber something added since the last sweep.
+  const client = new ReadOnlyJobNimbusClient(config);
+  const live = await client.getJson(`${config.endpoints.contacts}/${encodeURIComponent(review.file.id)}`);
+  const current = String(live?.description || "").trim();
+
+  const line = `${label}: ${value}`;
+  const labelPattern = DESCRIPTION_LABEL_PATTERN(label);
+  let nextDescription;
+  if (current && labelPattern.test(current)) {
+    // Replace an existing line with this same label instead of duplicating it.
+    nextDescription = current.replace(labelPattern, line);
+  } else if (current) {
+    nextDescription = `${current}\n${line}`;
+  } else {
+    nextDescription = line;
+  }
+
+  return {
+    method: "PUT",
+    endpoint: `${config.endpoints.contacts}/${encodeURIComponent(review.file.id)}`,
+    body: { description: nextDescription },
+    warnings: [],
+    preview: { before: current || "(empty)", after: nextDescription }
   };
 }
 
