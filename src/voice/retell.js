@@ -211,7 +211,13 @@ function renderRetellPrompt(packet) {
       "versions. Say calmly: 'My apologies, please go ahead and read the full number from start to finish, and I " +
       "will just write it down without repeating.'",
     "- If you get mismatched on a number or detail, stop talking immediately. On any interruption or overlap, just " +
-      "say 'sorry, go ahead.'",
+      "say 'sorry, go ahead.' Do NOT restart your sentence from the beginning over and over — if you were cut off " +
+      "mid-sentence, either finish the remaining few words once or yield with 'sorry, go ahead' and wait. Never " +
+      "loop the same phrase (e.g. repeating 'the property address is...') multiple times.",
+    "- NEVER guess or answer 'yes'/'no' to a question whose answer is not in your file facts. Questions like 'is the " +
+      "home still livable?', 'have temporary repairs been made?', 'is it owner-occupied?', 'what's the mortgage " +
+      "company?', or the homeowner's phone/email are NOT in your facts unless listed above — for any of these say " +
+      "naturally that you don't have it in front of you and will follow up. Do not invent a 'yes'.",
     "- When verifying emails, spell them out slowly with the NATO phonetic alphabet (A as in Alpha, B as in Bravo) " +
       "only when asked, and don't repeat them excessively once confirmed.",
     "",
