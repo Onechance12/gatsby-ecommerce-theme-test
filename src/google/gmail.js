@@ -167,6 +167,38 @@ function buildRawEmail({ to, cc, bcc, subject, body }) {
   return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${body}`);
 }
 
+// Create a Gmail DRAFT with file attachments (multipart/mixed). attachments:
+// [{ filename, contentType, bytes: Buffer }]. Requires Google OAuth creds.
+export async function createDraftWithAttachments(config, { to, cc, subject, body, attachments = [] }) {
+  const boundary = "wave_mixed_boundary_0001";
+  const parts = [];
+  parts.push(`--${boundary}`);
+  parts.push("Content-Type: text/plain; charset=utf-8");
+  parts.push("");
+  parts.push(body);
+  for (const att of attachments) {
+    parts.push(`--${boundary}`);
+    parts.push(`Content-Type: ${att.contentType || "application/octet-stream"}; name="${att.filename}"`);
+    parts.push("Content-Transfer-Encoding: base64");
+    parts.push(`Content-Disposition: attachment; filename="${att.filename}"`);
+    parts.push("");
+    parts.push(Buffer.from(att.bytes).toString("base64").replace(/(.{76})/g, "$1\r\n"));
+  }
+  parts.push(`--${boundary}--`);
+
+  const headers = [
+    `To: ${to}`,
+    cc ? `Cc: ${cc}` : "",
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`
+  ].filter(Boolean);
+
+  const raw = base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${parts.join("\r\n")}`);
+  const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/drafts", { method: "POST", body: { message: { raw } } });
+  return { id: result.id || "", messageId: result.message?.id || "" };
+}
+
 function base64UrlDecode(value) {
   return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 }

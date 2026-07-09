@@ -35,7 +35,8 @@
     "drive": "node src/index.js drive",
     "google:oauth": "node scripts/google-oauth.mjs",
     "quo": "node src/index.js quo",
-    "chance:brief": "node src/index.js chance:brief"
+    "chance:brief": "node src/index.js chance:brief",
+    "lor-package": "node src/index.js lor-package"
   },
   "engines": {
     "node": ">=20"
