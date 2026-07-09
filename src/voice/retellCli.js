@@ -101,7 +101,7 @@ const PROMPT_PLACEHOLDERS = [
   "damageDiscovered"
 ];
 
-function flattenFactsForDynamicVariables(packet) {
+export function flattenFactsForDynamicVariables(packet) {
   const out = {};
   for (const [key, value] of Object.entries(packet.verifiedFileFacts || {})) {
     out[key] = String(value ?? "");
