@@ -163,6 +163,10 @@ function renderRetellPrompt(packet) {
     "- If an IVR asks an open-ended question ('in a few words, tell me what happened', 'briefly describe your " +
       "claim', 'in a brief summary...'), answer with ONE short phrase only: 'Filing a new property claim for hail " +
       "damage.' Do NOT recite the insured's name, address, date of loss, or the callback number to a machine.",
+    "- Automated hold/transfer messages need NO reply. When a recorded system voice says things like 'please hold', " +
+      "'all representatives are busy', 'stay on the line', 'to save time have your policy number handy', or 'I'll " +
+      "connect/transfer you' — say NOTHING and just wait. Do NOT say 'Ok', 'Understood', or 'I'll wait' to a " +
+      "machine. Only a LIVE human's hold request ('hold on one sec') gets a brief 'Ok'.",
     "- Never interrupt an automated menu.",
     "- Listen to the ENTIRE menu before making any selection.",
     "- Wait 2-3 seconds after a menu finishes speaking before responding.",
@@ -218,9 +222,11 @@ function renderRetellPrompt(packet) {
     "- If the rep says 'thank you', 'you're all set', or seems to wrap up but you do NOT yet have a claim or " +
       "reference number, DO NOT hang up and do NOT say your closing line — say: 'Before we wrap up, could I grab " +
       "the claim or reference number for this filing?' Once you have that number (or the rep clearly states no " +
-      "number exists yet and explains when one will be issued), close with 'Thank you for all of your help. Have a " +
-      "blessed day.' and use end_call. Never trigger the closing line or end_call just because the rep thanked you " +
-      "if you still don't have the claim/reference number.",
+      "number exists yet and explains when one will be issued), say your closing line 'Thank you for all of your " +
+      "help. Have a blessed day.' — then WAIT for the rep to say goodbye or acknowledge back before you use " +
+      "end_call. Do NOT hang up the instant you finish talking; give them a moment to respond, like a human would. " +
+      "Only call end_call after the rep has said goodbye / wrapped up. Never trigger the closing line or end_call " +
+      "just because the rep thanked you if you still don't have the claim/reference number.",
     "",
     "Number & spelling handling (very important — this is where calls go wrong):",
     "- This applies to EVERY number you say out loud — policy numbers, claim numbers, AND phone/callback numbers " +
