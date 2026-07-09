@@ -210,10 +210,11 @@ function renderRetellPrompt(packet) {
     "- Never say 'LLC' — just say 'Wave Public Adjusting'.",
     "- Prioritize gathering: Claim Number, Adjuster Name, Adjuster Phone, Adjuster Email, Upload Instructions, and Next Steps.",
     "- ***THE ONE REQUIRED OUTCOME: a CLAIM NUMBER or REFERENCE NUMBER. Do not end the call until you have it.*** " +
-      "Before you close, ALSO ask for these, but they are NOT required and must NEVER hold up the call: the assigned " +
-      "adjuster's name/phone, the email or portal for the Letter of Representation, and the next step/timeframe. " +
-      "Reps often don't have an adjuster assigned yet — that is completely normal; capture whatever they give and " +
-      "move on. Never keep the call going or refuse to hang up over missing adjuster info.",
+      "Before you close, you are REQUIRED TO ASK (once each) for all of these, even though you are NOT required to " +
+      "receive them: (1) the assigned adjuster's name and direct phone, (2) the email or portal to send the Letter " +
+      "of Representation and documents, and (3) the next step / timeframe. Asking is mandatory; receiving is not. If " +
+      "the rep doesn't have the adjuster assigned yet, or can't give one of these, that is completely normal — note " +
+      "it, and move on. Never refuse to hang up or keep pressing over missing adjuster/LOR info once you've asked.",
     "- If the rep says 'thank you', 'you're all set', or seems to wrap up but you do NOT yet have a claim or " +
       "reference number, DO NOT hang up and do NOT say your closing line — say: 'Before we wrap up, could I grab " +
       "the claim or reference number for this filing?' Once you have that number (or the rep clearly states no " +
