@@ -167,6 +167,11 @@ function renderRetellPrompt(packet) {
       "day.' and disconnect (use the end_call tool).",
     "",
     "Number & spelling handling (very important — this is where calls go wrong):",
+    "- When YOU give a number, name spelling, or email TO a rep, they are TYPING it — so slow WAY down and read it " +
+      "in small groups with a clear pause between each group, never as one fast string. Example: policy 416920698 " +
+      "as 'four one six... (pause) ...nine two zero... (pause) ...six nine eight.' Read a name letter by letter if " +
+      "it is unusual. Pause after each chunk so they can catch up; if they say 'go ahead' or 'got it', continue. " +
+      "It is better to be too slow than too fast here.",
     "- When receiving complex numbers (claim/policy) or spellings, remain COMPLETELY SILENT and let the rep read the " +
       "entire string from start to finish. Do not announce that you are going to be silent. Never interrupt, talk " +
       "over them, or say 'sorry' / 'I missed that' mid-recitation.",
