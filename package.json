@@ -1,0 +1,41 @@
+{
+  "name": "jobnimbus-ops-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local read-only JobNimbus operations sweep assistant.",
+  "type": "module",
+  "scripts": {
+    "audit": "node src/index.js audit",
+    "bridge": "node src/bridge/server.js",
+    "claim:prep": "node src/index.js claim:prep",
+    "chat:action": "node src/index.js chat:action",
+    "chat:tool": "node src/index.js chat:tool",
+    "claim:call": "node src/index.js claim:call",
+    "chance:approve": "node src/index.js chance:approve",
+    "chance:agents": "node src/index.js chance:agents",
+    "chance:queue": "node src/index.js chance:queue",
+    "chance:review-packets": "node src/index.js chance:review-packets",
+    "chance:sweep": "node src/index.js chance:sweep",
+    "ledger:audit": "node src/index.js ledger:audit",
+    "ledger:build": "node src/index.js ledger:build",
+    "map:fields": "node src/index.js map:fields",
+    "pagination:audit": "node src/index.js pagination:audit",
+    "probe": "node src/index.js probe",
+    "openai:test": "node src/index.js openai:test",
+    "review:file": "node src/index.js review:file",
+    "search": "node src/index.js search",
+    "storm:research": "node src/index.js storm:research",
+    "sweep": "node src/index.js sweep",
+    "sweep:fixture": "JOBNIMBUS_USE_FIXTURES=true node src/index.js sweep",
+    "voice:server": "node src/index.js voice:server",
+    "voice:realtime-call": "node src/index.js voice:realtime-call",
+    "voice:test-call": "node src/index.js voice:test-call",
+    "check": "node --check src/index.js && node src/selftest.js && node src/index.js doctor"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}

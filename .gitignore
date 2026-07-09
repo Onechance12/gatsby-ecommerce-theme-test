@@ -1,0 +1,13 @@
+# Secrets
+.env
+.env.local
+
+# Local synced JobNimbus data — real client records, never commit
+data/
+reports/
+work/
+
+# Dependencies / junk
+node_modules/
+tmp/
+.DS_Store

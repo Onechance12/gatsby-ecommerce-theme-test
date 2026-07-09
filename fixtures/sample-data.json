@@ -1,0 +1,333 @@
+{
+  "contacts": [
+    {
+      "jnid": "contact-1001",
+      "display_name": "Rosa Sanchez",
+      "first_name": "Rosa",
+      "last_name": "Sanchez",
+      "record_type_name": "Insurance",
+      "status_name": "Submitted Awaiting Confirmation",
+      "address_line1": "1418 Mesquite Dr",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79107",
+      "mobile_phone": "806-555-0141",
+      "email": "rosa.sanchez@example.com",
+      "date_created": 1780000000,
+      "date_updated": 1782600000,
+      "sales_rep_name": "Chance Pearson",
+      "owners": [{ "id": "user-chance", "name": "Chance Pearson" }],
+      "Insurance Company": "Farmers",
+      "Policy #": "TXHO-00099111",
+      "Date of Loss": "05/28/2026",
+      "Type Of Loss": "Hail"
+    },
+    {
+      "jnid": "contact-1002",
+      "display_name": "Maribel Munoz",
+      "first_name": "Maribel",
+      "last_name": "Munoz",
+      "record_type_name": "Insurance",
+      "status_name": "Photo File / Estimate Needed",
+      "address_line1": "902 Palo Duro St",
+      "city": "Canyon",
+      "state_text": "TX",
+      "zip": "79015",
+      "mobile_phone": "806-555-0177",
+      "date_created": 1780500000,
+      "date_updated": 1781000000,
+      "sales_rep_name": "Chance Pearson",
+      "owners": [{ "id": "user-chance", "name": "Chance Pearson" }],
+      "Insurance Company": "State Farm",
+      "Claim #": "55-8812-990",
+      "Policy #": "SF-4471820",
+      "Date of Loss": "04/12/2026",
+      "Type Of Loss": "Wind"
+    },
+    {
+      "jnid": "contact-2005",
+      "display_name": "Josee Jimenez",
+      "first_name": "Josee",
+      "last_name": "Jimenez",
+      "record_type_name": "Insurance",
+      "status_name": "Ready for Appraisal",
+      "address_line1": "77 Coulter Ave",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79106",
+      "mobile_phone": "806-555-0163",
+      "date_created": 1779000000,
+      "date_updated": 1782601000,
+      "sales_rep_name": "Chance Pearson",
+      "owners": [{ "id": "user-chance", "name": "Chance Pearson" }],
+      "Insurance Company": "Allstate",
+      "Claim #": "0829457522",
+      "Policy #": "AS-9982241",
+      "Date of Loss": "03/02/2026",
+      "Type Of Loss": "Hail",
+      "Deductible Amount": "$2,500",
+      "Days in Status": "4"
+    },
+    {
+      "jnid": "contact-2006",
+      "display_name": "Alice Gonzales",
+      "first_name": "Alice",
+      "last_name": "Gonzales",
+      "record_type_name": "Insurance",
+      "status_name": "Submitted for Appraisal",
+      "address_line1": "310 Buchanan St",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79101",
+      "home_phone": "806-555-0102",
+      "date_created": 1778000000,
+      "date_updated": 1782687400,
+      "sales_rep_name": "Mark Harrison",
+      "owners": [{ "id": "user-mark", "name": "Mark Harrison" }],
+      "Insurance Company": "Travelers",
+      "Claim #": "TRV-77120034",
+      "Policy #": "TRV-HP-5521",
+      "Date of Loss": "02/14/2026",
+      "Type Of Loss": "Hail",
+      "Carrier DA": "Dan Whitfield",
+      "Carrier DA Contact #": "800-555-0190"
+    },
+    {
+      "jnid": "contact-3001",
+      "display_name": "Raj Thamizhan",
+      "first_name": "Raj",
+      "last_name": "Thamizhan",
+      "record_type_name": "Insurance",
+      "status_name": "New Lead",
+      "address_line1": "4501 Tascosa Rd",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79124",
+      "mobile_phone": "806-555-0122",
+      "email": "raj.t@example.com",
+      "date_created": 1782500000,
+      "date_updated": 1782500000,
+      "sales_rep_name": "Chance Pearson",
+      "owners": [{ "id": "user-chance", "name": "Chance Pearson" }],
+      "Insurance Company": "",
+      "Type Of Loss": "Hail"
+    }
+  ],
+  "jobs": [
+    {
+      "jnid": "job-2001",
+      "name": "Jennifer Arguello - Roof Claim",
+      "customerName": "Jennifer Arguello",
+      "customer": "contact-9001",
+      "status_name": "Claim Filed - Awaiting Claim Number",
+      "record_type_name": "Insurance Job",
+      "address_line1": "2207 S Hughes St",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79109",
+      "date_created": 1779800000,
+      "date_updated": 1782300000,
+      "Insurance Company": "Farmers",
+      "Policy #": "TXHO-00042366",
+      "Date of Loss": "05/28/2026"
+    },
+    {
+      "jnid": "job-2002",
+      "name": "Danny Ledbetter - Hail Damage",
+      "customerName": "Danny Ledbetter",
+      "customer": "contact-9002",
+      "status_name": "Negotiating",
+      "record_type_name": "Insurance Job",
+      "address_line1": "808 Bell St",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79106",
+      "date_created": 1778600000,
+      "date_updated": 1781200000,
+      "Insurance Company": "USAA",
+      "Claim #": "USAA-30125577",
+      "Policy #": "USAA-88451",
+      "Date of Loss": "04/12/2026",
+      "Adjuster Name": "Kelly Brooks",
+      "Adjuster Phone": "800-555-0155"
+    },
+    {
+      "jnid": "job-2003",
+      "name": "Pete Fowler - Storm Claim",
+      "customerName": "Pete Fowler",
+      "customer": "contact-9003",
+      "status_name": "Awaiting ACV",
+      "record_type_name": "Insurance Job",
+      "address_line1": "1500 Wolflin Ave",
+      "city": "Amarillo",
+      "state_text": "TX",
+      "zip": "79102",
+      "date_created": 1777500000,
+      "date_updated": 1782687400,
+      "Insurance Company": "Liberty Mutual",
+      "Claim #": "LM-6620178",
+      "Policy #": "LM-HP-2210",
+      "Date of Loss": "03/22/2026",
+      "Mortgage Company": "Happy State Bank"
+    }
+  ],
+  "tasks": [
+    {
+      "jnid": "task-3301",
+      "title": "Follow up on Payment",
+      "description": "Email sent. Call into Farmers if no response.",
+      "status_name": "Open",
+      "record_type_name": "Task",
+      "all_day_start_date": "07/15/2026",
+      "date_due": 1784073600,
+      "created_by_name": "Mark Harrison",
+      "related": [{ "id": "job-2003", "type": "job" }]
+    },
+    {
+      "jnid": "task-3302",
+      "title": "Get claim number from Farmers",
+      "description": "Homeowner filed online; carrier has not issued claim number yet.",
+      "status_name": "Open",
+      "record_type_name": "Task",
+      "date_due": 1782950400,
+      "created_by_name": "Chance Pearson",
+      "related": [{ "id": "job-2001", "type": "job" }]
+    },
+    {
+      "jnid": "task-3303",
+      "title": "Schedule inspection with homeowner",
+      "description": "Attempted to schedule twice. Homeowner not available last week.",
+      "status_name": "Open",
+      "record_type_name": "Task",
+      "date_due": 1782777600,
+      "created_by_name": "Chance Pearson",
+      "related": [{ "id": "contact-1002", "type": "contact" }]
+    },
+    {
+      "jnid": "task-3304",
+      "title": "Send appraisal demand letter",
+      "description": "ACV received and gap confirmed. Prepare and send demand.",
+      "status_name": "Completed",
+      "is_completed": true,
+      "record_type_name": "Task",
+      "date_due": 1782259200,
+      "created_by_name": "Chance Pearson",
+      "related": [{ "id": "contact-2005", "type": "contact" }]
+    }
+  ],
+  "notes": [
+    {
+      "id": "note-4001",
+      "jobId": "job-2001",
+      "createdAt": "2026-06-26T09:45:00-05:00",
+      "body": "Homeowner says claim was filed online but has not received claim number."
+    },
+    {
+      "id": "note-4002",
+      "jobId": "job-2002",
+      "createdAt": "2026-05-21T15:30:00-05:00",
+      "body": "Inspection completed. Carrier scope is underpaid and missing roof items. Review for supplement or appraisal."
+    },
+    {
+      "id": "note-4003",
+      "jobId": "job-2003",
+      "createdAt": "2026-06-17T12:10:00-05:00",
+      "body": "ACV received. Appraisal demand sent. Need deductible confirmation and mortgage company packet."
+    },
+    {
+      "id": "note-4006",
+      "jobId": "contact-1001",
+      "createdAt": "2026-07-01T10:05:00-05:00",
+      "body": "Claim submitted to Farmers online portal. Waiting on receipt confirmation and desk adjuster assignment. Check redirection acknowledgment still needed."
+    },
+    {
+      "id": "note-4007",
+      "jobId": "contact-1002",
+      "createdAt": "2026-06-20T13:40:00-05:00",
+      "body": "Photos uploaded by field team. Estimate needed. Homeowner said no one will be home next week - attempted to schedule twice with negative results."
+    },
+    {
+      "id": "note-4008",
+      "jobId": "contact-3001",
+      "createdAt": "2026-07-03T16:20:00-05:00",
+      "body": "New signup from canvassing. Carrier couldn't find a policy under the name given - need current dec page with correct insured information."
+    }
+  ],
+  "activities": [
+    {
+      "jnid": "activity-4004",
+      "date_created": 1782601000,
+      "note": "Initial ACV received. Ready for appraisal.",
+      "record_type_name": "Note",
+      "related": [{ "id": "contact-2005", "type": "contact" }]
+    },
+    {
+      "jnid": "activity-4005",
+      "date_created": 1782687400,
+      "note": "Appraisal letter sent to carrier. Waiting for carrier appraiser assignment.",
+      "record_type_name": "Note",
+      "related": [{ "id": "contact-2006", "type": "contact" }]
+    }
+  ],
+  "documents": [
+    {
+      "jnid": "doc-5001",
+      "filename": "farmers-policy-declaration.pdf",
+      "content_type": "application/pdf",
+      "record_type_name": "Document",
+      "related": [{ "id": "contact-1001", "type": "contact" }]
+    },
+    {
+      "jnid": "doc-5002",
+      "filename": "allstate-acv-estimate.esx",
+      "content_type": "application/octet-stream",
+      "record_type_name": "Document",
+      "related": [{ "id": "contact-2005", "type": "contact" }]
+    },
+    {
+      "jnid": "doc-5003",
+      "filename": "roof-photos.zip",
+      "content_type": "application/zip",
+      "record_type_name": "Document",
+      "related": [{ "id": "contact-1002", "type": "contact" }]
+    }
+  ],
+  "payments": [
+    {
+      "jnid": "pay-6001",
+      "amount": 8412.55,
+      "date_created": 1782000000,
+      "record_type_name": "Payment",
+      "related": [{ "id": "job-2003", "type": "job" }]
+    }
+  ],
+  "accountUsers": [
+    { "jnid": "user-chance", "first_name": "Chance", "last_name": "Pearson", "email": "chance@example.com" },
+    { "jnid": "user-mark", "first_name": "Mark", "last_name": "Harrison", "email": "mark@example.com" }
+  ],
+  "accountSettings": [
+    {
+      "workflows": [
+        {
+          "name": "Insurance",
+          "statuses": [
+            "New Lead",
+            "Photo File / Estimate Needed",
+            "Ready for PA Review",
+            "Submitted Awaiting Confirmation",
+            "Negotiating",
+            "Awaiting ACV",
+            "Ready for Appraisal",
+            "Submitted for Appraisal",
+            "Carrier Appraiser Assigned",
+            "Meeting Scheduled",
+            "Initial Approval / Awaiting Estimate",
+            "Umpire",
+            "Finalized / Awaiting ACV",
+            "Hold/Closed"
+          ]
+        }
+      ]
+    }
+  ]
+}

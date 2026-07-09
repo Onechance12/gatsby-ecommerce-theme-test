@@ -1,0 +1,42 @@
+[
+  {
+    "id": "note-4001",
+    "jobId": "job-2001",
+    "createdAt": "2026-06-26T09:45:00-05:00",
+    "body": "Homeowner says claim was filed online but has not received claim number."
+  },
+  {
+    "id": "note-4002",
+    "jobId": "job-2002",
+    "createdAt": "2026-05-21T15:30:00-05:00",
+    "body": "Inspection completed. Carrier scope is underpaid and missing roof items. Review for supplement or appraisal."
+  },
+  {
+    "id": "note-4003",
+    "jobId": "job-2003",
+    "createdAt": "2026-06-17T12:10:00-05:00",
+    "body": "ACV received. Appraisal demand sent. Need deductible confirmation and mortgage company packet."
+  },
+  {
+    "jnid": "activity-4004",
+    "date_created": 1782601000,
+    "note": "Initial ACV received. Ready for appraisal.",
+    "related": [
+      {
+        "id": "contact-2005",
+        "type": "contact"
+      }
+    ]
+  },
+  {
+    "jnid": "activity-4005",
+    "date_created": 1782687400,
+    "note": "Appraisal letter sent to carrier. Waiting for carrier appraiser assignment.",
+    "related": [
+      {
+        "id": "contact-2006",
+        "type": "contact"
+      }
+    ]
+  }
+]
