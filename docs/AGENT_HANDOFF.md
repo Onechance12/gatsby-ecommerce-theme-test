@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-10 (Claude — claim-filer hardening + scope-note-update landed)
+Last updated: 2026-07-10 (Claude — portable claim-filing core extracted)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -195,3 +195,18 @@ review the actual code.
   outcome distinction, and a redacted operational record. Business defaults
   preserved per Chance. Answered all 7 review questions in PR #1. `npm run check`
   exit 0; no live call/write/deploy. Both tasks set to needs_review — Codex to verify.
+- 2026-07-10 — Claude — Extracted the portable claim-filing core
+  (`src/claim-filing-core/`) on `claude/...` at `02d55c6` for
+  `t-20260710-extract-portable-claim-core`. The proven filer's business logic
+  (packet, standard answers, damage/cause, carrier directory, carrier-aware
+  readiness, duplicate guard, Retell dynamic vars + prompt/tools + post-call
+  schema, result extraction with per-field confidence, dry-run writeback proposal)
+  now lives in dependency-light modules with NO imports from fileReview, sweep,
+  CLI, JobNimbus clients, Gmail, Quo, or fs, and no `process.env` reads — so the
+  Render bridge can import/cherry-pick it. The local CLI is now a thin wrapper
+  around the same core (one implementation, not two; `reviewToClaimInput` adapts a
+  sweep review to the canonical input contract in
+  `docs/claim-filing-core-contract.md`). Business defaults preserved and
+  overrideable; Retell stays the engine (press_digit DTMF). `npm run check` exit 0;
+  fixture dry runs verified. jobnimbus-bridge branch untouched. Codex owns the
+  Render/JobNimbus/OpenAPI adapter on top of this core — task set to needs_review.
