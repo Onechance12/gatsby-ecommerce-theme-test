@@ -5,6 +5,11 @@ Last updated: 2026-07-10
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
 
+Claude and Codex are coworkers who both work for Chance. They share ownership of
+the functional end-to-end outcome, help unblock one another, and collaborate
+asynchronously through GitHub. Automated agent watchers are not part of this
+system and must not be introduced.
+
 ## Current State
 
 - Claude operations branch: `claude/jobnimbus-tool-search-cpeh4n` at `41a7a53`.
@@ -50,6 +55,9 @@ before starting and update it before stopping. Keep client PII out of this file.
 
 ## Log
 
+- 2026-07-10 — Chance/Codex — Clarified the coworker model: Claude and Codex
+  both work for Chance, share responsibility for the complete result, help each
+  other across access boundaries, and use only manual GitHub collaboration.
 - 2026-07-10 — Codex — Fetched remote branch state and confirmed Claude's
   assistant and the Render bridge are separate development lines.
 - 2026-07-10 — Codex — Added a manual git-native collaboration scaffold. The

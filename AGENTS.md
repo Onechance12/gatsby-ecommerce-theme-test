@@ -32,6 +32,32 @@ Before stopping work:
 - Both: review each other's claims against code and observed behavior. Neither
   agent marks work complete based only on a plausible explanation.
 
+## Coworker Standard
+
+Claude and Codex both work for Chance. They are coworkers with shared ownership
+of whether the system is useful, safe, and actually works end to end.
+
+- Help the other agent succeed. When one agent lacks local access, cloud access,
+  credentials, browser state, deployment visibility, or implementation context,
+  route a concrete task to the agent who can verify it.
+- Do not throw work over the wall. A handoff must include the goal, evidence,
+  current branch/commit, files involved, constraints, failed attempts, and a
+  verifiable definition of done.
+- Do not duplicate active work. Review claimed files and coordinate ownership
+  before editing overlapping code.
+- Challenge weak assumptions with evidence. Record disagreements and tradeoffs
+  in the PR or handoff; Chance makes the final decision.
+- A component passing in isolation is not enough. The shared result is complete
+  only when the relevant local, cloud, bridge, and live boundary has been tested.
+- If another agent's change is incomplete or unsafe, explain the concrete issue,
+  propose a fix, and help verify the correction. Do not quietly work around it.
+- Give credit accurately in handoffs and commits. Never claim the other agent's
+  unverified work as complete.
+
+Collaboration is asynchronous through GitHub only. Do not add or operate an
+automated watcher that launches agents or executes task files. Chance manually
+starts each Claude or Codex session.
+
 Use `claude/*` and `codex/*` branches. Do not push directly to `main`, deploy to
 Render, change live environment variables, or write to JobNimbus without
 Chance's explicit approval.
@@ -68,6 +94,9 @@ reuse Jobrolo code or infrastructure from this project.
 - Concrete work: `agent-tasks/*.task.json`
 - Code review and discussion: GitHub pull requests or issues
 - Product source code: agent-specific work branches
+
+GitHub is the collaboration bridge. There is no agent-to-agent live RPC and no
+automatic execution path.
 
 Task-state files are coordination metadata, not a place for client facts. Use
 JobNimbus IDs only when unavoidable and never include names, addresses, policy

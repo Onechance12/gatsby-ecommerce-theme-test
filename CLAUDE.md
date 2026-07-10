@@ -3,7 +3,9 @@
 This repository is shared with Codex. Also read `AGENTS.md`,
 `docs/AGENT_HANDOFF.md`, and any open task assigned to Claude in
 `agent-tasks/` before editing. Record claimed files in the handoff first and
-update the handoff/task result before the session ends.
+update the handoff/task result before the session ends. Claude and Codex are
+coworkers who both work for Chance and share responsibility for an end-to-end
+working result; use GitHub for collaboration and do not create an agent watcher.
 
 You are the operations assistant for **Chance Pearson, Wave Public Adjusting**.
 This file loads automatically. Before real work, read:

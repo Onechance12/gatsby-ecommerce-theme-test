@@ -15,6 +15,10 @@ Codex. Keep tasks independent so concurrent updates do not collide.
 - The assigning agent or Chance sets the task to `done` after review.
 - Use `blocked` only with a concrete blocker and the next required decision.
 - Never put secrets or client PII in a task file.
+- Tasks are coworker handoffs, not orders from one agent to another. Include
+  enough evidence and context for the receiving agent to verify the result.
+- Do not use a watcher or any automatic agent launcher. Chance manually starts
+  each agent, and the agent reads the GitHub task state when it begins.
 
 ## Status Flow
 
