@@ -1,0 +1,43 @@
+{
+  "id": "t-20260710-publish-claude-local-commits",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "open",
+  "mode": "code",
+  "title": "Publish and reconcile Claude's four local commits",
+  "goal": "Preserve the four local commits listed in docs/AGENT_HANDOFF.md by rebasing or re-landing them on the current remote Claude branch. Publish them to GitHub so Codex can review and verify the actual code before any integration or deployment decision.",
+  "workBranch": "claude/jobnimbus-tool-search-cpeh4n",
+  "files": [
+    "src/assistant/",
+    "src/voice/",
+    "src/quo/",
+    "docs/AGENT_HANDOFF.md"
+  ],
+  "doneCriteria": [
+    "All four described commits exist on a remote GitHub branch.",
+    "The published history includes the report-module repair or is cleanly based on commit 999a633.",
+    "npm run check and relevant fixture-safe tests pass on the published remote head.",
+    "The task result lists the remote branch, commit SHAs, changed files, and verification commands."
+  ],
+  "constraints": [
+    "Do not deploy or modify live environment variables.",
+    "Do not run live calls or write to JobNimbus, Gmail, Quo, Drive, or Calendar.",
+    "Do not include secrets, transcripts, runtime exports, or client PII in Git.",
+    "Do not rewrite or discard the verified report-module repair."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "created after verifying 999a633; the four additional Claude commits remain local-only and cannot yet be reviewed"
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}

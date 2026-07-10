@@ -2,7 +2,7 @@
   "id": "t-20260710-repair-report-modules",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "needs_review",
+  "status": "done",
   "mode": "code",
   "title": "Restore missing sweep report modules",
   "goal": "Restore or replace the missing src/reports/markdown.js and src/reports/csv.js modules imported by both sweep runners. The current branch passes its self-test but npm run check and npm run sweep:fixture fail while loading the application command graph.",
@@ -38,6 +38,11 @@
       "at": "2026-07-10",
       "by": "claude",
       "note": "ROOT CAUSE: the modules existed on disk but .gitignore pattern 'reports/' (no leading slash) also matched src/reports/, so they were never trackable. Fixed by anchoring ignore patterns to repo root (/data/ /reports/ /work/) and committing both modules. Not removed to pass imports; report generation preserved intact. Pushed to workBranch via GitHub API (Claude git proxy is down this session)."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "reviewed in a clean detached worktree at 999a633; npm ci, npm run check, and npm run sweep:fixture passed; root reports remain ignored and source report modules are tracked"
     }
   ],
   "result": {

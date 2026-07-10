@@ -40,7 +40,8 @@ Codex/Chance: do not assume `claude/...` on GitHub reflects these four yet.
 ## Claimed / In-Progress Work
 
 - Codex — 2026-07-10 — collaboration scaffold and production-boundary mapping
-  — `AGENTS.md`, `CLAUDE.md`, `docs/AGENT_HANDOFF.md`, `agent-tasks/` — in progress.
+  — `AGENTS.md`, `CLAUDE.md`, `docs/AGENT_HANDOFF.md`, `agent-tasks/` — scaffold
+  complete; production-boundary task remains owner review.
 - Claude — 2026-07-10 — operations assistant + voice/claim workflow. In-session
   scope: `src/voice/retell.js` + `retellCli.js` (the reusable "Mitra" claim-call
   agent + Retell post-call extraction), `src/assistant/fileClaim.js`,
@@ -48,10 +49,14 @@ Codex/Chance: do not assume `claude/...` on GitHub reflects these four yet.
   `carrierDirectory.js`, `lorPackage.js`, `stormResearch.js`, `actionTools.js`;
   docs under `docs/carriers/`, `inspection-capture.md`, `backlog.md`. Most is in
   the 4 unpushed commits above.
-- Claude — 2026-07-10 — DONE (needs_review) — restored `src/reports/markdown.js`
-  and `src/reports/csv.js` so baseline + fixture commands load — task
+- Claude — 2026-07-10 — DONE — restored `src/reports/markdown.js`
+  and `src/reports/csv.js` so baseline + fixture commands load — reviewed and
+  closed by Codex — task
   `t-20260710-repair-report-modules`. Commit `999a633` on
   `claude/jobnimbus-tool-search-cpeh4n`.
+- Claude — open task — publish and reconcile the four local-only commits so
+  Codex can review their actual code — task
+  `t-20260710-publish-claude-local-commits`.
 
 ## Open Questions
 
@@ -69,13 +74,19 @@ Codex/Chance: do not assume `claude/...` on GitHub reflects these four yet.
 
 ## Next Coordination Steps
 
-1. Codex reviews `t-20260710-repair-report-modules` (needs_review) and closes it.
-2. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
-3. Both agents agree on one small integration task and review it through a PR.
-4. Chance approves any deployment, environment-variable change, or live write.
+1. Claude publishes the four local-only commits through task
+   `t-20260710-publish-claude-local-commits`.
+2. Codex reviews those commits from the remote branch.
+3. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
+4. Both agents implement one small read-only integration through a PR.
+5. Chance approves any deployment, environment-variable change, or live write.
 
 ## Log
 
+- 2026-07-10 — Codex — Ran Claude's bridge handoff. Independently verified the
+  report repair in a clean detached checkout: `npm ci`, `npm run check`, and
+  `npm run sweep:fixture` passed. Closed the repair and collaboration-review
+  tasks. Created a task to preserve Claude's four still-unpublished commits.
 - 2026-07-10 — Chance/Codex — Clarified the coworker model: Claude and Codex
   both work for Chance, share responsibility for the complete result, help each
   other across access boundaries, and use only manual GitHub collaboration.
