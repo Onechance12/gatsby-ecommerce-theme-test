@@ -37,9 +37,9 @@ export async function runLorPackage(config, args) {
   const lor = generateLor(config, file);
   // 3: pull TDI (+ optional extras) from JobNimbus
   const jnFiles = await listContactFiles(config, file.id);
+  // Direct-to-pay packet = TDI + LOR + W-9 only (per Chance). Part B is not sent.
   const wanted = [
-    { key: "TDI", keyword: "tdi|fin535", label: "TDI/FIN535" },
-    { key: "PartB", keyword: "part b|part-b", label: "Part B" }
+    { key: "TDI", keyword: "tdi|fin535", label: "TDI/FIN535" }
   ];
   const attachments = [];
   const workDir = path.join(config.paths.workDir, "lor");
@@ -60,15 +60,23 @@ export async function runLorPackage(config, args) {
     }
   }
 
+  // W-9: the firm's standard Wave W-9 (saved from Richard's template email). It's
+  // the same doc on every direct-to-pay, so attach it from a local asset path.
+  const w9Path = input.w9Path || process.env.WAVE_W9_PATH || path.join(config.paths.workDir, "templates", "Wave-W9.pdf");
+  if (fs.existsSync(w9Path)) {
+    attachments.push({ filename: "Wave-W9.pdf", contentType: "application/pdf", localPath: w9Path, source: "Wave W-9 (firm asset)" });
+    pulled.push({ label: "W-9", found: true, filename: "Wave-W9.pdf" });
+  } else {
+    pulled.push({ label: "W-9", found: false, note: `not found at ${w9Path}` });
+  }
+
   // 4: cover email
   const to = input.to || "{carrier claims email — needed}";
   const subject = file.claimNumber || "{claim number}";
   const body = [
     "Good afternoon,",
     "",
-    `Attached please find an executed FIN535 (TDI) and LOR for the above referenced claim (policyholder: ${file.customer}). Please send payment to our office with Wave Public Adjusting LLC included as a payee.`,
-    "",
-    "In addition, could you please send over the insured's policy package and any correspondence.",
+    `Attached please find an executed TDI (FIN535), an updated LOR, and W-9 for the above referenced claim (policyholder: ${file.customer}). Please send payment to our office with Wave Public Adjusting LLC included as a payee.`,
     "",
     "Thank you,",
     "Chance Pearson",
