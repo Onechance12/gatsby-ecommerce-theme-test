@@ -19,7 +19,7 @@ Claude.
 
 ## Current State
 
-- Claude operations branch: `claude/jobnimbus-tool-search-cpeh4n` at `e28024c`
+- Claude operations branch: `claude/jobnimbus-tool-search-cpeh4n` at `2e2717e`
   (= report repair `999a633` + Claude's four previously-local commits, now
   published). Contains the local assistant, Chance sweep/review tools, JobNimbus
   actions, Gmail/Drive/Quo modules, storm research, LOR packaging, `file:claim`
@@ -65,12 +65,19 @@ review the actual code.
 - Claude — 2026-07-10 — DONE — `t-20260710-publish-claude-local-commits`
   — four commits published on `999a633`, head `e28024c`; independently verified
   and closed by Codex.
-- Claude — 2026-07-10 — DONE (needs_review) — `t-20260710-scope-note-update`
+- Claude — 2026-07-10 — DONE (Codex-closed) — `t-20260710-scope-note-update`
   — `update_jobnimbus_note` now requires {query, noteId}, resolves the Chance file,
   and verifies the activity belongs to it before any PUT. On `claude/...` at `2e2717e`.
-- Claude — 2026-07-10 — DONE (needs_review) — `t-20260710-claim-filer-production-review`
+- Claude — 2026-07-10 — DONE (Codex-closed) — `t-20260710-claim-filer-production-review`
   — all 7 review questions answered in PR #1; fixture-safe hardening landed on
   `claude/...` at `2e2717e`. See "Claim Filer — Operational State" below.
+- Claude — open task — extract the verified filer into a portable, bridge-ready
+  core with no local sweep/CLI/JobNimbus-client dependencies —
+  `t-20260710-extract-portable-claim-core`.
+- Codex — next task after portable-core review — integrate that core into the
+  existing Render bridge using direct fresh JobNimbus reads, strict Chance-only
+  resolution, approval digests, Retell result polling, OpenAPI actions, and the
+  existing gated `processJobNimbusUpdate` write path.
 
 ## Claim Filer — Operational State (2026-07-10)
 
@@ -115,17 +122,27 @@ review the actual code.
 
 ## Next Coordination Steps
 
-1. Claude hardens the note-update scope through `t-20260710-scope-note-update`.
-2. Claude completes `t-20260710-claim-filer-production-review`; do not expose
-   `file:claim` through the production bridge before Codex review and Chance approval.
-3. Use normal Git first; use `docs/ARTIFACT_HANDOFF.md` only when Git transport fails.
-4. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
-5. Implement one small read-only integration (first candidate: the JobNimbus-only
-   `review_file` evidence packet) through a PR.
-6. Chance approves any deployment, environment-variable change, or live write.
+1. Claude completes `t-20260710-extract-portable-claim-core` without editing the
+   production bridge.
+2. Codex independently reviews the portable core, then builds the Render adapter
+   and OpenAPI actions on a separate branch.
+3. The bridge must resolve and re-verify a Chance-owned file on every prepare,
+   call, result, and writeback step; first-match-only resolution is insufficient.
+4. Claim filing uses Retell. Keep the older OpenAI/Twilio path available only for
+   generic calls; do not route carrier filing through it.
+5. Use normal Git first; use `docs/ARTIFACT_HANDOFF.md` only when Git transport fails.
+6. Chance approves deployment, Retell-agent updates, environment changes, the
+   first live bridge call, and every JobNimbus write.
 
 ## Log
 
+- 2026-07-10 — Codex — Reviewed Claude's `2e2717e` claim-filer and note-scope
+  hardening. `npm ci`, `npm run check`, `npm run sweep:fixture`, and diff checks
+  pass. Official Retell documentation confirms the post-call analysis mechanism.
+  Closed both review tasks. Compared the local filer with live bridge `20c86e3`:
+  the bridge already has fresh JobNimbus reads/gated writes, while the filer has
+  the proven Retell behavior but depends on local sweep files. Assigned Claude a
+  portable-core extraction; Codex owns the Chance-only Render adapter and deploy.
 - 2026-07-10 — Codex — Audited Claude's AI claim filer and exercised fixture
   dry runs. Confirmed the deterministic live-refresh/call/duplicate-guard design
   is strong and recorded Claude's report of a successful real Allstate filing.

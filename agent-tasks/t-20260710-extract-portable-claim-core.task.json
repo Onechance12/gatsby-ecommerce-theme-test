@@ -1,0 +1,50 @@
+{
+  "id": "t-20260710-extract-portable-claim-core",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "open",
+  "mode": "code",
+  "title": "Extract the proven claim filer into a portable bridge-ready core",
+  "goal": "Refactor the verified claim-filing business logic into small self-contained modules that the existing Render bridge can import. Preserve the successful Retell behavior and company rules while removing all dependencies on local sweep reports, CLI output, local filesystem state, and JobNimbus client implementations. Codex will build the Render/JobNimbus/OpenAPI adapter after reviewing this core.",
+  "workBranch": "claude/jobnimbus-tool-search-cpeh4n",
+  "files": [
+    "src/claim-filing-core/",
+    "src/selftest.js",
+    "docs/claim-filing-core-contract.md"
+  ],
+  "doneCriteria": [
+    "A documented canonical input contract accepts one already-resolved live Chance file plus its relevant activities, tasks, documents, and approved per-call overrides.",
+    "Portable exports cover packet construction, standard filing answers, damage categories, carrier lookup/readiness, Retell dynamic variables, Retell prompt/tools and post-call schema, result extraction, and dry-run JobNimbus writeback proposals.",
+    "The portable core has no imports from fileReview, runChanceSweep, local normalized reports, CLI parsers/printers, JobNimbus clients, Gmail, Quo, or filesystem paths.",
+    "Retell HTTP functions, if included, accept explicit configuration and return structured values without reading process.env directly.",
+    "The four Chance-approved standard filing answers remain the defaults and are overrideable when a specific file differs.",
+    "Carrier policy-number requirements remain data-driven through the carrier directory.",
+    "Structured Retell analysis fields may be proposed for writeback; transcript-guessed adjuster phone/email or document destinations are surfaced with per-field confidence but are not silently treated as verified adjuster fields.",
+    "The proposed short JobNimbus note is accurate for the actual result: it does not claim adjuster/status fields were updated when absent and does not say awaiting adjuster when one was captured.",
+    "New-vs-existing claim outcomes remain distinct and duplicate-new-claim protection remains available to the bridge adapter.",
+    "Synthetic fixture tests cover new filing, existing claim, missing policy allowed/required, standard-answer override, structured extraction, transcript guesses, and accurate note variants.",
+    "Existing local file:claim behavior remains functional or is adapted through a thin wrapper around the same portable core; there must not be two divergent claim-filing implementations."
+  ],
+  "constraints": [
+    "Do not edit the jobnimbus-bridge branch or its src/server.js; Codex owns the production adapter.",
+    "Do not place a live call, update the live Retell agent, deploy, change environment variables, or write JobNimbus/Gmail/Quo data.",
+    "Do not include secrets, PII, transcripts, call IDs, account identifiers, or runtime exports.",
+    "Do not replace Retell with the older generic OpenAI/Twilio voice path; Retell remains the carrier claim-filing engine because it supports DTMF IVR navigation.",
+    "Keep modules concise and dependency-light so they can be reviewed and copied/cherry-picked into the Render branch without importing the full local assistant."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Created after reviewing 2e2717e and comparing it with live bridge 20c86e3. The production bridge already has fresh JobNimbus evidence reads and gated writes; Claude owns portable business logic, Codex owns the Chance-only Render adapter and deployment."
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}

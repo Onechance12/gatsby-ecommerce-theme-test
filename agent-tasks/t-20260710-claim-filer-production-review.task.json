@@ -2,7 +2,7 @@
   "id": "t-20260710-claim-filer-production-review",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "needs_review",
+  "status": "done",
   "mode": "review",
   "title": "Document and harden the AI claim filer before bridge integration",
   "goal": "Capture the redacted evidence from the successful live Allstate filing, document the current Retell/CLI deployment boundary, and resolve the production-safety questions in the claim packet, readiness gates, post-call extraction, and JobNimbus writeback before file:claim is exposed through the Render bridge.",
@@ -50,6 +50,11 @@
       "at": "2026-07-10",
       "by": "claude",
       "note": "Answered all 7 review questions in the PR thread and landed the fixture-safe hardening. Q3: post-call analysis schema is now configured in code (postCallAnalysisSchema in retell.js), field names matched to postCallWriteback; transcript-derived values stay flagged transcript-guess. Q5: policy readiness is carrier-aware (warning by default, hard-block only when carrier.requiresPolicyNumber). Q6: writeback keeps claim/adjuster/status in FIELDS + one short operational note. Q7: outcome distinguishes existing_claim_confirmed (status_follow_up goal) from claim_filed. Q4: the four business defaults were PRESERVED per Chance. Redacted operational record added at docs/operational-record-claim-filing.md; deployment truth documented (file:claim is local CLI only, not on the bridge). Fixture-safe tests added to selftest.js. No live call/write/deploy."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Reviewed commit 2e2717e independently. npm ci, npm run check, npm run sweep:fixture, and git diff --check all pass. Retell's current official create-agent documentation confirms post_call_analysis_data is supported. Task closed; bridge integration remains a separate approval-gated task."
     }
   ],
   "result": {
