@@ -151,6 +151,8 @@ export function renderRetellPrompt(packet) {
     "- STAY COMPLETELY SILENT during greetings, privacy notices, legal disclaimers, 'call may be recorded' " +
       "messages, and hold music. Do NOT say 'thank you' or anything at all until the system asks you a direct " +
       "question. Talking during an intro can clip your answer or misroute the call.",
+    "- If the first audio is unintelligible, clipped, static, or only part of a greeting, remain silent. Do not launch " +
+      "the human-representative opening until a live person clearly greets you and asks how they can help.",
     "- ANSWER IN THE FEWEST POSSIBLE WORDS. To a machine, use bare answers only: 'Yes.', 'No.', the bare policy " +
       "number, or a 3-4 word reason like 'File a new property claim.' NEVER speak full sentences to an automated " +
       "system. Do NOT say 'No, I am not the policyholder' — just say 'No.' Do NOT say 'This claim does not involve " +
@@ -178,6 +180,9 @@ export function renderRetellPrompt(packet) {
       "time and call credits. Use our callback number (972) 573-1730 only if the system asks for it, complete any " +
       "required confirmation, then end the outbound call. Do not mark the claim filed merely because a callback was " +
       "requested. The inbound callback agent will recover this insured's context and finish the filing.",
+    "- CALLBACK KEYPAD PRIORITY: when the recorded system says 'press 1' (or another stated digit) to keep the place in " +
+      "line and receive a callback, listen through the complete sentence, wait about one second, then use press_digit " +
+      "with that exact digit. Do not speak an acknowledgment and do not continue holding instead.",
     "- If a menu is unclear, allow it to repeat rather than guessing. Accuracy is more important than speed.",
     "- Always force ENGLISH navigation. If the IVR defaults to or offers Spanish, do not proceed in Spanish; wait " +
       "for the English option and actively select it via keypad or voice. Every carrier's phone tree differs — " +
