@@ -110,6 +110,33 @@ export function retellCallBody(plan) {
   });
 }
 
+export function callbackCandidateFromCall(call) {
+  const metadata = call?.metadata || {};
+  const variables = call?.retell_llm_dynamic_variables || {};
+  if (metadata.source !== CLAIM_BRIDGE_SOURCE || !metadata.contactId) return null;
+  const filingOutcome = String(call?.call_analysis?.custom_analysis_data?.filing_outcome || "");
+  if (filingOutcome === "claim_filed" || filingOutcome === "existing_claim_confirmed") return null;
+  return {
+    callId: String(call.call_id || ""),
+    contactId: String(metadata.contactId),
+    fileNumber: String(metadata.fileNumber || ""),
+    goal: String(metadata.goal || variables.goal || "file_new_claim"),
+    carrier: String(variables.carrier || ""),
+    insuredName: String(variables.insuredName || ""),
+    propertyAddress: String(variables.propertyAddress || ""),
+    policyNumber: String(variables.policyNumber || ""),
+    policyNumberSpoken: String(variables.policyNumberSpoken || ""),
+    claimNumber: String(variables.claimNumber || ""),
+    filingOutcome,
+    carrierPhone: normalizePhoneOrBlank(call.to_number),
+    createdAt: Number(call.start_timestamp || 0)
+  };
+}
+
+function normalizePhoneOrBlank(value) {
+  try { return normalizePhone(value); } catch { return ""; }
+}
+
 export function analyzeClaimCall(call, file) {
   const extracted = extractCallResults(call);
   const proposal = buildWritebackProposal(file, extracted);

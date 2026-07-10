@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  callbackCandidateFromCall,
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
@@ -9,8 +10,61 @@ import {
   retellCallBody,
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
+import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
 
 const OWNER_ID = "chance-owner";
+
+test("spokenPolicyNumber strips mortgage control and loan references", () => {
+  assert.equal(
+    spokenPolicyNumber("Master Policy 7007-0002 / Control Q4622430 / Loan 0055298467"),
+    "7007-0002"
+  );
+  assert.equal(spokenPolicyNumber("Policy # 93-E4-B591-7"), "93-E4-B591-7");
+});
+
+test("callbackCandidateFromCall reconstructs a pending case from Retell metadata", () => {
+  assert.deepEqual(callbackCandidateFromCall({
+    call_id: "call-1",
+    to_number: "+18008248562",
+    start_timestamp: 1770000000000,
+    metadata: {
+      source: "hcn-wave-jobnimbus-bridge",
+      contactId: "contact-2717",
+      fileNumber: "2717",
+      goal: "file_new_claim"
+    },
+    retell_llm_dynamic_variables: {
+      carrier: "National General",
+      insuredName: "Margarito Vega",
+      propertyAddress: "5412 Meadow Nest Dr",
+      policyNumber: "Master Policy 7007-0002 / Control Q4622430",
+      policyNumberSpoken: "7007-0002"
+    }
+  }), {
+    callId: "call-1",
+    contactId: "contact-2717",
+    fileNumber: "2717",
+    goal: "file_new_claim",
+    carrier: "National General",
+    insuredName: "Margarito Vega",
+    propertyAddress: "5412 Meadow Nest Dr",
+    policyNumber: "Master Policy 7007-0002 / Control Q4622430",
+    policyNumberSpoken: "7007-0002",
+    claimNumber: "",
+    filingOutcome: "",
+    carrierPhone: "+18008248562",
+    createdAt: 1770000000000
+  });
+});
+
+test("completed filings are not offered as callback candidates", () => {
+  assert.equal(callbackCandidateFromCall({
+    call_id: "call-complete",
+    to_number: "+18008248562",
+    metadata: { source: "hcn-wave-jobnimbus-bridge", contactId: "contact-1" },
+    call_analysis: { custom_analysis_data: { filing_outcome: "claim_filed" } }
+  }), null);
+});
 
 function fixture(overrides = {}) {
   return {

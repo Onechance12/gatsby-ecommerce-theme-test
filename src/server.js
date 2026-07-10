@@ -11,6 +11,7 @@ import {
   assertApprovalDigest,
   buildClaimFilingPlan,
   retellCallBody,
+  callbackCandidateFromCall,
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
 
@@ -51,6 +52,7 @@ const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER 
 const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(tmpdir(), "jobnimbus-claim-call-ledger.json");
+const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
@@ -92,6 +94,7 @@ const routes = new Map([
   ["POST /claim-filing/call", placeClaimFilingCall],
   ["POST /claim-filing/result", claimFilingResult],
   ["POST /claim-filing/writeback", claimFilingWriteback],
+  ["POST /retell/inbound", retellInbound],
   ["POST /gmail/search", gmailSearch],
   ["POST /gmail/thread", gmailThread],
   ["POST /gmail/draft", gmailDraft],
@@ -106,7 +109,10 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith("/artifacts/") && (!BRIDGE_TOKEN || !authorized(req))) {
       return send(res, 401, { error: "Artifact mailbox requires bridge bearer authentication." });
     }
-    if (!isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
+    if (url.pathname === "/retell/inbound" && !retellInboundAuthorized(url)) {
+      return send(res, 401, { error: "Unauthorized inbound webhook" });
+    }
+    if (url.pathname !== "/retell/inbound" && !isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
     const body = req.method === "GET" ? {} : await readJson(req);
     const result = await handler(body);
     if (result?.html) sendHtml(res, 200, result.html);
@@ -181,7 +187,8 @@ function health() {
       callsAllowed: ALLOW_RETELL_CALLS,
       ownerScope: "Chance Pearson",
       approvalDigestRequired: true,
-      writebackRequiresSeparateApproval: true
+      writebackRequiresSeparateApproval: true,
+      callbackWebhookAvailable: Boolean(RETELL_INBOUND_WEBHOOK_TOKEN)
     }
   };
 }
@@ -894,6 +901,93 @@ async function claimFilingWriteback(input) {
     writebackDigest: analysis.writebackDigest,
     results
   };
+}
+
+async function retellInbound(input) {
+  const event = input?.event;
+  const inbound = input?.call_inbound;
+  if (event !== "call_inbound" || !inbound?.from_number || !inbound?.to_number) {
+    badRequest("Expected a Retell call_inbound webhook payload.");
+  }
+
+  const candidates = await recentCallbackCandidates(inbound.from_number);
+  const exact = candidates.filter((candidate) => samePhone(candidate.carrierPhone, inbound.from_number));
+  const selected = exact.length === 1 ? exact[0] : (candidates.length === 1 ? candidates[0] : null);
+  const dynamicVariables = selected
+    ? callbackDynamicVariables(selected, "matched")
+    : callbackDynamicVariables({
+        carrier: "Unknown carrier callback",
+        insuredName: "Unknown",
+        propertyAddress: "Unknown",
+        policyNumberSpoken: "Unknown",
+        claimNumber: "Unknown"
+      }, candidates.length ? "needs_identity_confirmation" : "no_pending_case");
+
+  if (!selected && candidates.length) {
+    dynamicVariables.pendingCallbackCases = candidates.slice(0, 8).map(callbackCaseLabel).join(" | ");
+  }
+
+  return {
+    call_inbound: {
+      override_agent_id: RETELL_AGENT_ID,
+      dynamic_variables: dynamicVariables,
+      metadata: {
+        source: "hcn-wave-retell-callback",
+        ownerId: CHANCE_OWNER_ID,
+        contactId: selected?.contactId || "",
+        originalCallId: selected?.callId || "",
+        callbackMatch: dynamicVariables.callbackMatch
+      }
+    }
+  };
+}
+
+async function recentCallbackCandidates(fromNumber) {
+  if (!RETELL_API_KEY) return [];
+  const response = await retellApi("POST", "/v3/list-calls", {
+    filter_criteria: { direction: "outbound" },
+    sort_order: "descending",
+    limit: 100
+  });
+  const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
+  return (response.items || [])
+    .map(callbackCandidateFromCall)
+    .filter(Boolean)
+    .filter((candidate) => !candidate.createdAt || candidate.createdAt >= cutoff)
+    .sort((a, b) => {
+      const aExact = samePhone(a.carrierPhone, fromNumber) ? 1 : 0;
+      const bExact = samePhone(b.carrierPhone, fromNumber) ? 1 : 0;
+      return bExact - aExact || b.createdAt - a.createdAt;
+    });
+}
+
+function callbackDynamicVariables(candidate, match) {
+  return {
+    directionMode: "carrier_callback",
+    callbackMatch: match,
+    callbackCarrier: String(candidate.carrier || "Unknown"),
+    callbackInsuredName: String(candidate.insuredName || "Unknown"),
+    callbackPropertyAddress: String(candidate.propertyAddress || "Unknown"),
+    callbackPolicyNumber: String(candidate.policyNumberSpoken || "Unknown"),
+    callbackClaimNumber: String(candidate.claimNumber || "Unknown"),
+    pendingCallbackCases: ""
+  };
+}
+
+function callbackCaseLabel(candidate) {
+  const policySuffix = String(candidate.policyNumberSpoken || candidate.policyNumber || "").replace(/\W/g, "").slice(-4);
+  return [candidate.carrier, candidate.insuredName, candidate.propertyAddress, policySuffix ? `policy ending ${policySuffix}` : ""]
+    .filter(Boolean)
+    .join("; ");
+}
+
+function samePhone(a, b) {
+  return String(a || "").replace(/\D/g, "").slice(-10) === String(b || "").replace(/\D/g, "").slice(-10);
+}
+
+function retellInboundAuthorized(url) {
+  if (!RETELL_INBOUND_WEBHOOK_TOKEN) return false;
+  return url.searchParams.get("token") === RETELL_INBOUND_WEBHOOK_TOKEN;
 }
 
 async function buildLiveClaimContext(query) {
