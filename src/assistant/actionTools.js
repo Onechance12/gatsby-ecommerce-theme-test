@@ -28,8 +28,8 @@ const ACTION_DEFINITIONS = [
   },
   {
     name: "update_jobnimbus_note",
-    description: "Replace the body of an existing JobNimbus note/activity (e.g. to correct one). Dry-run unless execute:true and ALLOW_JOBNIMBUS_WRITES=true.",
-    input: { noteId: "string (activity jnid)", note: "string (new full body)", execute: "boolean optional" },
+    description: "Replace the body of an existing JobNimbus note/activity. Requires the Chance file query AND noteId; verifies the note belongs to that file before any PUT. Dry-run unless execute:true and ALLOW_JOBNIMBUS_WRITES=true.",
+    input: { query: "string (Chance file)", noteId: "string (activity jnid)", note: "string (new full body)", execute: "boolean optional" },
     writes: ["JobNimbus activities"]
   },
   {
@@ -57,16 +57,12 @@ export async function runActionTool(config, args) {
 
   const input = parseInput(rest.join(" "));
 
-  // Most actions target a file (by query); update_jobnimbus_note targets an
-  // activity by id, so it needs no file match.
-  const needsFile = actionName !== "update_jobnimbus_note";
-  let review = null;
-  let alternates = [];
-  if (needsFile) {
-    const reviews = loadReviews(config);
-    const query = required(input.query || input._, "query");
-    ({ review, alternates } = requireFileMatch(reviews, query));
-  }
+  // EVERY action targets a Chance-owned file resolved by query — including
+  // update_jobnimbus_note, so a raw activity id can never edit an unrelated
+  // company note.
+  const reviews = loadReviews(config);
+  const query = required(input.query || input._, "query");
+  const { review, alternates } = requireFileMatch(reviews, query);
 
   let plan;
   if (actionName === "create_jobnimbus_note") {
@@ -78,7 +74,7 @@ export async function runActionTool(config, args) {
   } else if (actionName === "update_jobnimbus_contact") {
     plan = planUpdateContact(config, review, input);
   } else if (actionName === "update_jobnimbus_note") {
-    plan = planUpdateNote(config, input);
+    plan = await planUpdateNote(config, review, input);
   } else if (actionName === "append_jobnimbus_description") {
     plan = await planAppendDescription(config, review, input);
   } else {
@@ -138,16 +134,49 @@ export async function runActionTool(config, args) {
   });
 }
 
-function planUpdateNote(config, input) {
+// Collect every file/contact id an activity is linked to (primary + related).
+export function activityFileIds(activity) {
+  const ids = [];
+  if (activity?.primary?.id) ids.push(String(activity.primary.id));
+  for (const r of activity?.related || []) if (r?.id) ids.push(String(r.id));
+  return ids;
+}
+
+// Returns "" if the activity belongs to fileId, otherwise a specific rejection.
+export function noteOwnershipError(activity, fileId, customer) {
+  if (!activity || typeof activity !== "object") return `activity ${activity ? "shape" : "not found"} could not be read; refusing to edit.`;
+  const ids = activityFileIds(activity);
+  if (ids.includes(String(fileId))) return "";
+  return `note is not related to ${customer} (${fileId}); it is linked to [${ids.join(", ") || "no file"}]. Pass the correct {query, noteId} pair.`;
+}
+
+async function planUpdateNote(config, review, input) {
   const noteId = required(input.noteId, "noteId");
   const note = required(input.note, "note");
+
+  // Fetch the target activity and VERIFY it belongs to the resolved Chance file
+  // before planning any PUT. A raw/wrong activity id must fail here, not write.
+  if (config.useFixtures) {
+    throw new Error("update_jobnimbus_note verifies note ownership against live JobNimbus and cannot run in fixture mode.");
+  }
+  const client = new ReadOnlyJobNimbusClient(config);
+  let activity;
+  try {
+    activity = await client.getJson(`${config.endpoints.activities}/${encodeURIComponent(noteId)}`);
+  } catch (error) {
+    throw new Error(`Could not fetch note ${noteId} to verify ownership: ${config.redact(error.message)}`);
+  }
+  const ownershipError = noteOwnershipError(activity, review.file.id, review.file.customer);
+  if (ownershipError) throw new Error(`Refusing to edit note ${noteId}: ${ownershipError}`);
+
   const policyViolations = notePolicyViolations(note);
   return {
     method: "PUT",
     endpoint: `${config.endpoints.activities}/${encodeURIComponent(noteId)}`,
     body: { note, date_updated: nowUnix() },
     warnings: noteWarnings(note),
-    policyViolations
+    policyViolations,
+    verifiedOwnership: { noteId, fileId: review.file.id, customer: review.file.customer }
   };
 }
 

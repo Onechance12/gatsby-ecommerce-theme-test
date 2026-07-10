@@ -18,7 +18,11 @@ export function extractCallResults(call) {
   const adjusterEmail = firstNonEmpty(cad.adjuster_email, transcriptEmail(transcript));
   const documentSubmission = firstNonEmpty(cad.document_submission, transcriptEmail(transcript));
   const nextStep = firstNonEmpty(cad.next_step);
-  const outcome = firstNonEmpty(cad.filing_outcome, inferOutcome(claimNumber, call));
+  // Goal came in from file:claim metadata. It decides whether a captured claim #
+  // means a NEW filing landed or an EXISTING claim was merely confirmed — the two
+  // must not both be labeled "claim_filed" (that mislabels follow-up calls).
+  const goal = firstNonEmpty(call?.raw?.metadata?.goal, dv.goal);
+  const outcome = firstNonEmpty(cad.filing_outcome, inferOutcome(claimNumber, call, goal));
 
   return {
     insuredName: firstNonEmpty(dv.insuredName),
@@ -41,8 +45,11 @@ export function extractCallResults(call) {
   };
 }
 
-// Map extracted results onto the JobNimbus custom fields + status + note, exactly
-// like the Frazier writeback we did by hand.
+// Map extracted results onto the JobNimbus custom fields + status + note. The
+// STRUCTURED data (claim #, adjuster, status) belongs in FIELDS — that's what the
+// sweep, pulse, and filer read back. The note is a short, human, timeline line —
+// NOT a dump of the same values (that just clutters the activity feed and drifts
+// out of sync with the fields). One source of truth per fact.
 export function buildWritebackBundle(file, ex) {
   const fields = {};
   if (ex.claimNumber) fields.cf_string_2 = cleanClaim(ex.claimNumber);
@@ -55,25 +62,20 @@ export function buildWritebackBundle(file, ex) {
   if (ex.claimNumber && /photo file|estimate needed|ready for pa|paperwork/i.test(file.status || "")) {
     suggestedStatus = "Submitted Awaiting Confirmation";
   }
-
-  const carrier = (file.carrier || ex.carrier || "the carrier").toString();
-  const noteLines = [
-    `CLAIM ${ex.outcome === "existing_claim_confirmed" ? "CONFIRMED" : "FILED"} — ${carrier.toUpperCase()}`,
-    "",
-    "Filed/confirmed by phone.",
-    ex.claimNumber ? `Claim #: ${cleanClaim(ex.claimNumber)}` : "Claim #: (not captured)",
-    ex.adjusterName ? `Assigned to: ${ex.adjusterName}${ex.adjusterPhone ? ` (${ex.adjusterPhone})` : ""}` : null,
-    ex.adjusterEmail ? `Adjuster/docs email: ${ex.adjusterEmail}` : null,
-    ex.documentSubmission ? `Documents to: ${ex.documentSubmission}` : null,
-    ex.nextStep ? `Next step: ${ex.nextStep}` : null,
-    suggestedStatus ? `Status: moved to ${suggestedStatus}` : null
-  ].filter((l) => l !== null);
-  const note = noteLines.join("\n");
-
   if (suggestedStatus) fields.status_name = suggestedStatus;
+
+  // ONE short note. Distinguishes a new filing from an existing-claim confirmation,
+  // and points at the fields for the details rather than restating them.
+  const confirmed = ex.outcome === "existing_claim_confirmed";
+  const note = ex.claimNumber
+    ? (confirmed
+        ? "Existing claim confirmed by phone. Claim #, adjuster, and status updated in the file fields."
+        : "Claim filed by phone. Awaiting adjuster assignment and inspection scheduling; claim # saved to the file.")
+    : "Filing call completed — no claim number captured. See call transcript before re-attempting.";
 
   return {
     file: { id: file.id, customer: file.customer, currentStatus: file.status },
+    outcome: ex.outcome,
     proposedFields: fields,
     proposedNote: note,
     commands: {
@@ -166,8 +168,12 @@ function transcriptNear(t, anchor, pattern) {
   const m = window.match(pattern);
   return m ? m[0] : "";
 }
-function inferOutcome(claimNumber, call) {
-  if (claimNumber) return "claim_filed";
+function inferOutcome(claimNumber, call, goal) {
+  if (claimNumber) {
+    // A follow-up/status call that surfaced a claim # merely CONFIRMED an existing
+    // claim — it did not file a new one. Only a new-filing goal earns "claim_filed".
+    return /follow|status|existing|confirm/i.test(String(goal || "")) ? "existing_claim_confirmed" : "claim_filed";
+  }
   if (call?.disconnectionReason === "dial_no_answer" || call?.disconnectionReason === "dial_failed") return "no_result";
   return "no_result";
 }

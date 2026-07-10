@@ -11,6 +11,8 @@ import { reviewFiles } from "./rules/reviewFiles.js";
 import { parseDate, daysBetween, dateOnly, todayDate } from "./lib/dates.js";
 import { findChanceUserIds, isChanceContact } from "./lib/chanceScope.js";
 import { isOperationalDocument } from "./jobnimbus/documentFilters.js";
+import { extractCallResults, buildWritebackBundle } from "./assistant/postCallWriteback.js";
+import { activityFileIds, noteOwnershipError } from "./assistant/actionTools.js";
 
 const projectRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 let failures = 0;
@@ -66,6 +68,57 @@ check("every review has a thresher phase", reviews.every((review) => review.thre
 
 const readyForAppraisal = reviews.find((review) => review.file.customer === "Josee Jimenez");
 check("ready-for-appraisal detected", readyForAppraisal?.categories.includes("Ready for appraisal"));
+
+// ---- post-call writeback: extraction, outcome distinction, note hygiene ----
+const fakeFile = { id: "abc123", customer: "Test Insured", status: "Photo File Received", carrier: "Allstate" };
+
+// A NEW filing that captured a claim number via Retell's structured analysis.
+// All values here are synthetic — never a real claim number, name, or phone.
+const newFilingCall = {
+  transcript: "Rep: your claim number is 1 1 1 2 2 2 3 3 3 4.",
+  raw: {
+    metadata: { goal: "file_new_claim" },
+    call_analysis: { custom_analysis_data: { claim_number: "1112223334", adjuster_name: "Fixture Team", adjuster_phone: "555-000-1111" } }
+  }
+};
+const newEx = extractCallResults(newFilingCall);
+check("extract reads claim # from retell analysis", newEx.claimNumber === "1112223334");
+check("extract source flags retell-analysis", newEx.source.claimNumber === "retell-analysis");
+check("new-filing goal => claim_filed", newEx.outcome === "claim_filed");
+
+const newBundle = buildWritebackBundle(fakeFile, newEx);
+check("claim # goes to fields not just note", newBundle.proposedFields.cf_string_2 === "1112223334");
+check("adjuster name goes to fields", newBundle.proposedFields.cf_string_7 === "Fixture Team");
+check("writeback note is short (single line, no field dump)", newBundle.proposedNote.split("\n").length === 1 && !newBundle.proposedNote.includes("1112223334"));
+
+// A STATUS follow-up that surfaced an existing claim number must NOT read as filed.
+const followUpCall = {
+  transcript: "Rep: yes that claim is on file, number 1 2 3 4 5 6 7.",
+  raw: { metadata: { goal: "status_follow_up" }, call_analysis: { custom_analysis_data: { claim_number: "1234567" } } }
+};
+const followEx = extractCallResults(followUpCall);
+check("follow-up goal => existing_claim_confirmed", followEx.outcome === "existing_claim_confirmed");
+check("existing-claim note says confirmed, not filed", /confirmed/i.test(buildWritebackBundle(fakeFile, followEx).proposedNote));
+
+// No claim number captured => no_result, and no field writes proposed.
+const deadCall = { transcript: "no answer", raw: { metadata: { goal: "file_new_claim" }, call_analysis: { custom_analysis_data: {} } }, disconnectionReason: "dial_no_answer" };
+const deadEx = extractCallResults(deadCall);
+check("no claim # => no_result outcome", deadEx.outcome === "no_result");
+check("no extraction => no field updates", Object.keys(buildWritebackBundle(fakeFile, deadEx).proposedFields).length === 0);
+
+// Spelled-out claim number ("zero eight three...") parsed from transcript fallback.
+const spelledCall = { transcript: "Rep: the claim number is zero eight three two seven, thanks.", raw: { metadata: {}, call_analysis: { custom_analysis_data: {} } } };
+check("spelled-out claim # parsed from transcript", extractCallResults(spelledCall).claimNumber === "08327");
+
+// ---- note-ownership guard (scope-note-update hardening) ----
+const primaryOwned = { primary: { id: "abc123" }, related: [] };
+const relatedOwned = { primary: { id: "zzz999" }, related: [{ id: "abc123" }] };
+const foreign = { primary: { id: "other1" }, related: [{ id: "other2" }] };
+check("activityFileIds collects primary + related", activityFileIds(relatedOwned).join(",") === "zzz999,abc123");
+check("note owned via primary => allowed", noteOwnershipError(primaryOwned, "abc123", "Test") === "");
+check("note owned via related => allowed", noteOwnershipError(relatedOwned, "abc123", "Test") === "");
+check("note on foreign file => rejected", noteOwnershipError(foreign, "abc123", "Test").length > 0);
+check("missing activity => rejected", noteOwnershipError(null, "abc123", "Test").length > 0);
 
 console.log("");
 if (failures) {

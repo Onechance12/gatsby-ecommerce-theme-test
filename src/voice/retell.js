@@ -289,6 +289,30 @@ function bulletLines(items) {
   return (items && items.length ? items : ["(none)"]).map((item) => `- ${item}`).join("\n");
 }
 
+// The post-call analysis schema Retell runs against the transcript after every
+// call. It populates call_analysis.custom_analysis_data with exactly the fields
+// postCallWriteback.extractCallResults() reads — so the writeback prefers a
+// structured extraction over transcript guessing. Kept in CODE (not a one-off
+// curl PATCH) so every agent update re-applies it and it can never drift.
+// Field names here MUST match the cad.* keys in postCallWriteback.js.
+// Docs: https://docs.retellai.com/build/post-call-analysis
+export function postCallAnalysisSchema() {
+  return [
+    { type: "string", name: "claim_number", description: "The claim or reference number the carrier gave for this filing, digits/letters only. Empty if none was issued on the call." },
+    { type: "string", name: "adjuster_name", description: "Full name of the assigned adjuster or handling team, if the rep provided one. Empty if not assigned yet." },
+    { type: "string", name: "adjuster_phone", description: "Direct phone number for the adjuster or claims team, if given. Empty if not provided." },
+    { type: "string", name: "adjuster_email", description: "Email address for the adjuster, if given. Empty if not provided." },
+    { type: "string", name: "document_submission", description: "The email address or portal the rep said to use for sending the Letter of Representation and documents. Empty if not provided." },
+    { type: "string", name: "next_step", description: "The next step or timeframe the rep described (e.g. 'adjuster will call in 24-48 hours', 'inspection to be scheduled'). Empty if none." },
+    {
+      type: "enum",
+      name: "filing_outcome",
+      description: "The outcome of the call. 'claim_filed' = a NEW claim was opened and a claim number issued. 'existing_claim_confirmed' = an already-existing claim was confirmed (no new claim opened). 'no_result' = no claim/reference number obtained (no answer, IVR dead-end, or rep could not file).",
+      choices: ["claim_filed", "existing_claim_confirmed", "no_result"]
+    }
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Configure (create/update) the Retell LLM + agent from a call packet
 // ---------------------------------------------------------------------------
@@ -312,6 +336,7 @@ export async function configureRetellAgentFromPacket(config, packet, options = {
       voiceId: config.retell.voiceId || "(RETELL_VOICE_ID not set - Retell default will apply)"
     },
     llmRequestBody: llm.toLlmRequestBody(),
+    postCallAnalysisData: postCallAnalysisSchema(),
     missingConfig: missing
   };
 
@@ -334,7 +359,8 @@ export async function configureRetellAgentFromPacket(config, packet, options = {
   const agentBody = {
     agent_name: options.agentName || "Wave Public Adjusting - Carrier Claim Call",
     response_engine: { type: "retell-llm", llm_id: llmResult.llm_id },
-    voice_id: config.retell.voiceId || "11labs-Adrian"
+    voice_id: config.retell.voiceId || "11labs-Adrian",
+    post_call_analysis_data: postCallAnalysisSchema()
   };
 
   const agentResult = config.retell.agentId

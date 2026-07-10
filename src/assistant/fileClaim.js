@@ -121,7 +121,7 @@ export async function runFileClaim(config, args) {
     to,
     agentId: input.agentId,
     dynamicVariables,
-    metadata: { purpose: "file_claim", file: `${review.file.customer} (${review.file.id})`, carrier: packet.verifiedFileFacts.carrier },
+    metadata: { purpose: "file_claim", goal, file: `${review.file.customer} (${review.file.id})`, carrier: packet.verifiedFileFacts.carrier },
     execute: true
   });
 
@@ -181,14 +181,21 @@ function assessReadiness(packet, to, carrier) {
   const f = packet.verifiedFileFacts;
   const blockers = [];
   const isMissing = (v) => !v || /^missing/i.test(String(v));
+  const warnings = [];
   if (isMissing(f.insuredName)) blockers.push("no insured name");
   if (isMissing(f.propertyAddress)) blockers.push("no property address");
   if (isMissing(f.carrier)) blockers.push("no carrier");
-  if (isMissing(f.policyNumber)) blockers.push("no policy number");
   if (isMissing(f.dateOfLoss)) blockers.push("no date of loss");
   if (!to && !carrier) blockers.push("no filing phone for this carrier");
 
-  const warnings = [];
+  // Policy number is NOT a universal blocker: the Wave playbook has the agent let
+  // the carrier locate coverage by insured name + property address + phone. Only
+  // carriers explicitly flagged requiresPolicyNumber in the directory hard-block.
+  if (isMissing(f.policyNumber)) {
+    if (carrier?.requiresPolicyNumber) blockers.push(`no policy number (${carrier.display} requires it to locate the policy)`);
+    else warnings.push("no policy number — carrier will be asked to locate coverage by insured name/address/phone");
+  }
+
   if (isMissing(f.stormTime)) warnings.push("no storm time (run DOL report / inspection capture)");
   if (!packet.damageSummary?.length || /^No specific/i.test(packet.damageSummary[0])) {
     warnings.push("no damage scope captured");
