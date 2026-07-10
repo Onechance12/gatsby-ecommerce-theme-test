@@ -20,7 +20,7 @@
     "A redacted operational record explains the successful Allstate filing path, result capture, manual cleanup, and writeback method without client PII or secrets.",
     "The handoff states whether file:claim is local CLI only or exposed anywhere live and identifies the live Retell configuration generation without IDs or secrets.",
     "Retell post-call custom analysis fields are documented and configured in code, or the writeback clearly treats transcript-derived values as unverified proposals.",
-    "Injuries, habitability, temporary repairs, and contractor answers are not represented as verified unless supported by current file evidence or an explicit approved override.",
+    "The company-approved standard answers remain: no injuries reported, home habitable, temporary repairs made, and Titan Reconstruction is the contractor. Current file evidence or Chance's explicit instruction overrides a default when a claim differs.",
     "Missing-policy readiness is carrier-aware and consistent with the Wave playbook instead of universally blocking when alternate lookup is viable.",
     "Post-call JobNimbus proposals keep claim, adjuster, and status values in fields and use one short operational note consistent with Chance's note rules.",
     "Existing-claim confirmation is distinguishable from a newly filed claim in the extracted outcome.",
@@ -40,6 +40,11 @@
       "at": "2026-07-10",
       "by": "codex",
       "note": "Created after code review and fixture dry runs. The architecture is strong and a real Allstate filing reportedly succeeded; production questions were posted to PR #1 in comment 4936725671."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "chance/codex",
+      "note": "Chance confirmed the four standard filing answers are intentional business defaults: no injuries, habitable home, temporary repairs made, and Titan Reconstruction as contractor. Preserve them unless current evidence or Chance identifies an exception."
     }
   ],
   "result": {

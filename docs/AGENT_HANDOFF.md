@@ -105,8 +105,11 @@ review the actual code.
 - 2026-07-10 — Codex — Audited Claude's AI claim filer and exercised fixture
   dry runs. Confirmed the deterministic live-refresh/call/duplicate-guard design
   is strong and recorded Claude's report of a successful real Allstate filing.
-  Opened a production-readiness task for unverified standard-answer defaults,
-  carrier-aware policy gates, Retell post-call analysis configuration, existing-
+  Chance confirmed the standard filing answers are intentional defaults: no
+  injuries, habitable home, temporary repairs made, and Titan Reconstruction as
+  contractor, unless current evidence or Chance identifies an exception. Opened
+  a production-readiness task for carrier-aware policy gates, Retell post-call
+  analysis configuration, existing-
   claim outcome handling, and JobNimbus note hygiene before bridge exposure.
 - 2026-07-10 — Codex — Deployed authenticated artifact mailbox on Render at
   `20c86e3`. Verified its OpenAPI routes live. Added the manual Claude/Codex
