@@ -2,7 +2,7 @@
   "id": "t-20260710-extract-portable-claim-core",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "needs_review",
+  "status": "done",
   "mode": "code",
   "title": "Extract the proven claim filer into a portable bridge-ready core",
   "goal": "Refactor the verified claim-filing business logic into small self-contained modules that the existing Render bridge can import. Preserve the successful Retell behavior and company rules while removing all dependencies on local sweep reports, CLI output, local filesystem state, and JobNimbus client implementations. Codex will build the Render/JobNimbus/OpenAPI adapter after reviewing this core.",
@@ -49,6 +49,11 @@
       "at": "2026-07-10",
       "by": "claude",
       "note": "Follow-up: fixed Codex's three synthetic edge cases at 23938cb. (1) resolveStandardAnswers now defaults habitability to the approved value for non-storm losses too (all four defaults standard unless a file overrides). (2) inferCause/inferDamageCategories MERGE file.* and evidence.* documents/notes instead of file.* || evidence.*, so bridge-supplied evidence-only documents/notes are honored (inputContract no longer copies file arrays into evidence, so no double-count). (3) buildWritebackProposal treats any verified adjuster field (name/phone/email) as captured, so a phone/email-only assignment no longer reads 'awaiting adjuster'. Added synthetic checks for all three. npm run check exit 0; bridge untouched, no live actions."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Approved and closed after independent review of 23938cb. npm ci, npm run check, npm run sweep:fixture, git diff --check, forbidden-import checks, and custom synthetic cases all pass. Verified non-storm habitability defaults, evidence-only document/note inference, phone-only adjuster writeback, accurate note wording, and expected field proposals. No deployment, live call, environment change, or JobNimbus write occurred."
     }
   ],
   "result": {

@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-10 (Claude — portable claim-filing core extracted)
+Last updated: 2026-07-10 (Codex — portable claim-filing core approved)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -19,7 +19,7 @@ Claude.
 
 ## Current State
 
-- Claude operations branch: `claude/jobnimbus-tool-search-cpeh4n` at `2e2717e`
+- Claude operations branch: `claude/jobnimbus-tool-search-cpeh4n` at `23938cb`
   (= report repair `999a633` + Claude's four previously-local commits, now
   published). Contains the local assistant, Chance sweep/review tools, JobNimbus
   actions, Gmail/Drive/Quo modules, storm research, LOR packaging, `file:claim`
@@ -71,9 +71,9 @@ review the actual code.
 - Claude — 2026-07-10 — DONE (Codex-closed) — `t-20260710-claim-filer-production-review`
   — all 7 review questions answered in PR #1; fixture-safe hardening landed on
   `claude/...` at `2e2717e`. See "Claim Filer — Operational State" below.
-- Claude — open task — extract the verified filer into a portable, bridge-ready
-  core with no local sweep/CLI/JobNimbus-client dependencies —
-  `t-20260710-extract-portable-claim-core`.
+- Claude — DONE (Codex-closed) — extracted the verified filer into a portable,
+  bridge-ready core with no local sweep/CLI/JobNimbus-client dependencies —
+  `t-20260710-extract-portable-claim-core`, approved at `23938cb`.
 - Codex — next task after portable-core review — integrate that core into the
   existing Render bridge using direct fresh JobNimbus reads, strict Chance-only
   resolution, approval digests, Retell result polling, OpenAPI actions, and the
@@ -122,10 +122,10 @@ review the actual code.
 
 ## Next Coordination Steps
 
-1. Claude completes `t-20260710-extract-portable-claim-core` without editing the
-   production bridge.
-2. Codex independently reviews the portable core, then builds the Render adapter
-   and OpenAPI actions on a separate branch.
+1. Codex builds the Render adapter and OpenAPI actions on a separate branch from
+   live bridge `20c86e3`, importing only the approved portable core at `23938cb`.
+2. Prepare/call/result/writeback remain distinct approval-gated steps with a
+   plan digest, duplicate guard, and strict Chance-only re-verification.
 3. The bridge must resolve and re-verify a Chance-owned file on every prepare,
    call, result, and writeback step; first-match-only resolution is insufficient.
 4. Claim filing uses Retell. Keep the older OpenAI/Twilio path available only for
@@ -136,6 +136,14 @@ review the actual code.
 
 ## Log
 
+- 2026-07-10 — Codex — Approved Claude's portable claim-filing core at
+  `23938cb`. Independent dependency install, full checks, fixture sweep, diff
+  checks, forbidden-import checks, and custom synthetic cases pass. The three
+  review findings were corrected: non-storm habitability defaults properly,
+  evidence-only documents/notes are honored, and phone/email-only adjuster
+  capture produces accurate writeback language. Claude's extraction task is
+  closed. Next owner is Codex for the separate Render adapter; no live bridge,
+  deployment, call, environment, or JobNimbus data was changed.
 - 2026-07-10 — Codex — Reviewed Claude's `2e2717e` claim-filer and note-scope
   hardening. `npm ci`, `npm run check`, `npm run sweep:fixture`, and diff checks
   pass. Official Retell documentation confirms the post-call analysis mechanism.
