@@ -180,6 +180,27 @@ const withAdjuster = extractCallResults({ raw: { metadata: { goal: "file_new_cla
 const adjProposal = buildWritebackProposal({ id: "file1", customer: "Synthetic Insured", status: "Photo File Received" }, withAdjuster);
 check("adjuster captured => field written + note reflects it", adjProposal.proposedFields.cf_string_7 === "Desk Team" && /adjuster saved/i.test(adjProposal.proposedNote) && !/awaiting adjuster/i.test(adjProposal.proposedNote));
 
+// ---- Codex edge-case follow-ups ----
+// (1) All four defaults apply to NON-storm losses too (habitability not dropped).
+const nonStormInput = { file: { customer: "Non Storm", address: "2 Test St", carrier: "Allstate", dateOfLoss: "2026-05-02", typeOfLoss: "Theft" }, evidence: {} };
+const nonStormPacket = buildClaimCallPacket(nonStormInput, { goal: "file_new_claim" });
+check("non-storm loss still gets habitable default", nonStormPacket.verifiedFileFacts.homeLivable === STANDARD_FILING_ANSWERS.homeLivable);
+check("resolveStandardAnswers gives all four defaults with no overrides", resolveStandardAnswers({}).homeLivable === STANDARD_FILING_ANSWERS.homeLivable);
+
+// (2) Evidence-only documents/notes are honored (bridge supplies them under evidence).
+// typeOfLoss is left empty so cause is INFERRED from the evidence note (a present
+// typeOfLoss would short-circuit inference).
+const evidenceOnly = { file: { customer: "Evidence Only", address: "3 Test St", carrier: "Allstate", dateOfLoss: "2026-05-03", typeOfLoss: "", documents: [], notes: [] }, evidence: { documents: [{ name: "roof inspection report" }], notes: [{ body: "hail impact bruising on shingles; gutter and downspout damage noted" }] } };
+const evidencePacket = buildClaimCallPacket(evidenceOnly, { goal: "file_new_claim" });
+check("evidence-only documents drive damage categories", evidencePacket.damageSummary.some((c) => /roof/i.test(c)) && !/^No specific/i.test(evidencePacket.damageSummary[0]));
+check("evidence-only notes drive cause inference", evidencePacket.verifiedFileFacts.causeOfLoss === "Hail");
+
+// (3) Structured adjuster PHONE (no name) still counts as captured in the note.
+const phoneOnlyAdj = extractCallResults({ raw: { metadata: { goal: "file_new_claim" }, call_analysis: { custom_analysis_data: { claim_number: "66667777", adjuster_phone: "800-555-9000" } } } });
+const phoneOnlyProposal = buildWritebackProposal({ id: "file1", customer: "Synthetic Insured", status: "Photo File Received" }, phoneOnlyAdj);
+check("adjuster phone-only written to fields", phoneOnlyProposal.proposedFields.cf_string_8 === "800-555-9000");
+check("adjuster phone-only note does not say awaiting adjuster", !/awaiting adjuster/i.test(phoneOnlyProposal.proposedNote));
+
 console.log("");
 if (failures) {
   console.error(`Self-test failed: ${failures} check(s) failed.`);

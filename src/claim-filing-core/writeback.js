@@ -46,7 +46,9 @@ export function buildWritebackProposal(file, ex) {
     fieldConfidence.status_name = "suggested";
   }
 
-  const adjusterFieldWritten = Boolean(proposedFields.cf_string_7);
+  // Any VERIFIED adjuster field (name, phone, or email) counts as "captured" —
+  // otherwise a phone/email-only assignment would still read "awaiting adjuster".
+  const adjusterFieldWritten = Boolean(proposedFields.cf_string_7 || proposedFields.cf_string_8 || proposedFields.cf_string_9);
   const note = buildNote(ex, { adjusterCaptured: adjusterFieldWritten, statusMoved: Boolean(suggestedStatus) });
 
   return {

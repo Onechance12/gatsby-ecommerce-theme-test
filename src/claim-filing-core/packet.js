@@ -31,8 +31,7 @@ export function buildClaimCallPacket(input, options = {}) {
 
   const goal = normalizeGoal(options.goal || overrides.goal || DEFAULT_GOAL, file);
   const causeOfLoss = file.typeOfLoss || inferCause(file, normalized.evidence);
-  const stormLike = /hail|wind|storm/i.test(causeOfLoss);
-  const standard = resolveStandardAnswers(overrides, { stormLike });
+  const standard = resolveStandardAnswers(overrides);
 
   const facts = {
     insuredName: file.customer || "Missing",

@@ -14,20 +14,33 @@ export const STANDARD_FILING_ANSWERS = {
 };
 
 // Resolve the standard answers for a call: an explicit override always wins; the
-// company default fills the rest. homeLivable defaults only apply to storm-like
-// losses (a non-storm loss leaves it "Missing" so the rep is asked rather than
-// answered from an assumption).
-export function resolveStandardAnswers(overrides = {}, { stormLike = true } = {}) {
+// company default fills the rest. Per Chance, ALL FOUR defaults are standard for
+// routine residential claims — including habitability — unless a specific file
+// establishes an exception (passed as an override). We do NOT downgrade
+// habitability to "Missing" for non-storm losses; that would silently drop an
+// approved default.
+export function resolveStandardAnswers(overrides = {}) {
   const pick = (key, fallback) => {
     const v = overrides[key];
     return v && String(v).trim() ? String(v) : fallback;
   };
   return {
     injuries: pick("injuries", STANDARD_FILING_ANSWERS.injuries),
-    homeLivable: pick("homeLivable", stormLike ? STANDARD_FILING_ANSWERS.homeLivable : "Missing"),
+    homeLivable: pick("homeLivable", STANDARD_FILING_ANSWERS.homeLivable),
     temporaryRepairs: pick("temporaryRepairs", STANDARD_FILING_ANSWERS.temporaryRepairs),
     contractorHired: pick("contractorHired", STANDARD_FILING_ANSWERS.contractorHired)
   };
+}
+
+// Merge document/note evidence from BOTH the file record and the evidence block.
+// The canonical contract lets the bridge attach documents/notes under `evidence`
+// while the local sweep attaches them under `file`; a plain `file.x || evidence.x`
+// would ignore the evidence copy whenever file.x is a present-but-empty array.
+function mergedDocuments(file, evidence) {
+  return [...(file.documents || []), ...(evidence.documents || [])];
+}
+function mergedNotes(file, evidence) {
+  return [...(file.notes || []), ...(evidence.notes || [])];
 }
 
 // Infer the cause of loss from free-text evidence (type of loss, status,
@@ -36,8 +49,8 @@ export function inferCause(file = {}, evidence = {}) {
   const source = [
     file.typeOfLoss,
     file.status,
-    ...(evidence.documents || []).map((doc) => doc?.name || ""),
-    ...(evidence.notes || []).map((note) => note?.body || "")
+    ...mergedDocuments(file, evidence).map((doc) => doc?.name || ""),
+    ...mergedNotes(file, evidence).map((note) => note?.body || "")
   ].join("\n").toLowerCase();
   if (source.includes("hail") && source.includes("wind")) return "Hail / wind";
   if (source.includes("hail")) return "Hail";
@@ -54,8 +67,8 @@ export function inferDamageCategories(file = {}, evidence = {}) {
     evidence.recommendedNextAction,
     evidence.bottleneck,
     ...(evidence.categories || []),
-    ...(file.documents || evidence.documents || []).map((doc) => doc?.name || ""),
-    ...(file.notes || evidence.notes || []).map((note) => note?.body || "")
+    ...mergedDocuments(file, evidence).map((doc) => doc?.name || ""),
+    ...mergedNotes(file, evidence).map((note) => note?.body || "")
   ].join("\n").toLowerCase();
 
   const checks = [

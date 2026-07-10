@@ -53,8 +53,11 @@ export function normalizeClaimFileInput(raw = {}) {
       categories: evidence.categories || [],
       recommendedNextAction: evidence.recommendedNextAction || "",
       bottleneck: evidence.bottleneck || "",
-      documents: evidence.documents || file.documents || [],
-      notes: evidence.notes || file.notes || [],
+      // Documents/notes may live on the file record OR here; the damage/cause
+      // inference MERGES both (see standardAnswers.js), so keep these distinct
+      // rather than copying file.* in — copying would double-count the same items.
+      documents: evidence.documents || [],
+      notes: evidence.notes || [],
       tasks: evidence.tasks || []
     },
     captured: {
