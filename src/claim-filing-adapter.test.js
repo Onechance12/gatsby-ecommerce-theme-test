@@ -99,6 +99,8 @@ test("carrier calls refuse sensitive identity and banking information", () => {
   assert.match(prompt, /never provide, request, confirm, or invent a Social Security number/i);
   assert.match(prompt, /driver's license number, bank account, routing number/i);
   assert.match(prompt, /Just making sure we are still connected\./);
+  assert.match(prompt, /first configured silence reminder triggers at 30 seconds/i);
+  assert.match(prompt, /second reminder triggers at 60 seconds total/i);
 });
 
 function fixture(overrides = {}) {

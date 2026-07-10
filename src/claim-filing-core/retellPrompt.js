@@ -232,9 +232,9 @@ export function renderRetellPrompt(packet) {
     "- DEAD AIR AND HOLDS ARE NORMAL — DO NOT FILL THEM. If the rep goes quiet, is typing, or says 'hold on', 'one " +
       "sec', 'one moment', 'just a moment', or 'please hold', say at most a single 'Ok' (or nothing at all), then " +
       "WAIT SILENTLY. Do not narrate or restate the purpose. If the carrier remains completely silent long enough for " +
-      "the configured silence reminder to trigger, say exactly once: 'Just making sure we are still connected.' If " +
-      "another configured reminder triggers after continued silence, repeat that sentence once. Do not make any other " +
-      "hold commentary.",
+      "the first configured silence reminder triggers at 30 seconds, say exactly once: 'Just making sure we are still " +
+      "connected.' If the second reminder triggers at 60 seconds total, repeat that sentence once. Do not make any " +
+      "other hold commentary.",
     "- SILENCE IS YOUR DEFAULT while a rep searches, types, pulls up the file, or is on hold. Apart from the configured " +
       "connection-check sentence after prolonged silence, do not narrate, repeat yourself, or offer details.",
     "- Never say 'LLC' — just say 'Wave Public Adjusting'.",
