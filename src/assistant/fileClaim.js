@@ -1,9 +1,14 @@
 import { loadReviews, findMatches } from "./fileReview.js";
-import { buildClaimCallPacket } from "./claimCallPrompt.js";
-import { flattenFactsForDynamicVariables } from "../voice/retellCli.js";
-import { triggerRetellCall, fetchRetellCallResult } from "../voice/retell.js";
+import { buildClaimCallPacket, reviewToClaimInput } from "./claimCallPrompt.js";
+import {
+  flattenFactsForDynamicVariables,
+  assessReadiness,
+  existingClaimBlock,
+  lookupCarrier,
+  knownCarriers
+} from "../claim-filing-core/index.js";
+import { triggerRetellCall } from "../voice/retell.js";
 import { runPostCallWriteback } from "./postCallWriteback.js";
-import { lookupCarrier, knownCarriers } from "../voice/carrierDirectory.js";
 import { ReadOnlyJobNimbusClient } from "../jobnimbus/client.js";
 import { dateOnly } from "../lib/dates.js";
 
@@ -42,7 +47,7 @@ export async function runFileClaim(config, args) {
   if (contact) applyLiveOverrides(review.file, contact);
 
   const goal = input.goal || "file_new_claim";
-  const packet = buildClaimCallPacket(review, {
+  const packet = buildClaimCallPacket(reviewToClaimInput(review), {
     goal,
     carrierPhone: input.carrierPhone || "",
     stormTime: input.stormTime || captured.stormTime || "",
@@ -61,11 +66,11 @@ export async function runFileClaim(config, args) {
 
   const readiness = assessReadiness(packet, to, carrier);
 
-  // Duplicate-filing guard: never open a NEW claim on a file that already has a
-  // claim number (that's a follow-up, not a filing).
-  const existingClaim = String(review.file.claimNumber || "").replace(/^missing.*/i, "").trim();
-  if (goal === "file_new_claim" && existingClaim) {
-    readiness.blockers.push(`file already has claim # ${existingClaim} — use goal:"status_follow_up", not a new filing`);
+  // Duplicate-filing guard (shared with the bridge adapter via the core): never
+  // open a NEW claim on a file that already has a claim number.
+  const dupBlock = existingClaimBlock(review.file.claimNumber, goal);
+  if (dupBlock) {
+    readiness.blockers.push(dupBlock);
     readiness.ready = false;
   }
   // Surface a silent live-refresh failure so a call never quietly runs on stale data.
@@ -173,34 +178,6 @@ function matchLine(text, label) {
   const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*(.+)$`, "im");
   const m = re.exec(text || "");
   return m ? m[1].trim() : "";
-}
-
-// A file is "ready to file" when the carrier can actually find and open the
-// claim: insured name, property address, carrier, policy number, date of loss.
-function assessReadiness(packet, to, carrier) {
-  const f = packet.verifiedFileFacts;
-  const blockers = [];
-  const isMissing = (v) => !v || /^missing/i.test(String(v));
-  const warnings = [];
-  if (isMissing(f.insuredName)) blockers.push("no insured name");
-  if (isMissing(f.propertyAddress)) blockers.push("no property address");
-  if (isMissing(f.carrier)) blockers.push("no carrier");
-  if (isMissing(f.dateOfLoss)) blockers.push("no date of loss");
-  if (!to && !carrier) blockers.push("no filing phone for this carrier");
-
-  // Policy number is NOT a universal blocker: the Wave playbook has the agent let
-  // the carrier locate coverage by insured name + property address + phone. Only
-  // carriers explicitly flagged requiresPolicyNumber in the directory hard-block.
-  if (isMissing(f.policyNumber)) {
-    if (carrier?.requiresPolicyNumber) blockers.push(`no policy number (${carrier.display} requires it to locate the policy)`);
-    else warnings.push("no policy number — carrier will be asked to locate coverage by insured name/address/phone");
-  }
-
-  if (isMissing(f.stormTime)) warnings.push("no storm time (run DOL report / inspection capture)");
-  if (!packet.damageSummary?.length || /^No specific/i.test(packet.damageSummary[0])) {
-    warnings.push("no damage scope captured");
-  }
-  return { ready: blockers.length === 0, blockers, warnings };
 }
 
 function parseInput(text) {

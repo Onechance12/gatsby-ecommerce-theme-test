@@ -1,5 +1,6 @@
 import { loadReviews, findMatches } from "../assistant/fileReview.js";
-import { buildClaimCallPacket } from "../assistant/claimCallPrompt.js";
+import { buildClaimCallPacket, reviewToClaimInput } from "../assistant/claimCallPrompt.js";
+import { flattenFactsForDynamicVariables } from "../claim-filing-core/index.js";
 import { normalizeE164, parseJsonArg } from "./twilioHelpers.js";
 import {
   configureRetellAgentFromPacket,
@@ -16,7 +17,7 @@ export async function runRetellConfigure(config, args) {
   const input = parseJsonArg(args);
   const query = requireQuery(input);
   const { review } = requireFileMatch(config, query);
-  const packet = buildClaimCallPacket(review, { goal: input.goal, carrierPhone: input.carrierPhone || "" });
+  const packet = buildClaimCallPacket(reviewToClaimInput(review), { goal: input.goal, carrierPhone: input.carrierPhone || "" });
 
   const result = await configureRetellAgentFromPacket(config, packet, {
     execute: input.execute === true,
@@ -35,7 +36,7 @@ export async function runRetellCall(config, args) {
   let dynamicVariables;
   if (input.query) {
     const { review } = requireFileMatch(config, input.query);
-    const packet = buildClaimCallPacket(review, { goal: input.goal, carrierPhone: input.carrierPhone || "" });
+    const packet = buildClaimCallPacket(reviewToClaimInput(review), { goal: input.goal, carrierPhone: input.carrierPhone || "" });
     packetInfo = { query: input.query, goal: packet.goal, objective: packet.objective };
     dynamicVariables = flattenFactsForDynamicVariables(packet);
   }
@@ -73,47 +74,6 @@ export async function runRetellResult(config, args) {
       "After approval, update claim number/status/adjuster fields and leave one short file-specific note."
     ]
   });
-}
-
-// Every {{placeholder}} referenced in the Retell prompt. Kept in sync with
-// renderRetellPrompt — any placeholder missing a value at call time would be
-// spoken literally as "curly brace insured name", so we default them all.
-const PROMPT_PLACEHOLDERS = [
-  "objective",
-  "insuredName",
-  "propertyAddress",
-  "homeownerPhone",
-  "homeownerEmail",
-  "carrier",
-  "policyNumber",
-  "claimNumber",
-  "dateOfLoss",
-  "stormTime",
-  "causeOfLoss",
-  "adjuster",
-  "mortgageCompany",
-  "damageSummary",
-  "injuries",
-  "homeLivable",
-  "temporaryRepairs",
-  "contractorHired",
-  "occupancy",
-  "damageDiscovered"
-];
-
-export function flattenFactsForDynamicVariables(packet) {
-  const out = {};
-  for (const [key, value] of Object.entries(packet.verifiedFileFacts || {})) {
-    out[key] = String(value ?? "");
-  }
-  out.objective = String(packet.objective ?? "");
-  // damageSummary is a separate packet field (array) — the generic prompt
-  // references {{damageSummary}}, so pass it as a joined string per call.
-  out.damageSummary = (packet.damageSummary || []).join(", ");
-  for (const key of PROMPT_PLACEHOLDERS) {
-    if (!out[key]) out[key] = "Missing";
-  }
-  return out;
 }
 
 function requireQuery(input) {

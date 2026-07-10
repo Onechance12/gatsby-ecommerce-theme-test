@@ -13,6 +13,15 @@ import { findChanceUserIds, isChanceContact } from "./lib/chanceScope.js";
 import { isOperationalDocument } from "./jobnimbus/documentFilters.js";
 import { extractCallResults, buildWritebackBundle } from "./assistant/postCallWriteback.js";
 import { activityFileIds, noteOwnershipError } from "./assistant/actionTools.js";
+import {
+  buildClaimCallPacket,
+  assessReadiness,
+  existingClaimBlock,
+  lookupCarrier,
+  resolveStandardAnswers,
+  buildWritebackProposal,
+  STANDARD_FILING_ANSWERS
+} from "./claim-filing-core/index.js";
 
 const projectRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 let failures = 0;
@@ -119,6 +128,57 @@ check("note owned via primary => allowed", noteOwnershipError(primaryOwned, "abc
 check("note owned via related => allowed", noteOwnershipError(relatedOwned, "abc123", "Test") === "");
 check("note on foreign file => rejected", noteOwnershipError(foreign, "abc123", "Test").length > 0);
 check("missing activity => rejected", noteOwnershipError(null, "abc123", "Test").length > 0);
+
+// ---- portable claim core: packet, standard answers, readiness, duplicate guard ----
+const coreInput = {
+  file: {
+    id: "file1", customer: "Synthetic Insured", address: "1 Test St, Dallas TX",
+    carrier: "Allstate", policyNumber: "", claimNumber: "", dateOfLoss: "2026-05-01",
+    typeOfLoss: "Hail", status: "Photo File Received",
+    contact: { mobile_phone: "555-000-2222", email: "insured@example.test" }
+  },
+  evidence: { categories: ["roof hail damage"], documents: [], notes: [] }
+};
+const corePacket = buildClaimCallPacket(coreInput, { goal: "file_new_claim" });
+check("core packet resolves insured", corePacket.verifiedFileFacts.insuredName === "Synthetic Insured");
+check("core packet keeps the four standard defaults", corePacket.verifiedFileFacts.contractorHired === STANDARD_FILING_ANSWERS.contractorHired && corePacket.verifiedFileFacts.injuries === STANDARD_FILING_ANSWERS.injuries);
+
+// Standard-answer override wins over the default when a file differs.
+const overridden = buildClaimCallPacket(coreInput, { goal: "file_new_claim", injuries: "Yes, one minor injury reported" });
+check("standard answer is overrideable", overridden.verifiedFileFacts.injuries === "Yes, one minor injury reported");
+check("resolveStandardAnswers falls back to defaults", resolveStandardAnswers({}).temporaryRepairs === STANDARD_FILING_ANSWERS.temporaryRepairs);
+
+// Missing policy number: allowed for a carrier that does not require it (warning, not blocker).
+const allstate = lookupCarrier("Allstate");
+const readyAllowed = assessReadiness(corePacket, allstate.filingPhone, allstate);
+check("missing policy allowed when carrier does not require it", readyAllowed.ready === true && readyAllowed.warnings.some((w) => /no policy number/i.test(w)));
+
+// Missing policy number: hard-blocks a carrier flagged requiresPolicyNumber.
+const strictCarrier = { display: "Strict Mutual", filingPhone: "+18005550000", requiresPolicyNumber: true };
+const readyBlocked = assessReadiness(corePacket, strictCarrier.filingPhone, strictCarrier);
+check("missing policy blocks a requiresPolicyNumber carrier", readyBlocked.ready === false && readyBlocked.blockers.some((b) => /policy number/i.test(b)));
+
+// Duplicate-new-claim guard.
+check("existing claim blocks a new filing", existingClaimBlock("CLM-123456", "file_new_claim").length > 0);
+check("existing claim does not block a status follow-up", existingClaimBlock("CLM-123456", "status_follow_up") === "");
+check("no claim number => no duplicate block", existingClaimBlock("", "file_new_claim") === "");
+
+// ---- writeback confidence: transcript-guessed adjuster fields are NOT silently written ----
+const guessCall = {
+  transcript: "Rep: the claim number is 9 9 8 8 7 7 6 6. You can reach the adjuster team at 800-555-1212, email adjuster@example.test.",
+  raw: { metadata: { goal: "file_new_claim" }, call_analysis: { custom_analysis_data: { claim_number: "99887766" } } }
+};
+const guessEx = extractCallResults(guessCall);
+const guessProposal = buildWritebackProposal({ id: "file1", customer: "Synthetic Insured", status: "Photo File Received" }, guessEx);
+check("claim # (structured) written to fields", guessProposal.proposedFields.cf_string_2 === "99887766");
+check("transcript-guessed adjuster phone NOT written as verified field", !("cf_string_8" in guessProposal.proposedFields));
+check("transcript-guessed adjuster surfaced as unverified", guessProposal.unverified.some((u) => u.source === "transcript-guess"));
+check("note does not claim adjuster saved when none verified", /awaiting adjuster/i.test(guessProposal.proposedNote));
+
+// Accurate note when an adjuster WAS captured (structured): no "awaiting adjuster".
+const withAdjuster = extractCallResults({ raw: { metadata: { goal: "file_new_claim" }, call_analysis: { custom_analysis_data: { claim_number: "55554444", adjuster_name: "Desk Team" } } } });
+const adjProposal = buildWritebackProposal({ id: "file1", customer: "Synthetic Insured", status: "Photo File Received" }, withAdjuster);
+check("adjuster captured => field written + note reflects it", adjProposal.proposedFields.cf_string_7 === "Desk Team" && /adjuster saved/i.test(adjProposal.proposedNote) && !/awaiting adjuster/i.test(adjProposal.proposedNote));
 
 console.log("");
 if (failures) {
