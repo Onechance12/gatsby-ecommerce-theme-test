@@ -1,0 +1,41 @@
+{
+  "id": "t-20260710-claude-collab-review",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "open",
+  "mode": "verify",
+  "title": "Review the shared collaboration contract",
+  "goal": "Review AGENTS.md, docs/AGENT_HANDOFF.md, and the task-bus rules. Confirm or correct the recorded Claude branch scope, add current claimed files, and identify the first small module that should be tested against the live bridge.",
+  "workBranch": "codex/agent-collab",
+  "files": [
+    "AGENTS.md",
+    "docs/AGENT_HANDOFF.md",
+    "agent-tasks/README.md"
+  ],
+  "doneCriteria": [
+    "Record Claude's exact current scope in docs/AGENT_HANDOFF.md.",
+    "Confirm the collaboration rules do not conflict with Claude's operating model.",
+    "Recommend one small read-only integration task for joint review.",
+    "Return findings without deploying or modifying live systems."
+  ],
+  "constraints": [
+    "Do not touch Jobrolo.",
+    "Do not deploy or change live environment variables.",
+    "Do not write client data or include client PII in Git."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "created for Claude review"
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}

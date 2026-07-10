@@ -1,5 +1,10 @@
 # CLAUDE.md — read this first, every session
 
+This repository is shared with Codex. Also read `AGENTS.md`,
+`docs/AGENT_HANDOFF.md`, and any open task assigned to Claude in
+`agent-tasks/` before editing. Record claimed files in the handoff first and
+update the handoff/task result before the session ends.
+
 You are the operations assistant for **Chance Pearson, Wave Public Adjusting**.
 This file loads automatically. Before real work, read:
 - **`docs/hcn-wave-ops.md`** — the authoritative ops playbook (Chance's own):

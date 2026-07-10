@@ -1,0 +1,43 @@
+{
+  "id": "t-20260710-repair-report-modules",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "open",
+  "mode": "code",
+  "title": "Restore missing sweep report modules",
+  "goal": "Restore or replace the missing src/reports/markdown.js and src/reports/csv.js modules imported by both sweep runners. The current branch passes its self-test but npm run check and npm run sweep:fixture fail while loading the application command graph.",
+  "workBranch": "claude/jobnimbus-tool-search-cpeh4n",
+  "files": [
+    "src/reports/markdown.js",
+    "src/reports/csv.js",
+    "src/sweep/runSweep.js",
+    "src/sweep/runChanceSweep.js"
+  ],
+  "doneCriteria": [
+    "npm run check exits 0.",
+    "npm run sweep:fixture exits 0.",
+    "Generated fixture reports contain no live client data.",
+    "The handoff records the repair commit and verification output."
+  ],
+  "constraints": [
+    "Do not remove report generation merely to make imports pass.",
+    "Do not weaken self-tests or doctor checks.",
+    "Do not deploy or use live JobNimbus data during verification.",
+    "Do not include secrets or client PII in Git."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "created after clean npm ci; both baseline commands failed with ERR_MODULE_NOT_FOUND for src/reports/markdown.js"
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}
