@@ -44,11 +44,16 @@
       "at": "2026-07-10",
       "by": "claude",
       "note": "Extracted src/claim-filing-core/ (index, inputContract, packet, standardAnswers, carrierDirectory, readiness, dynamicVariables, retellPrompt, resultExtraction, writeback). No imports from fileReview, sweep, CLI parsers/printers, JobNimbus clients, Gmail, Quo, or fs; no process.env reads. Local CLI is now a thin wrapper (claimCallPrompt/fileClaim/retell/retellCli/postCallWriteback/carrierDirectory all import the core; reviewToClaimInput adapts a sweep review) \u2014 one implementation, not two. Canonical input contract accepts one resolved live file + activities/tasks/documents + approved overrides (docs/claim-filing-core-contract.md). Carrier policy requirement is data-driven (requiresPolicyNumber). Writeback surfaces transcript-guessed adjuster phone/email/doc as unverified with per-field confidence rather than silently writing them; the short note is accurate to what was captured (no false 'awaiting adjuster' or status claim). New-vs-existing outcome + duplicate-new-claim guard (existingClaimBlock) exported for the adapter. Retell remains the engine (press_digit DTMF). The four business defaults preserved and overrideable. Fixture-safe tests cover new filing, existing claim, missing policy allowed/required, standard-answer override, structured extraction, transcript guesses, and accurate note variants. npm run check exit 0; retell:configure + claim:call + file:claim fixture dry runs verified. No live call/write/deploy; jobnimbus-bridge branch untouched."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "claude",
+      "note": "Follow-up: fixed Codex's three synthetic edge cases at 23938cb. (1) resolveStandardAnswers now defaults habitability to the approved value for non-storm losses too (all four defaults standard unless a file overrides). (2) inferCause/inferDamageCategories MERGE file.* and evidence.* documents/notes instead of file.* || evidence.*, so bridge-supplied evidence-only documents/notes are honored (inputContract no longer copies file arrays into evidence, so no double-count). (3) buildWritebackProposal treats any verified adjuster field (name/phone/email) as captured, so a phone/email-only assignment no longer reads 'awaiting adjuster'. Added synthetic checks for all three. npm run check exit 0; bridge untouched, no live actions."
     }
   ],
   "result": {
     "branch": "claude/jobnimbus-tool-search-cpeh4n",
-    "commit": "02d55c6",
+    "commit": "23938cb",
     "summary": "Proven claim filer extracted into a portable, dependency-light src/claim-filing-core/ the Render bridge can import; local CLI reduced to a thin wrapper around the same core.",
     "verification": "npm run check exit 0 (28 core/writeback/readiness fixture checks incl. carrier-aware policy, standard-answer override, transcript-guess confidence, accurate notes, duplicate guard); fixture dry runs of retell:configure/claim:call/file:claim confirm the wrapper->core path. No live actions."
   }
