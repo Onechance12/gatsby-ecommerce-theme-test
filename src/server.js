@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -19,6 +19,11 @@ const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GMAIL_USER = process.env.GMAIL_USER || "me";
 const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-handoffs.json");
 const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-handoff-uploads");
+const ARTIFACT_STORE_PATH = process.env.ARTIFACT_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-artifacts.json");
+const ARTIFACT_UPLOAD_DIR = process.env.ARTIFACT_UPLOAD_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-artifact-uploads");
+const ARTIFACT_FILE_DIR = process.env.ARTIFACT_FILE_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-artifacts");
+const MAX_ARTIFACT_BYTES = positiveIntegerEnv("MAX_ARTIFACT_BYTES", 5 * 1024 * 1024);
+const ARTIFACT_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("ARTIFACT_TTL_HOURS", 72), 168));
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
@@ -51,6 +56,10 @@ const routes = new Map([
   ["POST /handoff/get", getHandoff],
   ["POST /handoff/process", processHandoff],
   ["POST /handoff/complete", completeHandoff],
+  ["POST /artifacts/chunk", createArtifactChunk],
+  ["POST /artifacts/list", listArtifacts],
+  ["POST /artifacts/get", getArtifact],
+  ["POST /artifacts/complete", completeArtifact],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
   ["POST /jobnimbus/assigned-files", assignedFiles],
@@ -76,6 +85,9 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
+    if (url.pathname.startsWith("/artifacts/") && (!BRIDGE_TOKEN || !authorized(req))) {
+      return send(res, 401, { error: "Artifact mailbox requires bridge bearer authentication." });
+    }
     if (!isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
     const body = req.method === "GET" ? {} : await readJson(req);
     const result = await handler(body);
@@ -127,6 +139,15 @@ function health() {
     gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
     writesAllowed: ALLOW_WRITES,
     ocrMode: "poppler+tesseract",
+    artifactMailbox: {
+      available: Boolean(BRIDGE_TOKEN),
+      authentication: "bearer_token_required",
+      acceptedTypes: [".patch", ".diff"],
+      maxBytes: MAX_ARTIFACT_BYTES,
+      ttlHours: ARTIFACT_TTL_HOURS,
+      storage: "ephemeral_unless_paths_use_persistent_disk",
+      automaticExecution: false
+    },
     voice: {
       available: Boolean(OPENAI_API_KEY),
       model: OPENAI_REALTIME_MODEL,
@@ -495,6 +516,142 @@ async function completeHandoff(input) {
   const completionNote = String(input.completionNote || input.note || "").trim();
   const handoff = await markHandoffComplete(id, completionNote);
   return { completed: true, handoff };
+}
+
+async function createArtifactChunk(input) {
+  if (!BRIDGE_TOKEN) badRequest("Artifact mailbox requires JOBNIMBUS_BRIDGE_TOKEN to be configured.");
+  const uploadId = normalizeUploadId(input.uploadId || randomUUID());
+  const index = Number(input.index);
+  const total = Number(input.total);
+  const chunk = String(input.chunk ?? "");
+  if (!Number.isInteger(index) || index < 0) badRequest("index must be a zero-based integer");
+  if (!Number.isInteger(total) || total < 1 || total > 1000) badRequest("total must be between 1 and 1000");
+  if (index >= total) badRequest("index must be less than total");
+  if (!chunk) badRequest("chunk is required");
+
+  const dir = path.join(ARTIFACT_UPLOAD_DIR, uploadId);
+  const metaPath = path.join(dir, "meta.json");
+  await mkdir(dir, { recursive: true });
+
+  let metadata;
+  if (index === 0) {
+    metadata = {
+      uploadId,
+      filename: normalizeArtifactFilename(input.filename),
+      source: String(input.source || "claude").trim().slice(0, 80),
+      baseCommit: normalizeCommitSha(input.baseCommit),
+      summary: String(input.summary || "").trim().slice(0, 1000),
+      expectedSha256: normalizeSha256(input.sha256 || input.expectedSha256),
+      total,
+      createdAt: new Date().toISOString()
+    };
+    await writeFile(metaPath, JSON.stringify(metadata, null, 2));
+  } else {
+    metadata = await readJsonFile(metaPath, null);
+    if (!metadata) badRequest("Upload metadata is missing. Send chunk index 0 first.");
+    if (metadata.total !== total) badRequest("total must match the first chunk");
+  }
+
+  await writeFile(path.join(dir, `${index}.part`), chunk, "utf8");
+  const received = (await readdir(dir)).filter((name) => name.endsWith(".part")).length;
+  if (received < total) {
+    return { uploadId, complete: false, received, total, maxArtifactBytes: MAX_ARTIFACT_BYTES };
+  }
+
+  const chunks = [];
+  for (let part = 0; part < total; part += 1) {
+    chunks.push(await readFile(path.join(dir, `${part}.part`), "utf8"));
+  }
+  const content = chunks.join("");
+  const sizeBytes = Buffer.byteLength(content, "utf8");
+  if (sizeBytes > MAX_ARTIFACT_BYTES) {
+    await rm(dir, { recursive: true, force: true });
+    const error = new Error(`Artifact is too large. Limit is ${MAX_ARTIFACT_BYTES} bytes.`);
+    error.statusCode = 413;
+    throw error;
+  }
+  if (content.includes("\u0000")) badRequest("Artifact must be UTF-8 text without NUL bytes.");
+
+  const policyViolations = artifactPolicyViolations(content);
+  if (policyViolations.length) {
+    await rm(dir, { recursive: true, force: true });
+    badRequest(`Artifact rejected: ${policyViolations.join("; ")}`);
+  }
+
+  const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+  if (sha256 !== metadata.expectedSha256) {
+    await rm(dir, { recursive: true, force: true });
+    badRequest(`SHA-256 mismatch. Expected ${metadata.expectedSha256}, received ${sha256}.`);
+  }
+
+  const now = new Date();
+  const artifact = {
+    id: randomUUID(),
+    status: "uploaded",
+    filename: metadata.filename,
+    source: metadata.source,
+    baseCommit: metadata.baseCommit,
+    summary: metadata.summary,
+    sha256,
+    sizeBytes,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + ARTIFACT_TTL_HOURS * 60 * 60 * 1000).toISOString(),
+    completedAt: "",
+    completionNote: ""
+  };
+
+  await mkdir(ARTIFACT_FILE_DIR, { recursive: true });
+  await writeFile(artifactFilePath(artifact.id), content, "utf8");
+  const artifacts = await readArtifactStore();
+  artifacts.unshift(artifact);
+  await writeArtifactStore(artifacts);
+  await rm(dir, { recursive: true, force: true });
+
+  return { uploadId, complete: true, received, total, artifact };
+}
+
+async function listArtifacts(input = {}) {
+  const artifacts = await pruneExpiredArtifacts();
+  const limit = clamp(Number(input.limit || 25), 1, 100);
+  const includeCompleted = input.includeCompleted === true;
+  const status = String(input.status || "").trim().toLowerCase();
+  const matches = artifacts
+    .filter((artifact) => includeCompleted || artifact.status !== "completed")
+    .filter((artifact) => !status || artifact.status === status)
+    .slice(0, limit);
+  return { count: matches.length, artifacts: matches };
+}
+
+async function getArtifact(input) {
+  const id = normalizeArtifactId(input.id || input.artifactId);
+  const artifacts = await pruneExpiredArtifacts();
+  const artifact = artifacts.find((row) => row.id === id);
+  if (!artifact) badRequest(`No active artifact found for id: ${id}`);
+  const content = await readFile(artifactFilePath(id), "utf8");
+  const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+  if (sha256 !== artifact.sha256) {
+    const error = new Error("Stored artifact checksum does not match metadata.");
+    error.statusCode = 409;
+    throw error;
+  }
+  return {
+    artifact,
+    ...(input.includeContent === false ? {} : { content })
+  };
+}
+
+async function completeArtifact(input) {
+  const id = normalizeArtifactId(input.id || input.artifactId);
+  const artifacts = await pruneExpiredArtifacts();
+  const artifact = artifacts.find((row) => row.id === id);
+  if (!artifact) badRequest(`No active artifact found for id: ${id}`);
+  artifact.status = "completed";
+  artifact.updatedAt = new Date().toISOString();
+  artifact.completedAt = artifact.updatedAt;
+  artifact.completionNote = String(input.completionNote || input.note || "").trim().slice(0, 2000);
+  await writeArtifactStore(artifacts);
+  return { completed: true, artifact };
 }
 
 async function searchContacts(input) {
@@ -1466,6 +1623,99 @@ async function writeHandoffStore(handoffs) {
   await writeFile(HANDOFF_STORE_PATH, JSON.stringify(handoffs.slice(0, 500), null, 2));
 }
 
+async function readArtifactStore() {
+  try {
+    const raw = await readFile(ARTIFACT_STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function writeArtifactStore(artifacts) {
+  await mkdir(path.dirname(ARTIFACT_STORE_PATH), { recursive: true });
+  await writeFile(ARTIFACT_STORE_PATH, JSON.stringify(artifacts.slice(0, 200), null, 2));
+}
+
+async function pruneExpiredArtifacts() {
+  const artifacts = await readArtifactStore();
+  const now = Date.now();
+  const active = [];
+  let changed = false;
+  for (const artifact of artifacts) {
+    const expiresAt = Date.parse(artifact.expiresAt || "");
+    if (Number.isFinite(expiresAt) && expiresAt <= now) {
+      changed = true;
+      await rm(artifactFilePath(artifact.id), { force: true });
+    } else {
+      active.push(artifact);
+    }
+  }
+  if (changed) await writeArtifactStore(active);
+  return active;
+}
+
+function artifactFilePath(id) {
+  return path.join(ARTIFACT_FILE_DIR, `${normalizeArtifactId(id)}.patch`);
+}
+
+function normalizeArtifactId(value) {
+  const id = String(value || "").trim();
+  if (!/^[a-f0-9-]{36}$/.test(id)) badRequest("artifact id must be a UUID");
+  return id;
+}
+
+function normalizeArtifactFilename(value) {
+  const filename = String(value || "").trim();
+  if (!/^[a-zA-Z0-9._-]{1,120}\.(patch|diff)$/i.test(filename)) {
+    badRequest("filename must be a simple .patch or .diff filename");
+  }
+  return filename;
+}
+
+function normalizeCommitSha(value) {
+  const sha = String(value || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{7,40}$/.test(sha)) badRequest("baseCommit must be a 7-40 character Git SHA");
+  return sha;
+}
+
+function normalizeSha256(value) {
+  const sha = String(value || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha)) badRequest("sha256 must be a 64-character lowercase SHA-256 digest");
+  return sha;
+}
+
+function artifactPolicyViolations(content) {
+  const violations = new Set();
+  const pathPatterns = [
+    /^\.env(?:\.|$)/i,
+    /^data\//i,
+    /^reports\//i,
+    /^work\//i,
+    /(^|\/)client_secret[^/]*\.json$/i,
+    /\.(pem|p12|pfx|key)$/i
+  ];
+  const patchPaths = [];
+  for (const line of content.split("\n")) {
+    const diffMatch = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+    if (diffMatch) patchPaths.push(diffMatch[1], diffMatch[2]);
+    const fileMatch = line.match(/^(?:---|\+\+\+) [ab]\/(.+)$/);
+    if (fileMatch) patchPaths.push(fileMatch[1]);
+  }
+  for (const filePath of patchPaths) {
+    if (pathPatterns.some((pattern) => pattern.test(filePath))) {
+      violations.add(`forbidden path in patch: ${filePath}`);
+    }
+  }
+  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(content)) violations.add("private key material detected");
+  if (/\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{20,}\b/.test(content)) {
+    violations.add("probable access token detected");
+  }
+  return [...violations];
+}
+
 async function readJsonFile(filePath, fallback) {
   try {
     return JSON.parse(await readFile(filePath, "utf8"));
@@ -2368,6 +2618,11 @@ function stripTrailingSlash(value) {
   return String(value || "").replace(/\/+$/, "");
 }
 
+function positiveIntegerEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
 function clamp(value, min, max) {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : min;
 }
@@ -2650,6 +2905,46 @@ const OPENAPI = {
           completionNote: { type: "string", description: "Optional note describing how the handoff was processed." },
           note: { type: "string", description: "Alias for completionNote." }
         }
+      },
+      CreateArtifactChunkRequest: {
+        type: "object",
+        properties: {
+          uploadId: { type: "string", description: "Upload id returned by the first chunk. Omit on chunk zero." },
+          filename: { type: "string", description: "Simple UTF-8 .patch or .diff filename. Required on chunk zero." },
+          source: { type: "string", description: "Agent creating the package, such as claude or codex." },
+          baseCommit: { type: "string", description: "Git commit SHA the patch applies to. Required on chunk zero." },
+          summary: { type: "string", description: "PII-free summary of the package." },
+          sha256: { type: "string", description: "Lowercase SHA-256 of the complete UTF-8 patch. Required on chunk zero." },
+          index: { type: "integer", minimum: 0, description: "Zero-based chunk index. Chunk zero must be sent first." },
+          total: { type: "integer", minimum: 1, maximum: 1000, description: "Total number of chunks." },
+          chunk: { type: "string", description: "One raw UTF-8 slice of the patch." }
+        },
+        required: ["index", "total", "chunk"]
+      },
+      ListArtifactsRequest: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
+          status: { type: "string", description: "Optional status filter, such as uploaded or completed." },
+          includeCompleted: { type: "boolean", default: false }
+        }
+      },
+      GetArtifactRequest: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Artifact id returned after the final upload chunk." },
+          artifactId: { type: "string", description: "Alias for id." },
+          includeContent: { type: "boolean", default: true, description: "Return patch text after checksum verification." }
+        }
+      },
+      CompleteArtifactRequest: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Artifact id to close." },
+          artifactId: { type: "string", description: "Alias for id." },
+          completionNote: { type: "string", description: "PII-free review result or published commit reference." },
+          note: { type: "string", description: "Alias for completionNote." }
+        }
       }
     }
   },
@@ -2723,6 +3018,34 @@ const OPENAPI = {
         operationId: "completeHandoff",
         requestBody: jsonBody("CompleteHandoffRequest"),
         responses: { "200": { description: "Marks a handoff as completed after it is processed." } }
+      }
+    },
+    "/artifacts/chunk": {
+      post: {
+        operationId: "uploadAgentPatchChunk",
+        requestBody: jsonBody("CreateArtifactChunkRequest"),
+        responses: { "200": { description: "Stores one authenticated patch chunk and returns artifact metadata after checksum verification." } }
+      }
+    },
+    "/artifacts/list": {
+      post: {
+        operationId: "listAgentPatchArtifacts",
+        requestBody: jsonBody("ListArtifactsRequest"),
+        responses: { "200": { description: "Lists active patch-package metadata without file content." } }
+      }
+    },
+    "/artifacts/get": {
+      post: {
+        operationId: "getAgentPatchArtifact",
+        requestBody: jsonBody("GetArtifactRequest"),
+        responses: { "200": { description: "Returns one patch after verifying its stored SHA-256." } }
+      }
+    },
+    "/artifacts/complete": {
+      post: {
+        operationId: "completeAgentPatchArtifact",
+        requestBody: jsonBody("CompleteArtifactRequest"),
+        responses: { "200": { description: "Marks an artifact reviewed/completed. It remains non-executable and expires normally." } }
       }
     },
     "/jobnimbus/search": {
