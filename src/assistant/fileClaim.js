@@ -2,6 +2,7 @@ import { loadReviews, findMatches } from "./fileReview.js";
 import { buildClaimCallPacket } from "./claimCallPrompt.js";
 import { flattenFactsForDynamicVariables } from "../voice/retellCli.js";
 import { triggerRetellCall, fetchRetellCallResult } from "../voice/retell.js";
+import { runPostCallWriteback } from "./postCallWriteback.js";
 import { lookupCarrier, knownCarriers } from "../voice/carrierDirectory.js";
 import { ReadOnlyJobNimbusClient } from "../jobnimbus/client.js";
 import { dateOnly } from "../lib/dates.js";
@@ -20,10 +21,11 @@ import { dateOnly } from "../lib/dates.js";
 export async function runFileClaim(config, args) {
   const input = parseInput(args.join(" "));
 
-  // Mode 3: fetch + format the result of a completed call.
+  // Mode 3: fetch a completed call AND propose the JobNimbus writeback bundle
+  // (extracted claim #, adjuster, status, note) for approval.
   if (input.callId) {
-    const result = await fetchRetellCallResult(config, String(input.callId));
-    printJson({ tool: "file_claim_result", callId: input.callId, result });
+    const result = await runPostCallWriteback(config, String(input.callId), input);
+    printJson(result);
     return;
   }
 

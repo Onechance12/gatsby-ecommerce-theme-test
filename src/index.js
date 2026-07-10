@@ -19,6 +19,7 @@ import { runOpenAiTest } from "./voice/openaiTest.js";
 import { runRetellConfigure, runRetellCall, runRetellResult } from "./voice/retellCli.js";
 import { runActionTool } from "./assistant/actionTools.js";
 import { runFileClaim } from "./assistant/fileClaim.js";
+import { runFilePulse } from "./assistant/filePulse.js";
 import { runChanceAgents, runChanceApprove, runChanceQueue } from "./assistant/chanceQueue.js";
 import { runStormResearch } from "./assistant/stormResearch.js";
 import { runFileLedger } from "./assistant/fileLedger.js";
@@ -149,6 +150,11 @@ async function main() {
 
   if (command === "file:claim") {
     await runFileClaim(config, commandArgs);
+    return;
+  }
+
+  if (command === "file:pulse") {
+    await runFilePulse(config, commandArgs);
     return;
   }
 

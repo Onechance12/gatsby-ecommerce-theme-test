@@ -11,6 +11,7 @@
     "chat:action": "node src/index.js chat:action",
     "chat:tool": "node src/index.js chat:tool",
     "file:claim": "node src/index.js file:claim",
+    "file:pulse": "node src/index.js file:pulse",
     "claim:call": "node src/index.js claim:call",
     "chance:approve": "node src/index.js chance:approve",
     "chance:agents": "node src/index.js chance:agents",
