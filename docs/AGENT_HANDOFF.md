@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-10 (Codex — portable claim-filing core approved)
+Last updated: 2026-07-10 (Codex — Render claim-filing integration ready for final review)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -29,6 +29,9 @@ Claude.
   bridge and OpenAI/Twilio voice path. Separate runtime line from Claude's branch.
   Artifact mailbox deployed at `20c86e3`; authenticated patch upload/list/get/
   complete endpoints are live and documented in `docs/ARTIFACT_HANDOFF.md`.
+- Render claim-filing integration branch: `codex/render-claim-core` at `2564ddb`,
+  draft PR #3 targeting `jobnimbus-bridge`. Imports Claude's approved core and
+  adds fresh Chance-only prepare/call/result/writeback actions. Not deployed.
 - Collaboration scaffold: `codex/agent-collab`, based on Claude's branch.
 
 ### ✅ Claude's local commits are now published (proxy worked around)
@@ -74,10 +77,10 @@ review the actual code.
 - Claude — DONE (Codex-closed) — extracted the verified filer into a portable,
   bridge-ready core with no local sweep/CLI/JobNimbus-client dependencies —
   `t-20260710-extract-portable-claim-core`, approved at `23938cb`.
-- Codex — next task after portable-core review — integrate that core into the
-  existing Render bridge using direct fresh JobNimbus reads, strict Chance-only
-  resolution, approval digests, Retell result polling, OpenAPI actions, and the
-  existing gated `processJobNimbusUpdate` write path.
+- Codex — DONE — integrated the portable core into the existing Render bridge
+  using direct fresh JobNimbus reads, strict Chance-only resolution, approval
+  digests, Retell result polling, OpenAPI actions, and separately approved
+  JobNimbus writeback — `t-20260710-integrate-claim-core-render`, `2564ddb`, PR #3.
 
 ## Claim Filer — Operational State (2026-07-10)
 
@@ -122,10 +125,13 @@ review the actual code.
 
 ## Next Coordination Steps
 
-1. Codex builds the Render adapter and OpenAPI actions on a separate branch from
-   live bridge `20c86e3`, importing only the approved portable core at `23938cb`.
-2. Prepare/call/result/writeback remain distinct approval-gated steps with a
-   plan digest, duplicate guard, and strict Chance-only re-verification.
+1. Run a final architecture/security review of draft PR #3. Fable/high reasoning
+   is appropriate here because this is the production-boundary review.
+2. After review fixes pass, Chance separately approves merging/deployment and
+   Render environment changes. Keep `ALLOW_RETELL_CALLS=false` initially.
+3. Run one authenticated read-only prepare action against a known Chance fixture
+   file, then one controlled call only after Chance reviews the exact plan digest.
+4. Review the call result before separately approving any JobNimbus writeback.
 3. The bridge must resolve and re-verify a Chance-owned file on every prepare,
    call, result, and writeback step; first-match-only resolution is insufficient.
 4. Claim filing uses Retell. Keep the older OpenAI/Twilio path available only for
@@ -136,6 +142,15 @@ review the actual code.
 
 ## Log
 
+- 2026-07-10 — Codex — Integrated Claude's approved core into the Render bridge
+  on `codex/render-claim-core` at `2564ddb`, draft PR #3. Added four authenticated
+  actions: fresh prepare, approved Retell call, result review, and separately
+  approved JobNimbus writeback. Every stage re-verifies Chance ownership; plan
+  and writeback digests reject changed facts; ledgers prevent duplicate calls and
+  notes; transcript guesses remain unverified; image/photo files are excluded
+  from claim evidence. Bridge auth now fails closed when its token is missing,
+  while `/health` stays public. Eight tests pass, including a fake JobNimbus HTTP
+  route test. No deployment, environment change, call, or live write occurred.
 - 2026-07-10 — Codex — Approved Claude's portable claim-filing core at
   `23938cb`. Independent dependency install, full checks, fixture sweep, diff
   checks, forbidden-import checks, and custom synthetic cases pass. The three

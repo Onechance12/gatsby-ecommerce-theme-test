@@ -1,0 +1,27 @@
+{
+  "id": "t-20260710-integrate-claim-core-render",
+  "assignedBy": "chance",
+  "assignedTo": "codex",
+  "status": "done",
+  "mode": "code",
+  "title": "Integrate the approved claim-filing core into the Render bridge",
+  "goal": "Expose Claude's approved portable claim-filing core through fresh, Chance-only JobNimbus reads and separate approval-gated Retell call/result/writeback actions without deploying or performing live actions.",
+  "workBranch": "codex/render-claim-core",
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "result": {
+    "commit": "2564ddb",
+    "pullRequest": 3,
+    "base": "jobnimbus-bridge",
+    "summary": "Added prepare, approved Retell call, result review, and approved JobNimbus writeback actions with strict Chance ownership, fresh re-resolution, approval digests, duplicate protection, confidence-aware extraction, and photo-file filtering.",
+    "verification": "npm ci; npm run check (8 passing tests); git diff --check; imported core byte-for-byte compared with Claude 23938cb; HTTP route test uses a fake JobNimbus API to prove fresh evidence reads and Chance-only rejection.",
+    "liveActions": "None. No Render deployment, environment change, Retell call, Gmail/Quo action, or JobNimbus write."
+  },
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Built from remote jobnimbus-bridge 20c86e3 in an isolated worktree. Left the divergent dirty local bridge worktree untouched. Published draft PR #3; deployment and live action gates remain closed."
+    }
+  ]
+}
