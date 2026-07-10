@@ -48,3 +48,15 @@ services:
         sync: false
       - key: ALLOW_VOICE_CALLS
         value: "false"
+      - key: RETELL_API_KEY
+        sync: false
+      - key: RETELL_AGENT_ID
+        sync: false
+      - key: RETELL_FROM_NUMBER
+        sync: false
+      - key: ALLOW_RETELL_CALLS
+        value: "false"
+      - key: CHANCE_JOBNIMBUS_OWNER_ID
+        value: fc95a213f70e4c9daddc5fa366be9941
+      - key: CLAIM_CALL_STORE_PATH
+        value: /tmp/jobnimbus-claim-call-ledger.json

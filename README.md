@@ -134,6 +134,45 @@ Example:
 
 Set `execute:true` only after approval and only when `BRIDGE_ALLOW_WRITES=true`.
 
+## Approval-Gated Claim Filing
+
+Carrier claim filing uses Retell so the agent can navigate IVR menus with DTMF.
+It is restricted to JobNimbus insurance files assigned to Chance Pearson.
+
+```text
+POST /claim-filing/prepare
+POST /claim-filing/call
+POST /claim-filing/result
+POST /claim-filing/writeback
+```
+
+The workflow is intentionally split:
+
+1. `prepare` pulls fresh JobNimbus fields, activity, tasks, and document metadata,
+   builds the call packet, and returns a `planDigest` without placing a call.
+2. `call` repeats the live read. It rejects a stale digest and only calls when
+   `execute:true` and `ALLOW_RETELL_CALLS=true` are both present.
+3. `result` reads the Retell transcript and post-call analysis. Structured facts
+   are proposed for JobNimbus; transcript guesses remain visibly unverified.
+4. `writeback` repeats the live checks and requires the exact approved
+   `writebackDigest`. It writes only with `execute:true` and
+   `BRIDGE_ALLOW_WRITES=true`.
+
+Both calls and writebacks have a small idempotency ledger to prevent accidental
+duplicates. Point `CLAIM_CALL_STORE_PATH` at persistent storage if the ledger
+must survive Render restarts.
+
+Required private claim-filing variables:
+
+```text
+RETELL_API_KEY=
+RETELL_AGENT_ID=
+RETELL_FROM_NUMBER=
+```
+
+Keep `ALLOW_RETELL_CALLS=false` until the deployment and first controlled call
+are explicitly approved.
+
 ## Gmail OAuth
 
 Create a Google OAuth client with Gmail API enabled, then run:
