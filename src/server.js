@@ -1018,7 +1018,7 @@ async function recentCallbackCandidates(fromNumber) {
     limit: 100
   });
   const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
-  return (response.items || [])
+  const candidates = (response.items || [])
     .filter((call) => call.direction === "outbound")
     .map(callbackCandidateFromCall)
     .filter(Boolean)
@@ -1028,6 +1028,12 @@ async function recentCallbackCandidates(fromNumber) {
       const bExact = samePhone(b.carrierPhone, fromNumber) ? 1 : 0;
       return bExact - aExact || b.createdAt - a.createdAt;
     });
+  const seenContacts = new Set();
+  return candidates.filter((candidate) => {
+    if (seenContacts.has(candidate.contactId)) return false;
+    seenContacts.add(candidate.contactId);
+    return true;
+  });
 }
 
 function callbackDynamicVariables(candidate, match) {
