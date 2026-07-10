@@ -945,12 +945,13 @@ async function retellInbound(input) {
 async function recentCallbackCandidates(fromNumber) {
   if (!RETELL_API_KEY) return [];
   const response = await retellApi("POST", "/v3/list-calls", {
-    filter_criteria: { direction: "outbound" },
+    filter_criteria: {},
     sort_order: "descending",
     limit: 100
   });
   const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
   return (response.items || [])
+    .filter((call) => call.direction === "outbound")
     .map(callbackCandidateFromCall)
     .filter(Boolean)
     .filter((candidate) => !candidate.createdAt || candidate.createdAt >= cutoff)
