@@ -980,7 +980,7 @@ async function retellInbound(input) {
 
   const candidates = await recentCallbackCandidates(inbound.from_number);
   const exact = candidates.filter((candidate) => samePhone(candidate.carrierPhone, inbound.from_number));
-  const selected = exact.length === 1 ? exact[0] : (candidates.length === 1 ? candidates[0] : null);
+  const selected = exact.length === 1 ? exact[0] : null;
   const dynamicVariables = selected
     ? callbackDynamicVariables(selected, "matched")
     : callbackDynamicVariables({
