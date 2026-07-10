@@ -12,6 +12,7 @@ import {
 } from "./claim-filing-adapter.js";
 import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
 import { normalizeDateOfLoss } from "./claim-filing-core/packet.js";
+import { renderRetellPrompt } from "./claim-filing-core/retellPrompt.js";
 
 const OWNER_ID = "chance-owner";
 
@@ -70,6 +71,13 @@ test("completed filings are not offered as callback candidates", () => {
     metadata: { source: "hcn-wave-jobnimbus-bridge", contactId: "contact-1" },
     call_analysis: { custom_analysis_data: { filing_outcome: "claim_filed" } }
   }), null);
+});
+
+test("inbound callback prompt recovers from a clipped carrier introduction", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /stay silent for about two seconds/i);
+  assert.match(prompt, /Give me a second while I pull up that information\./);
+  assert.match(prompt, /If they already clearly named the carrier, do not ask for it again\./);
 });
 
 function fixture(overrides = {}) {

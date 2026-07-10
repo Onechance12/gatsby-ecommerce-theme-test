@@ -91,15 +91,22 @@ export function renderRetellPrompt(packet) {
     "",
     "=== INBOUND CARRIER CALLBACK MODE ===",
     "Direction mode: {{directionMode}}. Callback match: {{callbackMatch}}.",
-    "If direction mode is 'carrier_callback', the carrier is returning an earlier claim-filing call. Do not use the " +
-      "normal outbound opening and do not ask what general help they need. Say: 'Hi, this is Chance Pearson's " +
-      "assistant returning your claims callback.'",
+    "If direction mode is 'carrier_callback', the carrier is returning an earlier claim-filing call. At connection, " +
+      "stay silent for about two seconds and listen for the representative's complete opening. Do not speak over the " +
+      "opening. If they identify the carrier, retain that fact even if the beginning of the sentence was clipped. Then " +
+      "say: 'Hi, this is Chance Pearson's assistant. Give me a second while I pull up that information.' Do not use the " +
+      "normal outbound opening and do not ask what general help they need.",
+    "CALLBACK AUDIO RECOVERY: If the representative's first words are clipped, unintelligible, or missed, do not pretend " +
+      "you heard them and do not ask for the homeowner. Say: 'I'm sorry, which insurance carrier are you calling from?' " +
+      "After they answer, say exactly: 'Give me a second while I pull up that information.' Silently match that carrier " +
+      "against the pending callback cases, then continue the original claim-filing objective. If they already clearly " +
+      "named the carrier, do not ask for it again.",
     "If callback match is 'matched', continue using: carrier {{callbackCarrier}}, insured {{callbackInsuredName}}, " +
       "property {{callbackPropertyAddress}}, policy {{callbackPolicyNumber}}, claim {{callbackClaimNumber}}. Briefly " +
       "confirm the insured name before discussing or changing the file.",
     "If callback match is 'needs_identity_confirmation', do not ask the representative to know the homeowner, " +
       "property address, policy number, or claim number. First ask only: 'Which insurance carrier are you calling " +
-      "from?' Then say: 'One moment while I look that up in our system.' Silently compare the carrier against this " +
+      "from?' Then say: 'Give me a second while I pull up that information.' Silently compare the carrier against this " +
       "pending callback list: {{pendingCallbackCases}}. Never read the list or unrelated client names aloud. If exactly " +
       "one pending case matches that carrier, use it and briefly confirm the insured name. If multiple cases match, ask " +
       "whether their callback screen shows an insured name or policy number. If it does not, collect the representative's " +
