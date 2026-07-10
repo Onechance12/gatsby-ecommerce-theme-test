@@ -780,7 +780,7 @@ async function placeClaimFilingCall(input) {
       file: context.file,
       planDigest: plan.planDigest,
       readiness: plan.readiness,
-      request: redactRetellRequest(request)
+      request: previewRetellRequest(request)
     };
   }
 
@@ -1056,7 +1056,7 @@ async function writeClaimCallLedger(rows) {
   await writeFile(CLAIM_CALL_STORE_PATH, `${JSON.stringify(rows, null, 2)}\n`, "utf8");
 }
 
-function redactRetellRequest(request) {
+function previewRetellRequest(request) {
   return {
     ...request,
     retell_llm_dynamic_variables: request.retell_llm_dynamic_variables,
