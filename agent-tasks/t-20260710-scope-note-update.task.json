@@ -2,7 +2,7 @@
   "id": "t-20260710-scope-note-update",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "open",
+  "status": "needs_review",
   "mode": "code",
   "title": "Scope note edits to a verified Chance file",
   "goal": "Harden update_jobnimbus_note so a raw activity id cannot bypass the normal Chance-file match and edit an unrelated company note. Require a file query, resolve the Chance-owned file, and verify the target activity belongs to that file before planning or executing PUT /activities/{id}.",
@@ -32,12 +32,17 @@
       "at": "2026-07-10",
       "by": "codex",
       "note": "created during review of e28024c; update_jobnimbus_note skips requireFileMatch and plans a PUT from noteId alone"
+    },
+    {
+      "at": "2026-07-10",
+      "by": "claude",
+      "note": "Hardened. The dispatcher no longer special-cases update_jobnimbus_note: ALL actions now resolve a Chance file via requireFileMatch, so a bare noteId can no longer plan a PUT. planUpdateNote requires {query, noteId}, fetches the activity read-only, and refuses the edit unless the activity is related to the resolved file (activityFileIds + noteOwnershipError). Dry-run default and ALLOW_JOBNIMBUS_WRITES+execute gates unchanged; fixture mode refuses (ownership needs a live read). Fixture-safe checks in selftest.js cover primary-match/related-match allowed and wrong-file/missing-activity rejected. npm run check exit 0."
     }
   ],
   "result": {
-    "branch": null,
-    "commit": null,
-    "summary": null,
-    "verification": null
+    "branch": "claude/jobnimbus-tool-search-cpeh4n",
+    "commit": "2e2717e",
+    "summary": "update_jobnimbus_note now requires a Chance-file query + noteId and verifies the activity belongs to the resolved file before any PUT.",
+    "verification": "npm run check exit 0; note-ownership guard unit-checked (allowed via primary/related, rejected on wrong-file/missing activity)."
   }
 }

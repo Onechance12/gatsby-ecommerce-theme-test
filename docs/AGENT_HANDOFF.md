@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-10
+Last updated: 2026-07-10 (Claude — claim-filer hardening + scope-note-update landed)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -65,12 +65,36 @@ review the actual code.
 - Claude — 2026-07-10 — DONE — `t-20260710-publish-claude-local-commits`
   — four commits published on `999a633`, head `e28024c`; independently verified
   and closed by Codex.
-- Claude — open task — scope `update_jobnimbus_note` to a resolved Chance-owned
-  file and verify the activity belongs to it — `t-20260710-scope-note-update`.
-- Claude — open review task — document the successful AI claim-filing path and
-  harden packet defaults, carrier-aware readiness, post-call extraction, and
-  JobNimbus writeback before production bridge integration —
-  `t-20260710-claim-filer-production-review`.
+- Claude — 2026-07-10 — DONE (needs_review) — `t-20260710-scope-note-update`
+  — `update_jobnimbus_note` now requires {query, noteId}, resolves the Chance file,
+  and verifies the activity belongs to it before any PUT. On `claude/...` at `2e2717e`.
+- Claude — 2026-07-10 — DONE (needs_review) — `t-20260710-claim-filer-production-review`
+  — all 7 review questions answered in PR #1; fixture-safe hardening landed on
+  `claude/...` at `2e2717e`. See "Claim Filer — Operational State" below.
+
+## Claim Filer — Operational State (2026-07-10)
+
+- **Deployment truth:** `file:claim` is **local CLI only**. It is NOT exposed on
+  the Render bridge or any custom GPT/connector. The bridge does not place carrier
+  calls, run `file:claim`, or write to JobNimbus. Live calling stays double-gated
+  (`ALLOW_RETELL_CALLS=true` + `execute:true`).
+- **Post-call analysis (Q3):** now configured in **code** — `postCallAnalysisSchema()`
+  in `src/voice/retell.js`, wired into the agent body, field names matched to what
+  `postCallWriteback.js` reads. Structured extraction is preferred; transcript-derived
+  values stay flagged `transcript-guess` (never high-confidence).
+- **Policy readiness (Q5):** carrier-aware — a missing policy number is a warning,
+  not a universal blocker; hard-blocks only for carriers flagged `requiresPolicyNumber`.
+- **Writeback hygiene (Q6):** claim/adjuster/status go to JobNimbus fields; the
+  note is one short operational line, no field dump.
+- **Outcome (Q7):** `existing_claim_confirmed` (status_follow_up goal) is now
+  distinct from `claim_filed` (new filing); goal is carried in call metadata.
+- **Business defaults (Q4):** the four intentional defaults (no injuries, habitable,
+  temp repairs, Titan) are PRESERVED per Chance; not copied into routine notes.
+- **Redacted record:** `docs/operational-record-claim-filing.md` documents the
+  end-to-end filing path and boundary with no PII/IDs/secrets.
+- **Tests:** fixture-safe checks in `src/selftest.js` cover extraction, new-vs-existing
+  outcome, note hygiene, no-result, spelled-out claim parse, and note-ownership.
+  `npm run check` exit 0.
 
 ## Open Questions
 
@@ -146,3 +170,11 @@ review the actual code.
   `.gitignore` pattern `reports/` (no leading slash) shadowing `src/reports/`.
   Anchored the ignores to repo root and tracked both modules. Both commands
   exit 0.
+- 2026-07-10 — Claude — Landed `t-20260710-scope-note-update` and
+  `t-20260710-claim-filer-production-review` on `claude/...` at `2e2717e`.
+  Note-update is now scoped to a resolved Chance file with activity-ownership
+  verification. Claim filer hardened: post-call analysis schema in code,
+  carrier-aware policy readiness, field/note writeback hygiene, existing-vs-new
+  outcome distinction, and a redacted operational record. Business defaults
+  preserved per Chance. Answered all 7 review questions in PR #1. `npm run check`
+  exit 0; no live call/write/deploy. Both tasks set to needs_review — Codex to verify.
