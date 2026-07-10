@@ -12,7 +12,7 @@ import {
 } from "./claim-filing-adapter.js";
 import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
 import { normalizeDateOfLoss } from "./claim-filing-core/packet.js";
-import { renderRetellPrompt } from "./claim-filing-core/retellPrompt.js";
+import { buildRetellLlmFromPacket, renderRetellPrompt } from "./claim-filing-core/retellPrompt.js";
 
 const OWNER_ID = "chance-owner";
 
@@ -78,6 +78,20 @@ test("inbound callback prompt recovers from a clipped carrier introduction", () 
   assert.match(prompt, /stay silent for about two seconds/i);
   assert.match(prompt, /Give me a second while I pull up that information\./);
   assert.match(prompt, /If they already clearly named the carrier, do not ask for it again\./);
+});
+
+test("voice prompt contains no speakable pacing label", () => {
+  const prompt = renderRetellPrompt({});
+  assert.doesNotMatch(prompt, /\bpause\b/i);
+  assert.match(prompt, /Never verbalize stage directions, pacing instructions/);
+});
+
+test("IVR controls listen to the full menu without waiting for a repeat", () => {
+  const config = buildRetellLlmFromPacket({});
+  const pressDigit = config.generalTools.find((tool) => tool.name === "press_digit");
+  assert.equal(pressDigit.delay_ms, 250);
+  assert.match(config.generalPrompt, /wait about 0\.75 to 1 second/i);
+  assert.doesNotMatch(config.generalPrompt, /wait a full 3 seconds after the system/i);
 });
 
 function fixture(overrides = {}) {

@@ -20,9 +20,9 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
       name: "press_digit",
       description:
         "Press a single DTMF touch-tone digit when an IVR menu explicitly instructs pressing a number, or when the " +
-        "IVR does not accept spoken answers and requires numeric keypad input. Wait for the full menu prompt plus " +
-        "about 3 seconds of silence before pressing, per the call script's IVR discipline instructions.",
-      delay_ms: options.pressDigitDelayMs ?? 1000
+        "IVR does not accept spoken answers and requires numeric keypad input. Hear the complete menu, identify the " +
+        "correct option, and press shortly after the menu ends, per the call script's IVR discipline instructions.",
+      delay_ms: options.pressDigitDelayMs ?? 250
     }
   ];
   return {
@@ -173,7 +173,8 @@ export function renderRetellPrompt(packet) {
       "machine. Only a LIVE human's hold request ('hold on one sec') gets a brief 'Ok'.",
     "- Never interrupt an automated menu.",
     "- Listen to the ENTIRE menu before making any selection.",
-    "- Wait 2-3 seconds after a menu finishes speaking before responding.",
+    "- After the complete menu finishes, wait about 0.75 to 1 second, then press the correct key. Do not wait so " +
+      "long that the IVR starts repeating the menu.",
     "- Do not select options based on the first instruction given; if multiple options are presented, analyze them all before choosing.",
     "- Never press # for an extension unless an extension number has been provided.",
     "- When a menu says to press a number, or does not accept speech, use the press_digit tool with that digit; do " +
@@ -205,8 +206,9 @@ export function renderRetellPrompt(packet) {
       "not end the call until all approved batch cases are completed or the representative refuses/cannot continue. Never " +
       "file a case that is not present in {{batchClaims}}. If {{batchClaimCount}} is zero, do not ask to file another claim.",
     "- CRITICAL (especially Liberty Mutual): wait for the system to completely read ALL options before responding. " +
-      "Never press buttons or speak too early. Listen to the entire prompt, wait a full 3 seconds after the system " +
-      "stops talking, then make the selection — this prevents getting misrouted to towing or roadside assistance.",
+      "Never press buttons or speak before the final option is complete. Once the system stops talking, wait about " +
+      "0.75 to 1 second and make the selection before the menu begins repeating. This prevents getting misrouted to " +
+      "towing or roadside assistance.",
     "",
     "=== CLAIMS CALL OPTIMIZATION DIRECTIVE (with a human rep) ===",
     "- Speak only when necessary using the shortest possible response. Never engage in small talk, repeat " +
@@ -251,22 +253,21 @@ export function renderRetellPrompt(packet) {
     "- When asked for the policy number, say ONLY {{policyNumberSpoken}}. Never volunteer labels such as 'master " +
       "policy', a control number, loan number, mortgage reference, or any identifier after a slash. Give another " +
       "identifier only if the representative specifically asks for it by name.",
-    "- Read {{policyNumberSpoken}} one character at a time in short groups of no more than three characters, with " +
-      "a brief silent beat between groups. A hyphen is a grouping break; do not say the word 'hyphen' unless asked.",
+    "- Read {{policyNumberSpoken}} one character at a time at a slow, steady pace. A hyphen is only visual punctuation; " +
+      "do not speak it or replace it with any label.",
     "- This applies to EVERY number you say out loud — policy numbers, claim numbers, AND phone/callback numbers " +
       "(especially our callback number 972-573-1730). Read phone numbers as area code, then first three, then last " +
       "four, each as its own slow group: 'nine seven two', then 'five seven three', then 'one seven three zero'.",
     "- When YOU give a number, name spelling, or email TO a rep, they are TYPING it — so slow WAY down and speak it " +
-      "as small groups with a short beat of silence between each group, never as one fast string. Do NOT say the " +
-      "word 'pause' and do NOT announce that you are going to read it slowly — just actually slow your delivery. " +
-      "For example, say policy 416920698 as three unhurried groups: 'four one six', then 'nine two zero', then " +
-      "'six nine eight'. Spell an unusual name letter by letter. Give the rep time to type; if they say 'go ahead' " +
+      "in one slow, unhurried sequence, never as one fast string. Never verbalize stage directions, pacing instructions, " +
+      "punctuation, or separator labels. For example, policy 416920698 is spoken only as 'four one six nine two zero " +
+      "six nine eight'. Spell an unusual name letter by letter. Give the rep time to type; if they say 'go ahead' " +
       "or 'got it', continue. Better too slow than too fast here.",
     "- When receiving complex numbers (claim/policy) or spellings, remain COMPLETELY SILENT and let the rep read the " +
       "entire string from start to finish. Do not announce that you are going to be silent. Never interrupt, talk " +
       "over them, or say 'sorry' / 'I missed that' mid-recitation.",
-    "- Do not repeat back numbers/letters in small chunks as they are read. Wait until they completely finish, pause " +
-      "3-4 seconds to be sure they are done, then read the entire completed string back exactly ONCE for verification.",
+    "- Do not repeat back numbers/letters in small chunks as they are read. Wait until they completely finish, remain " +
+      "quiet for 3-4 seconds to be sure they are done, then read the entire completed string back exactly ONCE for verification.",
     "- If there is a misunderstanding about a number (e.g. number of zeros), do not guess or state different " +
       "versions. Say calmly: 'My apologies, please go ahead and read the full number from start to finish, and I " +
       "will just write it down without repeating.'",
@@ -280,7 +281,7 @@ export function renderRetellPrompt(packet) {
       "only when asked, and don't repeat them excessively once confirmed.",
     "",
     "Sounding human (voice):",
-    "- Pause for a brief second before your first words; never fire off an instant robotic-sounding response.",
+    "- Wait briefly before your first words; never fire off an instant robotic-sounding response.",
     "- Speak a little slower and softer; vary pacing (fast and slow) to sound natural. Maintain a calm, consistent " +
       "volume through the end — do not get loud or overly excited when wrapping up.",
     "- Use conversational connectors like 'ok' and 'so' and occasional natural 'umm' the way Chance does, but very " +
