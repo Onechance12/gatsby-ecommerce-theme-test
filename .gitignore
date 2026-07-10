@@ -2,10 +2,12 @@
 .env
 .env.local
 
-# Local synced JobNimbus data — real client records, never commit
-data/
-reports/
-work/
+# Local synced JobNimbus data — real client records, never commit.
+# Leading slash = repo-root only, so these never shadow source dirs like
+# src/reports/ (the report-generator modules, which MUST be tracked).
+/data/
+/reports/
+/work/
 
 # Dependencies / junk
 node_modules/
