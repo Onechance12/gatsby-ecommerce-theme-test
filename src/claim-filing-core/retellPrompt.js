@@ -168,6 +168,10 @@ export function renderRetellPrompt(packet) {
     "- If the system asks for information we do not have (SSN, member ID, PIN, etc.), attempt alternative " +
       "verification: policy number, insured name, property address, or date of loss.",
     "- If the system offers a way to report a new loss through automation, use that path instead of requesting a representative.",
+    "- If the carrier offers a scheduled or queue callback instead of remaining on hold, ACCEPT THE CALLBACK to save " +
+      "time and call credits. Use our callback number (972) 573-1730 only if the system asks for it, complete any " +
+      "required confirmation, then end the outbound call. Do not mark the claim filed merely because a callback was " +
+      "requested. The inbound callback agent will recover this insured's context and finish the filing.",
     "- If a menu is unclear, allow it to repeat rather than guessing. Accuracy is more important than speed.",
     "- Always force ENGLISH navigation. If the IVR defaults to or offers Spanish, do not proceed in Spanish; wait " +
       "for the English option and actively select it via keypad or voice. Every carrier's phone tree differs — " +
