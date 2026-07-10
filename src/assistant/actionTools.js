@@ -244,7 +244,9 @@ async function planAppendDescription(config, review, input) {
   let nextDescription;
   if (current && labelPattern.test(current)) {
     // Replace an existing line with this same label instead of duplicating it.
-    nextDescription = current.replace(labelPattern, line);
+    // Use a function replacement so $-sequences in the value (e.g. "$5,000")
+    // are written literally, not interpreted as replacement patterns.
+    nextDescription = current.replace(labelPattern, () => line);
   } else if (current) {
     nextDescription = `${current}\n${line}`;
   } else {

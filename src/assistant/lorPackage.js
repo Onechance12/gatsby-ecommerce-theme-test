@@ -19,6 +19,7 @@ import { generateLor } from "../documents/lorGenerator.js";
 import { listContactFiles, findFile, downloadFile } from "../jobnimbus/files.js";
 import { googleConfigured } from "../google/googleAuth.js";
 import { createDraftWithAttachments } from "../google/gmail.js";
+import { gatherLiveContext, applyLiveOverrides } from "./fileClaim.js";
 
 export async function runLorPackage(config, args) {
   const input = parseInput(args);
@@ -32,6 +33,11 @@ export async function runLorPackage(config, args) {
   const match = findMatches(reviews, query)[0];
   if (!match) { console.log(`No file found for: ${query}`); process.exitCode = 1; return; }
   const file = match.file;
+
+  // Refresh key fields from live JobNimbus (the LOR is a legal doc — never build
+  // it from a stale snapshot's policy/claim/insured values).
+  const { contact: liveContact, liveError } = await gatherLiveContext(config, match);
+  if (liveContact) applyLiveOverrides(file, liveContact);
 
   // 1 + 2: generate LOR
   const lor = generateLor(config, file);
@@ -70,13 +76,27 @@ export async function runLorPackage(config, args) {
     pulled.push({ label: "W-9", found: false, note: `not found at ${w9Path}` });
   }
 
-  // 4: cover email
+  // 4: cover email — name ONLY the docs actually attached, so we never promise a
+  // document the recipient won't find.
+  const has = (kw) => attachments.some((a) => new RegExp(kw, "i").test(a.filename) || new RegExp(kw, "i").test(a.source || ""));
+  const docPhrases = [];
+  if (has("lor|representation")) docPhrases.push("an updated LOR");
+  if (has("tdi|fin535")) docPhrases.push("an executed TDI (FIN535)");
+  if (has("w-?9")) docPhrases.push("a W-9");
+  const docList = docPhrases.length
+    ? docPhrases.length === 1 ? docPhrases[0]
+      : `${docPhrases.slice(0, -1).join(", ")} and ${docPhrases[docPhrases.length - 1]}`
+    : "the requested documents";
+  const missingRequired = [];
+  if (!has("lor|representation")) missingRequired.push("LOR");
+  if (!has("tdi|fin535")) missingRequired.push("TDI");
+
   const to = input.to || "{carrier claims email — needed}";
   const subject = file.claimNumber || "{claim number}";
   const body = [
     "Good afternoon,",
     "",
-    `Attached please find an executed TDI (FIN535), an updated LOR, and W-9 for the above referenced claim (policyholder: ${file.customer}). Please send payment to our office with Wave Public Adjusting LLC included as a payee.`,
+    `Attached please find ${docList} for the above referenced claim (policyholder: ${file.customer}). Please send payment to our office with Wave Public Adjusting LLC included as a payee.`,
     "",
     "Thank you,",
     "Chance Pearson",
@@ -96,18 +116,25 @@ export async function runLorPackage(config, args) {
     lorPdf: lor.pdfPath || lor.error
   };
 
+  plan.missingRequiredDocs = missingRequired;
+  if (liveError) plan.liveRefreshWarning = `Live JobNimbus refresh failed (${liveError}); LOR built from last sweep — verify policy/claim before sending.`;
   const execute = input.execute === true;
-  const canDraft = googleConfigured(config) && config.google.allowSend !== undefined; // drafts allowed whenever configured
 
   if (!execute || !googleConfigured(config)) {
     console.log(JSON.stringify({ mode: "DRY RUN", plan, next: googleConfigured(config)
-      ? "Add \"execute\":true to stage the Gmail draft with attachments."
-      : "Google not configured — LOR + TDI saved locally. Set GOOGLE_* in .env (see docs/google-setup.md) to auto-stage the draft."
+      ? (missingRequired.length ? `WARNING: missing ${missingRequired.join(", ")} — draft will be blocked until present (or pass allowMissingDocs:true).` : "Add \"execute\":true to stage the Gmail draft with attachments.")
+      : "Google not configured — docs saved locally. Set GOOGLE_* in .env (see docs/google-setup.md) to auto-stage the draft."
     }, null, 2));
     return;
   }
   if (to.startsWith("{")) {
     console.log(JSON.stringify({ mode: "BLOCKED", reason: "No recipient email. Pass \"to\":\"...\".", plan }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+  // Never stage a legal-doc email that promises an LOR/TDI it doesn't carry.
+  if (missingRequired.length && input.allowMissingDocs !== true) {
+    console.log(JSON.stringify({ mode: "BLOCKED", reason: `Required document(s) missing: ${missingRequired.join(", ")}. Fix the file (upload the TDI / check LOR generation) or pass allowMissingDocs:true to override.`, plan }, null, 2));
     process.exitCode = 1;
     return;
   }

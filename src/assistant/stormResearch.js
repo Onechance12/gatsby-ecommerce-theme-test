@@ -361,7 +361,10 @@ function computeStormWindow(reports, dateIso) {
 }
 
 function normalizeSpcRow(row, type) {
-  const sizeRaw = Number(row.Size);
+  // SPC hail CSVs carry a "Size" column (hundredths of an inch); wind CSVs carry
+  // a "Speed" column (mph). Reading Size for wind gave NaN and silently killed
+  // all wind evidence.
+  const sizeRaw = type === "wind" ? Number(row.Speed ?? row.Size) : Number(row.Size);
   return {
     time: row.Time || "",
     size: type === "hail" ? sizeRaw / 100 : sizeRaw,

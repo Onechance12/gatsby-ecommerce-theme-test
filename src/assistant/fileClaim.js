@@ -36,7 +36,7 @@ export async function runFileClaim(config, args) {
   // Read the live contact ONCE: refresh the key filing fields (sweep data can be
   // stale) and parse the inspection-captured description lines. One API call,
   // zero Claude tokens, fully fresh facts.
-  const { captured, contact } = await gatherLiveContext(config, review);
+  const { captured, contact, liveError } = await gatherLiveContext(config, review);
   if (contact) applyLiveOverrides(review.file, contact);
 
   const goal = input.goal || "file_new_claim";
@@ -58,6 +58,19 @@ export async function runFileClaim(config, args) {
   const dynamicVariables = flattenFactsForDynamicVariables(packet);
 
   const readiness = assessReadiness(packet, to, carrier);
+
+  // Duplicate-filing guard: never open a NEW claim on a file that already has a
+  // claim number (that's a follow-up, not a filing).
+  const existingClaim = String(review.file.claimNumber || "").replace(/^missing.*/i, "").trim();
+  if (goal === "file_new_claim" && existingClaim) {
+    readiness.blockers.push(`file already has claim # ${existingClaim} — use goal:"status_follow_up", not a new filing`);
+    readiness.ready = false;
+  }
+  // Surface a silent live-refresh failure so a call never quietly runs on stale data.
+  if (liveError) {
+    readiness.warnings.push(`LIVE JOBNIMBUS REFRESH FAILED (${liveError}) — facts below are from the last sweep and may be stale`);
+  }
+
   const execute = input.execute === true;
 
   const plan = {
@@ -115,9 +128,11 @@ export async function runFileClaim(config, args) {
 
 // One live read of the contact: returns the inspection-captured description
 // lines plus the raw contact record (for refreshing stale filing fields).
-async function gatherLiveContext(config, review) {
+// liveError is set (not thrown) when the refresh fails, so callers can WARN
+// rather than silently proceed on stale sweep data.
+export async function gatherLiveContext(config, review) {
   const captured = { stormTime: "", occupancy: "", damageDiscovered: "" };
-  if (config.useFixtures) return { captured, contact: null };
+  if (config.useFixtures) return { captured, contact: null, liveError: null };
   try {
     const client = new ReadOnlyJobNimbusClient(config);
     const contact = await client.getJson(`${config.endpoints.contacts}/${encodeURIComponent(review.file.id)}`);
@@ -125,16 +140,16 @@ async function gatherLiveContext(config, review) {
     captured.stormTime = matchLine(description, "Time of Loss");
     captured.occupancy = matchLine(description, "Occupancy");
     captured.damageDiscovered = matchLine(description, "Damage Discovered");
-    return { captured, contact };
-  } catch {
-    return { captured, contact: null };
+    return { captured, contact, liveError: null };
+  } catch (error) {
+    return { captured, contact: null, liveError: config.redact ? config.redact(error.message) : error.message };
   }
 }
 
 // Overwrite the (possibly stale) sweep fields with the live contact's custom
 // fields, using the same cf_* mapping the normalizer uses. Only overrides when
 // the live value is present, so we never blank out good sweep data.
-function applyLiveOverrides(file, contact) {
+export function applyLiveOverrides(file, contact) {
   const set = (key, value) => { if (value) file[key] = value; };
   set("carrier", contact.cf_string_1 || contact["Insurance Company"]);
   set("claimNumber", contact.cf_string_2 || contact["Claim #"]);
@@ -153,7 +168,7 @@ function applyLiveOverrides(file, contact) {
 }
 
 function matchLine(text, label) {
-  const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}:\\s*(.+)$`, "im");
+  const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*(.+)$`, "im");
   const m = re.exec(text || "");
   return m ? m[1].trim() : "";
 }
