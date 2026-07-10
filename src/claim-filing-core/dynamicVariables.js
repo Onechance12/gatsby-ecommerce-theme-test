@@ -31,7 +31,9 @@ export const PROMPT_PLACEHOLDERS = [
   "callbackPropertyAddress",
   "callbackPolicyNumber",
   "callbackClaimNumber",
-  "pendingCallbackCases"
+  "pendingCallbackCases",
+  "batchClaimCount",
+  "batchClaims"
 ];
 
 export function flattenFactsForDynamicVariables(packet) {
@@ -52,6 +54,8 @@ export function flattenFactsForDynamicVariables(packet) {
   out.callbackPolicyNumber = "Missing";
   out.callbackClaimNumber = "Missing";
   out.pendingCallbackCases = "Missing";
+  out.batchClaimCount = "0";
+  out.batchClaims = "None";
   // The goal rides along so post-call extraction can tell a new filing from a
   // status follow-up even without call metadata.
   if (packet.goal) out.goal = String(packet.goal);

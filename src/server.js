@@ -10,6 +10,7 @@ import {
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
+  digest,
   retellCallBody,
   callbackCandidateFromCall,
   validateRetellCallOwnership
@@ -761,7 +762,8 @@ async function assignedCounts(input = {}) {
 
 async function prepareClaimFiling(input) {
   const context = await buildLiveClaimContext(required(input.query, "query"));
-  const plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
+  let plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
+  plan = await attachSameCarrierBatch(plan, context, input);
   return {
     mode: "dry_run",
     approvalRequired: true,
@@ -776,7 +778,8 @@ async function prepareClaimFiling(input) {
 
 async function placeClaimFilingCall(input) {
   const context = await buildLiveClaimContext(required(input.query, "query"));
-  const plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
+  let plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
+  plan = await attachSameCarrierBatch(plan, context, input);
   assertApprovalDigest(input.planDigest, plan.planDigest);
 
   const request = retellCallBody(plan);
@@ -831,6 +834,71 @@ async function placeClaimFilingCall(input) {
     callStatus: result.call_status,
     nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId."
   };
+}
+
+async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
+  if (input.includeCarrierBatch === false || primaryPlan.packet.goal !== "file_new_claim") return primaryPlan;
+  const carrierKey = normalizeCompare(primaryContext.file.carrier);
+  if (!carrierKey) return primaryPlan;
+
+  const contacts = await listContacts({ maxPages: Number(input.maxPages || 25) });
+  const candidates = contacts
+    .filter((contact) => isInsuranceFile(contact) && assignedTo(contact, CHANCE_OWNER_ID) && isOpenActive(contact))
+    .map((contact) => ({ contact, file: compactContact(contact) }))
+    .filter(({ file }) => file.id !== primaryContext.file.id)
+    .filter(({ file }) => normalizeCompare(file.carrier) === carrierKey)
+    .filter(({ file }) => /(?:ready|waiting) for pa review/i.test(file.status))
+    .filter(({ file }) => !String(file.claimNumber || "").trim())
+    .sort((a, b) => Number(a.file.number || 0) - Number(b.file.number || 0))
+    .slice(0, 6);
+
+  const batchClaims = [];
+  for (const { contact, file } of candidates) {
+    const candidateInput = {
+      file: {
+        id: file.id,
+        customer: file.name,
+        address: file.address,
+        carrier: file.carrier,
+        policyNumber: file.policyNumber,
+        claimNumber: file.claimNumber,
+        dateOfLoss: file.dateOfLoss,
+        typeOfLoss: file.typeOfLoss,
+        status: file.status,
+        mortgageCompany: fieldValue(contact, ["Mortgage Company", "mortgage_company", "cf_string_6"]),
+        contact,
+        adjuster: {}
+      },
+      evidence: { documents: [], notes: [], tasks: [] },
+      captured: {},
+      overrides: {}
+    };
+    const candidatePlan = buildClaimFilingPlan(candidateInput, claimPlanOptions(input, file));
+    if (!candidatePlan.readiness.ready) continue;
+    batchClaims.push({
+      fileNumber: file.number,
+      contactId: file.id,
+      insuredName: candidatePlan.packet.verifiedFileFacts.insuredName,
+      propertyAddress: candidatePlan.packet.verifiedFileFacts.propertyAddress,
+      homeownerPhone: candidatePlan.packet.verifiedFileFacts.homeownerPhone,
+      homeownerEmail: candidatePlan.packet.verifiedFileFacts.homeownerEmail,
+      policyNumber: candidatePlan.callPlan.dynamicVariables.policyNumberSpoken,
+      dateOfLoss: candidatePlan.packet.verifiedFileFacts.dateOfLoss,
+      causeOfLoss: candidatePlan.packet.verifiedFileFacts.causeOfLoss,
+      injuries: candidatePlan.packet.verifiedFileFacts.injuries,
+      homeLivable: candidatePlan.packet.verifiedFileFacts.homeLivable,
+      temporaryRepairs: candidatePlan.packet.verifiedFileFacts.temporaryRepairs,
+      contractorHired: candidatePlan.packet.verifiedFileFacts.contractorHired
+    });
+  }
+
+  primaryPlan.callPlan.dynamicVariables.batchClaimCount = String(batchClaims.length);
+  primaryPlan.callPlan.dynamicVariables.batchClaims = batchClaims.length ? JSON.stringify(batchClaims) : "None";
+  primaryPlan.callPlan.metadata.batchContactIds = batchClaims.map((claim) => claim.contactId).join(",");
+  primaryPlan.batchClaims = batchClaims;
+  primaryPlan.planDigest = digest({ primaryPlanDigest: primaryPlan.planDigest, batchClaims });
+  primaryPlan.callPlan.metadata.planDigest = primaryPlan.planDigest;
+  return primaryPlan;
 }
 
 async function claimFilingResult(input) {

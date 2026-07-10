@@ -48,6 +48,7 @@ export function postCallAnalysisSchema() {
     { type: "string", name: "adjuster_email", description: "Email address for the adjuster, if given. Empty if not provided." },
     { type: "string", name: "document_submission", description: "The email address or portal the rep said to use for sending the Letter of Representation and documents. Empty if not provided." },
     { type: "string", name: "next_step", description: "The next step or timeframe the rep described (e.g. 'adjuster will call in 24-48 hours', 'inspection to be scheduled'). Empty if none." },
+    { type: "string", name: "additional_claims", description: "For approved batch filings, a compact JSON array with one object per additional insured containing fileNumber, insuredName, claimNumber, adjusterName, adjusterPhone, adjusterEmail, documentSubmission, nextStep, and outcome. Empty array string [] when no additional claim was handled." },
     {
       type: "enum",
       name: "filing_outcome",
@@ -110,6 +111,7 @@ export function renderRetellPrompt(packet) {
       "destination, and next step. The callback result still requires Chance's approval before any JobNimbus writeback.",
     "",
     "Call objective for THIS call: {{objective}}",
+    "Approved same-carrier follow-on claims: {{batchClaimCount}}. Approved batch data: {{batchClaims}}.",
     "",
     "Verified file facts for THIS call (use ONLY these; never invent or guess a value):",
     "- Insured: {{insuredName}}",
@@ -180,8 +182,13 @@ export function renderRetellPrompt(packet) {
     "- Always force ENGLISH navigation. If the IVR defaults to or offers Spanish, do not proceed in Spanish; wait " +
       "for the English option and actively select it via keypad or voice. Every carrier's phone tree differs — " +
       "remain adaptable and wait specifically for the English selection prompts.",
-    "- Batch Filing Rule: if multiple claims are pending for the same carrier, ask the representative at the end of " +
-      "the first filing if they can help file another claim on the same call to save time.",
+    "- BATCH FILING RULE: {{batchClaimCount}} is the number of ADDITIONAL same-carrier claims Chance approved for this " +
+      "call. After receiving and confirming the claim/reference number for the current insured, and when the representative " +
+      "asks whether anything else is needed, say: 'Could you also help me open a claim for another policyholder?' If they " +
+      "agree, file every approved case in {{batchClaims}} one at a time. Treat each case as a fresh claim: give only the " +
+      "requested facts, obtain its separate claim/reference number, and ask for document instructions and next steps. Do " +
+      "not end the call until all approved batch cases are completed or the representative refuses/cannot continue. Never " +
+      "file a case that is not present in {{batchClaims}}. If {{batchClaimCount}} is zero, do not ask to file another claim.",
     "- CRITICAL (especially Liberty Mutual): wait for the system to completely read ALL options before responding. " +
       "Never press buttons or speak too early. Listen to the entire prompt, wait a full 3 seconds after the system " +
       "stops talking, then make the selection — this prevents getting misrouted to towing or roadside assistance.",

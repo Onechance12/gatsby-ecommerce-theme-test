@@ -15,6 +15,7 @@ export function extractCallResults(call) {
   const adjusterEmail = firstNonEmpty(cad.adjuster_email, transcriptEmail(transcript));
   const documentSubmission = firstNonEmpty(cad.document_submission, transcriptEmail(transcript));
   const nextStep = firstNonEmpty(cad.next_step);
+  const additionalClaims = parseAdditionalClaims(cad.additional_claims);
 
   // Goal decides new-vs-existing when the analysis didn't supply filing_outcome.
   const goal = firstNonEmpty(call?.raw?.metadata?.goal, dv.goal);
@@ -41,11 +42,24 @@ export function extractCallResults(call) {
     adjusterEmail,
     documentSubmission,
     nextStep,
+    additionalClaims,
     outcome,
     source,
     callStatus: call?.callStatus,
     disconnectionReason: call?.disconnectionReason
   };
+}
+
+function parseAdditionalClaims(value) {
+  if (Array.isArray(value)) return value;
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export function inferOutcome(claimNumber, call, goal) {
