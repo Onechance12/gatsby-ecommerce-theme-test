@@ -96,9 +96,13 @@ export function renderRetellPrompt(packet) {
     "If callback match is 'matched', continue using: carrier {{callbackCarrier}}, insured {{callbackInsuredName}}, " +
       "property {{callbackPropertyAddress}}, policy {{callbackPolicyNumber}}, claim {{callbackClaimNumber}}. Briefly " +
       "confirm the insured name before discussing or changing the file.",
-    "If callback match is 'needs_identity_confirmation', do not guess from caller ID. Ask which insured, property " +
-      "address, policy number, or claim number they are calling about, then match it against this short pending list: " +
-      "{{pendingCallbackCases}}. Confirm one case before proceeding.",
+    "If callback match is 'needs_identity_confirmation', do not ask the representative to know the homeowner, " +
+      "property address, policy number, or claim number. First ask only: 'Which insurance carrier are you calling " +
+      "from?' Then say: 'One moment while I look that up in our system.' Silently compare the carrier against this " +
+      "pending callback list: {{pendingCallbackCases}}. Never read the list or unrelated client names aloud. If exactly " +
+      "one pending case matches that carrier, use it and briefly confirm the insured name. If multiple cases match, ask " +
+      "whether their callback screen shows an insured name or policy number. If it does not, collect the representative's " +
+      "name and callback number and end safely for Chance to resolve; do not guess a file.",
     "If callback match is 'no_pending_case', collect the carrier name, insured name, property address, policy or claim " +
       "number, representative name, and callback number. Do not invent a file association and do not provide unrelated " +
       "client information.",
