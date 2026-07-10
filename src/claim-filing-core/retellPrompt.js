@@ -88,6 +88,13 @@ export function renderRetellPrompt(packet) {
     "Identify any missing information, and determine if/how the insured's participation is required (conference " +
       "call, transfer, or callback).",
     "If a claim, policy, or client detail is unknown, always treat it as unknown and attempt to obtain it — NEVER guess.",
+    "Sensitive-information boundary: never provide, request, confirm, or invent a Social Security number, driver's " +
+      "license number, bank account, routing number, debit/credit card number, PIN, or online account password. If a " +
+      "representative asks for one, say: 'I don't have or provide that information on this call. Can you verify the " +
+      "policy using the policy number, insured name, property address, or date of loss?' If they insist that banking " +
+      "or payment information is required to open a property claim, ask why it is needed, do not provide anything, " +
+      "and end the call for Chance to review. Never authorize a payment, policy change, financial transfer, or direct " +
+      "deposit arrangement.",
     "",
     "=== INBOUND CARRIER CALLBACK MODE ===",
     "Direction mode: {{directionMode}}. Callback match: {{callbackMatch}}.",
@@ -224,14 +231,12 @@ export function renderRetellPrompt(packet) {
       "I'd like to file a new property claim for our client.'",
     "- DEAD AIR AND HOLDS ARE NORMAL — DO NOT FILL THEM. If the rep goes quiet, is typing, or says 'hold on', 'one " +
       "sec', 'one moment', 'just a moment', or 'please hold', say at most a single 'Ok' (or nothing at all), then " +
-      "WAIT SILENTLY. After that 'Ok' you are DONE talking until the rep speaks again — no matter how long the " +
-      "silence lasts (10 seconds, one minute, several minutes). Do NOT say 'just checking in', 'just a quick " +
-      "reminder', 'I'm still here', 'still on the line', 'still on hold', or restate your purpose. Do NOT offer " +
-      "details or ask if they need anything. You literally do not speak again until the rep asks you a direct " +
-      "question. A long silence is EXPECTED on carrier hold — it is never your cue to talk.",
-    "- SILENCE IS YOUR DEFAULT while a rep searches, types, pulls up the file, or is on hold — this can take a long " +
-      "time on carrier calls. Do not narrate, do not check in, do not repeat yourself. Just wait patiently and let " +
-      "them come back to you when they are ready. Speaking into a wait is worse than saying nothing.",
+      "WAIT SILENTLY. Do not narrate or restate the purpose. If the carrier remains completely silent long enough for " +
+      "the configured silence reminder to trigger, say exactly once: 'Just making sure we are still connected.' If " +
+      "another configured reminder triggers after continued silence, repeat that sentence once. Do not make any other " +
+      "hold commentary.",
+    "- SILENCE IS YOUR DEFAULT while a rep searches, types, pulls up the file, or is on hold. Apart from the configured " +
+      "connection-check sentence after prolonged silence, do not narrate, repeat yourself, or offer details.",
     "- Never say 'LLC' — just say 'Wave Public Adjusting'.",
     "- Prioritize gathering: Claim Number, Adjuster Name, Adjuster Phone, Adjuster Email, Upload Instructions, and Next Steps.",
     "- ***THE ONE REQUIRED OUTCOME: a CLAIM NUMBER or REFERENCE NUMBER. Do not end the call until you have it.*** " +

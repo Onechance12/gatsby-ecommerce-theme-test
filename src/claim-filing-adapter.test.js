@@ -94,6 +94,13 @@ test("IVR controls listen to the full menu without waiting for a repeat", () => 
   assert.doesNotMatch(config.generalPrompt, /wait a full 3 seconds after the system/i);
 });
 
+test("carrier calls refuse sensitive identity and banking information", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /never provide, request, confirm, or invent a Social Security number/i);
+  assert.match(prompt, /driver's license number, bank account, routing number/i);
+  assert.match(prompt, /Just making sure we are still connected\./);
+});
+
 function fixture(overrides = {}) {
   return {
     file: {
