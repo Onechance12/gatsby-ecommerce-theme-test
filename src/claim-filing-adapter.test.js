@@ -112,6 +112,19 @@ test("builds deterministic approval-gated State Farm plan", () => {
   assert.equal(retellCallBody(first).override_agent_id, "agent-1");
 });
 
+test("uses the verified National General homeowners claims number", () => {
+  const input = fixture();
+  input.file.carrier = "National General Insurance Company";
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    fileNumber: "2717",
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.callPlan.to, "+18003251088");
+  assert.equal(plan.readiness.ready, true);
+});
+
 test("changed live facts invalidate an approved digest", () => {
   const options = { ownerId: OWNER_ID, from: "+12145550100", agentId: "agent-1" };
   const approved = buildClaimFilingPlan(fixture(), options);

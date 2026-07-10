@@ -31,6 +31,16 @@ const CARRIERS = [
     ivrType: "speech",
     requiresPolicyNumber: false,
     notes: "Speech IVR routes to a live rep to open the claim; policy-number verification; injury question = No."
+  },
+  {
+    key: "national general",
+    match: /national\s+general/i,
+    filingPhone: "+18003251088",
+    display: "National General (homeowners claims)",
+    dossier: "docs/carriers/national-general.md",
+    ivrType: "dtmf",
+    requiresPolicyNumber: false,
+    notes: "Verified by National General callback on 2026-07-10. Lender services is 800-211-4533; homeowners claims is 800-325-1088."
   }
 ];
 
