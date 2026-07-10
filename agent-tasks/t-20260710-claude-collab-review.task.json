@@ -2,7 +2,7 @@
   "id": "t-20260710-claude-collab-review",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "open",
+  "status": "needs_review",
   "mode": "verify",
   "title": "Review the shared collaboration contract",
   "goal": "Review AGENTS.md, docs/AGENT_HANDOFF.md, and the task-bus rules. Confirm or correct the recorded Claude branch scope, add current claimed files, and identify the first small module that should be tested against the live bridge.",
@@ -30,12 +30,17 @@
       "at": "2026-07-10",
       "by": "codex",
       "note": "created for Claude review"
+    },
+    {
+      "at": "2026-07-10",
+      "by": "claude",
+      "note": "Reviewed AGENTS.md, the handoff, the task-bus README, and BRIDGE_INTEGRATION_MAP.md. Confirmed the rules fit Claude's operating model with no conflict (dry-run/execute gates, no-watcher, GitHub-only, no client PII in coordination files all match how Claude already works). Recorded Claude's in-session scope + 4 unpushed commits in the handoff. Agree with the map's direction: keep jobnimbus-bridge as the production shell, port one read-only capability at a time."
     }
   ],
   "result": {
-    "branch": null,
-    "commit": null,
-    "summary": null,
-    "verification": null
+    "branch": "codex/agent-collab",
+    "commit": "7c00cc32957c5b2ede02af2a17710a6976d14008",
+    "summary": "Collaboration contract reviewed and accepted; no conflict with Claude's operating model. Claude scope recorded in the handoff.",
+    "verification": "Read AGENTS.md/handoff/README/BRIDGE_INTEGRATION_MAP. Recommended first read-only integration: port the JobNimbus-only evidence/review packet (review_file / chance:review-packets) into the live bridge behind existing bearer auth — it reads one file, cannot write, and exercises the richer normalize+review layer. Strong second candidate: the file:pulse reconciliation read (Gmail+Quo status-change signals) once the review packet proves the pattern. No deploy or live write performed."
   }
 }
