@@ -11,6 +11,7 @@ import {
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
 import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
+import { normalizeDateOfLoss } from "./claim-filing-core/packet.js";
 
 const OWNER_ID = "chance-owner";
 
@@ -20,6 +21,11 @@ test("spokenPolicyNumber strips mortgage control and loan references", () => {
     "7007-0002"
   );
   assert.equal(spokenPolicyNumber("Policy # 93-E4-B591-7"), "93-E4-B591-7");
+});
+
+test("normalizeDateOfLoss converts JobNimbus epoch seconds before the voice call", () => {
+  assert.equal(normalizeDateOfLoss(1777136400), "04/25/2026");
+  assert.equal(normalizeDateOfLoss("4/25/2026"), "04/25/2026");
 });
 
 test("callbackCandidateFromCall reconstructs a pending case from Retell metadata", () => {

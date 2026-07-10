@@ -41,7 +41,7 @@ export function buildClaimCallPacket(input, options = {}) {
     carrier: file.carrier || "Missing",
     policyNumber: file.policyNumber || "Missing",
     claimNumber: cleanClaimNumber(file.claimNumber) || "Missing / not filed",
-    dateOfLoss: file.dateOfLoss || "Missing",
+    dateOfLoss: normalizeDateOfLoss(file.dateOfLoss),
     stormTime: overrides.stormTime || captured.stormTime || "Missing",
     causeOfLoss,
     currentStatus: file.status || "Missing",
@@ -85,6 +85,31 @@ export function normalizeGoal(value, file) {
   if (ALLOWED_GOALS.has(goal)) return goal;
   const claimNumber = cleanClaimNumber(file?.claimNumber);
   return claimNumber ? "status_follow_up" : DEFAULT_GOAL;
+}
+
+export function normalizeDateOfLoss(value) {
+  if (value === undefined || value === null || value === "") return "Missing";
+  const raw = String(value).trim();
+  let date;
+
+  if (/^\d{10}$/.test(raw)) date = new Date(Number(raw) * 1000);
+  else if (/^\d{13}$/.test(raw)) date = new Date(Number(raw));
+  else {
+    const matched = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+    if (matched) {
+      const [, month, day, year] = matched;
+      return `${month.padStart(2, "0")}/${day.padStart(2, "0")}/${year}`;
+    }
+    date = new Date(raw);
+  }
+
+  if (Number.isNaN(date.getTime())) return raw;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric"
+  }).format(date);
 }
 
 function objectiveFor(goal, facts) {
