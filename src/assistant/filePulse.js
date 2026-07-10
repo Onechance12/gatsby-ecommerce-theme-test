@@ -8,6 +8,7 @@
 // biggest hole the audit found. Read-only; it never writes.
 //
 //   npm run file:pulse -- '{"query":"Robert Frazier"}'
+import { execFileSync } from "node:child_process";
 import { loadReviews, findMatches } from "./fileReview.js";
 import { gatherLiveContext, applyLiveOverrides } from "./fileClaim.js";
 import { googleConfigured, googleApi } from "../google/googleAuth.js";
@@ -21,7 +22,7 @@ const SIGNALS = [
   { key: "denial", re: /\b(denied|denial|not covered|coverage is denied)\b/i, suggests: "Possible denial — needs PA attention" },
   { key: "approved", re: /\b(approved|approval|estimate is approved|claim is approved)\b/i, suggests: "Claim/estimate approved — advance status" },
   { key: "adjuster", re: /adjuster (?:is |has been |will be )?(?:assigned|named|handling)|assigned adjuster|your adjuster is/i, suggests: "Adjuster assigned — capture name/contact + advance status" },
-  { key: "inspection", re: /inspection (?:is )?(?:scheduled|set|confirmed|booked)|scheduled (?:the |your )?inspection|inspection (?:on|for) \w+day|reinspection/i, suggests: "Inspection scheduled — move to Appointment Set / calendar it" },
+  { key: "inspection", re: /inspection (?:has been |is |was |will be )?(?:scheduled|set|confirmed|booked)|(?:scheduled|set) (?:the |your |an? )?(?:re-?)?inspection|inspection (?:on|for) \w+day|arrival window|reinspection/i, suggests: "Inspection scheduled — move to Appointment Set / calendar it + confirm homeowner access" },
   { key: "supplement", re: /supplement/i, suggests: "Supplement activity" },
   { key: "appraisal", re: /appraisal|appraiser|umpire/i, suggests: "Appraisal activity" },
 ];
@@ -41,6 +42,7 @@ export async function runFilePulse(config, args) {
   const keys = {
     insuredName: file.customer || "",
     homeownerPhone: pickPhone(file),
+    adjusterPhone: String(file.adjuster?.phone || file.source?.contact?.["Carrier DA Contact #"] || "").trim(),
     homeownerEmail: (file.email || file.source?.contact?.email || "").trim(),
     claimNumber: cleanClaim(file.claimNumber),
   };
@@ -97,21 +99,29 @@ async function pullGmail(config, keys) {
 
 async function pullQuo(config, keys) {
   if (!config.quo.apiKey) return { error: "Quo not configured", messages: [], calls: [] };
-  if (!keys.homeownerPhone) return { error: "no homeowner phone on file", messages: [], calls: [] };
-  const phone = toE164(keys.homeownerPhone);
+  // Match on BOTH the homeowner and (if known) the adjuster number — filing
+  // intel lives in both conversations.
+  const phones = [...new Set([toE164(keys.homeownerPhone), toE164(keys.adjusterPhone)].filter(Boolean))];
+  if (!phones.length) return { error: "no homeowner/adjuster phone on file", messages: [], calls: [] };
   const lines = await quoGet(config, "/phone-numbers");
   const lineIds = (lines.data || []).map((n) => n.id);
   const messages = [];
   const calls = [];
-  for (const lineId of lineIds) {
-    for (const kind of ["messages", "calls"]) {
-      let payload;
-      try {
-        payload = await quoGet(config, `/${kind}?phoneNumberId=${encodeURIComponent(lineId)}&participants[]=${encodeURIComponent(phone)}&maxResults=20`);
-      } catch { continue; }
-      for (const row of payload.data || []) {
-        if (kind === "messages") messages.push({ at: row.createdAt, direction: row.direction, text: (row.text || "").replace(/\s+/g, " ").trim() });
-        else calls.push({ at: row.createdAt, direction: row.direction, durationSec: row.duration, status: row.status });
+  const seen = new Set();
+  for (const phone of phones) {
+    const who = phone === toE164(keys.adjusterPhone) ? "adjuster" : "homeowner";
+    for (const lineId of lineIds) {
+      for (const kind of ["messages", "calls"]) {
+        let payload;
+        try {
+          payload = await quoGet(config, `/${kind}?phoneNumberId=${encodeURIComponent(lineId)}&participants[]=${encodeURIComponent(phone)}&maxResults=20`);
+        } catch { continue; }
+        for (const row of payload.data || []) {
+          if (seen.has(row.id)) continue;
+          seen.add(row.id);
+          if (kind === "messages") messages.push({ at: row.createdAt, with: who, direction: row.direction, text: (row.text || "").replace(/\s+/g, " ").trim() });
+          else calls.push({ at: row.createdAt, with: who, direction: row.direction, durationSec: row.duration, status: row.status });
+        }
       }
     }
   }
@@ -120,15 +130,27 @@ async function pullQuo(config, keys) {
   return { messages, calls };
 }
 
+// Quo (OpenPhone) via Node fetch, with a curl fallback. The sandbox proxy 503s
+// undici for api.openphone.com; curl goes through cleanly. On a normal machine
+// (Chance's Mac) the fetch path works and curl is never touched. Either way, Quo
+// review runs — no MacBook required.
 async function quoGet(config, endpoint) {
-  const response = await fetch(`${config.quo.baseUrl}${endpoint}`, {
-    headers: { authorization: config.quo.apiKey, "content-type": "application/json" },
-  });
-  const text = await response.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
-  if (!response.ok) throw new Error(`Quo ${response.status}`);
-  return json;
+  const url = `${config.quo.baseUrl}${endpoint}`;
+  try {
+    const response = await fetch(url, { headers: { authorization: config.quo.apiKey, "content-type": "application/json" } });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Quo ${response.status}`);
+    return text ? JSON.parse(text) : {};
+  } catch (fetchErr) {
+    try {
+      const out = execFileSync("curl", ["-s", "--max-time", "30", url, "-H", `authorization: ${config.quo.apiKey}`, "-H", "content-type: application/json"], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+      const json = out ? JSON.parse(out) : {};
+      if (json && json.status && Number(json.status) >= 400) throw new Error(`Quo ${json.status}`);
+      return json;
+    } catch (curlErr) {
+      throw new Error(`Quo unreachable (fetch: ${String(fetchErr.message).slice(0, 40)}; curl: ${String(curlErr.message).slice(0, 40)})`);
+    }
+  }
 }
 
 // ---------- helpers ----------
