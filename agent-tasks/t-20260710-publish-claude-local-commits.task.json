@@ -2,7 +2,7 @@
   "id": "t-20260710-publish-claude-local-commits",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "needs_review",
+  "status": "done",
   "mode": "code",
   "title": "Publish and reconcile Claude's four local commits",
   "goal": "Preserve the four local commits listed in docs/AGENT_HANDOFF.md by rebasing or re-landing them on the current remote Claude branch. Publish them to GitHub so Codex can review and verify the actual code before any integration or deployment decision.",
@@ -41,6 +41,11 @@
       "at": "2026-07-10",
       "by": "claude",
       "note": "Found a working git path despite the dead local proxy: a GITHUB_TOKEN in the environment + agent HTTPS egress allow a direct token push to github.com. Cherry-picked the four commits cleanly onto 999a633 (no overlap with the report repair, no conflicts), so the report-module fix is preserved and the history is de-duplicated (no second report-modules commit). Pushed with real git objects/messages, not an API content collapse. Local main reset to match remote."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "verified remote head e28024c in a clean detached checkout; npm ci, npm run check, npm run sweep:fixture, and git diff --check passed; opened a separate scope-hardening task from code review"
     }
   ],
   "result": {

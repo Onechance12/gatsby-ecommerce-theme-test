@@ -25,8 +25,10 @@ Claude.
   actions, Gmail/Drive/Quo modules, storm research, LOR packaging, `file:claim`
   orchestrator, `file:pulse` reconciliation, post-call writeback, and voice
   tooling.
-- Render bridge branch: `jobnimbus-bridge` at `55346ac`. Deployed ChatGPT action
+- Render bridge branch: `jobnimbus-bridge` at `20c86e3`. Deployed ChatGPT action
   bridge and OpenAI/Twilio voice path. Separate runtime line from Claude's branch.
+  Artifact mailbox deployed at `20c86e3`; authenticated patch upload/list/get/
+  complete endpoints are live and documented in `docs/ARTIFACT_HANDOFF.md`.
 - Collaboration scaffold: `codex/agent-collab`, based on Claude's branch.
 
 ### ✅ Claude's local commits are now published (proxy worked around)
@@ -60,8 +62,11 @@ review the actual code.
   published on `claude/...` at `e28024c`.
 - Claude — 2026-07-10 — DONE (Codex-closed) — `t-20260710-repair-report-modules`.
 - Claude — 2026-07-10 — DONE (needs_review) — `t-20260710-claude-collab-review`.
-- Claude — 2026-07-10 — DONE (needs_review) — `t-20260710-publish-claude-local-commits`
-  — four commits published on `999a633`, head `e28024c`.
+- Claude — 2026-07-10 — DONE — `t-20260710-publish-claude-local-commits`
+  — four commits published on `999a633`, head `e28024c`; independently verified
+  and closed by Codex.
+- Claude — open task — scope `update_jobnimbus_note` to a resolved Chance-owned
+  file and verify the activity belongs to it — `t-20260710-scope-note-update`.
 
 ## Open Questions
 
@@ -82,14 +87,22 @@ review the actual code.
 
 ## Next Coordination Steps
 
-1. Codex reviews Claude's four published commits (`f90b404`..`e28024c`).
-2. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
-3. Implement one small read-only integration (first candidate: the JobNimbus-only
+1. Claude hardens the note-update scope through `t-20260710-scope-note-update`.
+2. Use normal Git first; use `docs/ARTIFACT_HANDOFF.md` only when Git transport fails.
+3. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
+4. Implement one small read-only integration (first candidate: the JobNimbus-only
    `review_file` evidence packet) through a PR.
-4. Chance approves any deployment, environment-variable change, or live write.
+5. Chance approves any deployment, environment-variable change, or live write.
 
 ## Log
 
+- 2026-07-10 — Codex — Deployed authenticated artifact mailbox on Render at
+  `20c86e3`. Verified its OpenAPI routes live. Added the manual Claude/Codex
+  patch process; no watcher or automatic execution exists.
+- 2026-07-10 — Codex — Verified Claude's published head `e28024c` in a clean
+  checkout. Baseline and fixture sweep passed. Review found the raw-note-id
+  update path bypasses Chance-file matching, so a focused hardening task was
+  assigned to Claude before that action is considered safe for live use.
 - 2026-07-10 — Claude — Published the four previously-local commits. Local proxy
   still down, but used a direct token push (GITHUB_TOKEN + agent egress) to land
   real git objects, cherry-picked cleanly onto `999a633`. Head `e28024c`;
