@@ -1,0 +1,51 @@
+{
+  "id": "t-20260710-claim-filer-production-review",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "open",
+  "mode": "review",
+  "title": "Document and harden the AI claim filer before bridge integration",
+  "goal": "Capture the redacted evidence from the successful live Allstate filing, document the current Retell/CLI deployment boundary, and resolve the production-safety questions in the claim packet, readiness gates, post-call extraction, and JobNimbus writeback before file:claim is exposed through the Render bridge.",
+  "workBranch": "claude/jobnimbus-tool-search-cpeh4n",
+  "files": [
+    "src/assistant/fileClaim.js",
+    "src/assistant/claimCallPrompt.js",
+    "src/assistant/postCallWriteback.js",
+    "src/voice/retell.js",
+    "src/voice/carrierDirectory.js",
+    "docs/carriers/",
+    "docs/AGENT_HANDOFF.md"
+  ],
+  "doneCriteria": [
+    "A redacted operational record explains the successful Allstate filing path, result capture, manual cleanup, and writeback method without client PII or secrets.",
+    "The handoff states whether file:claim is local CLI only or exposed anywhere live and identifies the live Retell configuration generation without IDs or secrets.",
+    "Retell post-call custom analysis fields are documented and configured in code, or the writeback clearly treats transcript-derived values as unverified proposals.",
+    "Injuries, habitability, temporary repairs, and contractor answers are not represented as verified unless supported by current file evidence or an explicit approved override.",
+    "Missing-policy readiness is carrier-aware and consistent with the Wave playbook instead of universally blocking when alternate lookup is viable.",
+    "Post-call JobNimbus proposals keep claim, adjuster, and status values in fields and use one short operational note consistent with Chance's note rules.",
+    "Existing-claim confirmation is distinguishable from a newly filed claim in the extracted outcome.",
+    "Fixture-safe tests cover a normal filing candidate, an existing-claim duplicate guard, missing/unknown standard answers, and post-call extraction confidence."
+  ],
+  "constraints": [
+    "Do not place another live carrier call for this task.",
+    "Do not perform a live JobNimbus write, Gmail send, Quo send, deploy, or environment change.",
+    "Do not commit client PII, call transcripts, call IDs, phone numbers, credentials, or Retell/Twilio identifiers.",
+    "Normal Git is the primary handoff; use the artifact mailbox only if Git fails.",
+    "Do not expose file:claim on the production bridge until Codex reviews the result and Chance approves deployment."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Created after code review and fixture dry runs. The architecture is strong and a real Allstate filing reportedly succeeded; production questions were posted to PR #1 in comment 4936725671."
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}

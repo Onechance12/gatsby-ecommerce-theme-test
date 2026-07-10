@@ -67,6 +67,10 @@ review the actual code.
   and closed by Codex.
 - Claude — open task — scope `update_jobnimbus_note` to a resolved Chance-owned
   file and verify the activity belongs to it — `t-20260710-scope-note-update`.
+- Claude — open review task — document the successful AI claim-filing path and
+  harden packet defaults, carrier-aware readiness, post-call extraction, and
+  JobNimbus writeback before production bridge integration —
+  `t-20260710-claim-filer-production-review`.
 
 ## Open Questions
 
@@ -88,14 +92,22 @@ review the actual code.
 ## Next Coordination Steps
 
 1. Claude hardens the note-update scope through `t-20260710-scope-note-update`.
-2. Use normal Git first; use `docs/ARTIFACT_HANDOFF.md` only when Git transport fails.
-3. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
-4. Implement one small read-only integration (first candidate: the JobNimbus-only
+2. Claude completes `t-20260710-claim-filer-production-review`; do not expose
+   `file:claim` through the production bridge before Codex review and Chance approval.
+3. Use normal Git first; use `docs/ARTIFACT_HANDOFF.md` only when Git transport fails.
+4. Review `docs/BRIDGE_INTEGRATION_MAP.md`; agree on the read-only comparison test.
+5. Implement one small read-only integration (first candidate: the JobNimbus-only
    `review_file` evidence packet) through a PR.
-5. Chance approves any deployment, environment-variable change, or live write.
+6. Chance approves any deployment, environment-variable change, or live write.
 
 ## Log
 
+- 2026-07-10 — Codex — Audited Claude's AI claim filer and exercised fixture
+  dry runs. Confirmed the deterministic live-refresh/call/duplicate-guard design
+  is strong and recorded Claude's report of a successful real Allstate filing.
+  Opened a production-readiness task for unverified standard-answer defaults,
+  carrier-aware policy gates, Retell post-call analysis configuration, existing-
+  claim outcome handling, and JobNimbus note hygiene before bridge exposure.
 - 2026-07-10 — Codex — Deployed authenticated artifact mailbox on Render at
   `20c86e3`. Verified its OpenAPI routes live. Added the manual Claude/Codex
   patch process; no watcher or automatic execution exists.
