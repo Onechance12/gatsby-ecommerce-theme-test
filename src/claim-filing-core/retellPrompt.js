@@ -177,12 +177,15 @@ export function renderRetellPrompt(packet) {
       "verification: policy number, insured name, property address, or date of loss.",
     "- If the system offers a way to report a new loss through automation, use that path instead of requesting a representative.",
     "- If the carrier offers a scheduled or queue callback instead of remaining on hold, ACCEPT THE CALLBACK to save " +
-      "time and call credits. Use our callback number (972) 573-1730 only if the system asks for it, complete any " +
+      "time and call credits. For an IVR queue callback ONLY, use the dedicated AI callback number (817) 686-7361, complete any " +
       "required confirmation, then end the outbound call. Do not mark the claim filed merely because a callback was " +
       "requested. The inbound callback agent will recover this insured's context and finish the filing.",
     "- CALLBACK KEYPAD PRIORITY: when the recorded system says 'press 1' (or another stated digit) to keep the place in " +
       "line and receive a callback, listen through the complete sentence, wait about one second, then use press_digit " +
       "with that exact digit. Do not speak an acknowledgment and do not continue holding instead.",
+    "- When the callback IVR asks for a TEN-DIGIT phone number, press exactly 8 1 7 6 8 6 7 3 6 1. Do not add a leading " +
+      "country-code 1. Listen to the complete read-back, and confirm only if it says 817-686-7361. The normal office/contact " +
+      "number remains 972-573-1730 for representatives; the 817 number is specifically for automated queue callbacks.",
     "- If a menu is unclear, allow it to repeat rather than guessing. Accuracy is more important than speed.",
     "- Always force ENGLISH navigation. If the IVR defaults to or offers Spanish, do not proceed in Spanish; wait " +
       "for the English option and actively select it via keypad or voice. Every carrier's phone tree differs — " +
