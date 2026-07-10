@@ -27,6 +27,12 @@ const ACTION_DEFINITIONS = [
     writes: ["JobNimbus contacts"]
   },
   {
+    name: "update_jobnimbus_note",
+    description: "Replace the body of an existing JobNimbus note/activity (e.g. to correct one). Dry-run unless execute:true and ALLOW_JOBNIMBUS_WRITES=true.",
+    input: { noteId: "string (activity jnid)", note: "string (new full body)", execute: "boolean optional" },
+    writes: ["JobNimbus activities"]
+  },
+  {
     name: "append_jobnimbus_description",
     description: "Append a labeled line (e.g. 'Time of Loss: ...', 'Occupancy: ...') to a contact's Description field, without erasing what's already there. Dry-run unless execute:true and ALLOW_JOBNIMBUS_WRITES=true.",
     input: { query: "string", label: "string", value: "string", execute: "boolean optional" },
@@ -50,9 +56,17 @@ export async function runActionTool(config, args) {
   }
 
   const input = parseInput(rest.join(" "));
-  const reviews = loadReviews(config);
-  const query = required(input.query || input._, "query");
-  const { review, alternates } = requireFileMatch(reviews, query);
+
+  // Most actions target a file (by query); update_jobnimbus_note targets an
+  // activity by id, so it needs no file match.
+  const needsFile = actionName !== "update_jobnimbus_note";
+  let review = null;
+  let alternates = [];
+  if (needsFile) {
+    const reviews = loadReviews(config);
+    const query = required(input.query || input._, "query");
+    ({ review, alternates } = requireFileMatch(reviews, query));
+  }
 
   let plan;
   if (actionName === "create_jobnimbus_note") {
@@ -63,6 +77,8 @@ export async function runActionTool(config, args) {
     plan = planCreateTask(config, review, input);
   } else if (actionName === "update_jobnimbus_contact") {
     plan = planUpdateContact(config, review, input);
+  } else if (actionName === "update_jobnimbus_note") {
+    plan = planUpdateNote(config, input);
   } else if (actionName === "append_jobnimbus_description") {
     plan = await planAppendDescription(config, review, input);
   } else {
@@ -75,12 +91,13 @@ export async function runActionTool(config, args) {
     status: item.file.status,
     address: item.file.address || ""
   }));
+  const fileInfo = review ? fileSummary(review) : { noteId: input.noteId || null };
 
   if (!truthy(input.execute)) {
     printJson({
       mode: "dry_run",
       action: actionName,
-      file: fileSummary(review),
+      file: fileInfo,
       plan,
       execute: {
         allowed: false,
@@ -94,7 +111,7 @@ export async function runActionTool(config, args) {
     printJson({
       mode: "blocked",
       action: actionName,
-      file: fileSummary(review),
+      file: fileInfo,
       plan,
       execute: {
         allowed: false,
@@ -111,7 +128,7 @@ export async function runActionTool(config, args) {
   printJson({
     mode: "executed",
     action: actionName,
-    file: fileSummary(review),
+    file: fileInfo,
     request: {
       method: plan.method,
       endpoint: plan.endpoint,
@@ -119,6 +136,19 @@ export async function runActionTool(config, args) {
     },
     result
   });
+}
+
+function planUpdateNote(config, input) {
+  const noteId = required(input.noteId, "noteId");
+  const note = required(input.note, "note");
+  const policyViolations = notePolicyViolations(note);
+  return {
+    method: "PUT",
+    endpoint: `${config.endpoints.activities}/${encodeURIComponent(noteId)}`,
+    body: { note, date_updated: nowUnix() },
+    warnings: noteWarnings(note),
+    policyViolations
+  };
 }
 
 function planCreateNote(config, review, input) {
