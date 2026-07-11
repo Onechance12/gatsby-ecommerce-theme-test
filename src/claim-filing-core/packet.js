@@ -202,7 +202,7 @@ function buildQuoLearnedPattern(goal) {
     "Confirm the client/claim before moving forward.",
     "Ask one direct question at a time.",
     "If documents are requested, ask for the exact destination and subject-line rule.",
-    "Ask whether anything else is needed from Chance before ending the call.",
+    "Only after the claim/reference number and required closing details are captured, ask once whether the representative needs anything else before ending the call.",
     "Capture promised follow-up documents/emails and expected timing."
   ];
   if (goal === "file_new_claim") {

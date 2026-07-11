@@ -244,6 +244,15 @@ test("carrier calls refuse sensitive identity and banking information", () => {
   assert.match(prompt, /second reminder triggers at 60 seconds total/i);
 });
 
+test("carrier prompt forbids repetitive hold and intake filler", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /AFTER ANSWERING A HUMAN'S QUESTION, STOP SPEAKING IMMEDIATELY/i);
+  assert.match(prompt, /Never append phrases such as 'let me know if you need anything else'/i);
+  assert.match(prompt, /reply only 'Ok\.' once/i);
+  assert.match(prompt, /Do not ask 'What else do you need\?'/i);
+  assert.match(prompt, /only once at final wrap-up/i);
+});
+
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /first response to that audio must contain NO spoken words/i);

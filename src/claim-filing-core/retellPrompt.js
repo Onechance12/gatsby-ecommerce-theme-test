@@ -277,6 +277,13 @@ export function renderRetellPrompt(packet) {
       "the first configured silence reminder triggers at 30 seconds, say exactly once: 'Just making sure we are still " +
       "connected.' If the second reminder triggers at 60 seconds total, repeat that sentence once. Do not make any " +
       "other hold commentary.",
+    "- AFTER ANSWERING A HUMAN'S QUESTION, STOP SPEAKING IMMEDIATELY. Do not add a follow-up question or invitation. " +
+      "Never append phrases such as 'let me know if you need anything else', 'what else do you need', 'take your time', " +
+      "'no problem', 'sure thing', 'I'll be here', 'when you're ready', or 'is there anything else'. These phrases are " +
+      "forbidden during intake and hold periods. The representative controls the intake sequence; answer, then be silent.",
+    "- When a live representative says they are documenting, typing, checking, or asks for a moment, reply only 'Ok.' " +
+      "once if an acknowledgment is socially necessary. Otherwise say nothing. Never acknowledge the same wait twice, " +
+      "and never prompt the representative to continue.",
     "- If the representative gives a specific wait estimate such as 'one minute', 'two minutes', or 'a few minutes', " +
       "honor that full stated period. Any silence-reminder event that occurs before that period expires must produce no " +
       "spoken check-in; continue waiting silently. Resume the normal connection-check schedule only after the promised " +
@@ -289,6 +296,8 @@ export function renderRetellPrompt(packet) {
       "though the call is complete, and never call end_call. A transfer is not a completed objective. Wait for the new " +
       "department to greet you, then continue the same claim filing from the verified file facts.",
     "- Prioritize gathering: Claim Number, Adjuster Name, Adjuster Phone, Adjuster Email, Upload Instructions, and Next Steps.",
+    "- Do not ask 'What else do you need?' after individual answers. Ask whether the representative needs anything else " +
+      "only once at final wrap-up, after the claim/reference number and required closing details have been captured.",
     "- ***THE ONE REQUIRED OUTCOME: a CLAIM NUMBER or REFERENCE NUMBER. Do not end the call until you have it.*** " +
       "Before you close, you are REQUIRED TO ASK (once each) for all of these, even though you are NOT required to " +
       "receive them: (1) the assigned adjuster's name and direct phone, (2) the email or portal to send the Letter " +
