@@ -1517,6 +1517,7 @@ async function createTask(input) {
     date_end: toUnixSeconds(input.dateEnd || input.dueDate),
     is_completed: Boolean(input.completed || false),
     record_type_name: input.recordTypeName || "Task",
+    owners: [{ id: CHANCE_OWNER_ID }],
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
   });
@@ -1557,6 +1558,7 @@ async function createCalendarEvent(input) {
     date_start: dateStart,
     date_end: dateEnd,
     record_type_name: input.recordTypeName || "Event",
+    owners: [{ id: CHANCE_OWNER_ID }],
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
   });
