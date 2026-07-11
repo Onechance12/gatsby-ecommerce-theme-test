@@ -58,9 +58,10 @@ export function buildClaimCallPacket(input, options = {}) {
     carrierPhone: overrides.carrierPhone || "User will provide / caller should find claims phone if needed"
   };
 
-  const damageCategories = inferDamageCategories(file, normalized.evidence);
+  const inferredDamageCategories = inferDamageCategories(file, normalized.evidence);
   const damageOpening = String(overrides.damageOpening || DEFAULT_DAMAGE_OPENING).trim();
-  const damageDetails = normalizeDamageDetails(overrides.damageDetails, damageCategories);
+  const damageDetails = normalizeDamageDetails(overrides.damageDetails, inferredDamageCategories);
+  const damageCategories = overrides.damageDetails ? [...damageDetails] : inferredDamageCategories;
   const missingFields = missingCallFields(facts, goal, damageCategories);
 
   return {

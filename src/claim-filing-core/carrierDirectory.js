@@ -25,8 +25,8 @@ const CARRIERS = [
   {
     key: "allstate",
     match: /allstate/i,
-    filingPhone: "+18005478676",
-    display: "Allstate (National Catastrophe Team)",
+    filingPhone: "+18002557828",
+    display: "Allstate Property Claims",
     dossier: "docs/carriers/allstate.md",
     ivrType: "speech",
     requiresPolicyNumber: false,

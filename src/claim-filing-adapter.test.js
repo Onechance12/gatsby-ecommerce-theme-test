@@ -157,6 +157,24 @@ test("approved per-call overrides replace stale verified carrier and DOL facts",
   assert.equal(plan.packet.verifiedFileFacts.causeOfLoss, "Hail and wind");
 });
 
+test("verified damage details replace broader inferred damage categories", () => {
+  const input = fixture({
+    evidence: {
+      documents: [{ name: "Estimate.pdf" }],
+      notes: [{ body: "Roof, fence, and detached structure damage." }],
+      tasks: []
+    }
+  });
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1",
+    overrides: { damageDetails: ["Roof hail damage", "Fence damage"] }
+  });
+  assert.deepEqual(plan.packet.damageSummary, ["Roof hail damage", "Fence damage"]);
+  assert.doesNotMatch(plan.callPlan.dynamicVariables.damageSummary, /detached/i);
+});
+
 function fixture(overrides = {}) {
   return {
     file: {
