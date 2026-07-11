@@ -103,6 +103,13 @@ test("carrier calls refuse sensitive identity and banking information", () => {
   assert.match(prompt, /second reminder triggers at 60 seconds total/i);
 });
 
+test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /first response to that audio must contain NO spoken words/i);
+  assert.match(prompt, /A transfer is not a completed objective/i);
+  assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
+});
+
 function fixture(overrides = {}) {
   return {
     file: {
@@ -154,6 +161,20 @@ test("uses the verified National General homeowners claims number", () => {
   });
   assert.equal(plan.callPlan.to, "+18003251088");
   assert.equal(plan.readiness.ready, true);
+});
+
+test("routes National General master policies to lender services property claims", () => {
+  const input = fixture();
+  input.file.carrier = "National General Insurance Company";
+  input.file.policyNumber = "Master Policy 7007-0002 / Control Q4622430 / Loan 0055298467";
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    fileNumber: "2717",
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.callPlan.to, "+18008248562");
+  assert.equal(plan.carrier.display, "National General Lender Services (property claims)");
 });
 
 test("changed live facts invalidate an approved digest", () => {

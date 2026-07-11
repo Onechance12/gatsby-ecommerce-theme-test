@@ -28,7 +28,7 @@ export function buildClaimFilingPlan(input, options = {}) {
     contractorHired: options.contractorHired
   });
   const packet = buildClaimCallPacket(input, packetOptions);
-  const carrier = lookupCarrier(packet.verifiedFileFacts.carrier);
+  const carrier = lookupCarrier(packet.verifiedFileFacts.carrier, packet.verifiedFileFacts.policyNumber);
   const to = normalizePhone(options.to || packetOptions.carrierPhone || carrier?.filingPhone || "");
   const from = normalizePhone(options.from || "");
   const readiness = assessReadiness(packet, to, carrier);
