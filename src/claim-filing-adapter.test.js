@@ -130,6 +130,8 @@ test("claim packet separates the short damage opening from detailed follow-up sc
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /window screens\/windows/);
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /garage door/);
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /bathroom ceiling and adjoining walls/);
+  assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /detached structures/);
+  assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /personal property/);
   assert.match(renderRetellPrompt({}), /When a human representative first asks broadly what was damaged/);
 });
 
