@@ -55,7 +55,7 @@ services:
       - key: RETELL_FROM_NUMBER
         sync: false
       - key: ALLOW_RETELL_CALLS
-        value: "false"
+        value: "true"
       - key: CHANCE_JOBNIMBUS_OWNER_ID
         value: fc95a213f70e4c9daddc5fa366be9941
       - key: CLAIM_CALL_STORE_PATH

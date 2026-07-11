@@ -13,7 +13,8 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
     {
       type: "end_call",
       name: "end_call",
-      description: "End the call once the objective is complete, a stop rule is triggered, or a human asks to end the call."
+      description: "End the call once the objective is complete, a stop rule is triggered, or a human asks to end the call.",
+      speak_after_execution: false
     },
     {
       type: "press_digit",
@@ -22,7 +23,8 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
         "Press a single DTMF touch-tone digit when an IVR menu explicitly instructs pressing a number, or when the " +
         "IVR does not accept spoken answers and requires numeric keypad input. Hear the complete menu, identify the " +
         "correct option, and press shortly after the menu ends, per the call script's IVR discipline instructions.",
-      delay_ms: options.pressDigitDelayMs ?? 250
+      delay_ms: options.pressDigitDelayMs ?? 250,
+      speak_after_execution: false
     }
   ];
   return {

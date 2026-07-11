@@ -14,6 +14,10 @@ export const CLAIM_PLAN_VERSION = "2026-07-10.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export function buildClaimFilingPlan(input, options = {}) {
+  const verifiedInput = applyVerifiedFileOverrides(input, {
+    ...(input.overrides || {}),
+    ...(options.overrides || {})
+  });
   const packetOptions = cleanObject({
     ...(input.overrides || {}),
     ...(options.overrides || {}),
@@ -27,12 +31,12 @@ export function buildClaimFilingPlan(input, options = {}) {
     temporaryRepairs: options.temporaryRepairs,
     contractorHired: options.contractorHired
   });
-  const packet = buildClaimCallPacket(input, packetOptions);
+  const packet = buildClaimCallPacket(verifiedInput, packetOptions);
   const carrier = lookupCarrier(packet.verifiedFileFacts.carrier, packet.verifiedFileFacts.policyNumber);
   const to = normalizePhone(options.to || packetOptions.carrierPhone || carrier?.filingPhone || "");
   const from = normalizePhone(options.from || "");
   const readiness = assessReadiness(packet, to, carrier);
-  const duplicateBlock = existingClaimBlock(input.file?.claimNumber, packet.goal);
+  const duplicateBlock = existingClaimBlock(verifiedInput.file?.claimNumber, packet.goal);
   const blockers = [...readiness.blockers, ...(duplicateBlock ? [duplicateBlock] : [])];
   const dynamicVariables = flattenFactsForDynamicVariables(packet);
   const ownerId = String(options.ownerId || "").trim();
@@ -90,6 +94,30 @@ export function buildClaimFilingPlan(input, options = {}) {
       }
     }
   };
+}
+
+function applyVerifiedFileOverrides(input, overrides) {
+  const file = { ...(input.file || {}) };
+  const mappings = {
+    insuredName: "customer",
+    customer: "customer",
+    propertyAddress: "address",
+    address: "address",
+    carrier: "carrier",
+    policyNumber: "policyNumber",
+    claimNumber: "claimNumber",
+    dateOfLoss: "dateOfLoss",
+    causeOfLoss: "typeOfLoss",
+    typeOfLoss: "typeOfLoss",
+    mortgageCompany: "mortgageCompany"
+  };
+
+  for (const [overrideKey, fileKey] of Object.entries(mappings)) {
+    const value = overrides?.[overrideKey];
+    if (value !== undefined && value !== null && String(value).trim()) file[fileKey] = value;
+  }
+
+  return { ...input, file };
 }
 
 export function assertApprovalDigest(expected, actual, label = "planDigest") {

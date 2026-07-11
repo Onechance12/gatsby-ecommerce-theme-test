@@ -90,6 +90,7 @@ test("IVR controls listen to the full menu without waiting for a repeat", () => 
   const config = buildRetellLlmFromPacket({});
   const pressDigit = config.generalTools.find((tool) => tool.name === "press_digit");
   assert.equal(pressDigit.delay_ms, 250);
+  assert.equal(pressDigit.speak_after_execution, false);
   assert.match(config.generalPrompt, /wait about 0\.75 to 1 second/i);
   assert.doesNotMatch(config.generalPrompt, /wait a full 3 seconds after the system/i);
 });
@@ -133,6 +134,27 @@ test("claim packet separates the short damage opening from detailed follow-up sc
   assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /detached structures/);
   assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /personal property/);
   assert.match(renderRetellPrompt({}), /When a human representative first asks broadly what was damaged/);
+});
+
+test("approved per-call overrides replace stale verified carrier and DOL facts", () => {
+  const input = fixture();
+  input.file.carrier = "Allsate";
+  input.file.dateOfLoss = "";
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1",
+    to: "+18002557828",
+    overrides: {
+      carrier: "Allstate Insurance Company",
+      dateOfLoss: "04/27/2026",
+      causeOfLoss: "Hail and wind"
+    }
+  });
+  assert.equal(plan.readiness.ready, true);
+  assert.equal(plan.packet.verifiedFileFacts.carrier, "Allstate Insurance Company");
+  assert.equal(plan.packet.verifiedFileFacts.dateOfLoss, "04/27/2026");
+  assert.equal(plan.packet.verifiedFileFacts.causeOfLoss, "Hail and wind");
 });
 
 function fixture(overrides = {}) {
