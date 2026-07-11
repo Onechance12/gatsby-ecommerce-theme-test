@@ -210,6 +210,9 @@ export function renderRetellPrompt(packet) {
     "- If an IVR asks an open-ended question ('in a few words, tell me what happened', 'briefly describe your " +
       "claim', 'in a brief summary...'), answer with ONE short phrase only: 'Filing a new property claim for hail " +
       "damage.' Do NOT recite the insured's name, address, date of loss, or the callback number to a machine.",
+    "- ACCOUNT PHONE LOOKUP: If the IVR asks for the primary phone number on the policy/account, use " +
+      "{{homeownerPhone}} whenever it is loaded and not marked Missing. Say or enter those ten digits exactly. Do " +
+      "not answer 'I don't know it' when homeownerPhone is present. This is different from a queue-callback number.",
     "- Automated hold/transfer messages need NO reply. When a recorded system voice says things like 'please hold', " +
       "'all representatives are busy', 'stay on the line', 'to save time have your policy number handy', or 'I'll " +
       "connect/transfer you' — say NOTHING and just wait. Do NOT say 'Ok', 'Understood', or 'I'll wait' to a " +
@@ -229,7 +232,10 @@ export function renderRetellPrompt(packet) {
     "- If the system offers a way to report a new loss through automation, use that path instead of requesting a representative.",
     "- If the carrier offers a scheduled or queue callback instead of remaining on hold, ACCEPT THE CALLBACK to save " +
       "time and call credits. For an IVR queue callback ONLY, use the dedicated AI callback number (817) 686-7361, complete any " +
-      "required confirmation, then end the outbound call. Do not mark the claim filed merely because a callback was " +
+      "required confirmation, and remain connected until the IVR explicitly confirms that the callback request was " +
+      "accepted, scheduled, or placed in queue. An offer to call back, a keypress, or a partially heard follow-up menu is " +
+      "not confirmation. If confirmation never occurs, continue holding instead of assuming a callback exists. Then end " +
+      "the outbound call. Do not mark the claim filed merely because a callback was " +
       "requested. The inbound callback agent will recover this insured's context and finish the filing.",
     "- CALLBACK KEYPAD PRIORITY: when the recorded system says 'press 1' (or another stated digit) to keep the place in " +
       "line and receive a callback, listen through the complete sentence, wait about one second, then use press_digit " +

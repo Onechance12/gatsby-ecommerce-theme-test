@@ -211,11 +211,8 @@ export function selectCallbackCandidate(candidates, fromNumber) {
 }
 
 export function confirmedCallbackRequest(call) {
-  const analysis = call?.call_analysis?.custom_analysis_data || {};
-  if (analysis.callback_requested === true || /^true$/i.test(String(analysis.callback_requested || ""))) return true;
-  if (String(analysis.filing_outcome || "") === "callback_requested") return true;
   const transcript = String(call?.transcript || "");
-  return /(?:request for (?:a )?callback|callback request) has been confirmed|callback (?:is|was) confirmed|you(?:'ll| will) receive (?:a|the) callback/i.test(transcript);
+  return /(?:(?:request for (?:a )?callback|callback request) (?:has been|is|was) (?:confirmed|accepted|scheduled|received)|callback (?:is|was|has been) (?:confirmed|accepted|scheduled)|you(?:'ll| will) receive (?:a|the) callback|we(?:'ll| will) call you back|(?:your|the) (?:place|position) in (?:the )?line (?:has been|is) (?:saved|reserved))/i.test(transcript);
 }
 
 function callbackPacketStatus(variables) {

@@ -185,7 +185,20 @@ test("callback eligibility requires carrier confirmation, not merely an offer", 
   assert.equal(confirmedCallbackRequest({ transcript: "Your request for a callback has been confirmed." }), true);
   assert.equal(confirmedCallbackRequest({
     call_analysis: { custom_analysis_data: { filing_outcome: "callback_requested" } }
-  }), true);
+  }), false);
+  assert.equal(confirmedCallbackRequest({
+    transcript: "Press one to receive a callback.",
+    call_analysis: { custom_analysis_data: { callback_requested: true, filing_outcome: "callback_requested" } }
+  }), false);
+  assert.equal(confirmedCallbackRequest({ transcript: "We will call you back when an agent is available." }), true);
+});
+
+test("voice prompt uses the loaded homeowner phone for IVR account lookup", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /ACCOUNT PHONE LOOKUP/);
+  assert.match(prompt, /use \{\{homeownerPhone\}\}/);
+  assert.match(prompt, /Do not answer 'I don't know it' when homeownerPhone is present/);
+  assert.match(prompt, /remain connected until the IVR explicitly confirms/);
 });
 
 test("completed filings are not offered as callback candidates", () => {
