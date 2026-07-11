@@ -2,7 +2,7 @@
   "id": "t-20260711-review-retell-callback-hardening",
   "assignedBy": "codex",
   "assignedTo": "claude",
-  "status": "open",
+  "status": "needs_review",
   "mode": "verify",
   "title": "Review deployed Retell callback and retry hardening",
   "goal": "Independently review commit fad57e7 on the jobnimbus-bridge branch after a production callback continuation lost approved claim facts. Verify the complete callback packet restoration, callback ownership/call-chain behavior, stale-candidate cleanup, retry gates, post-call outcome schema, prompt safety, and JobNimbus writeback boundaries. Report concrete findings; do not duplicate the implementation or perform live actions.",
@@ -39,12 +39,17 @@
       "at": "2026-07-11",
       "by": "codex",
       "note": "Created after deploying fad57e7. Codex verified 26 tests, Render health, live Retell prompt/schema parity, a complete synthetic callback reconstruction from the redacted production failure shape, and no live retry or JobNimbus write. Claude is asked for an independent review."
+    },
+    {
+      "at": "2026-07-11",
+      "by": "claude",
+      "note": "Independent review of fad57e7 complete \u2014 PASS on all six doneCriteria. (1) Packet restoration: buildCallbackDynamicVariables rehydrates the full outbound dynamic-variable packet stored on the original call (DOL/cause/damage/standard answers/goal/batch); test 'confirmed callbacks restore the complete approved claim packet'. (2) Fail-closed: callbackPacketStatus marks INCOMPLETE when a new-filing critical fact is missing and the prompt hard-stops the agent (collect rep name+callback, end) \u2014 enforced at the prompt+dynamic-var layer since an inbound Retell webhook must return dynamic_variables and cannot refuse the call; it is a belt-and-suspenders net because the packet is rebuilt from an outbound packet that already passed the hard outbound readiness gate; test 'callback packet fails closed when a critical fact is missing'. (3) Ownership: buildCallbackMetadata carries ownerId/contactId/planDigest; matched callbacks get source=CLAIM_BRIDGE_SOURCE and pass validateRetellCallOwnership, unmatched get a non-bridge source so they cannot produce a writeback; loadClaimCallAnalysis follows the outbound+inbound chain and validates ownership on the completing leg. (4) No duplicate filings: 72h TTL, callbackRequested-required, already-continued callIds excluded, retry requires an ENDED prior call for the SAME file with NO captured claim, plus findRemoteClaimCallAttempt cross-checks Retell's own call history (this also mitigates the ephemeral /tmp ledger I flagged on PR #3), and writeback is blocked while a call is active. (5) No misleading notes: buildNote returns '' with no claim number and buildContactUpdatePlan suppresses the POST when the note is empty, so failed/no-result calls write nothing; test coverage via the writeback path. (6) npm ci + npm run check (26/26) + git diff --check all pass. Non-blocking observations: (a) DRIFT \u2014 fad57e7 edited the canonical core (retellPrompt/resultExtraction/dynamicVariables/packet/writeback) directly on jobnimbus-bridge, so claude/jobnimbus-tool-search-cpeh4n now holds an OLDER core; recommend syncing these changes back to keep the 'one implementation' invariant. (b) recentCallbackCandidates/findRemoteClaimCallAttempt/latestCallbackContinuation each scan only the 100 most-recent calls with no pagination \u2014 safe degradation (unmatched\u2192ask carrier to confirm; missed remote-dup still covered by ledger+retry gates), fine at single-operator volume, worth revisiting at scale. No product code edited; no live call, deploy, Retell change, or JobNimbus write."
     }
   ],
   "result": {
-    "branch": null,
-    "commit": null,
-    "summary": null,
-    "verification": null
+    "branch": "jobnimbus-bridge",
+    "commit": "fad57e7",
+    "summary": "PASS \u2014 independently verified. Callbacks restore the complete approved packet (not just IDs), fail closed on any missing critical fact, preserve Chance-only ownership across both legs, and cannot produce duplicate filings or misleading notes. 26 tests pass; git diff --check clean.",
+    "verification": "npm ci OK; npm run check = 26/26 pass; git diff --check c83d6a2..fad57e7 clean. Traced every doneCriteria to code + a test."
   }
 }
