@@ -1308,7 +1308,7 @@ async function retellApi(method, endpoint, body) {
 }
 
 async function buildContactUpdatePlan(contact, update) {
-  const contactBody = cleanObject({ ...(update.fields || {}), ...(update.status ? { status_name: update.status } : {}) });
+  const contactBody = normalizeContactFields({ ...(update.fields || {}), ...(update.status ? { status_name: update.status } : {}) });
   const noteBody = update.note ? {
     note: update.note,
     date_created: Math.floor(Date.now() / 1000),
@@ -1360,9 +1360,10 @@ async function updateContact(input) {
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
   const { contact } = await findOneContact(query);
-  const plan = { endpoint: `/contacts/${contact.jnid}`, fields };
+  const normalizedFields = normalizeContactFields(fields);
+  const plan = { endpoint: `/contacts/${contact.jnid}`, fields: normalizedFields };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
-  const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: fields });
+  const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: normalizedFields });
   return { mode: "executed", file: compactContact(contact), result };
 }
 
@@ -1393,7 +1394,7 @@ async function processUpdate(input) {
   }
   const { contact } = await findOneContact(query);
   const file = compactContact(contact);
-  const contactBody = cleanObject({ ...fields, ...(status ? { status_name: status } : {}) });
+  const contactBody = normalizeContactFields({ ...fields, ...(status ? { status_name: status } : {}) });
   const noteBody = note ? {
     note,
     date_created: Math.floor(Date.now() / 1000),
@@ -1554,7 +1555,6 @@ async function createCalendarEvent(input) {
     subject: title,
     note: input.note || input.description || "",
     description: input.description || input.note || "",
-    location: input.location || compactContact(contact).address,
     date_start: dateStart,
     date_end: dateEnd,
     record_type_name: input.recordTypeName || "Event",
@@ -2772,6 +2772,14 @@ function normalizeDateFields(fields) {
       body[outputKey] = toUnixSeconds(body[inputKey]);
       delete body[inputKey];
     }
+  }
+  return cleanObject(body);
+}
+
+function normalizeContactFields(fields) {
+  const body = { ...fields };
+  for (const key of Object.keys(body)) {
+    if (/^cf_date_\d+$/i.test(key)) body[key] = toUnixSeconds(body[key]);
   }
   return cleanObject(body);
 }

@@ -129,6 +129,32 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(prepared.callPlan.to, "+18444584300");
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
 
+  const updateDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", fields: { cf_date_1: "2026-04-27" }, execute: false })
+  });
+  assert.equal(updateDryRunResponse.status, 200);
+  const updateDryRun = await updateDryRunResponse.json();
+  assert.equal(updateDryRun.updates.contact.body.cf_date_1, 1777248000);
+
+  const calendarDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      title: "Adjuster Meeting",
+      dateStart: "2026-07-17T14:00:00-05:00",
+      dateEnd: "2026-07-17T16:00:00-05:00",
+      location: "100 Test St, Dallas, TX 75201",
+      execute: false
+    })
+  });
+  assert.equal(calendarDryRunResponse.status, 200);
+  const calendarDryRun = await calendarDryRunResponse.json();
+  assert.equal(calendarDryRun.plan.body.location, undefined);
+  assert.deepEqual(calendarDryRun.plan.body.owners, [{ id: chanceOwnerId }]);
+
   const rejectedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
