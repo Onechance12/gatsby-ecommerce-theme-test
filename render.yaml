@@ -56,6 +56,8 @@ services:
         sync: false
       - key: ALLOW_RETELL_CALLS
         value: "true"
+      - key: RETELL_CALLBACK_TTL_HOURS
+        value: "72"
       - key: CHANCE_JOBNIMBUS_OWNER_ID
         value: fc95a213f70e4c9daddc5fa366be9941
       - key: CLAIM_CALL_STORE_PATH

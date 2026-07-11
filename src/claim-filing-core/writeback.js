@@ -64,7 +64,7 @@ export function buildWritebackProposal(file, ex) {
 // One short operational note, accurate to what was actually captured/written.
 function buildNote(ex, { adjusterCaptured, statusMoved }) {
   if (!ex.claimNumber) {
-    return "Filing call completed — no claim number captured. See call transcript before re-attempting.";
+    return "";
   }
   const confirmed = ex.outcome === "existing_claim_confirmed";
   const lead = confirmed ? "Existing claim confirmed by phone." : "Claim filed by phone.";

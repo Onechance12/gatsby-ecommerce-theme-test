@@ -27,6 +27,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(healthResponse.status, 200);
   const health = await healthResponse.json();
   assert.equal(health.claimFiling.engine, "retell");
+  assert.equal(health.claimFiling.callbackPacketRestoration, "full_approved_packet");
+  assert.equal(health.claimFiling.retryRequiresPriorCallId, true);
   assert.equal(health.claimFiling.callsAllowed, false);
 
   const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
@@ -35,6 +37,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
   assert.equal(schema.paths["/claim-filing/call"].post.operationId, "placeApprovedClaimFilingCall");
   assert.equal(schema.paths["/claim-filing/result"].post.operationId, "reviewClaimFilingCallResult");
+  assert.equal(schema.paths["/claim-filing/callbacks"].post.operationId, "listPendingClaimCallbacks");
   assert.equal(schema.paths["/claim-filing/writeback"].post.operationId, "processApprovedClaimFilingWriteback");
 
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {

@@ -10,9 +10,12 @@ import {
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
+  buildCallbackDynamicVariables,
+  buildCallbackMetadata,
   digest,
   retellCallBody,
   callbackCandidateFromCall,
+  selectCallbackCandidate,
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
 
@@ -54,6 +57,7 @@ const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(tmpdir(), "jobnimbus-claim-call-ledger.json");
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
+const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
@@ -95,6 +99,7 @@ const routes = new Map([
   ["POST /claim-filing/prepare", prepareClaimFiling],
   ["POST /claim-filing/call", placeClaimFilingCall],
   ["POST /claim-filing/result", claimFilingResult],
+  ["POST /claim-filing/callbacks", pendingClaimCallbacks],
   ["POST /claim-filing/writeback", claimFilingWriteback],
   ["POST /retell/inbound", retellInbound],
   ["POST /gmail/search", gmailSearch],
@@ -190,7 +195,10 @@ function health() {
       ownerScope: "Chance Pearson",
       approvalDigestRequired: true,
       writebackRequiresSeparateApproval: true,
-      callbackWebhookAvailable: Boolean(RETELL_INBOUND_WEBHOOK_TOKEN)
+      callbackWebhookAvailable: Boolean(RETELL_INBOUND_WEBHOOK_TOKEN),
+      callbackPacketRestoration: "full_approved_packet",
+      callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
+      retryRequiresPriorCallId: true
     }
   };
 }
@@ -784,6 +792,7 @@ async function placeClaimFilingCall(input) {
   assertApprovalDigest(input.planDigest, plan.planDigest);
 
   const request = retellCallBody(plan);
+  const retryOfCallId = String(input.retryOfCallId || "").trim();
   if (input.execute !== true) {
     return {
       mode: "dry_run",
@@ -802,7 +811,8 @@ async function placeClaimFilingCall(input) {
   if (!plan.readiness.ready) badRequest(`Claim filing is blocked: ${plan.readiness.blockers.join("; ")}`);
 
   const ledger = await readClaimCallLedger();
-  const prior = ledger.find((row) => row.planDigest === plan.planDigest && row.callId);
+  const prior = ledger.find((row) => row.planDigest === plan.planDigest && String(row.retryOfCallId || "") === retryOfCallId && row.callId)
+    || await findRemoteClaimCallAttempt(plan.planDigest, retryOfCallId);
   if (prior) {
     return {
       mode: "duplicate_prevented",
@@ -815,6 +825,16 @@ async function placeClaimFilingCall(input) {
     };
   }
 
+  if (retryOfCallId) {
+    const retryAnalysis = await loadClaimCallAnalysis(retryOfCallId);
+    if (retryAnalysis.file.id !== context.file.id) badRequest("retryOfCallId belongs to a different JobNimbus file.");
+    if (retryAnalysis.call.callStatus !== "ended") badRequest("The prior call or callback is still active; do not create a retry yet.");
+    if (retryAnalysis.extracted.claimNumber || ["claim_filed", "existing_claim_confirmed"].includes(retryAnalysis.extracted.outcome)) {
+      badRequest("The prior call already captured a claim number. Review and write back that result instead of retrying.");
+    }
+    request.metadata.retryOfCallId = retryOfCallId;
+  }
+
   const result = await retellApi("POST", "/v2/create-phone-call", request);
   const record = {
     planDigest: plan.planDigest,
@@ -823,6 +843,7 @@ async function placeClaimFilingCall(input) {
     contactId: context.file.id,
     fileNumber: context.file.number,
     goal: plan.packet.goal,
+    retryOfCallId,
     createdAt: new Date().toISOString()
   };
   ledger.push(record);
@@ -835,6 +856,27 @@ async function placeClaimFilingCall(input) {
     callStatus: result.call_status,
     nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId."
   };
+}
+
+async function findRemoteClaimCallAttempt(planDigest, retryOfCallId) {
+  const response = await retellApi("POST", "/v3/list-calls", {
+    filter_criteria: {},
+    sort_order: "descending",
+    limit: 100
+  });
+  const row = (response.items || []).find((call) =>
+    call.direction === "outbound" &&
+    call.metadata?.source === "hcn-wave-jobnimbus-bridge" &&
+    String(call.metadata?.planDigest || "") === String(planDigest) &&
+    String(call.metadata?.retryOfCallId || "") === String(retryOfCallId || "")
+  );
+  return row ? {
+    planDigest,
+    retryOfCallId,
+    callId: row.call_id,
+    callStatus: row.call_status,
+    createdAt: row.start_timestamp ? new Date(row.start_timestamp).toISOString() : ""
+  } : null;
 }
 
 async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
@@ -904,9 +946,23 @@ async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
 
 async function claimFilingResult(input) {
   const analysis = await loadClaimCallAnalysis(required(input.callId, "callId"));
+  if (analysis.call.callStatus === "ongoing" || analysis.call.callStatus === "registered") {
+    return {
+      mode: "pending",
+      file: analysis.file,
+      callChain: analysis.callChain,
+      call: {
+        callId: analysis.call.callId,
+        callStatus: analysis.call.callStatus
+      },
+      approvalRequired: false,
+      nextStep: "The carrier call or callback is still active. Review the result again after it ends."
+    };
+  }
   return {
     mode: "read_only",
     file: analysis.file,
+    callChain: analysis.callChain,
     call: {
       callId: analysis.call.callId,
       callStatus: analysis.call.callStatus,
@@ -928,6 +984,7 @@ async function claimFilingResult(input) {
 
 async function claimFilingWriteback(input) {
   const analysis = await loadClaimCallAnalysis(required(input.callId, "callId"));
+  if (analysis.call.callStatus !== "ended") badRequest("The carrier call is not complete. Review it again after the call ends.");
   assertApprovalDigest(input.writebackDigest, analysis.writebackDigest, "writebackDigest");
   const plan = await buildContactUpdatePlan(analysis.contact, analysis.writeback);
 
@@ -980,33 +1037,28 @@ async function retellInbound(input) {
   }
 
   const candidates = await recentCallbackCandidates(inbound.from_number);
-  const exact = candidates.filter((candidate) => samePhone(candidate.carrierPhone, inbound.from_number));
-  const selected = exact.length === 1 ? exact[0] : null;
+  const { selected, match } = selectCallbackCandidate(candidates, inbound.from_number);
   const dynamicVariables = selected
-    ? callbackDynamicVariables(selected, "matched")
-    : callbackDynamicVariables({
+    ? buildCallbackDynamicVariables(selected, match)
+    : buildCallbackDynamicVariables({
         carrier: "Unknown carrier callback",
         insuredName: "Unknown",
         propertyAddress: "Unknown",
         policyNumberSpoken: "Unknown",
         claimNumber: "Unknown"
-      }, candidates.length ? "needs_identity_confirmation" : "no_pending_case");
+      }, match);
 
   if (!selected && candidates.length) {
     dynamicVariables.pendingCallbackCases = candidates.slice(0, 8).map(callbackCaseLabel).join(" | ");
   }
+  const metadata = buildCallbackMetadata(selected, match);
+  if (!metadata.ownerId) metadata.ownerId = CHANCE_OWNER_ID;
 
   return {
     call_inbound: {
       override_agent_id: RETELL_AGENT_ID,
       dynamic_variables: dynamicVariables,
-      metadata: {
-        source: "hcn-wave-retell-callback",
-        ownerId: CHANCE_OWNER_ID,
-        contactId: selected?.contactId || "",
-        originalCallId: selected?.callId || "",
-        callbackMatch: dynamicVariables.callbackMatch
-      }
+      metadata
     }
   };
 }
@@ -1018,11 +1070,17 @@ async function recentCallbackCandidates(fromNumber) {
     sort_order: "descending",
     limit: 100
   });
-  const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
-  const candidates = (response.items || [])
+  const cutoff = Date.now() - (RETELL_CALLBACK_TTL_HOURS * 60 * 60 * 1000);
+  const rows = response.items || [];
+  const continuedCallIds = new Set(rows
+    .filter((call) => call.direction === "inbound" && call.metadata?.originalCallId)
+    .map((call) => String(call.metadata.originalCallId)));
+  const candidates = rows
     .filter((call) => call.direction === "outbound")
     .map(callbackCandidateFromCall)
     .filter(Boolean)
+    .filter((candidate) => candidate.callbackRequested)
+    .filter((candidate) => !continuedCallIds.has(candidate.callId))
     .filter((candidate) => !candidate.createdAt || candidate.createdAt >= cutoff)
     .sort((a, b) => {
       const aExact = samePhone(a.carrierPhone, fromNumber) ? 1 : 0;
@@ -1037,19 +1095,6 @@ async function recentCallbackCandidates(fromNumber) {
   });
 }
 
-function callbackDynamicVariables(candidate, match) {
-  return {
-    directionMode: "carrier_callback",
-    callbackMatch: match,
-    callbackCarrier: String(candidate.carrier || "Unknown"),
-    callbackInsuredName: String(candidate.insuredName || "Unknown"),
-    callbackPropertyAddress: String(candidate.propertyAddress || "Unknown"),
-    callbackPolicyNumber: String(candidate.policyNumberSpoken || "Unknown"),
-    callbackClaimNumber: String(candidate.claimNumber || "Unknown"),
-    pendingCallbackCases: ""
-  };
-}
-
 function callbackCaseLabel(candidate) {
   const policySuffix = String(candidate.policyNumberSpoken || candidate.policyNumber || "").replace(/\W/g, "").slice(-4);
   return [candidate.carrier, candidate.insuredName, candidate.propertyAddress, policySuffix ? `policy ending ${policySuffix}` : ""]
@@ -1057,8 +1102,32 @@ function callbackCaseLabel(candidate) {
     .join("; ");
 }
 
+async function pendingClaimCallbacks() {
+  const candidates = await recentCallbackCandidates("");
+  return {
+    mode: "read_only",
+    callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
+    count: candidates.length,
+    callbacks: candidates.map((candidate) => ({
+      originalCallId: candidate.callId,
+      fileNumber: candidate.fileNumber,
+      contactId: candidate.contactId,
+      carrier: candidate.carrier,
+      insuredName: candidate.insuredName,
+      propertyAddress: candidate.propertyAddress,
+      policyNumberSpoken: candidate.policyNumberSpoken,
+      dateOfLoss: candidate.dynamicVariables?.dateOfLoss || "Missing",
+      causeOfLoss: candidate.dynamicVariables?.causeOfLoss || "Missing",
+      callbackPacketStatus: buildCallbackDynamicVariables(candidate, "matched").callbackPacketStatus,
+      requestedAt: candidate.createdAt ? new Date(candidate.createdAt).toISOString() : ""
+    }))
+  };
+}
+
 function samePhone(a, b) {
-  return String(a || "").replace(/\D/g, "").slice(-10) === String(b || "").replace(/\D/g, "").slice(-10);
+  const left = String(a || "").replace(/\D/g, "").slice(-10);
+  const right = String(b || "").replace(/\D/g, "").slice(-10);
+  return Boolean(left && right && left === right);
 }
 
 function retellInboundAuthorized(url) {
@@ -1169,7 +1238,9 @@ function claimPlanOptions(input, file) {
 
 async function loadClaimCallAnalysis(callId) {
   if (!RETELL_API_KEY) badRequest("RETELL_API_KEY is not configured.");
-  const raw = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+  const requestedRaw = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+  const continuation = await latestCallbackContinuation(requestedRaw.call_id);
+  const raw = continuation || requestedRaw;
   const call = {
     callId: raw.call_id,
     callStatus: raw.call_status,
@@ -1188,7 +1259,27 @@ async function loadClaimCallAnalysis(callId) {
     status: file.status,
     carrier: file.carrier
   });
-  return { call, metadata, contact, file, ...result };
+  const callChain = [requestedRaw, ...(continuation ? [continuation] : [])].map((item) => ({
+    callId: item.call_id,
+    direction: item.direction || "",
+    callLeg: item.metadata?.callLeg || (item.call_id === requestedRaw.call_id ? "outbound" : "carrier_callback"),
+    callStatus: item.call_status,
+    originalCallId: item.metadata?.originalCallId || ""
+  }));
+  return { call, callChain, metadata, contact, file, ...result };
+}
+
+async function latestCallbackContinuation(originalCallId) {
+  if (!originalCallId) return null;
+  const response = await retellApi("POST", "/v3/list-calls", {
+    filter_criteria: {},
+    sort_order: "descending",
+    limit: 100
+  });
+  const match = (response.items || []).find((item) =>
+    item.direction === "inbound" && String(item.metadata?.originalCallId || "") === String(originalCallId)
+  );
+  return match?.call_id ? retellApi("GET", `/v2/get-call/${encodeURIComponent(match.call_id)}`) : null;
 }
 
 async function retellApi(method, endpoint, body) {
@@ -3420,6 +3511,7 @@ const OPENAPI = {
           temporaryRepairs: { type: "string" },
           contractorHired: { type: "string" },
           overrides: { type: "object", additionalProperties: true },
+          retryOfCallId: { type: "string", description: "For an intentional retry only: the prior ended Retell call id for this same file. The bridge rejects retries while a callback is active or after a claim number was captured." },
           execute: { type: "boolean", default: false, description: "True only after Chance approves the exact prepared plan. Also requires ALLOW_RETELL_CALLS=true." }
         },
         required: ["query", "planDigest"]
@@ -3430,6 +3522,10 @@ const OPENAPI = {
           callId: { type: "string", description: "Retell call id returned by placeApprovedClaimFilingCall." }
         },
         required: ["callId"]
+      },
+      ClaimFilingCallbacksRequest: {
+        type: "object",
+        properties: {}
       },
       ClaimFilingWritebackRequest: {
         type: "object",
@@ -3597,6 +3693,13 @@ const OPENAPI = {
         operationId: "reviewClaimFilingCallResult",
         requestBody: jsonBody("ClaimFilingResultRequest"),
         responses: { "200": { description: "Retell transcript, structured extraction, confidence, unverified guesses, and a dry-run JobNimbus writeback proposal." } }
+      }
+    },
+    "/claim-filing/callbacks": {
+      post: {
+        operationId: "listPendingClaimCallbacks",
+        requestBody: jsonBody("ClaimFilingCallbacksRequest"),
+        responses: { "200": { description: "Read-only list of confirmed carrier callbacks still awaiting an inbound continuation, including callback packet completeness." } }
       }
     },
     "/claim-filing/writeback": {

@@ -156,7 +156,7 @@ function buildIvrAnswers(goal, facts) {
 }
 
 function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT_DAMAGE_OPENING, damageDetails = damageCategories) {
-  const intro = `Hi, this is Chance Pearson's assistant calling regarding a property damage claim for ${facts.insuredName} at ${facts.propertyAddress}.`;
+  const intro = `Hi, this is Chance Pearson's AI assistant calling regarding a property damage claim for ${facts.insuredName} at ${facts.propertyAddress}.`;
   if (goal === "file_new_claim") {
     return [
       intro,
@@ -243,6 +243,8 @@ function buildResultFormat(goal) {
     documentSubmissionInstructions: "",
     documentsRequested: [],
     carrierNextStep: "",
+    callbackRequested: "yes/no",
+    callbackNumberConfirmed: "",
     blocker: "",
     recommendedJobNimbusUpdates: { fields: {}, status: "", note: "" },
     rawSummary: `Short summary of what happened on the ${goal} call.`

@@ -60,6 +60,28 @@ goal per call.
 | `extractCallResults(call)`, `inferOutcome(...)`, `transcript*` | Post-call extraction with **per-field source** (`retell-analysis` / `transcript-guess` / `none`). |
 | `buildWritebackProposal(file, ex)` | DRY-RUN JobNimbus proposal: `proposedFields`, `fieldConfidence`, `proposedNote`, `unverified`, `outcome`. |
 
+## Carrier callback continuation contract
+
+An accepted carrier queue callback is a continuation of the approved outbound
+call, not a new generic inbound call.
+
+- The outbound Retell call keeps the complete approved packet in string dynamic
+  variables and immutable ownership metadata.
+- Only calls whose transcript or structured analysis confirms that a callback
+  was actually requested are eligible callback candidates.
+- Callback candidates expire after the configured TTL and are removed once an
+  inbound continuation exists.
+- The inbound webhook restores every approved claim fact, including DOL, cause,
+  damage, standard answers, batch data, goal, and contact facts.
+- The callback metadata carries the original contact, owner, plan digest, and
+  call id so result review and approval-gated writeback work on either call leg.
+- A callback packet must report `callbackPacketStatus=READY`. An incomplete
+  packet fails closed and may collect only the representative's callback details.
+- `listPendingClaimCallbacks` is the read-only operational check for queued
+  callbacks. It never places a call or writes JobNimbus.
+- Intentional retries require the ended prior call id and are rejected while a
+  continuation is active or after a claim number was captured.
+
 ## Company rules preserved
 
 - **The four standard filing answers are the defaults** — no injuries reported,

@@ -15,6 +15,9 @@ export function extractCallResults(call) {
   const adjusterEmail = firstNonEmpty(cad.adjuster_email, transcriptEmail(transcript));
   const documentSubmission = firstNonEmpty(cad.document_submission, transcriptEmail(transcript));
   const nextStep = firstNonEmpty(cad.next_step);
+  const representativeName = firstNonEmpty(cad.representative_name);
+  const blockingReason = firstNonEmpty(cad.blocking_reason);
+  const callbackRequested = cad.callback_requested === true || /^true$/i.test(String(cad.callback_requested || ""));
   const additionalClaims = parseAdditionalClaims(cad.additional_claims);
 
   // Goal decides new-vs-existing when the analysis didn't supply filing_outcome.
@@ -42,6 +45,9 @@ export function extractCallResults(call) {
     adjusterEmail,
     documentSubmission,
     nextStep,
+    representativeName,
+    blockingReason,
+    callbackRequested,
     additionalClaims,
     outcome,
     source,

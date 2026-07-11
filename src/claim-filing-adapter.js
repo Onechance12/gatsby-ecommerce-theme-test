@@ -7,10 +7,11 @@ import {
   existingClaimBlock,
   extractCallResults,
   flattenFactsForDynamicVariables,
-  lookupCarrier
+  lookupCarrier,
+  PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-07-10.1";
+export const CLAIM_PLAN_VERSION = "2026-07-11.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export function buildClaimFilingPlan(input, options = {}) {
@@ -156,13 +157,86 @@ export function callbackCandidateFromCall(call) {
     policyNumberSpoken: String(variables.policyNumberSpoken || ""),
     claimNumber: String(variables.claimNumber || ""),
     filingOutcome,
+    callbackRequested: confirmedCallbackRequest(call),
     carrierPhone: normalizePhoneOrBlank(call.to_number),
-    createdAt: Number(call.start_timestamp || 0)
+    createdAt: Number(call.start_timestamp || 0),
+    ownerId: String(metadata.ownerId || ""),
+    planDigest: String(metadata.planDigest || ""),
+    version: String(metadata.version || ""),
+    batchContactIds: String(metadata.batchContactIds || ""),
+    dynamicVariables: stringifyDynamicVariables(variables)
   };
+}
+
+export function buildCallbackDynamicVariables(candidate, match = "matched") {
+  const out = stringifyDynamicVariables(candidate?.dynamicVariables || {});
+  out.directionMode = "carrier_callback";
+  out.callbackMatch = String(match || "matched");
+  out.callbackCarrier = String(candidate?.carrier || out.carrier || "Unknown");
+  out.callbackInsuredName = String(candidate?.insuredName || out.insuredName || "Unknown");
+  out.callbackPropertyAddress = String(candidate?.propertyAddress || out.propertyAddress || "Unknown");
+  out.callbackPolicyNumber = String(candidate?.policyNumberSpoken || out.policyNumberSpoken || "Unknown");
+  out.callbackClaimNumber = String(candidate?.claimNumber || out.claimNumber || "Missing / not filed");
+  out.pendingCallbackCases = "";
+  out.callbackPacketStatus = callbackPacketStatus(out);
+
+  for (const key of PROMPT_PLACEHOLDERS) {
+    if (!out[key]) out[key] = "Missing";
+  }
+  return out;
+}
+
+export function buildCallbackMetadata(candidate, match = "matched") {
+  return {
+    source: candidate ? CLAIM_BRIDGE_SOURCE : "hcn-wave-retell-callback-unmatched",
+    version: String(candidate?.version || ""),
+    ownerId: String(candidate?.ownerId || ""),
+    contactId: String(candidate?.contactId || ""),
+    fileNumber: String(candidate?.fileNumber || ""),
+    goal: String(candidate?.goal || "file_new_claim"),
+    planDigest: String(candidate?.planDigest || ""),
+    batchContactIds: String(candidate?.batchContactIds || ""),
+    callLeg: "carrier_callback",
+    originalCallId: String(candidate?.callId || ""),
+    callbackMatch: String(match || "matched")
+  };
+}
+
+export function selectCallbackCandidate(candidates, fromNumber) {
+  const rows = Array.isArray(candidates) ? candidates : [];
+  const exact = rows.filter((candidate) => samePhone(candidate.carrierPhone, fromNumber));
+  if (exact.length === 1) return { selected: exact[0], match: "matched" };
+  if (rows.length === 1) return { selected: rows[0], match: "single_pending_case_requires_carrier_confirmation" };
+  return { selected: null, match: rows.length ? "needs_identity_confirmation" : "no_pending_case" };
+}
+
+export function confirmedCallbackRequest(call) {
+  const analysis = call?.call_analysis?.custom_analysis_data || {};
+  if (analysis.callback_requested === true || /^true$/i.test(String(analysis.callback_requested || ""))) return true;
+  if (String(analysis.filing_outcome || "") === "callback_requested") return true;
+  const transcript = String(call?.transcript || "");
+  return /(?:request for (?:a )?callback|callback request) has been confirmed|callback (?:is|was) confirmed|you(?:'ll| will) receive (?:a|the) callback/i.test(transcript);
+}
+
+function callbackPacketStatus(variables) {
+  if (String(variables.goal || "file_new_claim") !== "file_new_claim") return "READY";
+  const required = ["insuredName", "propertyAddress", "carrier", "dateOfLoss", "causeOfLoss", "damageOpening", "damageDetails"];
+  const missing = required.filter((key) => !variables[key] || /^missing/i.test(String(variables[key])));
+  return missing.length ? `INCOMPLETE: ${missing.join(", ")}` : "READY";
+}
+
+function stringifyDynamicVariables(variables) {
+  return Object.fromEntries(Object.entries(variables || {}).map(([key, value]) => [key, String(value ?? "")]));
 }
 
 function normalizePhoneOrBlank(value) {
   try { return normalizePhone(value); } catch { return ""; }
+}
+
+function samePhone(a, b) {
+  const left = String(a || "").replace(/\D/g, "").slice(-10);
+  const right = String(b || "").replace(/\D/g, "").slice(-10);
+  return Boolean(left && right && left === right);
 }
 
 export function analyzeClaimCall(call, file) {

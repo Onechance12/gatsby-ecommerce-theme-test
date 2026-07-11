@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   callbackCandidateFromCall,
+  buildCallbackDynamicVariables,
+  buildCallbackMetadata,
+  confirmedCallbackRequest,
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
   normalizePhone,
   retellCallBody,
+  selectCallbackCandidate,
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
 import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
@@ -22,6 +26,7 @@ test("spokenPolicyNumber strips mortgage control and loan references", () => {
     "7007-0002"
   );
   assert.equal(spokenPolicyNumber("Policy # 93-E4-B591-7"), "93-E4-B591-7");
+  assert.equal(spokenPolicyNumber("POLICY-1"), "POLICY-1");
 });
 
 test("normalizeDateOfLoss converts JobNimbus epoch seconds before the voice call", () => {
@@ -41,11 +46,16 @@ test("callbackCandidateFromCall reconstructs a pending case from Retell metadata
       goal: "file_new_claim"
     },
     retell_llm_dynamic_variables: {
+      goal: "file_new_claim",
       carrier: "National General",
       insuredName: "Margarito Vega",
       propertyAddress: "5412 Meadow Nest Dr",
       policyNumber: "Master Policy 7007-0002 / Control Q4622430",
-      policyNumberSpoken: "7007-0002"
+      policyNumberSpoken: "7007-0002",
+      dateOfLoss: "04/25/2026",
+      causeOfLoss: "Hail",
+      damageOpening: "Roof and exterior damage",
+      damageDetails: "Roof hail damage"
     }
   }), {
     callId: "call-1",
@@ -59,9 +69,122 @@ test("callbackCandidateFromCall reconstructs a pending case from Retell metadata
     policyNumberSpoken: "7007-0002",
     claimNumber: "",
     filingOutcome: "",
+    callbackRequested: false,
     carrierPhone: "+18008248562",
-    createdAt: 1770000000000
+    createdAt: 1770000000000,
+    ownerId: "",
+    planDigest: "",
+    version: "",
+    batchContactIds: "",
+    dynamicVariables: {
+      goal: "file_new_claim",
+      carrier: "National General",
+      insuredName: "Margarito Vega",
+      propertyAddress: "5412 Meadow Nest Dr",
+      policyNumber: "Master Policy 7007-0002 / Control Q4622430",
+      policyNumberSpoken: "7007-0002",
+      dateOfLoss: "04/25/2026",
+      causeOfLoss: "Hail",
+      damageOpening: "Roof and exterior damage",
+      damageDetails: "Roof hail damage"
+    }
   });
+});
+
+test("confirmed callbacks restore the complete approved claim packet", () => {
+  const outbound = buildClaimFilingPlan(fixture(), {
+    ownerId: OWNER_ID,
+    fileNumber: "2742",
+    from: "+18176867361",
+    to: "+18002557828",
+    agentId: "agent-1",
+    overrides: {
+      carrier: "Allstate Insurance Company",
+      dateOfLoss: "04/27/2026",
+      causeOfLoss: "Hail and wind",
+      damageDetails: ["Roof hail/wind damage", "Interior water damage"]
+    }
+  });
+  const call = {
+    call_id: "call-alice-outbound",
+    to_number: "+18002557828",
+    start_timestamp: 1770000000000,
+    transcript: "Your request for a callback has been confirmed.",
+    metadata: outbound.callPlan.metadata,
+    retell_llm_dynamic_variables: outbound.callPlan.dynamicVariables
+  };
+  const candidate = callbackCandidateFromCall(call);
+  const callback = buildCallbackDynamicVariables(candidate, "matched");
+  const metadata = buildCallbackMetadata(candidate, "matched");
+
+  assert.equal(confirmedCallbackRequest(call), true);
+  assert.equal(candidate.callbackRequested, true);
+  assert.equal(callback.directionMode, "carrier_callback");
+  assert.equal(callback.callbackPacketStatus, "READY");
+  assert.equal(callback.insuredName, "Fixture Homeowner");
+  assert.equal(callback.propertyAddress, "100 Test St, Dallas, TX 75201");
+  assert.equal(callback.carrier, "Allstate Insurance Company");
+  assert.equal(callback.policyNumberSpoken, "POLICY-1");
+  assert.equal(callback.dateOfLoss, "04/27/2026");
+  assert.equal(callback.causeOfLoss, "Hail and wind");
+  assert.match(callback.damageDetails, /Interior water damage/);
+  assert.equal(callback.injuries, "No injuries reported");
+  assert.equal(callback.homeLivable, "Yes, the home is livable");
+  assert.equal(callback.temporaryRepairs, "Yes, temporary repairs have been made");
+  assert.match(callback.contractorHired, /Titan Reconstruction/);
+  assert.equal(metadata.source, "hcn-wave-jobnimbus-bridge");
+  assert.equal(metadata.ownerId, OWNER_ID);
+  assert.equal(metadata.contactId, "contact-2739");
+  assert.equal(metadata.fileNumber, "2742");
+  assert.equal(metadata.planDigest, outbound.planDigest);
+  assert.equal(metadata.originalCallId, "call-alice-outbound");
+  assert.equal(metadata.callLeg, "carrier_callback");
+  assert.doesNotThrow(() => validateRetellCallOwnership({ raw: { metadata } }, OWNER_ID));
+});
+
+test("callback packet fails closed when a critical fact is missing", () => {
+  const callback = buildCallbackDynamicVariables({
+    carrier: "Allstate",
+    insuredName: "Alice Gonzales",
+    propertyAddress: "2904 Hillside Dr",
+    policyNumberSpoken: "844118424",
+    dynamicVariables: {
+      goal: "file_new_claim",
+      insuredName: "Alice Gonzales",
+      propertyAddress: "2904 Hillside Dr",
+      carrier: "Allstate",
+      policyNumber: "844118424",
+      policyNumberSpoken: "844118424",
+      dateOfLoss: "Missing",
+      causeOfLoss: "Hail and wind",
+      damageOpening: "Roof and exterior damage",
+      damageDetails: "Roof hail damage"
+    }
+  }, "matched");
+  assert.match(callback.callbackPacketStatus, /^INCOMPLETE:/);
+  assert.match(callback.callbackPacketStatus, /dateOfLoss/);
+});
+
+test("callback matching requires a unique safe association", () => {
+  const alice = { contactId: "alice", carrierPhone: "+18002557828" };
+  const vega = { contactId: "vega", carrierPhone: "+18003251088" };
+  assert.deepEqual(selectCallbackCandidate([alice, vega], "+18002557828"), { selected: alice, match: "matched" });
+  assert.deepEqual(selectCallbackCandidate([alice], "anonymous"), {
+    selected: alice,
+    match: "single_pending_case_requires_carrier_confirmation"
+  });
+  assert.deepEqual(selectCallbackCandidate([alice, vega], "anonymous"), {
+    selected: null,
+    match: "needs_identity_confirmation"
+  });
+});
+
+test("callback eligibility requires carrier confirmation, not merely an offer", () => {
+  assert.equal(confirmedCallbackRequest({ transcript: "Press one if you would like a callback." }), false);
+  assert.equal(confirmedCallbackRequest({ transcript: "Your request for a callback has been confirmed." }), true);
+  assert.equal(confirmedCallbackRequest({
+    call_analysis: { custom_analysis_data: { filing_outcome: "callback_requested" } }
+  }), true);
 });
 
 test("completed filings are not offered as callback candidates", () => {
@@ -76,8 +199,11 @@ test("completed filings are not offered as callback candidates", () => {
 test("inbound callback prompt recovers from a clipped carrier introduction", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /stay silent for about two seconds/i);
-  assert.match(prompt, /Give me a second while I pull up that information\./);
+  assert.match(prompt, /AI assistant\. Give me a second while I pull up that information\./);
   assert.match(prompt, /If they already clearly named the carrier, do not ask for it again\./);
+  assert.match(prompt, /Callback packet status/);
+  assert.match(prompt, /complete claim file did not load on my side/i);
+  assert.match(prompt, /Do not ask the representative to confirm the insured name/i);
 });
 
 test("voice prompt contains no speakable pacing label", () => {

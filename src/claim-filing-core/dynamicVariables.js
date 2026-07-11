@@ -33,6 +33,7 @@ export const PROMPT_PLACEHOLDERS = [
   "callbackPropertyAddress",
   "callbackPolicyNumber",
   "callbackClaimNumber",
+  "callbackPacketStatus",
   "pendingCallbackCases",
   "batchClaimCount",
   "batchClaims"
@@ -57,6 +58,7 @@ export function flattenFactsForDynamicVariables(packet) {
   out.callbackPropertyAddress = "Missing";
   out.callbackPolicyNumber = "Missing";
   out.callbackClaimNumber = "Missing";
+  out.callbackPacketStatus = "not_applicable";
   out.pendingCallbackCases = "Missing";
   out.batchClaimCount = "0";
   out.batchClaims = "None";
@@ -76,12 +78,9 @@ export function spokenPolicyNumber(value) {
   // Mortgage declarations often combine a usable policy identifier with
   // control and loan references. Give only the policy itself unless a carrier
   // representative explicitly asks for another identifier.
-  const master = raw.match(/\bmaster\s+policy\s*[:#-]?\s*([a-z0-9-]+)/i);
-  const policy = raw.match(/\bpolicy(?:\s+number|\s*#)?\s*[:#-]?\s*([a-z0-9-]+)/i);
-  const selected = String(master?.[1] || policy?.[1] || raw.split(/\s*\/\s*/)[0])
-    .replace(/^master\s+policy\s*/i, "")
-    .replace(/^policy(?:\s+number|\s*#)?\s*/i, "")
-    .trim();
+  const master = raw.match(/\bmaster\s+policy\s*[:#]?\s+([a-z0-9-]+)/i);
+  const policy = raw.match(/\bpolicy(?:\s+number|\s*#)?\s*[:#]?\s+([a-z0-9-]+)/i);
+  const selected = String(master?.[1] || policy?.[1] || raw.split(/\s*\/\s*/)[0]).trim();
 
   return selected || raw;
 }
