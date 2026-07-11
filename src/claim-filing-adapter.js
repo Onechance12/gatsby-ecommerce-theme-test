@@ -274,6 +274,31 @@ export function validateRetellCallOwnership(call, ownerId) {
   return metadata;
 }
 
+export function validateRetellCallChainOwnership(requestedCall, continuationCall, ownerId) {
+  const requestedMetadata = validateRetellCallOwnership(requestedCall, ownerId);
+  if (!continuationCall) return requestedMetadata;
+
+  const requestedRaw = requestedCall?.raw || requestedCall || {};
+  const continuationRaw = continuationCall?.raw || continuationCall || {};
+  const continuationMetadata = continuationRaw.metadata || {};
+  const linked = String(continuationMetadata.originalCallId || "") === String(requestedRaw.call_id || requestedCall?.callId || "");
+  const sameContact = String(continuationMetadata.contactId || "") === String(requestedMetadata.contactId || "");
+  const sameOwner = String(continuationMetadata.ownerId || "") === String(ownerId || "");
+
+  if (continuationMetadata.source === CLAIM_BRIDGE_SOURCE) {
+    const verified = validateRetellCallOwnership({ raw: continuationRaw }, ownerId);
+    if (!linked || !sameContact || String(verified.planDigest || "") !== String(requestedMetadata.planDigest || "")) {
+      throw validationError("The carrier callback is not linked to the approved outbound claim call.");
+    }
+    return verified;
+  }
+
+  if (continuationMetadata.source === "hcn-wave-retell-callback" && linked && sameContact && sameOwner) {
+    return requestedMetadata;
+  }
+  throw validationError("The carrier callback is not linked to the approved outbound claim call.");
+}
+
 export function digest(value) {
   return createHash("sha256").update(stableStringify(value), "utf8").digest("hex");
 }

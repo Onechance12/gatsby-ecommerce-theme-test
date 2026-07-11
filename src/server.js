@@ -16,7 +16,7 @@ import {
   retellCallBody,
   callbackCandidateFromCall,
   selectCallbackCandidate,
-  validateRetellCallOwnership
+  validateRetellCallChainOwnership
 } from "./claim-filing-adapter.js";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -1250,7 +1250,11 @@ async function loadClaimCallAnalysis(callId) {
     callAnalysis: raw.call_analysis || {},
     raw
   };
-  const metadata = validateRetellCallOwnership(call, CHANCE_OWNER_ID);
+  const metadata = validateRetellCallChainOwnership(
+    { raw: requestedRaw, callId: requestedRaw.call_id },
+    continuation ? { raw: continuation, callId: continuation.call_id } : null,
+    CHANCE_OWNER_ID
+  );
   const { contact } = await findChanceContact(metadata.contactId);
   const file = compactContact(contact);
   const result = analyzeClaimCall(call, {

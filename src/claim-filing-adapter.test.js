@@ -12,6 +12,7 @@ import {
   normalizePhone,
   retellCallBody,
   selectCallbackCandidate,
+  validateRetellCallChainOwnership,
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
 import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
@@ -432,6 +433,32 @@ test("rejects calls outside the Chance bridge scope", () => {
     planDigest: "digest-1"
   } } }, OWNER_ID);
   assert.equal(metadata.contactId, "contact-1");
+});
+
+test("legacy callback legs are accepted only when anchored to a validated outbound call", () => {
+  const outbound = { raw: {
+    call_id: "call-outbound",
+    metadata: {
+      source: "hcn-wave-jobnimbus-bridge",
+      ownerId: OWNER_ID,
+      contactId: "contact-1",
+      planDigest: "digest-1"
+    }
+  } };
+  const legacyCallback = { raw: {
+    call_id: "call-callback",
+    metadata: {
+      source: "hcn-wave-retell-callback",
+      ownerId: OWNER_ID,
+      contactId: "contact-1",
+      originalCallId: "call-outbound"
+    }
+  } };
+  const metadata = validateRetellCallChainOwnership(outbound, legacyCallback, OWNER_ID);
+  assert.equal(metadata.planDigest, "digest-1");
+  assert.throws(() => validateRetellCallChainOwnership(outbound, {
+    raw: { metadata: { ...legacyCallback.raw.metadata, originalCallId: "wrong-call" } }
+  }, OWNER_ID), /not linked/);
 });
 
 test("normalizes US phone numbers", () => {
