@@ -18,6 +18,8 @@ export const PROMPT_PLACEHOLDERS = [
   "adjuster",
   "mortgageCompany",
   "damageSummary",
+  "damageOpening",
+  "damageDetails",
   "injuries",
   "homeLivable",
   "temporaryRepairs",
@@ -45,6 +47,8 @@ export function flattenFactsForDynamicVariables(packet) {
   // damageSummary is a separate packet field (array); the prompt references
   // {{damageSummary}}, so join it to a string per call.
   out.damageSummary = (packet.damageSummary || []).join(", ");
+  out.damageOpening = String(packet.damageOpening || "");
+  out.damageDetails = (packet.damageDetails || packet.damageSummary || []).join(", ");
   out.policyNumberSpoken = spokenPolicyNumber(out.policyNumber);
   out.directionMode = "outbound_claim_call";
   out.callbackMatch = "not_applicable";

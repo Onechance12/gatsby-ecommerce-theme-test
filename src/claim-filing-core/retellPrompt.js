@@ -148,6 +148,12 @@ export function renderRetellPrompt(packet) {
     "- Adjuster: {{adjuster}}",
     "- Mortgage company: {{mortgageCompany}}",
     "- Reported damage (full scope, not just roof): {{damageSummary}}",
+    "- Standard initial damage answer: {{damageOpening}}",
+    "- Verified damage details for follow-up questions only: {{damageDetails}}",
+    "DAMAGE QUESTION RULE: When a human representative first asks broadly what was damaged, say only: '{{damageOpening}}' " +
+      "Then stop. Do not list every elevation, room, or estimate item. Let the representative walk through their " +
+      "questions. When they ask about a specific exterior item, room, or interior area, answer only from " +
+      "{{damageDetails}}. If the requested detail is not there, say you are not sure; never infer it from the broad opening.",
     "",
     "Standard filing questions — reps ask these on almost every new claim; answer from THESE facts:",
     "- Any injuries? -> {{injuries}}",

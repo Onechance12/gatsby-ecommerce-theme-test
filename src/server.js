@@ -57,6 +57,7 @@ const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN ||
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
+const claimScopeTextCache = new Map();
 
 const routes = new Map([
   ["GET /health", health],
@@ -1073,6 +1074,7 @@ async function buildLiveClaimContext(query) {
     listRelated("/files", contact.jnid, 150)
   ]);
   const claimDocuments = documents.filter(isClaimEvidenceDocument);
+  const claimScopeText = await extractClaimScopeEvidence(claimDocuments);
   const file = compactContact(contact);
   return {
     contact,
@@ -1098,7 +1100,10 @@ async function buildLiveClaimContext(query) {
       },
       evidence: {
         documents: claimDocuments.map((document) => ({ name: compactDocument(document).name })),
-        notes: activities.map((activity) => ({ body: activity.note || activity.description || "" })),
+        notes: [
+          ...activities.map((activity) => ({ body: activity.note || activity.description || "" })),
+          ...(claimScopeText ? [{ body: claimScopeText }] : [])
+        ],
         tasks: tasks.map((task) => ({ title: task.title || task.subject || "" }))
       },
       captured: {},
@@ -1108,10 +1113,29 @@ async function buildLiveClaimContext(query) {
       activitiesReviewed: activities.length,
       tasksReviewed: tasks.length,
       documentsReviewed: claimDocuments.length,
+      scopeDocumentRead: Boolean(claimScopeText),
       photoFilesExcluded: documents.length - claimDocuments.length,
       alternatives: alternatives.map(compactContact)
     }
   };
+}
+
+async function extractClaimScopeEvidence(documents) {
+  const document = documents.find((item) => /(?:estimate|final\s*draft|scope)/i.test(compactDocument(item).name));
+  if (!document) return "";
+  const id = String(document.jnid || document.id || compactDocument(document).name || "");
+  if (claimScopeTextCache.has(id)) return claimScopeTextCache.get(id);
+  try {
+    const downloaded = await downloadJobNimbusFile(document);
+    const extracted = await extractDocumentText(downloaded, document, 30000, { forceOcr: false, maxOcrPages: 1 });
+    const text = extracted.text || "";
+    claimScopeTextCache.set(id, text);
+    if (claimScopeTextCache.size > 100) claimScopeTextCache.delete(claimScopeTextCache.keys().next().value);
+    return text;
+  } catch {
+    claimScopeTextCache.set(id, "");
+    return "";
+  }
 }
 
 function isClaimEvidenceDocument(document) {

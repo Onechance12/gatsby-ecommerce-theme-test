@@ -110,6 +110,29 @@ test("carrier prompt stays silent for IVR openings and accepts transfers", () =>
   assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
 });
 
+test("claim packet separates the short damage opening from detailed follow-up scope", () => {
+  const input = fixture({
+    evidence: {
+      documents: [{ name: "Final Draft Estimate.pdf" }],
+      notes: [{ body: "Roof hail damage. Front window screens. Gutters and fascia. Garage door. Wood fence. Bathroom ceiling and adjoining wall water damage." }],
+      tasks: []
+    }
+  });
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(
+    plan.callPlan.dynamicVariables.damageOpening,
+    "It has roof damage along with collateral on the exterior of the home, mostly paint, window screens, and gutters. I also believe there is some interior damage."
+  );
+  assert.match(plan.callPlan.dynamicVariables.damageDetails, /window screens\/windows/);
+  assert.match(plan.callPlan.dynamicVariables.damageDetails, /garage door/);
+  assert.match(plan.callPlan.dynamicVariables.damageDetails, /bathroom ceiling and adjoining walls/);
+  assert.match(renderRetellPrompt({}), /When a human representative first asks broadly what was damaged/);
+});
+
 function fixture(overrides = {}) {
   return {
     file: {
