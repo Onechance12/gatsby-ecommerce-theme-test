@@ -1,0 +1,50 @@
+{
+  "id": "t-20260711-review-retell-callback-hardening",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "open",
+  "mode": "verify",
+  "title": "Review deployed Retell callback and retry hardening",
+  "goal": "Independently review commit fad57e7 on the jobnimbus-bridge branch after a production callback continuation lost approved claim facts. Verify the complete callback packet restoration, callback ownership/call-chain behavior, stale-candidate cleanup, retry gates, post-call outcome schema, prompt safety, and JobNimbus writeback boundaries. Report concrete findings; do not duplicate the implementation or perform live actions.",
+  "workBranch": "claude/review-retell-callback-hardening",
+  "files": [
+    "src/claim-filing-adapter.js",
+    "src/claim-filing-core/dynamicVariables.js",
+    "src/claim-filing-core/retellPrompt.js",
+    "src/claim-filing-core/resultExtraction.js",
+    "src/claim-filing-core/writeback.js",
+    "src/server.js",
+    "src/claim-filing-adapter.test.js",
+    "src/server-smoke.test.js",
+    "docs/claim-filing-core-contract.md"
+  ],
+  "doneCriteria": [
+    "Review the exact jobnimbus-bridge commit fad57e7 rather than the older local-only implementation.",
+    "Confirm callbacks preserve all approved critical facts and fail closed when any critical packet fact is missing.",
+    "Confirm outbound and inbound call legs remain Chance-scoped and result/writeback ownership checks still work.",
+    "Confirm stale callbacks, duplicate calls, active callbacks, and intentional retries cannot produce accidental duplicate filings.",
+    "Confirm unsuccessful calls cannot create noisy or misleading JobNimbus notes.",
+    "Run npm ci, npm run check, and git diff --check and record findings in this task."
+  ],
+  "constraints": [
+    "Verify only; do not edit product code under this task.",
+    "Do not include secrets or client PII.",
+    "Do not place a call, deploy, change Retell configuration, or write to JobNimbus.",
+    "Do not touch Jobrolo code or infrastructure."
+  ],
+  "createdAt": "2026-07-11",
+  "updatedAt": "2026-07-11",
+  "log": [
+    {
+      "at": "2026-07-11",
+      "by": "codex",
+      "note": "Created after deploying fad57e7. Codex verified 26 tests, Render health, live Retell prompt/schema parity, a complete synthetic callback reconstruction from the redacted production failure shape, and no live retry or JobNimbus write. Claude is asked for an independent review."
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}

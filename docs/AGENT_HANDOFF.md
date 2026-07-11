@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-10 (Codex — Render claim-filing integration ready for final review)
+Last updated: 2026-07-11 (Codex — Retell callback hardening deployed; Claude review requested)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -25,10 +25,11 @@ Claude.
   actions, Gmail/Drive/Quo modules, storm research, LOR packaging, `file:claim`
   orchestrator, `file:pulse` reconciliation, post-call writeback, and voice
   tooling.
-- Render bridge branch: `jobnimbus-bridge` at `20c86e3`. Deployed ChatGPT action
-  bridge and OpenAI/Twilio voice path. Separate runtime line from Claude's branch.
-  Artifact mailbox deployed at `20c86e3`; authenticated patch upload/list/get/
-  complete endpoints are live and documented in `docs/ARTIFACT_HANDOFF.md`.
+- Render bridge branch: `jobnimbus-bridge` at `fad57e7`, deployed. The bridge now
+  includes approval-gated Retell claim filing, complete callback packet
+  restoration, callback call-chain review, pending-callback inspection,
+  controlled retries, richer post-call outcomes, and separate JobNimbus
+  writeback approval. It remains a separate runtime line from Claude's branch.
 - Render claim-filing integration branch: `codex/render-claim-core` at `2564ddb`,
   draft PR #3 targeting `jobnimbus-bridge`. Imports Claude's approved core and
   adds fresh Chance-only prepare/call/result/writeback actions. Not deployed.
@@ -81,8 +82,33 @@ review the actual code.
   using direct fresh JobNimbus reads, strict Chance-only resolution, approval
   digests, Retell result polling, OpenAPI actions, and separately approved
   JobNimbus writeback — `t-20260710-integrate-claim-core-render`, `2564ddb`, PR #3.
+- Claude — OPEN (verify only) — independently review deployed Retell callback
+  and retry hardening at `jobnimbus-bridge` commit `fad57e7` —
+  `t-20260711-review-retell-callback-hardening`. No live calls, deployments,
+  Retell changes, JobNimbus writes, or Jobrolo access are authorized.
 
 ## Claim Filer — Operational State (2026-07-10)
+
+### Production callback hardening (2026-07-11)
+
+- A live carrier callback correctly matched its JobNimbus file but the old
+  inbound packet copied only identification fields and dropped critical filing
+  facts. The representative could not complete the claim.
+- `fad57e7` restores the complete approved outbound packet on callbacks,
+  including DOL, cause, damage, standard answers, goal, and batch data. It also
+  carries owner/contact/plan metadata so callback results pass the same approval
+  and ownership checks as outbound calls.
+- Callback candidates now require actual callback confirmation, expire after 72
+  hours, and leave the queue when an inbound continuation exists.
+- The bridge follows outbound + callback legs as one result chain, blocks
+  writeback while a call is active, and requires an ended prior call id for an
+  intentional retry.
+- Incomplete callback packets fail closed. Failed/no-result calls propose no
+  JobNimbus note. The live Retell prompt and post-call schema were synchronized,
+  and Render health reports full callback packet restoration.
+- Verification: 26 tests pass; the redacted failure packet reconstructs as
+  `READY`; deployed prompt equals repository source. No retry call or JobNimbus
+  write was performed after the repair.
 
 - **Deployment truth:** `file:claim` is **local CLI only**. It is NOT exposed on
   the Render bridge or any custom GPT/connector. The bridge does not place carrier
@@ -141,6 +167,15 @@ review the actual code.
    first live bridge call, and every JobNimbus write.
 
 ## Log
+
+- 2026-07-11 — Codex — Audited the deployed claim-filing agent after a callback
+  continuation lost critical approved facts. Deployed `fad57e7` to
+  `jobnimbus-bridge`; added full callback packet restoration, fail-closed packet
+  integrity, ownership-preserving call chains, pending callback visibility,
+  controlled retries, stale/duplicate cleanup, improved result classification,
+  policy-number normalization coverage, and no-note behavior for failed calls.
+  Updated the live Retell prompt/schema and verified Render plus 26 tests. Opened
+  a PII-free verify-only task for Claude. No live retry or JobNimbus write.
 
 - 2026-07-10 — Codex — Integrated Claude's approved core into the Render bridge
   on `codex/render-claim-core` at `2564ddb`, draft PR #3. Added four authenticated
