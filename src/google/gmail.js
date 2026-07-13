@@ -160,7 +160,7 @@ function buildRawEmail({ to, cc, bcc, subject, body }) {
     `To: ${to}`,
     cc ? `Cc: ${cc}` : "",
     bcc ? `Bcc: ${bcc}` : "",
-    `Subject: ${subject}`,
+    `Subject: ${encodeHeaderWord(subject)}`,
     "MIME-Version: 1.0",
     "Content-Type: text/plain; charset=utf-8"
   ].filter(Boolean);
@@ -170,6 +170,23 @@ function buildRawEmail({ to, cc, bcc, subject, body }) {
 // Create a Gmail DRAFT with file attachments (multipart/mixed). attachments:
 // [{ filename, contentType, bytes: Buffer }]. Requires Google OAuth creds.
 export async function createDraftWithAttachments(config, { to, cc, subject, body, attachments = [] }) {
+  const raw = buildMultipartRaw({ to, cc, subject, body, attachments });
+  const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/drafts", { method: "POST", body: { message: { raw } } });
+  return { id: result.id || "", messageId: result.message?.id || "" };
+}
+
+// Same packet, but delivered. Gated on ALLOW_GMAIL_SEND — the caller must also
+// pass Chance's explicit go-ahead, since this actually sends to the carrier.
+export async function sendMessageWithAttachments(config, { to, cc, subject, body, attachments = [] }) {
+  if (!config.google?.allowSend) {
+    throw new Error("Sending is disabled (ALLOW_GMAIL_SEND=false). Enable it to send, or stage a draft instead.");
+  }
+  const raw = buildMultipartRaw({ to, cc, subject, body, attachments });
+  const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/messages/send", { method: "POST", body: { raw } });
+  return { id: result.id || "", threadId: result.threadId || "" };
+}
+
+function buildMultipartRaw({ to, cc, subject, body, attachments = [] }) {
   const boundary = "wave_mixed_boundary_0001";
   const parts = [];
   parts.push(`--${boundary}`);
@@ -189,18 +206,25 @@ export async function createDraftWithAttachments(config, { to, cc, subject, body
   const headers = [
     `To: ${to}`,
     cc ? `Cc: ${cc}` : "",
-    `Subject: ${subject}`,
+    `Subject: ${encodeHeaderWord(subject)}`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${boundary}"`
   ].filter(Boolean);
 
-  const raw = base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${parts.join("\r\n")}`);
-  const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/drafts", { method: "POST", body: { message: { raw } } });
-  return { id: result.id || "", messageId: result.message?.id || "" };
+  return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${parts.join("\r\n")}`);
 }
 
 function base64UrlDecode(value) {
   return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+// RFC 2047 encoded-word for header values containing non-ASCII (em dashes, ·,
+// accented names). Plain ASCII passes through untouched so common subjects stay
+// human-readable in the raw source.
+function encodeHeaderWord(value) {
+  const str = String(value || "");
+  if (/^[\x00-\x7F]*$/.test(str)) return str;
+  return `=?UTF-8?B?${Buffer.from(str, "utf8").toString("base64")}?=`;
 }
 
 function base64UrlEncode(value) {
