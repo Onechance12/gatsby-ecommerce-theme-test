@@ -41,7 +41,8 @@
     "google:oauth": "node scripts/google-oauth.mjs",
     "quo": "node src/index.js quo",
     "chance:brief": "node src/index.js chance:brief",
-    "lor-package": "node src/index.js lor-package"
+    "lor-package": "node src/index.js lor-package",
+    "memory": "node src/index.js memory"
   },
   "engines": {
     "node": ">=20"

@@ -201,6 +201,24 @@ const phoneOnlyProposal = buildWritebackProposal({ id: "file1", customer: "Synth
 check("adjuster phone-only written to fields", phoneOnlyProposal.proposedFields.cf_string_8 === "800-555-9000");
 check("adjuster phone-only note does not say awaiting adjuster", !/awaiting adjuster/i.test(phoneOnlyProposal.proposedNote));
 
+// ---- Memory system (contracts only — no disk writes in selftest) ----
+const { normalizeMemoryDraft, assertCompanyLaneSafe, normalizeProposalDraft } = await import("./memory/contracts.js");
+const memDraft = normalizeMemoryDraft({ lane: "company", kind: "lesson", content: "synthetic lesson content for selftest", evidence: [{ type: "chance", note: "synthetic" }] });
+check("memory draft normalizes with confirmed chance evidence", memDraft.evidence[0].verification === "confirmed" && memDraft.status === "candidate");
+check("memory draft builds a dedup key", memDraft.dedupKey.startsWith("company:lesson:"));
+let memThrew = "";
+try { normalizeMemoryDraft({ lane: "company", kind: "lesson", content: "no evidence here at all" }); } catch (e) { memThrew = e.message; }
+check("memory without evidence is rejected", /evidence/.test(memThrew));
+let piiThrew = "";
+try { assertCompanyLaneSafe("Synthetic Person owes a call", ["Synthetic Person"]); } catch (e) { piiThrew = e.message; }
+check("company-lane PII guard blocks client names", /client name/.test(piiThrew));
+let numThrew = "";
+try { assertCompanyLaneSafe("claim 12345678 update"); } catch (e) { numThrew = e.message; }
+check("company-lane PII guard blocks long numbers", /long number/.test(numThrew));
+let propThrew = "";
+try { normalizeProposalDraft({ type: "recommendation", title: "test", detail: "detail long enough", memoryIds: [] }); } catch (e) { propThrew = e.message; }
+check("proposal without cited memories is rejected", /memory id/.test(propThrew));
+
 console.log("");
 if (failures) {
   console.error(`Self-test failed: ${failures} check(s) failed.`);

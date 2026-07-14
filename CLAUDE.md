@@ -19,6 +19,9 @@ executes. Node.js, ESM, CLI in `src/index.js`.
 
 ## The operating loop (default way we work)
 
+0. `npm run memory -- brain` — **FIRST, every session**: durable memory
+   (corrections, rules, open commitments, last-session handoffs). See
+   `docs/INVARIANTS.md` for the rules that never bend.
 1. `npm run chance:sweep` — pull + triage Chance's live files (needs `.env`)
 2. `npm run chance:brief` — **read THIS, not raw data** (compact digest)
 3. Work the top of the brief; `npm run review:file -- "<name>"` only for files
@@ -28,6 +31,10 @@ executes. Node.js, ESM, CLI in `src/index.js`.
 6. Chance does final send / spot-check
 
 On-demand only (no schedule). Scope = Chance's files only (for now).
+
+**End of session:** `npm run memory -- handoff '{"summary":"...","decisions":[],"commitments":[],"openQuestions":[],"corrections":[]}'`
+— and `memory remember` anything durable learned along the way (Chance's
+corrections are the highest-value memories; lane rules in `memory help`).
 
 ## Token efficiency (Chance pays per token — respect it)
 
