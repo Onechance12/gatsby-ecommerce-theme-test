@@ -47,6 +47,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/scheduling/availability"].post.operationId, "reviewUnifiedSchedulingAvailability");
   assert.equal(schema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
+  assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
 
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {
     method: "POST",
@@ -186,6 +187,25 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     start: "Jul 17, 2026, 2:00 PM CDT",
     end: "Jul 17, 2026, 4:00 PM CDT"
   });
+
+  const uploadDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/upload-file`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      filename: "Certified policy.pdf",
+      description: "Certified carrier policy.",
+      contentBase64: Buffer.from("fixture document").toString("base64"),
+      execute: false
+    })
+  });
+  assert.equal(uploadDryRunResponse.status, 200);
+  const uploadDryRun = await uploadDryRunResponse.json();
+  assert.equal(uploadDryRun.mode, "dry_run");
+  assert.equal(uploadDryRun.file.id, chance.jnid);
+  assert.equal(uploadDryRun.plan.filename, "Certified policy.pdf");
+  assert.equal(uploadDryRun.plan.sizeBytes, 16);
+  assert.deepEqual(uploadDryRun.plan.related, [chance.jnid]);
 
   const timezoneFreeResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",

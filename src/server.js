@@ -106,6 +106,7 @@ const routes = new Map([
   ["POST /jobnimbus/assigned-counts", assignedCounts],
   ["POST /jobnimbus/document-text", documentText],
   ["POST /jobnimbus/document-review", documentReview],
+  ["POST /jobnimbus/upload-file", uploadJobNimbusFile],
   ["POST /jobnimbus/update-contact", updateContact],
   ["POST /jobnimbus/update-status", updateStatus],
   ["POST /jobnimbus/process-update", processUpdate],
@@ -1867,6 +1868,65 @@ async function createTask(input) {
   return { mode: "executed", file: compactContact(contact), result };
 }
 
+async function uploadJobNimbusFile(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute file uploads.");
+  }
+  const query = required(input.query, "query");
+  const filename = path.basename(required(input.filename, "filename"));
+  const description = String(input.description || "").trim().slice(0, 1000);
+  const contentBase64 = required(input.contentBase64, "contentBase64").replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) badRequest("contentBase64 must be valid base64.");
+  const content = Buffer.from(contentBase64, "base64");
+  if (!content.length) badRequest("Uploaded file is empty.");
+  if (content.length > 8 * 1024 * 1024) badRequest("Uploaded file exceeds the bridge's 8 MB single-file limit.");
+
+  const { contact } = await findOneContact(query);
+  const plan = {
+    filename,
+    description,
+    sizeBytes: content.length,
+    type: 1,
+    related: [contact.jnid],
+    isPrivate: Boolean(input.isPrivate || false)
+  };
+  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
+
+  const reservation = await jobNimbusFileApi("/files/v1/uploads/url", {
+    method: "POST",
+    body: plan
+  });
+  const uploadUrl = reservation?.data?.url;
+  const fileId = reservation?.data?.jnid;
+  if (!uploadUrl || !fileId) badRequest("JobNimbus did not return a presigned upload URL and file id.");
+
+  const upload = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "content-type": "application/octet-stream" },
+    body: content
+  });
+  if (!upload.ok) {
+    const text = await upload.text().catch(() => "");
+    const error = new Error(`JobNimbus file storage upload ${upload.status}: ${text.slice(0, 500)}`);
+    error.statusCode = upload.status;
+    throw error;
+  }
+
+  const completion = await jobNimbusFileApi(`/files/v1/uploads/${encodeURIComponent(fileId)}/complete?generateThumbnail=true`, {
+    method: "POST"
+  });
+  return {
+    mode: "executed",
+    file: compactContact(contact),
+    result: {
+      id: fileId,
+      filename,
+      sizeBytes: content.length,
+      thumbnailUrl: completion?.data?.thumbnailUrl || ""
+    }
+  };
+}
+
 async function updateTask(input) {
   if (input.execute === true && !ALLOW_WRITES) {
     badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute task updates.");
@@ -2829,6 +2889,27 @@ async function jobNimbus(endpoint, options = {}) {
   return json;
 }
 
+async function jobNimbusFileApi(endpoint, options = {}) {
+  if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
+  const response = await fetch(`https://api.jobnimbus.com${endpoint}`, {
+    method: options.method || "GET",
+    headers: {
+      authorization: `Bearer ${API_KEY}`,
+      "content-type": "application/json"
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const text = await response.text();
+  let json;
+  try { json = text ? JSON.parse(text) : null; } catch { json = text; }
+  if (!response.ok) {
+    const error = new Error(`JobNimbus Files API ${response.status}: ${typeof json === "string" ? json : JSON.stringify(json)}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return json;
+}
+
 async function gmailApi(endpoint, options = {}) {
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
     badRequest("Gmail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in Render.");
@@ -3784,6 +3865,18 @@ const OPENAPI = {
         },
         required: ["query"]
       },
+      JobNimbusUploadFileRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "File/client identifier." },
+          filename: { type: "string", description: "Filename to store in JobNimbus, including the file extension." },
+          description: { type: "string", description: "Optional short description for the JobNimbus document." },
+          contentBase64: { type: "string", description: "Base64-encoded file content. Maximum decoded size is 8 MB." },
+          isPrivate: { type: "boolean", default: false, description: "Whether JobNimbus should mark the document private." },
+          execute: { type: "boolean", default: false, description: "When false, returns a dry-run plan. True requires bridge writes to be enabled." }
+        },
+        required: ["query", "filename", "contentBase64"]
+      },
       UpdateContactRequest: {
         type: "object",
         properties: {
@@ -4310,6 +4403,13 @@ const OPENAPI = {
         operationId: "reviewJobNimbusDocument",
         requestBody: jsonBody("DocumentReviewRequest"),
         responses: { "200": { description: "No-API document review with extracted text preview, likely fields, conflicts, and suggested uses." } }
+      }
+    },
+    "/jobnimbus/upload-file": {
+      post: {
+        operationId: "uploadJobNimbusFile",
+        requestBody: jsonBody("JobNimbusUploadFileRequest"),
+        responses: { "200": { description: "Dry run or JobNimbus document upload result." } }
       }
     },
     "/jobnimbus/update-contact": {
