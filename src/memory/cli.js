@@ -39,13 +39,14 @@ try {
       lanes: {
         company: "memory/company.jsonl — tracked in git; PII-free (guarded).",
         client: "data/memory/ — NEVER commit; on Render set MEMORY_ROOT to a persistent disk or client memory is lost on deploy."
-      }
+      },
+      authority: "remember creates candidates only; verify/dispute/review require approved:true and by:\"Chance Pearson\"; no memory command executes external actions"
     });
   } else if (tool === "brain") {
     // Bridge default is ISOLATED: company rules only. Pass subjectKey for one
     // file's client records; clientLane:"full" is reserved for local operator use.
     const clientLane = input.clientLane || (input.subjectKey ? "subject" : "none");
-    out(renderBrain(config, { clientLane, subjectKey: input.subjectKey || "" }));
+    out(renderBrain(config, { clientLane, subjectKey: input.subjectKey || "", includeEpisodes: input.includeEpisodes === true }));
   } else if (tool === "remember") {
     const customerNames = Array.isArray(input.customerNames) ? input.customerNames : [];
     delete input.customerNames;
@@ -55,7 +56,8 @@ try {
     const rows = listMemory(config, input);
     out({ count: rows.length, records: rows });
   } else if (tool === "verify" || tool === "dispute") {
-    out({ mode: tool, record: setMemoryStatus(config, input.id, tool === "verify" ? "verified" : "disputed", { by: input.by || "chance-via-bridge", reason: input.reason || "" }) });
+    requireApproval(input);
+    out({ mode: tool, record: setMemoryStatus(config, input.id, tool === "verify" ? "verified" : "disputed", { by: input.by, reason: input.reason || "" }) });
   } else if (tool === "handoff") {
     out({ mode: "recorded", episode: recordEpisode(config, input) });
   } else if (tool === "episodes") {
@@ -65,11 +67,18 @@ try {
   } else if (tool === "proposals") {
     out({ proposals: listProposals(config, input) });
   } else if (tool === "review") {
-    out({ proposal: reviewProposal(config, input.id, input.status, input.reason || "", { by: input.by || "chance-via-bridge" }) });
+    requireApproval(input);
+    out({ proposal: reviewProposal(config, input.id, input.status, input.reason || "", { by: input.by }) });
   } else {
     throw new Error(`Unknown memory tool: ${tool}. Run with no args for help.`);
   }
 } catch (error) {
   console.error(error.message);
   process.exit(1);
+}
+
+function requireApproval(input) {
+  if (input.approved !== true || String(input.by || "").trim().toLowerCase() !== "chance pearson") {
+    throw new Error('authoritative memory changes require approved:true and by:"Chance Pearson"');
+  }
 }

@@ -47,18 +47,20 @@ test("authority: candidate/disputed decisions never render as operating rules", 
   assert.match(brain, /DISPUTED needing resolution: 1/);
 });
 
-test("chance-confirmed evidence births a verified record with provenance", () => {
+test("caller-supplied Chance evidence stays candidate until explicit approval", () => {
   const cfg = freshCfg();
   const rec = saveMemory(cfg, { lane: "company", kind: "correction", content: "verified straight from the operator", evidence: [{ type: "chance", note: "direct instruction" }] }).record;
-  assert.equal(rec.status, "verified");
-  assert.equal(rec.verifiedBy, "chance-direct-instruction");
+  assert.equal(rec.status, "candidate");
+  assert.ok(!renderBrain(cfg).split("UNVERIFIED CANDIDATES")[0].includes("verified straight from the operator"));
+  setMemoryStatus(cfg, rec.id, "verified", { by: "Chance Pearson" });
   assert.ok(renderBrain(cfg).includes("verified straight from the operator"));
 });
 
 test("isolation: brain for file A cannot expose file B facts", () => {
   const cfg = freshCfg();
-  saveMemory(cfg, { lane: "client", kind: "fact", content: "alpha file synthetic fact", evidence: ["a"], subjectKey: "fileA" });
+  const alpha = saveMemory(cfg, { lane: "client", kind: "fact", content: "alpha file synthetic fact", evidence: ["a"], subjectKey: "fileA" }).record;
   saveMemory(cfg, { lane: "client", kind: "fact", content: "beta file synthetic fact", evidence: ["b"], subjectKey: "fileB" });
+  setMemoryStatus(cfg, alpha.id, "verified", { by: "Chance Pearson" });
   const subj = renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA" });
   assert.ok(subj.includes("alpha file synthetic fact"));
   assert.ok(!subj.includes("beta file synthetic fact"));
@@ -81,24 +83,39 @@ test("PII guard also covers subjectKey and evidence notes on save", () => {
   assert.throws(() => saveMemory(cfg, { lane: "company", kind: "lesson", content: "clean rule text here", evidence: [{ type: "note", note: "learned on the file at 99 Oak Street" }] }), /address/);
 });
 
-test("dedup + supersession", () => {
+test("dedup + approval-gated supersession with predecessor recovery", () => {
   const cfg = freshCfg();
   const a = saveMemory(cfg, { lane: "company", kind: "lesson", content: "identical lesson content for dedup", evidence: ["one"] });
   const b = saveMemory(cfg, { lane: "company", kind: "lesson", content: "identical lesson content for dedup", evidence: ["two"] });
   assert.equal(b.deduped, true);
   assert.equal(listMemory(cfg, { lane: "company" }).length, 1);
+  setMemoryStatus(cfg, a.record.id, "verified", { by: "Chance Pearson" });
   const c = saveMemory(cfg, { lane: "company", kind: "lesson", content: "improved replacement lesson content", evidence: ["three"], supersedesId: a.record.id }).record;
-  const all = listMemory(cfg, { lane: "company", includeRetired: true });
-  const old = all.find((r) => r.id === a.record.id);
+  let all = listMemory(cfg, { lane: "company", includeRetired: true });
+  let old = all.find((r) => r.id === a.record.id);
+  assert.equal(old.status, "verified");
+  assert.equal(c.status, "candidate");
+
+  setMemoryStatus(cfg, c.id, "verified", { by: "Chance Pearson" });
+  all = listMemory(cfg, { lane: "company", includeRetired: true });
+  old = all.find((r) => r.id === a.record.id);
   assert.equal(old.status, "superseded");
   assert.equal(old.supersededById, c.id);
   assert.equal(listMemory(cfg, { lane: "company" }).length, 1);
+
+  setMemoryStatus(cfg, c.id, "disputed", { by: "Chance Pearson", reason: "replacement was wrong" });
+  all = listMemory(cfg, { lane: "company", includeRetired: true });
+  old = all.find((r) => r.id === a.record.id);
+  assert.equal(old.status, "verified");
+  assert.equal(old.supersededById, undefined);
 });
 
 test("proposals must cite live memory ids and reviews carry provenance", () => {
   const cfg = freshCfg();
-  assert.throws(() => saveProposal(cfg, { type: "risk", title: "phantom", detail: "cites nothing real", memoryIds: ["mem_ghost"] }), /unknown|retired/);
+  assert.throws(() => saveProposal(cfg, { type: "risk", title: "phantom", detail: "cites nothing real", memoryIds: ["mem_ghost"] }), /unknown|retired|unverified/);
   const rec = saveMemory(cfg, { lane: "company", kind: "lesson", content: "real cited memory content", evidence: ["x"] }).record;
+  assert.throws(() => saveProposal(cfg, { type: "recommendation", title: "early", detail: "candidate memory cannot support a proposal", memoryIds: [rec.id] }), /unverified/);
+  setMemoryStatus(cfg, rec.id, "verified", { by: "Chance Pearson" });
   const prop = saveProposal(cfg, { type: "recommendation", title: "real", detail: "cites a live memory", memoryIds: [rec.id] }).proposal;
   assert.throws(() => reviewProposal(cfg, prop.id, "approved", "ok", {}), /provenance/);
   const reviewed = reviewProposal(cfg, prop.id, "approved", "ok", { by: "test-operator" });
@@ -120,6 +137,20 @@ test("status changes require provenance; episodes record and cap", () => {
   assert.throws(() => setMemoryStatus(cfg, rec.id, "verified", {}), /provenance/);
   const ep = recordEpisode(cfg, { summary: "synthetic session for the suite", decisions: ["d1"], commitments: ["c1"] });
   assert.ok(ep.id.startsWith("ep_"));
+  assert.ok(!renderBrain(cfg).includes("synthetic session for the suite"));
+  assert.ok(renderBrain(cfg, { includeEpisodes: true }).includes("synthetic session for the suite"));
+});
+
+test("candidate commitments and client facts stay quarantined", () => {
+  const cfg = freshCfg();
+  saveMemory(cfg, { lane: "company", kind: "commitment", content: "candidate commitment must not guide work", evidence: ["x"] });
+  saveMemory(cfg, { lane: "client", kind: "fact", content: "candidate client fact must not guide work", evidence: ["y"], subjectKey: "fileA" });
+  const brain = renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA" });
+  const primary = brain.split("UNVERIFIED CANDIDATES")[0];
+  assert.ok(!primary.includes("candidate commitment must not guide work"));
+  assert.ok(!primary.includes("candidate client fact must not guide work"));
+  assert.ok(brain.includes("candidate commitment must not guide work"));
+  assert.ok(brain.includes("candidate client fact must not guide work"));
 });
 
 test("contracts: evidence is mandatory", () => {
