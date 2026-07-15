@@ -60,6 +60,7 @@ const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "
 const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
 const RETELL_API_KEY = process.env.RETELL_API_KEY || "";
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
+const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
@@ -1074,12 +1075,12 @@ async function retellHomeownerCall(input) {
     ownerId: CHANCE_OWNER_ID,
     goal: "homeowner_appointment_confirmation"
   };
-  const planDigest = digest({ to, agentId: RETELL_AGENT_ID, metadata, dynamicVariables });
+  const planDigest = digest({ to, agentId: RETELL_HOMEOWNER_AGENT_ID, metadata, dynamicVariables });
   metadata.planDigest = planDigest;
   const request = {
     from_number: RETELL_FROM_NUMBER,
     to_number: to,
-    override_agent_id: RETELL_AGENT_ID,
+    override_agent_id: RETELL_HOMEOWNER_AGENT_ID,
     metadata,
     retell_llm_dynamic_variables: dynamicVariables
   };
@@ -1096,7 +1097,7 @@ async function retellHomeownerCall(input) {
   }
   assertApprovalDigest(input.planDigest, planDigest);
   if (!ALLOW_RETELL_CALLS) badRequest("Retell calls are disabled.");
-  if (!RETELL_API_KEY || !RETELL_AGENT_ID || !RETELL_FROM_NUMBER) {
+  if (!RETELL_API_KEY || !RETELL_HOMEOWNER_AGENT_ID || !RETELL_FROM_NUMBER) {
     badRequest("Retell is not fully configured.");
   }
   const prior = await findRemoteClaimCallAttempt(planDigest, "");
@@ -1431,19 +1432,15 @@ async function configureRetellAgent(input = {}) {
   }
   assertApprovalDigest(input.configDigest, configDigest, "configDigest");
 
-  const llm = await retellApi("POST", "/create-retell-llm", {
-    name: "HCN Wave Claims and Homeowner Assistant",
+  const llm = await retellApi("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, {
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
     begin_message: ""
   });
-  const publishedLlmId = String(llm.llm_id || "").trim();
   const llmVersion = Number(llm.version);
-  if (!publishedLlmId || !Number.isInteger(llmVersion) || llmVersion < 0) {
-    badRequest("Retell created the LLM but did not return a usable id and version.");
-  }
+  if (!Number.isInteger(llmVersion) || llmVersion < 0) badRequest("Retell updated the LLM but did not return a usable version.");
   const updatedAgent = await retellApi("PATCH", `/update-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, {
-    response_engine: { type: "retell-llm", llm_id: publishedLlmId, version: llmVersion },
+    response_engine: { type: "retell-llm", llm_id: llmId, version: llmVersion },
     post_call_analysis_data: analysisSchema,
     post_call_analysis_model: "gpt-4.1-mini",
     timezone: OPERATIONS_TIME_ZONE
@@ -1461,7 +1458,6 @@ async function configureRetellAgent(input = {}) {
     published: true,
     ...preview,
     publishedAgentVersion: version,
-    retellLlmId: publishedLlmId,
     retellLlmVersion: llmVersion,
     nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
   };
