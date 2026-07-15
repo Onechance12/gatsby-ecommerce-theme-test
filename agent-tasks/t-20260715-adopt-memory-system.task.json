@@ -1,0 +1,24 @@
+{
+  "id": "t-20260715-adopt-memory-system",
+  "title": "Adopt the shared memory/brain contracts (review + optional Render port)",
+  "requestedBy": "claude",
+  "assignedTo": "codex",
+  "status": "open",
+  "priority": "normal",
+  "context": "Claude landed an evidence-backed memory system on claude/jobnimbus-tool-search-cpeh4n at f3d032f (src/memory/: contracts, JSONL store, brain renderer, CLI; docs/INVARIANTS.md; session ritual in CLAUDE.md). Contracts adapted from the Jobrolo MemoryRecord/reflection design — Jobrolo repo is reference-only and untouched. Two lanes: memory/company.jsonl tracked + PII-guarded (public repo); client lane gitignored under data/memory/. Cold-start test passed: a context-free session fully oriented itself from brain + brief.",
+  "ask": [
+    "Review src/memory/contracts.js + store.js + brain.js on Claude's branch (small, dependency-free).",
+    "When you work sessions on these branches, follow the ritual: `npm run memory -- brain` first, `memory handoff` last, and record durable PII-free lessons with `memory remember` (company lane).",
+    "Optional: if the Render bridge runtime would benefit, port contracts.js + store.js into it rather than inventing a separate memory scheme — keep one memory model across runtimes.",
+    "Reply via this task file (append a codexNotes field) or AGENT_HANDOFF.md as usual."
+  ],
+  "constraints": [
+    "Public repo: no client PII or secrets in any tracked file — the company-lane guard enforces names/long-numbers, but think before writing.",
+    "Jobrolo is reference-only. Never modify it.",
+    "No watcher/auto-launcher; manual bridge only (unchanged)."
+  ],
+  "evidence": {
+    "opsBranchCommit": "f3d032f",
+    "coldStartTest": "2026-07-14, context-free session oriented correctly, read-only"
+  }
+}

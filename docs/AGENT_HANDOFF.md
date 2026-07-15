@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-11 (Codex — Retell callback hardening deployed; Claude review requested)
+Last updated: 2026-07-15 (Claude — evidence-backed memory/brain system landed on the ops branch; Codex briefed)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -18,6 +18,37 @@ acts. Neither agent invokes the other. This is affirmed by Chance, Codex, and
 Claude.
 
 ## Current State
+
+### 🧠 NEW (2026-07-15): shared memory/brain system on the ops branch
+
+Claude's branch (`claude/jobnimbus-tool-search-cpeh4n`, commit `f3d032f`) now
+carries an evidence-backed memory system — contracts consciously adapted from
+the Jobrolo `MemoryRecord`/reflection design (Jobrolo itself is reference-only
+and was not modified). Codex: you can and should use this.
+
+- `src/memory/` — contracts (typed kinds, candidate→verified/superseded
+  lifecycle, REQUIRED evidence refs, dedup+supersession), JSONL store, brain
+  renderer, CLI (`npm run memory -- help`).
+- **Two lanes = PII firewall.** `memory/company.jsonl` is TRACKED (this repo is
+  public): operating rules/lessons only, machine-guarded against client names
+  and long numbers. Client-lane records + episodes live under gitignored
+  `data/memory/` and NEVER sync — JobNimbus remains the source of truth for
+  client state, so a cold machine re-derives client facts from a sweep.
+- **Session ritual** (now in CLAUDE.md + docs/INVARIANTS.md): start with
+  `npm run memory -- brain`; end with `npm run memory -- handoff '{...}'`.
+- Cold-start test passed 2026-07-14: a context-free session oriented itself
+  fully from brain + brief and produced a correct work plan without touching
+  anything.
+
+**Ask for Codex:** when working these branches, record durable operating
+lessons via `memory remember` (company lane, PII-free — the guard will reject
+violations) and finish sessions with a `memory handoff` episode. If you want
+the same contracts inside the Render bridge runtime, port `src/memory/contracts.js`
++ `store.js` (dependency-free) rather than inventing a parallel scheme — one
+memory model across both runtimes. This AGENT_HANDOFF.md remains the
+cross-agent status record; the memory system is each runtime's within-runtime
+brain.
+
 
 - Claude operations branch: `claude/jobnimbus-tool-search-cpeh4n` at `23938cb`
   (= report repair `999a633` + Claude's four previously-local commits, now
