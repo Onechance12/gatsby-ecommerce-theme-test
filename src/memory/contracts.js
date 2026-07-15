@@ -118,7 +118,9 @@ export function assertCompanyLaneSafe(content, customerNames = []) {
   if (/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]?\d{4}\b/.test(text)) {
     throw new Error("company-lane memory contains a phone number. Put contact details in the client lane.");
   }
-  if (/\b\d{1,6}\s+[A-Za-z][A-Za-z ]{2,30}\s?(?:st|street|dr|drive|ln|lane|ave|avenue|rd|road|ct|court|blvd|boulevard|way|cir|circle|pkwy|parkway|pl|place|trl|trail)\b\.?/i.test(text)) {
+  // Street-type suffix must be a standalone word ("Sunset Dr"), never the tail
+  // of a longer word ("14 days again(st)" is stats, not an address).
+  if (/\b\d{1,6}\s+(?:[A-Za-z]+\s+){1,4}(?:st|street|dr|drive|ln|lane|ave|avenue|rd|road|ct|court|blvd|boulevard|way|cir|circle|pkwy|parkway|pl|place|trl|trail)\b\.?/i.test(text)) {
     throw new Error("company-lane memory contains what looks like a street address. Put property details in the client lane.");
   }
   if (/(?:policyholder|insured|homeowner|client|customer)s?\s*(?:named|name is|:|-)?\s+[A-Z][a-z]+\s+[A-Z][a-z]+/.test(text)) {

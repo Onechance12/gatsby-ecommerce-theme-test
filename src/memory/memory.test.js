@@ -73,6 +73,7 @@ test("PII firewall fails closed without customerNames", () => {
   assert.throws(() => assertCompanyLaneSafe("the policyholder John Smith prefers texts"), /name/);
   assert.throws(() => assertCompanyLaneSafe("claim 12345678 was slow"), /long number/);
   assert.doesNotThrow(() => assertCompanyLaneSafe("always verify a write by fetching the created activity id"));
+  assert.doesNotThrow(() => assertCompanyLaneSafe("48% of files (159/329) sit untouched >= 14 days against the 2-week audit standard"));
 });
 
 test("PII guard also covers subjectKey and evidence notes on save", () => {
