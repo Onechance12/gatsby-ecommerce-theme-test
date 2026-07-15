@@ -2,6 +2,10 @@
 // because a homeowner or adjuster may have communicated through any of them.
 // Sending remains approval-gated by both execute:true and ALLOW_QUO_SEND=true.
 
+const MIN_REQUEST_INTERVAL_MS = 140;
+let requestQueue = Promise.resolve();
+let nextRequestAt = 0;
+
 export async function listQuoNumbers(config) {
   requireConfigured(config);
   const payload = await request(config, "GET", "/phone-numbers");
@@ -79,7 +83,8 @@ export async function sendQuoText(config, input = {}) {
   if (input.execute !== true) return { mode: "dry_run", plan };
   if (!config.allowSend) throw new Error("Quo sending is disabled. Set ALLOW_QUO_SEND=true.");
 
-  const body = { content, from, to: [to] };
+  const sendingLine = await resolveSendingLine(config, from);
+  const body = { content, from: sendingLine.id, to: [to] };
   if (input.userId) body.userId = String(input.userId);
   const response = await request(config, "POST", "/messages", body);
   const message = response.data || {};
@@ -88,7 +93,8 @@ export async function sendQuoText(config, input = {}) {
     message: {
       id: message.id || "",
       conversationId: message.conversationId || "",
-      from: message.from || from,
+      from: message.from || sendingLine.number,
+      phoneNumberId: message.phoneNumberId || sendingLine.id,
       to: message.to || [to],
       direction: message.direction || "outgoing",
       status: message.status || "accepted",
@@ -136,7 +142,8 @@ async function collectAcrossLines(config, numbers, nameById, phone, kind, maxRes
   return [...byId.values()].sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)));
 }
 
-async function request(config, method, endpoint, body) {
+async function request(config, method, endpoint, body, attempt = 0) {
+  await waitForRequestSlot();
   const response = await fetch(`${config.baseUrl}${endpoint}`, {
     method,
     headers: {
@@ -148,6 +155,11 @@ async function request(config, method, endpoint, body) {
   const text = await response.text();
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (response.status === 429 && attempt < 2) {
+    const retryAfter = Math.max(1, Number(response.headers.get("retry-after") || 1));
+    await delay(retryAfter * 1000);
+    return request(config, method, endpoint, body, attempt + 1);
+  }
   if (!response.ok) {
     const detail = config.redact ? config.redact(JSON.stringify(json)) : JSON.stringify(json);
     const error = new Error(`Quo API ${response.status}: ${detail.slice(0, 500)}`);
@@ -155,6 +167,27 @@ async function request(config, method, endpoint, body) {
     throw error;
   }
   return json;
+}
+
+async function resolveSendingLine(config, from) {
+  const numbers = await listQuoNumbers(config);
+  const line = numbers.find((row) => toE164(row.number) === from);
+  if (!line?.id) throw new Error("Configured Quo from number is not available to this API key");
+  return line;
+}
+
+async function waitForRequestSlot() {
+  const turn = requestQueue.then(async () => {
+    const waitMs = Math.max(0, nextRequestAt - Date.now());
+    if (waitMs) await delay(waitMs);
+    nextRequestAt = Date.now() + MIN_REQUEST_INTERVAL_MS;
+  });
+  requestQueue = turn.catch(() => {});
+  await turn;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function requireConfigured(config) {

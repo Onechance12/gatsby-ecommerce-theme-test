@@ -74,7 +74,7 @@ const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRI
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
 const QUO_API_KEY = process.env.QUO_API_KEY || "";
-const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.openphone.com/v1");
+const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
 const ALLOW_QUO_SEND = process.env.ALLOW_QUO_SEND === "true";
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";

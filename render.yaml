@@ -37,7 +37,7 @@ services:
       - key: QUO_API_KEY
         sync: false
       - key: QUO_API_BASE_URL
-        value: https://api.openphone.com/v1
+        value: https://api.quo.com/v1
       - key: QUO_DEFAULT_FROM_NUMBER
         sync: false
       - key: ALLOW_QUO_SEND
