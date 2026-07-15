@@ -4,3 +4,6 @@
 node_modules/
 npm-debug.log*
 .DS_Store
+
+# Client-lane memory + episodes — real client data, never commit (see src/memory/)
+/data/
