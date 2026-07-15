@@ -156,7 +156,7 @@ The queue is built around this chat flow:
 User: show me what I need to approve
 Assistant: here is everything I need approval to do to move files forward
 User: approve
-Assistant: execute the approved JobNimbus updates, then send approved Quo/Gmail items through the connected chat tools
+Assistant: execute approved JobNimbus, Quo, Gmail, and document-package actions through the gated code paths; every successful API result records a private action receipt
 ```
 
 Dry-run selected approvals:
@@ -181,9 +181,9 @@ Each approval item includes:
 - proposed primary JobNimbus task/note/update or Quo/Gmail draft
 - supporting cleanup actions, such as overdue task cleanup or missing adjuster info
 
-Important: `chance:approve` can execute local JobNimbus task creation. Quo texts
-and Gmail emails still require connected chat-tool approval because those are not
-local repo shell actions.
+Important: `chance:approve` can execute local JobNimbus task creation. Quo and
+Gmail now have their own coded, approval-gated actions; they are dry-run by
+default and require their channel-specific environment gate to execute.
 
 ## Gated JobNimbus Action Layer
 
@@ -226,8 +226,19 @@ This layer currently supports:
 - create JobNimbus task
 - update exact JobNimbus contact/file fields
 
-Quo texts and Gmail sends are not local shell commands in this repo. Those
-should be handled through their connected chat connectors with explicit approval.
+Quo/Gmail examples:
+
+```bash
+npm run quo -- send '{"from":"+19725731730","to":"+18065550199","content":"Draft text","execute":false}'
+npm run gmail -- thread '{"threadId":"THREAD_ID","downloadAttachments":true,"subjectKey":"JOBNIMBUS_ID","fileLabel":"Client"}'
+npm run gmail -- delivery '{"subject":"CLAIM-NUMBER"}'
+npm run lor-package -- '{"query":"Client","to":"claims@carrier.com","execute":false}'
+```
+
+Execution requires explicit approval, `execute:true`, and the relevant gate:
+`ALLOW_QUO_SEND=true`, `ALLOW_GMAIL_SEND=true`, or
+`ALLOW_JOBNIMBUS_WRITES=true`. Incoming and outgoing PDF attachments are byte-
+validated; successful API actions create idempotent private memory receipts.
 
 ## Live API Setup Later
 

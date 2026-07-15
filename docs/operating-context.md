@@ -125,16 +125,17 @@ What the assistant can touch, and what each is for:
 | Tool | Status | Use |
 |------|--------|-----|
 | **JobNimbus API** | Live, working (read + gated write) | System of record for files, statuses, tasks, notes, docs, payments |
-| **Gmail** | Connected | Read scheduling/notes/adjuster threads; **draft** LORs/FIN535/appraisal demands (send stays manual for now) |
+| **Gmail** | Integrated (read + gated draft/send) | Read threads, download/validate incoming attachments, and draft/send verified document packets. Send requires `ALLOW_GMAIL_SEND=true` + `execute:true`. |
 | **Google Drive** | Connected | Read templates (LOR, TDI, FIN535), estimates, dec pages |
 | **Google Calendar** | Connected | Sync inspection / adjuster-meeting / appraisal windows (America/Chicago) |
 | **Twilio + OpenAI** | Connected | **The claim-filing method** — AI voice agent calls the carrier to file claims / get claim #s / confirm status (replaces Mitra). Voice bridge exists; not yet wired to the file loop. |
-| **Quo** (= OpenPhone) | **Integrated (read-only)** | `api.openphone.com/v1`, `Authorization: <key>` (no Bearer). Reads team phone lines, **texts**, **call logs**, and **transcripts of recorded calls**. `npm run quo -- history '{"phone":"..."}'` scans ALL team lines (homeowner contact runs through Andrea/Paula/Customer Service, not just Chance). Transcripts exist only for calls that were **recorded in Quo**. |
+| **Quo** (= OpenPhone) | Integrated (read + gated send) | Reads team phone lines, texts, call logs, and recorded-call transcripts; sends approved texts with `ALLOW_QUO_SEND=true` + `execute:true`. `npm run quo -- history '{"phone":"..."}'` scans all team lines. |
 
 ### Safety model (unchanged, applies everywhere)
 - Reads by default. JobNimbus writes require `ALLOW_JOBNIMBUS_WRITES=true` AND
   `execute:true` on the specific call.
-- Emails are **drafts only** right now — Chance sends.
+- Gmail and Quo are dry-run by default. Every live send requires explicit approval plus its channel gate.
+- Successful JobNimbus/Gmail/Quo/Retell API actions record private, idempotent action receipts. These receipts prove a past result but never authorize future work.
 - Nothing here commits secrets or client data to git (`.gitignore` covers
   `.env`, `data/`, `reports/`, `work/`).
 
@@ -150,13 +151,12 @@ What the assistant can touch, and what each is for:
 
 ## Open items / next builds
 
-- Wire **Gmail** (read for context + draft LORs) and **Drive** (real templates)
-  — current priority.
+- Finish Gmail/Drive document routing into JobNimbus uploads after the upload API contract is verified. Gmail receive/download and packet send validation are implemented.
 - **Calendar** sync of inspection/appraisal tasks.
 - **Twilio + OpenAI voice agent** is the claim-filing path (replaces Mitra) —
   wire it into the file loop so "claim not filed" can trigger an approved AI
   call to the carrier.
-- **Quo** read integration — DONE (texts, calls, transcripts across all lines).
+- **Quo** read + gated send integration — DONE (texts, calls, transcripts, approved sends across all lines).
   Next: fold Quo history into file reviews / the approval queue as evidence
   ("last homeowner contact: text 6 days ago via Andrea's line").
 - Port from the old `jobnimbus-bridge` branch: local OCR (pdftoppm+tesseract),

@@ -6,7 +6,7 @@
 //   ISOLATION — clientLane controls exposure: "full" (local single-operator
 //     ops sessions), "subject" (only records matching subjectKey — the bridge
 //     default, so a session working file A never sees file B), or "none".
-import { listMemory, latestEpisodes, listProposals } from "./store.js";
+import { listMemory, latestEpisodes, latestActionReceipts, listProposals } from "./store.js";
 
 export function renderBrain(config, { maxPerSection = 10, clientLane = "full", subjectKey = "", includeEpisodes = false } = {}) {
   const lines = [];
@@ -16,6 +16,9 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
     : clientLane === "subject" ? clientAll.filter((r) => subjectKey && r.subjectKey === subjectKey)
     : [];
   const episodes = includeEpisodes && clientLane === "full" ? latestEpisodes(config, 2) : [];
+  const actions = includeEpisodes && clientLane !== "none"
+    ? latestActionReceipts(config, 8, { subjectKey: clientLane === "subject" ? subjectKey : "" })
+    : [];
   const proposals = listProposals(config, { status: "candidate" });
 
   const verified = (rows) => rows.filter((r) => r.status === "verified");
@@ -65,6 +68,14 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
       for (const c of ep.commitments.slice(0, 4)) lines.push(`    open: ${c}`);
       for (const q of ep.openQuestions.slice(0, 3)) lines.push(`    question: ${q}`);
       for (const c of ep.corrections.slice(0, 3)) lines.push(`    correction: ${c}`);
+    }
+  }
+
+  if (actions.length) {
+    lines.push("", "RECENT ACTION RECEIPTS (proof of execution, never future approval):");
+    for (const action of actions) {
+      lines.push(`- ${action.at.slice(0, 16)} [${action.channel}/${action.action}] ${action.summary}`);
+      for (const followUp of action.followUps.slice(0, 3)) lines.push(`    open: ${followUp}`);
     }
   }
 

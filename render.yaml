@@ -17,6 +17,18 @@ services:
         value: "false"
       - key: ALLOW_JOBNIMBUS_WRITES
         value: "false"
+      - key: QUO_API_KEY
+        sync: false
+      - key: ALLOW_QUO_SEND
+        value: "false"
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: ALLOW_GMAIL_SEND
+        value: "false"
       - key: JOBNIMBUS_USE_FIXTURES
         value: "false"
       - key: OPENAI_API_KEY

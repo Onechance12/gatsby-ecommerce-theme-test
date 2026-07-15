@@ -57,7 +57,8 @@ export function loadConfig() {
     },
     quo: {
       apiKey: clean(env.QUO_API_KEY),
-      baseUrl: clean(env.QUO_API_BASE_URL).replace(/\/+$/, "") || "https://api.openphone.com/v1"
+      baseUrl: clean(env.QUO_API_BASE_URL).replace(/\/+$/, "") || "https://api.openphone.com/v1",
+      allowSend: truthy(env.ALLOW_QUO_SEND)
     },
     google: {
       clientId: clean(env.GOOGLE_CLIENT_ID),

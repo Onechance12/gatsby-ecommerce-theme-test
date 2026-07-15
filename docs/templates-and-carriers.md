@@ -197,7 +197,8 @@ Date of Loss: {DOL}
 
 ## Attachment note
 
-These emails attach PDFs (executed LOR/FIN535/W9). The Gmail connector creates
-the draft text; attaching the actual signed PDF is a manual step for Chance
-unless/until the assistant is wired to pull the file from Drive/JobNimbus and
-attach it. Draft the body + subject + recipient; Chance attaches + sends.
+These emails attach PDFs (executed LOR/FIN535/W9). `lor-package` now pulls the
+file-specific documents, generates the LOR, validates every PDF, verifies the
+final Gmail MIME payload, and creates a draft or gated send. Retain Gmail's
+draft/message ID and check for a bounce or carrier acknowledgement; a sent item
+alone does not prove delivery.

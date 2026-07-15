@@ -3,7 +3,12 @@
 // SENDING requires ALLOW_GMAIL_SEND=true AND execute:true. Drafts-first is the
 // standing posture — Chance hits send.
 
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { googleApi } from "./googleAuth.js";
+import { safeCloseoutAction } from "../memory/actionCloseout.js";
+import { isOperationalDocument } from "../jobnimbus/documentFilters.js";
 
 const GMAIL = "https://gmail.googleapis.com";
 
@@ -15,7 +20,9 @@ export async function runGmailTool(config, args) {
     printJson({
       tools: [
         { name: "search", input: { query: "gmail query string", limit: "number optional" }, note: "e.g. 'from:claims@claims.allstate.com newer_than:30d'" },
-        { name: "thread", input: { threadId: "string" }, note: "full thread with assistant read (claim#/policy#/contacts extraction)" },
+        { name: "thread", input: { threadId: "string", downloadAttachments: "boolean optional", includeNonDocuments: "boolean optional", subjectKey: "JobNimbus id optional", fileLabel: "client name optional" }, note: "full thread with assistant read; optionally downloads and validates operational documents (photos/logos skipped by default)" },
+        { name: "attachment", input: { messageId: "string", attachmentId: "string", filename: "string", contentType: "string optional", subjectKey: "JobNimbus id optional", fileLabel: "client name optional" }, note: "download one Gmail attachment into the controlled work directory and validate its bytes" },
+        { name: "delivery", input: { subject: "exact claim-number subject", days: "number optional, default 30" }, note: "check for bounce messages or inbound acknowledgement candidates; no bounce is not proof of receipt" },
         { name: "draft", input: { to: "", subject: "", body: "", cc: "optional", threadId: "optional", execute: "true to create" }, note: "dry-run unless execute:true. LOR rule: subject = claim number only." },
         { name: "send", input: { "...same as draft": "" }, note: "blocked unless ALLOW_GMAIL_SEND=true AND execute:true" }
       ]
@@ -41,7 +48,47 @@ export async function runGmailTool(config, args) {
     const threadId = required(input.threadId || input._, "threadId");
     const thread = await googleApi(config, GMAIL, `/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}?format=full`);
     const messages = Array.isArray(thread.messages) ? thread.messages.map(compactFullMessage) : [];
-    printJson({ id: thread.id || threadId, messageCount: messages.length, messages, assistantRead: assistantRead(messages) });
+    const downloadedAttachments = input.downloadAttachments === true
+      ? await downloadThreadAttachments(config, thread, input)
+      : [];
+    printJson({ id: thread.id || threadId, messageCount: messages.length, messages, assistantRead: assistantRead(messages), downloadedAttachments });
+    return;
+  }
+
+  if (tool === "attachment") {
+    const downloaded = await downloadGmailAttachment(config, {
+      messageId: required(input.messageId, "messageId"),
+      attachmentId: required(input.attachmentId, "attachmentId"),
+      filename: required(input.filename, "filename"),
+      contentType: input.contentType || "application/octet-stream",
+      subjectKey: input.subjectKey,
+      fileLabel: input.fileLabel
+    });
+    printJson({ mode: "downloaded", attachment: downloaded });
+    return;
+  }
+
+  if (tool === "delivery") {
+    const subject = required(input.subject || input._, "subject");
+    const days = clamp(Number(input.days || 30), 1, 365);
+    const safeSubject = subject.replace(/"/g, "");
+    const query = `in:anywhere {subject:"${safeSubject}" "${safeSubject}"} newer_than:${days}d`;
+    const messages = await searchMessageMetadata(config, query, 25);
+    const bounces = messages.filter(isBounceMessage);
+    const acknowledgements = messages.filter((message) =>
+      (message.labels || []).includes("INBOX") && !isBounceMessage(message)
+    );
+    printJson({
+      subject,
+      query,
+      status: bounces.length ? "bounced" : acknowledgements.length ? "acknowledgement_candidate" : "no_failure_found",
+      warning: bounces.length ? "Delivery failed; correct the destination before resending."
+        : acknowledgements.length ? "Review the inbound message body before treating carrier receipt as confirmed."
+          : "No bounce was found, but this does not prove carrier receipt. Continue waiting for or requesting acknowledgement.",
+      bounces,
+      acknowledgements,
+      messages
+    });
     return;
   }
 
@@ -63,11 +110,13 @@ export async function runGmailTool(config, args) {
         return;
       }
       const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/messages/send", { method: "POST", body: cleanObject({ raw, threadId: input.threadId }) });
-      printJson({ mode: "executed", message: compactMessage(result) });
+      const memoryCloseout = gmailCloseout(config, input, "send_email", result.id || "", `Gmail message sent with subject ${subject}.`);
+      printJson({ mode: "executed", message: compactMessage(result), memoryCloseout });
       return;
     }
     const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/drafts", { method: "POST", body: { message: cleanObject({ raw, threadId: input.threadId }) } });
-    printJson({ mode: "executed", draft: { id: result.id || "", message: result.message ? compactMessage(result.message) : null } });
+    const memoryCloseout = gmailCloseout(config, input, "create_draft", result.id || "", `Gmail draft created with subject ${subject}.`, "drafted");
+    printJson({ mode: "executed", draft: { id: result.id || "", message: result.message ? compactMessage(result.message) : null }, memoryCloseout });
     return;
   }
 
@@ -84,8 +133,25 @@ function compactMessage(message) {
     to: headers.to || "",
     cc: headers.cc || "",
     subject: headers.subject || "",
-    snippet: message.snippet || ""
+    snippet: message.snippet || "",
+    labels: Array.isArray(message.labelIds) ? message.labelIds : []
   };
+}
+
+async function searchMessageMetadata(config, query, limit) {
+  const list = await googleApi(config, GMAIL, `/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`);
+  const rows = Array.isArray(list.messages) ? list.messages : [];
+  const messages = [];
+  for (const row of rows) {
+    const message = await googleApi(config, GMAIL, `/gmail/v1/users/me/messages/${encodeURIComponent(row.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`);
+    messages.push(compactMessage(message));
+  }
+  return messages;
+}
+
+function isBounceMessage(message) {
+  const text = `${message.from || ""} ${message.subject || ""} ${message.snippet || ""}`;
+  return /mailer-daemon|mail delivery subsystem|postmaster|delivery status notification|address not found|wasn'?t delivered|user unknown|550\s+5\.[01]\.[01]/i.test(text);
 }
 
 function compactFullMessage(message) {
@@ -150,6 +216,68 @@ function listAttachments(part) {
   return attachments;
 }
 
+async function downloadThreadAttachments(config, thread, input) {
+  const downloaded = [];
+  for (const message of Array.isArray(thread?.messages) ? thread.messages : []) {
+    for (const attachment of listAttachments(message.payload)) {
+      if (input.includeNonDocuments !== true && !isOperationalDocument({
+        filename: attachment.filename,
+        content_type: attachment.mimeType
+      })) continue;
+      downloaded.push(await downloadGmailAttachment(config, {
+        messageId: message.id,
+        attachmentId: attachment.attachmentId,
+        filename: attachment.filename,
+        contentType: attachment.mimeType,
+        subjectKey: input.subjectKey,
+        fileLabel: input.fileLabel
+      }));
+    }
+  }
+  return downloaded;
+}
+
+export async function downloadGmailAttachment(config, input) {
+  const messageId = required(input.messageId, "messageId");
+  const attachmentId = required(input.attachmentId, "attachmentId");
+  const filename = safeMimeFilename(required(input.filename, "filename"));
+  const contentType = String(input.contentType || "application/octet-stream");
+  const payload = await googleApi(
+    config,
+    GMAIL,
+    `/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`
+  );
+  const bytes = base64UrlToBuffer(payload?.data || "");
+  const [validated] = validateAttachments([{ filename, contentType, bytes }]);
+  const directory = path.join(config.paths.workDir, "gmail", "inbound", safePathSegment(messageId));
+  const sha256 = crypto.createHash("sha256").update(validated.bytes).digest("hex");
+  fs.mkdirSync(directory, { recursive: true });
+  const resolved = resolveOutputPath(directory, validated.filename, sha256);
+  if (!resolved.reused) fs.writeFileSync(resolved.path, validated.bytes);
+  const memoryCloseout = safeCloseoutAction(config, {
+    channel: "gmail",
+    action: "receive_attachment",
+    status: "downloaded",
+    subjectKey: String(input.subjectKey || ""),
+    fileLabel: String(input.fileLabel || ""),
+    summary: `Downloaded and validated Gmail attachment ${validated.filename} (${validated.bytes.length} bytes).`,
+    externalId: `${messageId}:${attachmentId}`,
+    evidence: [`gmail:${messageId}:${attachmentId}`, `sha256:${sha256}`]
+  });
+  return {
+    messageId,
+    attachmentId,
+    filename: validated.filename,
+    contentType: validated.contentType,
+    bytes: validated.bytes.length,
+    sha256,
+    validated: true,
+    path: resolved.path,
+    reused: resolved.reused,
+    memoryCloseout
+  };
+}
+
 function walkParts(part, visitor) {
   visitor(part);
   for (const child of Array.isArray(part?.parts) ? part.parts : []) walkParts(child, visitor);
@@ -169,37 +297,57 @@ function buildRawEmail({ to, cc, bcc, subject, body }) {
 
 // Create a Gmail DRAFT with file attachments (multipart/mixed). attachments:
 // [{ filename, contentType, bytes: Buffer }]. Requires Google OAuth creds.
-export async function createDraftWithAttachments(config, { to, cc, subject, body, attachments = [] }) {
+export async function createDraftWithAttachments(config, { to, cc, subject, body, attachments = [], memory = null }) {
   const raw = buildMultipartRaw({ to, cc, subject, body, attachments });
   const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/drafts", { method: "POST", body: { message: { raw } } });
-  return { id: result.id || "", messageId: result.message?.id || "" };
+  const out = { id: result.id || "", messageId: result.message?.id || "" };
+  if (memory) out.memoryCloseout = gmailCloseout(config, memory, "create_draft", out.id, memory.summary || `Gmail draft created with subject ${subject}.`, "drafted");
+  return out;
 }
 
 // Same packet, but delivered. Gated on ALLOW_GMAIL_SEND — the caller must also
 // pass Chance's explicit go-ahead, since this actually sends to the carrier.
-export async function sendMessageWithAttachments(config, { to, cc, subject, body, attachments = [] }) {
+export async function sendMessageWithAttachments(config, { to, cc, subject, body, attachments = [], memory = null }) {
   if (!config.google?.allowSend) {
     throw new Error("Sending is disabled (ALLOW_GMAIL_SEND=false). Enable it to send, or stage a draft instead.");
   }
   const raw = buildMultipartRaw({ to, cc, subject, body, attachments });
   const result = await googleApi(config, GMAIL, "/gmail/v1/users/me/messages/send", { method: "POST", body: { raw } });
-  return { id: result.id || "", threadId: result.threadId || "" };
+  const out = { id: result.id || "", threadId: result.threadId || "" };
+  if (memory) out.memoryCloseout = gmailCloseout(config, memory, "send_email", out.id, memory.summary || `Gmail message sent with subject ${subject}.`);
+  return out;
 }
 
-function buildMultipartRaw({ to, cc, subject, body, attachments = [] }) {
-  const boundary = "wave_mixed_boundary_0001";
+function gmailCloseout(config, input, action, externalId, summary, status = "executed") {
+  return safeCloseoutAction(config, {
+    channel: "gmail",
+    action,
+    status,
+    subjectKey: String(input.subjectKey || ""),
+    fileLabel: String(input.fileLabel || input.query || ""),
+    summary: String(input.memorySummary || input.summary || summary),
+    externalId,
+    followUps: input.followUps || [],
+    evidence: externalId ? [`gmail:${externalId}`] : []
+  });
+}
+
+export function buildMultipartRaw({ to, cc, subject, body, attachments = [] }) {
+  const checkedAttachments = validateAttachments(attachments);
+  const boundary = `wave_mixed_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const parts = [];
   parts.push(`--${boundary}`);
   parts.push("Content-Type: text/plain; charset=utf-8");
   parts.push("");
   parts.push(body);
-  for (const att of attachments) {
+  for (const att of checkedAttachments) {
+    const filename = safeMimeFilename(att.filename);
     parts.push(`--${boundary}`);
-    parts.push(`Content-Type: ${att.contentType || "application/octet-stream"}; name="${att.filename}"`);
+    parts.push(`Content-Type: ${att.contentType || "application/octet-stream"}; name="${filename}"`);
     parts.push("Content-Transfer-Encoding: base64");
-    parts.push(`Content-Disposition: attachment; filename="${att.filename}"`);
+    parts.push(`Content-Disposition: attachment; filename="${filename}"`);
     parts.push("");
-    parts.push(Buffer.from(att.bytes).toString("base64").replace(/(.{76})/g, "$1\r\n"));
+    parts.push(wrapBase64(att.bytes));
   }
   parts.push(`--${boundary}--`);
 
@@ -211,11 +359,84 @@ function buildMultipartRaw({ to, cc, subject, body, attachments = [] }) {
     `Content-Type: multipart/mixed; boundary="${boundary}"`
   ].filter(Boolean);
 
-  return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${parts.join("\r\n")}`);
+  const raw = base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${parts.join("\r\n")}`);
+  verifyMultipartRaw(raw, checkedAttachments);
+  return raw;
+}
+
+export function validateAttachments(attachments = []) {
+  return attachments.map((attachment, index) => {
+    const filename = safeMimeFilename(attachment?.filename || `attachment-${index + 1}`);
+    const bytes = Buffer.isBuffer(attachment?.bytes) ? attachment.bytes : Buffer.from(attachment?.bytes || []);
+    if (!bytes.length) throw new Error(`Attachment ${filename} is empty; refusing to draft/send.`);
+
+    const contentType = String(attachment?.contentType || "application/octet-stream").trim();
+    const isPdf = contentType === "application/pdf" || /\.pdf$/i.test(filename);
+    if (isPdf) {
+      if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
+        throw new Error(`Attachment ${filename} is labeled as a PDF but has no PDF header.`);
+      }
+      const tail = bytes.subarray(Math.max(0, bytes.length - 2048)).toString("latin1");
+      if (!tail.includes("%%EOF")) {
+        throw new Error(`Attachment ${filename} is missing the PDF end marker; refusing to draft/send a possibly truncated document.`);
+      }
+    }
+    return { ...attachment, filename, contentType, bytes };
+  });
+}
+
+function verifyMultipartRaw(raw, attachments) {
+  const decoded = base64UrlDecode(raw);
+  for (const attachment of attachments) {
+    const filename = safeMimeFilename(attachment.filename);
+    if (!decoded.includes(`filename="${filename}"`)) {
+      throw new Error(`MIME self-check failed: ${filename} is missing from the attachment headers.`);
+    }
+    if (!decoded.includes(wrapBase64(attachment.bytes))) {
+      throw new Error(`MIME self-check failed: ${filename} bytes are missing or changed.`);
+    }
+  }
+}
+
+function wrapBase64(bytes) {
+  return Buffer.from(bytes).toString("base64").match(/.{1,76}/g)?.join("\r\n") || "";
+}
+
+function safeMimeFilename(value) {
+  const clean = String(value || "attachment")
+    .replace(/[\r\n"\\]/g, "_")
+    .replace(/[^\x20-\x7E]/g, "_")
+    .trim();
+  return clean || "attachment";
 }
 
 function base64UrlDecode(value) {
   return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function base64UrlToBuffer(value) {
+  return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
+function safePathSegment(value) {
+  return String(value || "gmail").replace(/[^a-z0-9._-]+/gi, "_").slice(0, 160) || "gmail";
+}
+
+function resolveOutputPath(directory, filename, sha256) {
+  const parsed = path.parse(filename);
+  let candidate = path.join(directory, filename);
+  if (fs.existsSync(candidate) && fileSha256(candidate) === sha256) return { path: candidate, reused: true };
+  let suffix = 2;
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(directory, `${parsed.name}-${suffix}${parsed.ext}`);
+    if (fs.existsSync(candidate) && fileSha256(candidate) === sha256) return { path: candidate, reused: true };
+    suffix += 1;
+  }
+  return { path: candidate, reused: false };
+}
+
+function fileSha256(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
 // RFC 2047 encoded-word for header values containing non-ASCII (em dashes, ·,

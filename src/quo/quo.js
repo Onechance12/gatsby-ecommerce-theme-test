@@ -1,6 +1,7 @@
-// Quo (formerly OpenPhone) read-only client — the system of record for what has
-// actually been communicated with clients/carriers by phone (texts + call logs).
-// Read-only: this module never sends texts or places calls.
+// Quo (formerly OpenPhone) client — the system of record for texts and calls.
+// Reads are open. Sending is dry-run by default and requires BOTH execute:true
+// and ALLOW_QUO_SEND=true. Successful sends create private memory receipts.
+import { safeCloseoutAction } from "../memory/actionCloseout.js";
 
 // NOTE: In this cloud sandbox the agent proxy 503s api.openphone.com for Node's
 // fetch (undici TLS quirk); curl works. On a normal machine (Mac / Render) there
@@ -10,20 +11,57 @@ export async function runQuoTool(config, args) {
   const [tool, ...rest] = args;
   const input = parseInput(rest.join(" "));
 
-  if (!config.quo.apiKey) {
-    console.log("Quo not configured. Set QUO_API_KEY in .env.");
-    process.exitCode = 1;
-    return;
-  }
-
   if (!tool || tool === "list" || tool === "numbers") {
+    requireQuoConfigured(config);
     const numbers = await listNumbers(config);
     printJson({ tool: "numbers", count: numbers.length, numbers: numbers.map((n) => ({ id: n.id, name: n.name, number: n.number })) });
     if (!tool || tool === "list") {
-      console.log("\nCommands: numbers | history <phone|+E164> | messages <phone> | calls <phone>");
+      console.log("\nCommands: numbers | history <phone|+E164> | messages <phone> | calls <phone> | send <json>");
     }
     return;
   }
+
+  if (tool === "send") {
+    const from = toE164(input.from || "");
+    const to = toE164(input.to || input.phone || "");
+    const content = String(input.content || input.message || "").trim();
+    if (!from) throw new Error("Quo send requires from in E.164 format");
+    if (!to) throw new Error("Quo send requires to in E.164 format");
+    if (!content) throw new Error("Quo send requires content");
+    if (content.length > 1600) throw new Error("Quo message exceeds the 1600-character API limit");
+
+    const plan = { tool: "send", from, to, contentPreview: content.slice(0, 300) };
+    if (input.execute !== true) {
+      printJson({ mode: "dry_run", plan, note: "Add execute:true and set ALLOW_QUO_SEND=true to send." });
+      return;
+    }
+    if (!config.quo.allowSend) {
+      printJson({ mode: "blocked", plan, reason: "Quo sending is disabled. Set ALLOW_QUO_SEND=true." });
+      process.exitCode = 1;
+      return;
+    }
+    requireQuoConfigured(config);
+
+    const payload = { content, from, to: [to] };
+    if (input.userId) payload.userId = String(input.userId);
+    const response = await quoRequest(config, "POST", "/messages", payload);
+    const message = response.data || {};
+    const memoryCloseout = safeCloseoutAction(config, {
+      channel: "quo",
+      action: "send_text",
+      status: message.status || "accepted",
+      subjectKey: String(input.subjectKey || ""),
+      fileLabel: String(input.fileLabel || input.query || ""),
+      summary: `Quo text sent${input.fileLabel || input.query ? ` for ${input.fileLabel || input.query}` : ""}; API status ${message.status || "accepted"}.`,
+      externalId: message.id || "",
+      followUps: input.followUps || [],
+      evidence: message.id ? [`quo:${message.id}`] : []
+    });
+    printJson({ mode: "executed", message: compactSentMessage(message), memoryCloseout });
+    return;
+  }
+
+  requireQuoConfigured(config);
 
   // Transcript / recording for a specific call id (calls must be RECORDED in Quo
   // — hit record on the call — before a transcript exists; otherwise 404).
@@ -110,8 +148,14 @@ async function hasRecording(config, callId) {
 }
 
 async function quoGet(config, endpoint) {
+  return quoRequest(config, "GET", endpoint);
+}
+
+async function quoRequest(config, method, endpoint, body) {
   const response = await fetch(`${config.quo.baseUrl}${endpoint}`, {
-    headers: { authorization: config.quo.apiKey, "content-type": "application/json" }
+    method,
+    headers: { authorization: config.quo.apiKey, "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
   });
   const text = await response.text();
   let json;
@@ -120,6 +164,22 @@ async function quoGet(config, endpoint) {
     throw new Error(`Quo API ${response.status}: ${config.redact(JSON.stringify(json)).slice(0, 300)}`);
   }
   return json;
+}
+
+function compactSentMessage(message) {
+  return {
+    id: message.id || "",
+    conversationId: message.conversationId || "",
+    from: message.from || "",
+    to: message.to || [],
+    direction: message.direction || "outgoing",
+    status: message.status || "",
+    createdAt: message.createdAt || ""
+  };
+}
+
+function requireQuoConfigured(config) {
+  if (!config.quo.apiKey) throw new Error("Quo not configured. Set QUO_API_KEY in .env.");
 }
 
 // Quo returns createdAt as UTC ISO. Always display Central time to Chance —

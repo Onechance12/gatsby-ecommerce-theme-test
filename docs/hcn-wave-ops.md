@@ -44,6 +44,7 @@ until Chance approves the exact action.
    a demand, confirming coverage/policy#/DOL/carrier position, comparing gaps.
 4. **Identify the bottleneck** — the single reason the file isn't moving.
 5. **Recommend one next action** — specific and executable.
+6. **Close out executed work** — verify the API result and preserve a private action receipt. A receipt proves what happened; it is never approval for the next action.
 
 ## 3. Thresher status logic (next actions per phase)
 
@@ -107,6 +108,7 @@ documents support them.**
   no "Ops update:" prefix; no brand name (HCN/Wave/Home Claim Network).
 - **Insurance emails:** Chance is the sender/persona unless told otherwise;
   subject = **claim number only** when applicable.
+- **Documents:** download and validate incoming attachment bytes before relying on them. Validate every outgoing PDF and final MIME payload before drafting/sending. Check for bounces or acknowledgements after send.
 - **Homeowner communication:** Andrea/client coordinator is the default; review
   Andrea/Quo context if available but **never send as Andrea**. Homeowner updates
   are mainly for appointments, interior access, missing documents, necessary

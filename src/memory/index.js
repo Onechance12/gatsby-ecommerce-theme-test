@@ -1,14 +1,15 @@
 // CLI for the memory system. Usage: npm run memory -- <tool> '<json>'
-// Tools: brain | remember | list | verify | dispute | handoff | propose |
-//        proposals | review
+// Tools: brain | remember | list | verify | dispute | handoff | closeout |
+//        actions | propose | proposals | review
 // All writes are LOCAL files (no JobNimbus/Gmail/network) so no execute gate,
 // with one exception baked into contracts: company-lane saves are PII-guarded.
 import { renderBrain } from "./brain.js";
 import {
   saveMemory, listMemory, setMemoryStatus,
-  recordEpisode, latestEpisodes,
+  recordEpisode, latestEpisodes, latestActionReceipts,
   saveProposal, listProposals, reviewProposal
 } from "./store.js";
+import { closeoutAction } from "./actionCloseout.js";
 import { loadReviews } from "../assistant/fileReview.js";
 
 export async function runMemoryTool(config, args) {
@@ -24,6 +25,8 @@ export async function runMemoryTool(config, args) {
         verify: '{"id":"mem_...","approved":true,"by":"Chance Pearson"} — mark verified after explicit approval',
         dispute: '{"id":"mem_...","approved":true,"by":"Chance Pearson"} — mark disputed after explicit approval',
         handoff: '{"summary":"...","decisions":[],"commitments":[],"openQuestions":[],"corrections":[]} — run LAST every session',
+        closeout: '{"channel":"jobnimbus|gmail|quo|retell","action":"...","summary":"...","subjectKey":"optional","externalId":"optional","followUps":[]} — save an idempotent private action receipt',
+        actions: '{"count":10,"subjectKey":"optional"} — list recent private action receipts',
         propose: '{"type":"recommendation|risk|opportunity|process_change","title":"","detail":"","memoryIds":["mem_..."]}',
         proposals: '{"status":"candidate"}',
         review: '{"id":"prop_...","status":"approved|rejected|executed|obsolete","reason":"","approved":true,"by":"Chance Pearson"}'
@@ -71,6 +74,16 @@ export async function runMemoryTool(config, args) {
 
   if (tool === "episodes") {
     printJson({ episodes: latestEpisodes(config, input.count || 3) });
+    return;
+  }
+
+  if (tool === "closeout") {
+    printJson({ mode: "closed_out", ...closeoutAction(config, input) });
+    return;
+  }
+
+  if (tool === "actions") {
+    printJson({ actions: latestActionReceipts(config, input.count || 10, { subjectKey: input.subjectKey || "" }) });
     return;
   }
 

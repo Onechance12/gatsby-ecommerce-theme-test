@@ -6,8 +6,37 @@ import { spawnSync } from "node:child_process";
 import { loadConfig } from "../lib/config.js";
 import { ensureRuntimeDirs } from "../lib/paths.js";
 
-const READ_TOOLS = ["search_files", "review_file", "claim_packet", "claim_call_prompt", "draft_message", "next_actions"];
-const WRITE_ACTIONS = ["create_jobnimbus_note", "create_jobnimbus_task", "update_jobnimbus_contact"];
+const READ_TOOL_COMMANDS = {
+  search_files: ["chat:tool", "search_files"],
+  review_file: ["chat:tool", "review_file"],
+  claim_packet: ["chat:tool", "claim_packet"],
+  claim_call_prompt: ["chat:tool", "claim_call_prompt"],
+  draft_message: ["chat:tool", "draft_message"],
+  next_actions: ["chat:tool", "next_actions"],
+  gmail_search: ["gmail", "search"],
+  gmail_thread: ["gmail", "thread"],
+  gmail_attachment: ["gmail", "attachment"],
+  gmail_delivery: ["gmail", "delivery"],
+  quo_history: ["quo", "history"],
+  quo_messages: ["quo", "messages"],
+  quo_calls: ["quo", "calls"]
+};
+const ACTION_COMMANDS = {
+  create_jobnimbus_note: ["chat:action", "create_jobnimbus_note"],
+  append_jobnimbus_assistant_log: ["chat:action", "append_jobnimbus_assistant_log"],
+  create_jobnimbus_task: ["chat:action", "create_jobnimbus_task"],
+  update_jobnimbus_contact: ["chat:action", "update_jobnimbus_contact"],
+  update_jobnimbus_note: ["chat:action", "update_jobnimbus_note"],
+  append_jobnimbus_description: ["chat:action", "append_jobnimbus_description"],
+  send_quo_message: ["quo", "send"],
+  create_gmail_draft: ["gmail", "draft"],
+  send_gmail_message: ["gmail", "send"],
+  prepare_lor_package: ["lor-package"],
+  memory_closeout: ["memory", "closeout"]
+};
+const READ_TOOLS = Object.keys(READ_TOOL_COMMANDS);
+const WRITE_ACTIONS = Object.keys(ACTION_COMMANDS);
+const JOBNIMBUS_ACTIONS = new Set(WRITE_ACTIONS.filter((name) => name.includes("jobnimbus")));
 const MAX_BODY_BYTES = 256 * 1024;
 
 const config = loadConfig();
@@ -25,14 +54,27 @@ server.listen(config.bridge.port, () => {
   console.log("JobNimbus chat bridge");
   console.log(`- listening on port ${config.bridge.port}`);
   console.log(`- auth: ${config.bridge.token ? "bearer token required" : "OPEN (set JOBNIMBUS_BRIDGE_TOKEN before exposing publicly)"}`);
-  console.log(`- writes: ${config.bridge.allowWrites && config.allowJobNimbusWrites ? "ENABLED" : "blocked (read-only)"}`);
+  console.log(`- bridge execution: ${config.bridge.allowWrites ? "ENABLED" : "blocked (dry-run only)"}`);
+  console.log(`- JobNimbus writes: ${config.allowJobNimbusWrites ? "enabled" : "blocked"}`);
+  console.log(`- Quo sends: ${config.quo.allowSend ? "enabled" : "blocked"}`);
+  console.log(`- Gmail sends: ${config.google.allowSend ? "enabled" : "blocked (drafts still available)"}`);
 });
 
 async function handle(request, response) {
   const url = new URL(request.url, "http://localhost");
 
   if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
-    sendJson(response, 200, { ok: true, service: "jobnimbus-chat-bridge", readOnly: !(config.bridge.allowWrites && config.allowJobNimbusWrites) });
+    sendJson(response, 200, {
+      ok: true,
+      service: "jobnimbus-chat-bridge",
+      executionEnabled: config.bridge.allowWrites,
+      channels: {
+        jobnimbusWrites: config.allowJobNimbusWrites,
+        quoSends: config.quo.allowSend,
+        gmailDrafts: true,
+        gmailSends: config.google.allowSend
+      }
+    });
     return;
   }
 
@@ -45,10 +87,16 @@ async function handle(request, response) {
     sendJson(response, 200, {
       readTools: READ_TOOLS,
       writeActions: WRITE_ACTIONS,
-      writesEnabled: config.bridge.allowWrites && config.allowJobNimbusWrites,
+      executionEnabled: config.bridge.allowWrites,
+      channelGates: {
+        jobnimbus: config.allowJobNimbusWrites,
+        quo: config.quo.allowSend,
+        gmailDraft: true,
+        gmailSend: config.google.allowSend
+      },
       usage: {
         read: "POST /tools/<name> with a JSON body, e.g. POST /tools/review_file {\"query\":\"Rosa Sanchez\"}",
-        write: "POST /actions/<name> with a JSON body; blocked unless BRIDGE_ALLOW_WRITES and ALLOW_JOBNIMBUS_WRITES are both true"
+        write: "POST /actions/<name> with a JSON body. Every external action is dry-run by default; execution requires BRIDGE_ALLOW_WRITES plus its channel-specific gate."
       }
     });
     return;
@@ -62,7 +110,7 @@ async function handle(request, response) {
       return;
     }
     const body = await readBody(request);
-    const result = runCli(["chat:tool", name, JSON.stringify(body)]);
+    const result = runCli([...READ_TOOL_COMMANDS[name], JSON.stringify(body)]);
     sendCliResult(response, result);
     return;
   }
@@ -76,19 +124,44 @@ async function handle(request, response) {
     }
     const body = await readBody(request);
     const wantsExecute = body.execute === true;
-    if (wantsExecute && !(config.bridge.allowWrites && config.allowJobNimbusWrites)) {
+    if (name === "memory_closeout" && !wantsExecute) {
+      sendJson(response, 200, { mode: "dry_run", action: name, plan: body, note: "Pass execute:true after the external action has been independently verified." });
+      return;
+    }
+    if (wantsExecute && !config.bridge.allowWrites) {
       sendJson(response, 403, {
-        error: "Writes are disabled on this bridge. Set BRIDGE_ALLOW_WRITES=true and ALLOW_JOBNIMBUS_WRITES=true to enable execution.",
+        error: "Execution is disabled on this bridge. Set BRIDGE_ALLOW_WRITES=true to enable approved actions.",
         hint: "Without execute:true the action runs as a dry run and returns the proposed change."
       });
       return;
     }
-    const result = runCli(["chat:action", name, JSON.stringify(body)]);
+    const gateError = actionGateError(name, body);
+    if (wantsExecute && gateError) {
+      sendJson(response, 403, { error: gateError });
+      return;
+    }
+    const result = runCli([...ACTION_COMMANDS[name], JSON.stringify(body)]);
     sendCliResult(response, result);
     return;
   }
 
   sendJson(response, 404, { error: "Not found", endpoints: ["GET /health", "GET /tools", "POST /tools/<name>", "POST /actions/<name>"] });
+}
+
+function actionGateError(name, body) {
+  if (JOBNIMBUS_ACTIONS.has(name) && !config.allowJobNimbusWrites) {
+    return "JobNimbus writes are disabled. Set ALLOW_JOBNIMBUS_WRITES=true.";
+  }
+  if (name === "send_quo_message" && !config.quo.allowSend) {
+    return "Quo sending is disabled. Set ALLOW_QUO_SEND=true.";
+  }
+  if (name === "send_gmail_message" && !config.google.allowSend) {
+    return "Gmail sending is disabled. Set ALLOW_GMAIL_SEND=true.";
+  }
+  if (name === "prepare_lor_package" && body.send === true && !config.google.allowSend) {
+    return "LOR delivery is disabled. Set ALLOW_GMAIL_SEND=true, or omit send:true to create a Gmail draft.";
+  }
+  return "";
 }
 
 function authorized(request) {

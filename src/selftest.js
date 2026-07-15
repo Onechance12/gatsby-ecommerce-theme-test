@@ -4,6 +4,8 @@
 // without touching the network or writing outside the repo.
 
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { readJson } from "./lib/io.js";
 import { normalizeFiles } from "./normalize/normalizeFiles.js";
@@ -13,6 +15,9 @@ import { findChanceUserIds, isChanceContact } from "./lib/chanceScope.js";
 import { isOperationalDocument } from "./jobnimbus/documentFilters.js";
 import { extractCallResults, buildWritebackBundle } from "./assistant/postCallWriteback.js";
 import { activityFileIds, noteOwnershipError } from "./assistant/actionTools.js";
+import { buildMultipartRaw, validateAttachments } from "./google/gmail.js";
+import { closeoutAction, safeCloseoutAction } from "./memory/actionCloseout.js";
+import { latestActionReceipts, latestEpisodes, listMemory } from "./memory/store.js";
 import {
   buildClaimCallPacket,
   assessReadiness,
@@ -35,6 +40,12 @@ function check(label, condition) {
   }
 }
 
+function throws(label, fn, pattern) {
+  let error = null;
+  try { fn(); } catch (caught) { error = caught; }
+  check(label, Boolean(error) && (!pattern || pattern.test(String(error.message || error))));
+}
+
 // dates
 check("parseDate handles ISO strings", dateOnly("2026-06-26T09:45:00-05:00") === "2026-06-26");
 check("parseDate handles US dates", dateOnly("07/15/2026") === "2026-07-15");
@@ -54,6 +65,46 @@ check("isChanceContact rejects others", !isChanceContact({ owners: [{ id: "user-
 check("pdf is operational", isOperationalDocument({ content_type: "application/pdf", filename: "policy.pdf" }));
 check("esx is operational", isOperationalDocument({ content_type: "application/octet-stream", filename: "estimate.esx" }));
 check("jpeg is not operational", !isOperationalDocument({ content_type: "image/jpeg", filename: "roof.jpg" }));
+
+// Gmail document transport: reject broken PDFs before a draft/send can exist.
+const validPdf = Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\nstartxref\n0\n%%EOF\n", "ascii");
+check("gmail attachment validator accepts a complete PDF", validateAttachments([{ filename: "valid.pdf", contentType: "application/pdf", bytes: validPdf }])[0].bytes.equals(validPdf));
+throws("gmail attachment validator rejects empty files", () => validateAttachments([{ filename: "empty.pdf", contentType: "application/pdf", bytes: Buffer.alloc(0) }]), /empty/i);
+throws("gmail attachment validator rejects fake PDFs", () => validateAttachments([{ filename: "fake.pdf", contentType: "application/pdf", bytes: Buffer.from("not a pdf") }]), /header/i);
+throws("gmail attachment validator rejects truncated PDFs", () => validateAttachments([{ filename: "cut.pdf", contentType: "application/pdf", bytes: Buffer.from("%PDF-1.4\nno eof") }]), /end marker/i);
+const rawWithPdf = buildMultipartRaw({ to: "claims@example.com", subject: "TEST-CLAIM", body: "Attached.", attachments: [{ filename: "valid.pdf", contentType: "application/pdf", bytes: validPdf }] });
+const decodedMime = Buffer.from(rawWithPdf.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+check("gmail MIME contains attachment name and bytes", decodedMime.includes('filename="valid.pdf"') && decodedMime.includes(validPdf.toString("base64")));
+
+// Action closeout: one receipt per external result, no session-log flooding,
+// and observed lessons remain candidates until Chance verifies them.
+const memoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "wave-memory-test-"));
+const memoryConfig = { projectRoot: memoryRoot, memoryRoot };
+const firstCloseout = closeoutAction(memoryConfig, {
+  channel: "gmail",
+  action: "send_email",
+  summary: "Sent a verified test email packet.",
+  externalId: "gmail-test-1",
+  learningCandidates: [{ content: "Verify attachment bytes before sending carrier documents." }]
+});
+const duplicateCloseout = closeoutAction(memoryConfig, {
+  channel: "gmail",
+  action: "send_email",
+  summary: "Sent a verified test email packet.",
+  externalId: "gmail-test-1"
+});
+check("action closeout stores one idempotent receipt", !firstCloseout.deduped && duplicateCloseout.deduped && latestActionReceipts(memoryConfig, 10).length === 1);
+check("routine action closeout does not flood session handoffs", latestEpisodes(memoryConfig, 10).length === 0);
+check("action learning remains an unverified candidate", listMemory(memoryConfig, { lane: "company" }).some((row) => row.status === "candidate"));
+fs.rmSync(memoryRoot, { recursive: true, force: true });
+const brokenMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "wave-memory-broken-test-"));
+fs.mkdirSync(path.join(brokenMemoryRoot, "data", "memory"), { recursive: true });
+fs.writeFileSync(path.join(brokenMemoryRoot, "data", "memory", "actions.jsonl"), "{broken\n");
+const safeFailure = safeCloseoutAction({ projectRoot: brokenMemoryRoot, memoryRoot: brokenMemoryRoot, redact: (value) => String(value) }, {
+  channel: "gmail", action: "send_email", summary: "External action already succeeded.", externalId: "safe-test"
+});
+check("memory failure cannot mask an external action result", safeFailure.recorded === false && /corrupt/i.test(safeFailure.error));
+fs.rmSync(brokenMemoryRoot, { recursive: true, force: true });
 
 // normalize + rules on fixture
 const raw = readJson(path.join(projectRoot, "fixtures", "sample-data.json"));

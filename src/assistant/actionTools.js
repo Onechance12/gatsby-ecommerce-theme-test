@@ -1,5 +1,7 @@
+import crypto from "node:crypto";
 import { ReadOnlyJobNimbusClient } from "../jobnimbus/client.js";
 import { findMatches, loadReviews } from "./fileReview.js";
+import { safeCloseoutAction } from "../memory/actionCloseout.js";
 
 const ACTION_DEFINITIONS = [
   {
@@ -120,6 +122,21 @@ export async function runActionTool(config, args) {
   ensureCanExecute(config);
   const client = new ReadOnlyJobNimbusClient(config);
   const result = await executePlan(client, plan);
+  const resultId = String(result?.jnid || result?.id || "");
+  const memoryCloseout = safeCloseoutAction(config, {
+    channel: "jobnimbus",
+    action: actionName,
+    status: "executed",
+    subjectKey: review.file.id,
+    fileLabel: review.file.customer,
+    summary: jobNimbusActionSummary(actionName, review.file.customer, plan),
+    externalId: resultId,
+    dedupKey: resultId
+      ? `jobnimbus:${actionName}:${resultId}`
+      : `jobnimbus:${actionName}:${crypto.createHash("sha256").update(`${plan.endpoint}\n${JSON.stringify(plan.body)}`).digest("hex")}`,
+    followUps: input.followUps || [],
+    evidence: [`jobnimbus:${plan.method}:${plan.endpoint}${resultId ? `:${resultId}` : ""}`]
+  });
 
   printJson({
     mode: "executed",
@@ -130,8 +147,24 @@ export async function runActionTool(config, args) {
       endpoint: plan.endpoint,
       body: plan.body
     },
-    result
+    result,
+    memoryCloseout
   });
+}
+
+function jobNimbusActionSummary(actionName, customer, plan) {
+  const labels = {
+    create_jobnimbus_note: "JobNimbus note created",
+    append_jobnimbus_assistant_log: "JobNimbus assistant log updated",
+    create_jobnimbus_task: "JobNimbus task/calendar item created",
+    update_jobnimbus_contact: "JobNimbus client details updated",
+    update_jobnimbus_note: "JobNimbus note updated",
+    append_jobnimbus_description: "JobNimbus client description updated"
+  };
+  let detail = "";
+  if (actionName === "update_jobnimbus_contact") detail = ` Fields: ${Object.keys(plan.body || {}).join(", ")}.`;
+  if (actionName === "create_jobnimbus_task" && plan.body?.title) detail = ` Task: ${plan.body.title}.`;
+  return `${labels[actionName] || "JobNimbus action completed"} for ${customer}.${detail}`;
 }
 
 // Collect every file/contact id an activity is linked to (primary + related).

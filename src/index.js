@@ -235,6 +235,10 @@ async function main() {
     console.log(`- api key: ${config.apiKey ? "[set]" : "(not set)"}`);
     console.log("- read tools: enabled");
     console.log(`- JobNimbus action execution: ${config.allowJobNimbusWrites ? "enabled" : "blocked by default"}`);
+    console.log(`- Quo API key: ${config.quo.apiKey ? "[set]" : "(not set)"}`);
+    console.log(`- Quo send execution: ${config.quo.allowSend ? "enabled" : "blocked by default"}`);
+    console.log(`- Google OAuth: ${config.google.clientId && config.google.clientSecret && config.google.refreshToken ? "[configured]" : "(not fully configured)"}`);
+    console.log(`- Gmail send execution: ${config.google.allowSend ? "enabled" : "blocked by default (drafts allowed)"}`);
     console.log(`- OpenAI API key: ${config.openai.apiKey ? "[set]" : "(not set)"}`);
     console.log(`- OpenAI realtime model: ${config.openai.realtimeModel}`);
     console.log(`- OpenAI voice: ${config.openai.voice}`);

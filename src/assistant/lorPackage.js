@@ -18,7 +18,7 @@ import { loadReviews, findMatches } from "./fileReview.js";
 import { generateLor } from "../documents/lorGenerator.js";
 import { listContactFiles, findFile, downloadFile } from "../jobnimbus/files.js";
 import { googleConfigured } from "../google/googleAuth.js";
-import { createDraftWithAttachments, sendMessageWithAttachments } from "../google/gmail.js";
+import { createDraftWithAttachments, sendMessageWithAttachments, validateAttachments } from "../google/gmail.js";
 import { gatherLiveContext, applyLiveOverrides } from "./fileClaim.js";
 
 export async function runLorPackage(config, args) {
@@ -90,6 +90,13 @@ export async function runLorPackage(config, args) {
   const missingRequired = [];
   if (!has("lor|representation")) missingRequired.push("LOR");
   if (!has("tdi|fin535")) missingRequired.push("TDI");
+  // Read and validate the exact bytes during PREVIEW, not only at send time.
+  // Approval must be based on real, intact documents rather than filenames.
+  const withBytes = validateAttachments(attachments.map((a) => ({
+    filename: a.filename,
+    contentType: a.contentType,
+    bytes: fs.readFileSync(a.localPath)
+  })));
 
   const to = input.to || "{carrier claims email — needed}";
   const subject = file.claimNumber || "{claim number}";
@@ -113,9 +120,13 @@ export async function runLorPackage(config, args) {
   const plan = {
     file: { customer: file.customer, carrier: file.carrier, claim: file.claimNumber, status: file.status, jnid: file.id },
     email: { to, subject, bodyPreview: body },
-    attachments: attachments.map((a) => ({ filename: a.filename, source: a.source })),
+    attachments: attachments.map((a, index) => {
+      const verified = withBytes[index];
+      return { filename: a.filename, source: a.source, bytes: verified?.bytes.length || 0, validated: Boolean(verified) };
+    }),
     jobNimbusDocs: pulled,
-    lorPdf: lor.pdfPath || lor.error
+    lorPdf: lor.pdfPath || lor.error,
+    lorPreview: lor.previewPath || "(preview unavailable — inspect the PDF before send)"
   };
 
   plan.missingRequiredDocs = missingRequired;
@@ -142,14 +153,19 @@ export async function runLorPackage(config, args) {
   }
 
   // 5: stage the draft — or, with send:true + ALLOW_GMAIL_SEND, deliver it.
-  const withBytes = attachments.map((a) => ({ filename: a.filename, contentType: a.contentType, bytes: fs.readFileSync(a.localPath) }));
+  const memory = {
+    subjectKey: file.id,
+    fileLabel: file.customer,
+    summary: `${input.send === true ? "LOR email sent" : "LOR email draft created"} with ${withBytes.length} verified attachment(s) for ${file.customer}.`,
+    followUps: input.followUps || []
+  };
   if (input.send === true) {
-    const sent = await sendMessageWithAttachments(config, { to, subject, body, attachments: withBytes });
-    console.log(JSON.stringify({ mode: "SENT", messageId: sent.id, threadId: sent.threadId, to, subject, attachments: withBytes.map((a) => a.filename) }, null, 2));
+    const sent = await sendMessageWithAttachments(config, { to, subject, body, attachments: withBytes, memory });
+    console.log(JSON.stringify({ mode: "SENT", messageId: sent.id, threadId: sent.threadId, to, subject, attachments: withBytes.map((a) => a.filename), memoryCloseout: sent.memoryCloseout }, null, 2));
     return;
   }
-  const draft = await createDraftWithAttachments(config, { to, subject, body, attachments: withBytes });
-  console.log(JSON.stringify({ mode: "DRAFT STAGED", draftId: draft.id, to, subject, attachments: withBytes.map((a) => a.filename), note: "Review in Gmail drafts and send." }, null, 2));
+  const draft = await createDraftWithAttachments(config, { to, subject, body, attachments: withBytes, memory });
+  console.log(JSON.stringify({ mode: "DRAFT STAGED", draftId: draft.id, to, subject, attachments: withBytes.map((a) => a.filename), memoryCloseout: draft.memoryCloseout, note: "Review in Gmail drafts and send." }, null, 2));
 }
 
 function parseInput(args) {

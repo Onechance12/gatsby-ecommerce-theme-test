@@ -7,6 +7,7 @@ import {
   triggerRetellCall,
   fetchRetellCallResult
 } from "./retell.js";
+import { safeCloseoutAction } from "../memory/actionCloseout.js";
 
 const FREE_TRIAL_NOTICE =
   "Chance's Retell account is on the FREE TRIAL. Test with a controlled call (e.g. Chance's own cell number) " +
@@ -53,7 +54,21 @@ export async function runRetellCall(config, args) {
     execute: input.execute === true
   });
 
-  printJson({ tool: "retell_call", freeTrialNotice: FREE_TRIAL_NOTICE, ...packetInfo, result });
+  const memoryCloseout = result.executed && result.callId
+    ? safeCloseoutAction(config, {
+      channel: "retell",
+      action: "start_call",
+      status: result.callStatus || "started",
+      subjectKey: String(input.subjectKey || ""),
+      fileLabel: String(input.query || ""),
+      summary: `Retell call started${input.query ? ` for ${input.query}` : ""}.`,
+      externalId: result.callId,
+      followUps: ["Review the completed call result before proposing any JobNimbus writeback."],
+      evidence: [`retell:${result.callId}`]
+    })
+    : null;
+
+  printJson({ tool: "retell_call", freeTrialNotice: FREE_TRIAL_NOTICE, ...packetInfo, result, memoryCloseout });
 }
 
 // npm run retell:result -- '{"callId":"call_xyz"}'
@@ -66,9 +81,21 @@ export async function runRetellResult(config, args) {
     return;
   }
   const result = await fetchRetellCallResult(config, callId);
+  const memoryCloseout = safeCloseoutAction(config, {
+    channel: "retell",
+    action: "review_call_result",
+    status: result.callStatus || "reviewed",
+    subjectKey: String(input.subjectKey || ""),
+    fileLabel: String(input.query || ""),
+    summary: `Retell call result reviewed${input.query ? ` for ${input.query}` : ""}; status ${result.callStatus || "unknown"}.`,
+    externalId: callId,
+    followUps: ["Any JobNimbus changes remain approval-gated."],
+    evidence: [`retell:${callId}`]
+  });
   printJson({
     tool: "retell_result",
     result,
+    memoryCloseout,
     postCallJobNimbusReminder: [
       "Do not update JobNimbus from this call result until Chance approves.",
       "After approval, update claim number/status/adjuster fields and leave one short file-specific note."

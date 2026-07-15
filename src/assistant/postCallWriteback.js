@@ -6,6 +6,7 @@
 import { loadReviews, findMatches } from "./fileReview.js";
 import { fetchRetellCallResult } from "../voice/retell.js";
 import { extractCallResults, buildWritebackProposal } from "../claim-filing-core/index.js";
+import { safeCloseoutAction } from "../memory/actionCloseout.js";
 
 // Re-export the core extraction for callers/tests that used this module before.
 export { extractCallResults } from "../claim-filing-core/index.js";
@@ -64,6 +65,17 @@ export async function runPostCallWriteback(config, callId, input = {}) {
   }
 
   result.writeback = buildWritebackBundle(review.file, ex);
+  result.memoryCloseout = safeCloseoutAction(config, {
+    channel: "retell",
+    action: "review_claim_call_result",
+    status: ex.callStatus || "reviewed",
+    subjectKey: review.file.id,
+    fileLabel: review.file.customer,
+    summary: `Retell call result reviewed for ${review.file.customer}; outcome ${ex.outcome || "unknown"}.`,
+    externalId: callId,
+    followUps: ["Chance must approve any proposed JobNimbus field, status, note, or task changes."],
+    evidence: [`retell:${callId}`]
+  });
   result.note = "DRY RUN — review the extracted values (and any unverified transcript guesses), then run the commands under writeback.commands to write (each is gated + dry-run-first itself).";
   return result;
 }

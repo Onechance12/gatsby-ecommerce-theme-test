@@ -11,6 +11,7 @@ import { triggerRetellCall } from "../voice/retell.js";
 import { runPostCallWriteback } from "./postCallWriteback.js";
 import { ReadOnlyJobNimbusClient } from "../jobnimbus/client.js";
 import { dateOnly } from "../lib/dates.js";
+import { safeCloseoutAction } from "../memory/actionCloseout.js";
 
 // ---------------------------------------------------------------------------
 // file:claim — one deterministic command that gathers every fact a filing call
@@ -130,7 +131,21 @@ export async function runFileClaim(config, args) {
     execute: true
   });
 
-  printJson({ ...plan, call, next: "Poll the result with: npm run file:claim -- '{\"callId\":\"<call_id>\"}'" });
+  const memoryCloseout = call.executed && call.callId
+    ? safeCloseoutAction(config, {
+      channel: "retell",
+      action: "start_claim_call",
+      status: call.callStatus || "started",
+      subjectKey: review.file.id,
+      fileLabel: review.file.customer,
+      summary: `Retell ${goal === "file_new_claim" ? "claim-filing" : goal} call started for ${review.file.customer}.`,
+      externalId: call.callId,
+      followUps: ["Review the completed call and obtain approval before any JobNimbus writeback."],
+      evidence: [`retell:${call.callId}`]
+    })
+    : null;
+
+  printJson({ ...plan, call, memoryCloseout, next: "Poll the result with: npm run file:claim -- '{\"callId\":\"<call_id>\"}'" });
 }
 
 // One live read of the contact: returns the inspection-captured description
