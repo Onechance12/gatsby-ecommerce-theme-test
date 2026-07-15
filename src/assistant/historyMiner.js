@@ -141,11 +141,89 @@ export async function runHistoryMiner(config, args) {
   const outPath = path.join(config.paths.reportsDir, "history-digest.md");
   fs.writeFileSync(outPath, digest);
 
+  // ---- brain training: deterministic candidate-lesson drafts ----
+  // Thresholded, PII-free, evidence = this mining run. These are DRAFTS: the
+  // assistant reviews them, saves survivors as candidate memories, and Chance's
+  // verify pass turns them into law. Re-runnable — dedupKeys keep it idempotent.
+  const runTag = `history:mine ${new Date(now * 1000).toISOString().slice(0, 10)}`;
+  const lessons = buildCandidateLessons({ league, dwell, closed, dead, staleLimit, staleActive, active, runTag });
+  const lessonsPath = path.join(config.paths.reportsDir, "history-candidate-memories.json");
+  fs.writeFileSync(lessonsPath, JSON.stringify(lessons, null, 2));
+
   console.log("");
   console.log(`HISTORY MINED — ${files.length} files | leads ${leads.length} | working ${working.length} | settlement ${settlement.length} | closed ${closed.length} | lost ${dead.length}`);
   console.log(`carriers: ${league.length} | status-change events: ${statusChanges.length} (window ${coverage.from} → ${coverage.to})`);
   console.log(`Richard standard (${staleLimit}d): ${staleActive.length} of ${active.length} active files stale`);
   console.log(`digest: ${outPath}`);
+  console.log(`candidate memories: ${lessons.length} drafts -> reports/history-candidate-memories.json`);
+}
+
+// Draft company-lane lessons from mined stats. Every draft cites the mining run
+// and embeds its numbers, so a verify pass can judge it on evidence. Thresholds
+// are deliberately conservative — better five solid lessons than twenty weak ones.
+export function buildCandidateLessons({ league, dwell, closed, dead, staleLimit, staleActive, active, runTag }) {
+  const drafts = [];
+  const add = (kind, content, importance, key) => drafts.push({
+    lane: "company", kind, content, importance,
+    subjectKey: "history-mining",
+    dedupKey: `company:${kind}:history-${key}`,
+    evidence: [{ type: "miner", id: runTag, note: "deterministic whole-book mining run", verification: "observed" }]
+  });
+
+  // resolution baseline
+  const resolved = closed.length + dead.length;
+  if (resolved >= 100) {
+    add("fact", `Historical baseline: of ${resolved} resolved files in the book, ${Math.round((closed.length / resolved) * 100)}% closed and ${Math.round((dead.length / resolved) * 100)}% were lost. Every recovered point of the lost rate is the value target.`, 8, "resolution-baseline");
+  }
+
+  // carrier speed outliers vs book median
+  const withSpeed = league.filter((c) => c.total >= 10 && c.medianDaysInStatus !== null);
+  const bookMedian = medianOf(withSpeed.map((c) => c.medianDaysInStatus));
+  if (bookMedian !== null) {
+    for (const c of withSpeed) {
+      if (c.medianDaysInStatus >= bookMedian * 2) {
+        add("lesson", `${c.carrier} is a slow-mover: active files sit a median ${c.medianDaysInStatus} days in status vs ${bookMedian} book-wide (n=${c.total} files). Build extra follow-up cadence into every ${c.carrier} file.`, 7, `slow-${c.carrier.toLowerCase().replace(/\s+/g, "-")}`);
+      }
+    }
+  }
+
+  // big-carrier close rates
+  for (const c of league.filter((x) => x.paidRate !== null && x.paid + x.dead >= 20)) {
+    add("fact", `${c.carrier} historical close rate: ${c.paidRate}% of ${c.paid + c.dead} resolved files closed (n=${c.total} total). Use as the baseline when judging whether a ${c.carrier} file is on track.`, 6, `closerate-${c.carrier.toLowerCase().replace(/\s+/g, "-")}`);
+  }
+
+  // pipeline bottleneck: worst dwell among high-volume working stages
+  const busy = dwell.filter((x) => x.n >= 30);
+  if (busy.length) {
+    const worst = [...busy].sort((a, b) => b.medianDays - a.medianDays)[0];
+    add("lesson", `Pipeline bottleneck: "${worst.status}" holds files a median ${worst.medianDays.toFixed(1)} days (${worst.n} transitions observed) — the slowest high-volume stage. Files entering it deserve proactive scheduling/estimate pushes, not passive waiting.`, 7, "bottleneck-stage");
+  }
+
+  // adjuster data gap
+  const bigCarriers = league.filter((c) => c.total >= 15);
+  if (bigCarriers.length) {
+    const avgAdj = Math.round(bigCarriers.reduce((s, c) => s + c.adjusterPct, 0) / bigCarriers.length);
+    if (avgAdj < 50) {
+      add("lesson", `Adjuster fields are chronically empty (~${avgAdj}% filled across major carriers). Capturing the adjuster at first contact is a standing gap — every carrier email/call that names one should be written to the file immediately.`, 7, "adjuster-gap");
+    }
+  }
+
+  // staleness reality vs Richard's standard
+  if (active.length >= 50) {
+    const stalePct = Math.round((staleActive.length / active.length) * 100);
+    if (stalePct >= 25) {
+      add("fact", `Aging reality: ${stalePct}% of active files (${staleActive.length}/${active.length}) sit untouched >= ${staleLimit} days against the 2-week audit standard. Staleness is systemic, not an exception — triage should assume it.`, 6, "staleness-baseline");
+    }
+  }
+
+  return drafts;
+}
+
+function medianOf(arr) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
 function renderDigest(d) {

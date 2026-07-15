@@ -274,6 +274,7 @@ check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allst
   check("memory PII: street address rejected", rejects("the property at 1012 Sunset Dr needs a tarp"));
   check("memory PII: named insured rejected", rejects("the policyholder John Smith prefers texts"));
   check("memory PII: clean operating rule accepted", !rejects("always verify the claim number by fetching the created activity"));
+  check("memory PII: stats text not mistaken for an address", !rejects("48% of files (159/329) sit untouched >= 14 days against the 2-week audit standard"));
 
   // proposals must cite live memory ids
   let propThrew2 = "";
