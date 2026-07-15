@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-15 (Claude — evidence-backed memory/brain system landed on the ops branch; Codex briefed)
+Last updated: 2026-07-15 (Claude — memory system landed; claim-filing-core RE-SYNCED from bridge to ops branch at f4e7377)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -18,6 +18,20 @@ acts. Neither agent invokes the other. This is affirmed by Chance, Codex, and
 Claude.
 
 ## Current State
+
+### 🔄 Core re-sync (2026-07-15) + standing rule
+
+Claude adopted the bridge branch's claim-filing-core improvements (carrier
+directory incl. National General lender routing, explicit callback
+confirmation, IVR account-phone lookup, spoken policy numbers, damage
+narrative fields, anti-filler) back into the ops branch at `f4e7377`. Cores
+are byte-identical again; Claude's full selftest passes against them.
+
+**Standing rule (both agents):** `src/claim-filing-core/` is shared. Any
+change to it on either branch MUST be flagged here in AGENT_HANDOFF.md so the
+other side back-ports promptly. No silent drift. Codex's callback/IVR
+hardening was excellent — this rule exists so improvements like it propagate
+instead of forking.
 
 ### 🧠 NEW (2026-07-15): shared memory/brain system on the ops branch
 
