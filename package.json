@@ -42,7 +42,8 @@
     "quo": "node src/index.js quo",
     "chance:brief": "node src/index.js chance:brief",
     "lor-package": "node src/index.js lor-package",
-    "memory": "node src/index.js memory"
+    "memory": "node src/index.js memory",
+    "history:mine": "node src/index.js history:mine"
   },
   "engines": {
     "node": ">=20"

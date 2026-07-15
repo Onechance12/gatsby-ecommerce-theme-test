@@ -219,6 +219,14 @@ let propThrew = "";
 try { normalizeProposalDraft({ type: "recommendation", title: "test", detail: "detail long enough", memoryIds: [] }); } catch (e) { propThrew = e.message; }
 check("proposal without cited memories is rejected", /memory id/.test(propThrew));
 
+// ---- History miner classification helpers ----
+const { bucketStatus, normalizeCarrier } = await import("./assistant/historyMiner.js");
+check("miner buckets Lost as dead", bucketStatus("Lost") === "dead");
+check("miner buckets Hold/Closed as closed", bucketStatus("Hold/Closed") === "closed");
+check("miner buckets leads separately", bucketStatus("Cold Lead (Recycle)") === "lead" && bucketStatus("Warm Lead (or New)") === "lead");
+check("miner buckets billing as settlement", bucketStatus("Ready for Billing") === "settlement");
+check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allstate" && normalizeCarrier("Sate Farm") === "State Farm");
+
 console.log("");
 if (failures) {
   console.error(`Self-test failed: ${failures} check(s) failed.`);
