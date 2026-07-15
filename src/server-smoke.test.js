@@ -46,6 +46,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/claim-filing/writeback"].post.operationId, "processApprovedClaimFilingWriteback");
   assert.equal(schema.paths["/scheduling/availability"].post.operationId, "reviewUnifiedSchedulingAvailability");
   assert.equal(schema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
+  assert.equal(schema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
+  assert.equal(schema.paths["/retell/homeowner-call-result"].post.operationId, "reviewHomeownerAppointmentCall");
   assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
 

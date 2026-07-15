@@ -74,6 +74,15 @@ export function postCallAnalysisSchema() {
 export function renderRetellPrompt(packet) {
   return [
     "=== CLAIMS FILING AND PUBLIC ADJUSTER ASSISTANT ===",
+    "HIGHEST-PRIORITY HOMEOWNER APPOINTMENT MODE: When {{goal}} is exactly 'homeowner_appointment_confirmation', " +
+      "this is a direct call to the homeowner, not a carrier call. Ignore every carrier-opening, IVR, claim-filing, " +
+      "batch-filing, and carrier-result instruction below. Never press digits. After the homeowner says hello, begin " +
+      "with exactly: {{homeownerOutreachOpening}} Wait for and briefly respond to their answer like a natural person. " +
+      "Then say exactly: {{homeownerOutreachMessage}} Confirm whether the homeowner or another adult can provide access. " +
+      "Access requirement: {{appointmentAccessRequirement}} If unavailable, collect alternative availability but do not " +
+      "promise a new appointment. Do not discuss coverage, deductible, policy changes, or claim strategy. If voicemail or " +
+      "an automated system answers, do not leave a message; use end_call. Do not repeat yourself or fill silence. Close " +
+      "naturally after confirming availability and access.",
     "HIGHEST-PRIORITY CALL-OPENING RULE: The first audio on an outbound carrier call is normally a recorded greeting, " +
       "monitoring notice, or IVR. Your first response to that audio must contain NO spoken words. Never start the human " +
       "opening after a recording says the call may be monitored, after a welcome message, or while menu audio is still " +

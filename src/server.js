@@ -121,6 +121,8 @@ const routes = new Map([
   ["POST /claim-filing/callbacks", pendingClaimCallbacks],
   ["POST /claim-filing/writeback", claimFilingWriteback],
   ["POST /retell/configure-agent", configureRetellAgent],
+  ["POST /retell/homeowner-call", retellHomeownerCall],
+  ["POST /retell/homeowner-call-result", retellHomeownerCallResult],
   ["POST /retell/inbound", retellInbound],
   ["POST /gmail/search", gmailSearch],
   ["POST /gmail/thread", gmailThread],
@@ -1029,6 +1031,135 @@ async function placeClaimFilingCall(input) {
     callStatus: result.call_status,
     nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId."
   };
+}
+
+async function retellHomeownerCall(input) {
+  const { contact } = await findOneContact(required(input.query, "query"));
+  const file = compactContact(contact);
+  const to = normalizePhone(file.phone);
+  const dateStart = required(input.dateStart, "dateStart");
+  const dateEnd = required(input.dateEnd, "dateEnd");
+  if (!explicitOffsetDateTime(dateStart) || !explicitOffsetDateTime(dateEnd)) {
+    badRequest("dateStart and dateEnd must be ISO datetimes with an explicit UTC offset.");
+  }
+  if (Date.parse(dateEnd) <= Date.parse(dateStart)) badRequest("dateEnd must be after dateStart.");
+  const appointment = homeownerAppointmentLabels(dateStart, dateEnd);
+  const firstName = String(file.name || "there").trim().split(/\s+/)[0] || "there";
+  const accessRequirement = input.interiorAccessRequired === false
+    ? "No special access requirement was provided."
+    : "Interior access is required. Confirm that the homeowner or another adult can provide access.";
+  const dynamicVariables = {
+    directionMode: "outbound_homeowner",
+    goal: "homeowner_appointment_confirmation",
+    objective: `Confirm ${file.name}'s availability and interior access for the scheduled carrier inspection.`,
+    homeownerFirstName: firstName,
+    insuredName: file.name,
+    homeownerPhone: file.phone,
+    homeownerEmail: file.email || "Missing",
+    propertyAddress: file.address,
+    carrier: file.carrier || "the insurance carrier",
+    claimNumber: file.claimNumber || "Missing",
+    appointmentDate: appointment.date,
+    appointmentWindow: appointment.window,
+    appointmentAccessRequirement: accessRequirement,
+    homeownerOutreachOpening: `Hey ${firstName}, this is Chance's assistant. How are you today?`,
+    homeownerOutreachMessage: `Well ${firstName}, I wanted to call and let you know we got an adjuster appointment scheduled ${appointment.date}, between ${appointment.window}. Will you be available to meet Chance and the adjuster?`,
+    batchClaimCount: "0",
+    batchClaims: "None"
+  };
+  const metadata = {
+    source: "hcn-wave-jobnimbus-bridge",
+    contactId: file.id,
+    fileNumber: String(file.number || ""),
+    ownerId: CHANCE_OWNER_ID,
+    goal: "homeowner_appointment_confirmation"
+  };
+  const planDigest = digest({ to, agentId: RETELL_AGENT_ID, metadata, dynamicVariables });
+  metadata.planDigest = planDigest;
+  const request = {
+    from_number: RETELL_FROM_NUMBER,
+    to_number: to,
+    override_agent_id: RETELL_AGENT_ID,
+    metadata,
+    retell_llm_dynamic_variables: dynamicVariables
+  };
+
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      approvalRequired: true,
+      file,
+      planDigest,
+      appointment,
+      request: previewRetellRequest(request)
+    };
+  }
+  assertApprovalDigest(input.planDigest, planDigest);
+  if (!ALLOW_RETELL_CALLS) badRequest("Retell calls are disabled.");
+  if (!RETELL_API_KEY || !RETELL_AGENT_ID || !RETELL_FROM_NUMBER) {
+    badRequest("Retell is not fully configured.");
+  }
+  const prior = await findRemoteClaimCallAttempt(planDigest, "");
+  if (prior) {
+    return {
+      mode: "duplicate_prevented",
+      file,
+      planDigest,
+      callId: prior.callId,
+      callStatus: prior.callStatus,
+      createdAt: prior.createdAt
+    };
+  }
+  const result = await retellApi("POST", "/v2/create-phone-call", request);
+  return {
+    mode: "executed",
+    file,
+    planDigest,
+    callId: result.call_id,
+    callStatus: result.call_status,
+    nextStep: "Review the call result before sending any fallback text."
+  };
+}
+
+async function retellHomeownerCallResult(input) {
+  const callId = required(input.callId, "callId");
+  const call = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+  if (call.metadata?.source !== "hcn-wave-jobnimbus-bridge" || call.metadata?.goal !== "homeowner_appointment_confirmation") {
+    badRequest("This is not a bridge homeowner appointment call.");
+  }
+  return {
+    mode: "read_only",
+    call: {
+      callId: call.call_id,
+      status: call.call_status,
+      disconnectionReason: call.disconnection_reason || "",
+      durationMs: call.duration_ms || 0,
+      transcript: call.transcript || "",
+      summary: call.call_analysis?.call_summary || "",
+      successful: call.call_analysis?.call_successful ?? null
+    },
+    file: {
+      id: call.metadata.contactId || "",
+      number: call.metadata.fileNumber || ""
+    }
+  };
+}
+
+function homeownerAppointmentLabels(dateStart, dateEnd) {
+  const start = new Date(dateStart);
+  const end = new Date(dateEnd);
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: OPERATIONS_TIME_ZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }).format(start);
+  const timeFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: OPERATIONS_TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit"
+  });
+  return { date, window: `${timeFormatter.format(start)} and ${timeFormatter.format(end)}` };
 }
 
 async function findRemoteClaimCallAttempt(planDigest, retryOfCallId) {
@@ -4066,6 +4197,25 @@ const OPENAPI = {
           publish: { type: "boolean", default: false, description: "Must be true with execute=true. Publishes the updated draft so the live caller cannot drift from bridge code." }
         }
       },
+      RetellHomeownerCallRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Chance-owned JobNimbus file identifier." },
+          dateStart: { type: "string", description: "Inspection arrival-window start as ISO 8601 with an explicit UTC offset." },
+          dateEnd: { type: "string", description: "Inspection arrival-window end as ISO 8601 with an explicit UTC offset." },
+          interiorAccessRequired: { type: "boolean", default: true },
+          planDigest: { type: "string", description: "Exact digest returned by the dry run." },
+          execute: { type: "boolean", default: false, description: "False returns the exact call plan. True places the call only after approval." }
+        },
+        required: ["query", "dateStart", "dateEnd"]
+      },
+      RetellHomeownerCallResultRequest: {
+        type: "object",
+        properties: {
+          callId: { type: "string", description: "Retell call id returned by placeApprovedHomeownerAppointmentCall." }
+        },
+        required: ["callId"]
+      },
       VoiceCallRequest: {
         type: "object",
         properties: {
@@ -4257,6 +4407,20 @@ const OPENAPI = {
         operationId: "configureApprovedRetellAgent",
         requestBody: jsonBody("RetellAgentConfigurationRequest"),
         responses: { "200": { description: "Dry-runs or, after exact digest approval, updates and publishes the Retell prompt, tools, timezone, and post-call extraction schema." } }
+      }
+    },
+    "/retell/homeowner-call": {
+      post: {
+        operationId: "placeApprovedHomeownerAppointmentCall",
+        requestBody: jsonBody("RetellHomeownerCallRequest"),
+        responses: { "200": { description: "Dry-runs or places an approved homeowner appointment confirmation call through Retell." } }
+      }
+    },
+    "/retell/homeowner-call-result": {
+      post: {
+        operationId: "reviewHomeownerAppointmentCall",
+        requestBody: jsonBody("RetellHomeownerCallResultRequest"),
+        responses: { "200": { description: "Returns the Retell homeowner appointment call status and transcript." } }
       }
     },
     "/voice/outbound-call": {

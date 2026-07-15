@@ -36,6 +36,13 @@ test("normalizeDateOfLoss converts JobNimbus epoch seconds before the voice call
   assert.equal(normalizeDateOfLoss("4/25/2026"), "04/25/2026");
 });
 
+test("Retell prompt has a dedicated homeowner appointment mode", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /HIGHEST-PRIORITY HOMEOWNER APPOINTMENT MODE/);
+  assert.match(prompt, /homeowner_appointment_confirmation/);
+  assert.match(prompt, /do not leave a message/);
+});
+
 test("callbackCandidateFromCall reconstructs a pending case from Retell metadata", () => {
   assert.deepEqual(callbackCandidateFromCall({
     call_id: "call-1",
