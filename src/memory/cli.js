@@ -22,7 +22,7 @@ import {
 } from "./store.js";
 
 const [tool, ...rest] = process.argv.slice(2);
-const config = { projectRoot: process.env.MEMORY_ROOT || process.cwd() };
+const config = { projectRoot: process.cwd() };  // company seed lives in the repo; MEMORY_ROOT (persistent disk) is honored inside the store for client data
 
 function parseInput(text) {
   const trimmed = (text || "").trim();
@@ -42,7 +42,10 @@ try {
       }
     });
   } else if (tool === "brain") {
-    out(renderBrain(config));
+    // Bridge default is ISOLATED: company rules only. Pass subjectKey for one
+    // file's client records; clientLane:"full" is reserved for local operator use.
+    const clientLane = input.clientLane || (input.subjectKey ? "subject" : "none");
+    out(renderBrain(config, { clientLane, subjectKey: input.subjectKey || "" }));
   } else if (tool === "remember") {
     const customerNames = Array.isArray(input.customerNames) ? input.customerNames : [];
     delete input.customerNames;
@@ -52,7 +55,7 @@ try {
     const rows = listMemory(config, input);
     out({ count: rows.length, records: rows });
   } else if (tool === "verify" || tool === "dispute") {
-    out({ mode: tool, record: setMemoryStatus(config, input.id, tool === "verify" ? "verified" : "disputed") });
+    out({ mode: tool, record: setMemoryStatus(config, input.id, tool === "verify" ? "verified" : "disputed", { by: input.by || "chance-via-bridge", reason: input.reason || "" }) });
   } else if (tool === "handoff") {
     out({ mode: "recorded", episode: recordEpisode(config, input) });
   } else if (tool === "episodes") {
@@ -62,7 +65,7 @@ try {
   } else if (tool === "proposals") {
     out({ proposals: listProposals(config, input) });
   } else if (tool === "review") {
-    out({ proposal: reviewProposal(config, input.id, input.status, input.reason || "") });
+    out({ proposal: reviewProposal(config, input.id, input.status, input.reason || "", { by: input.by || "chance-via-bridge" }) });
   } else {
     throw new Error(`Unknown memory tool: ${tool}. Run with no args for help.`);
   }

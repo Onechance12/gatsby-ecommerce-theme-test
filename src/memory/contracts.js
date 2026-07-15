@@ -102,13 +102,27 @@ export function normalizeProposalDraft(draft = {}) {
   };
 }
 
-// The PII firewall for the tracked company lane. Blocks entries containing any
-// known customer name (from the synced book) or obvious claim/policy numbers.
-// Conservative on purpose: a blocked save can always go to the client lane.
+// The PII firewall for the tracked company lane. Pattern-based and fail-closed
+// (per Codex review on PR #4): emails, phone numbers, street addresses, long
+// numbers, and person-name references near client words are all blocked WITHOUT
+// relying on the optional customerNames list. Conservative on purpose: a
+// blocked save can always go to the client lane.
 export function assertCompanyLaneSafe(content, customerNames = []) {
   const text = String(content || "");
   if (/\b\d{7,}\b/.test(text)) {
     throw new Error("company-lane memory contains a long number (claim/policy/phone?). Put client facts in the client lane.");
+  }
+  if (/[\w.+-]+@[\w-]+\.[a-z]{2,}/i.test(text)) {
+    throw new Error("company-lane memory contains an email address. Put contact details in the client lane.");
+  }
+  if (/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]?\d{4}\b/.test(text)) {
+    throw new Error("company-lane memory contains a phone number. Put contact details in the client lane.");
+  }
+  if (/\b\d{1,6}\s+[A-Za-z][A-Za-z ]{2,30}\s?(?:st|street|dr|drive|ln|lane|ave|avenue|rd|road|ct|court|blvd|boulevard|way|cir|circle|pkwy|parkway|pl|place|trl|trail)\b\.?/i.test(text)) {
+    throw new Error("company-lane memory contains what looks like a street address. Put property details in the client lane.");
+  }
+  if (/(?:policyholder|insured|homeowner|client|customer)s?\s*(?:named|name is|:|-)?\s+[A-Z][a-z]+\s+[A-Z][a-z]+/.test(text)) {
+    throw new Error("company-lane memory appears to reference a client by name. Put client facts in the client lane.");
   }
   for (const name of customerNames) {
     const clean = String(name || "").trim();

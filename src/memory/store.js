@@ -1,8 +1,19 @@
-// JSONL memory store. Two physical files, one logical brain:
-//   memory/company.jsonl      — TRACKED (public repo): PII-free operating knowledge
-//   data/memory/records.jsonl — GITIGNORED: client-lane memories
-// Same record shape in both; lane decides the file. Append-mostly: status
-// changes rewrite the file (small data, simplicity beats cleverness).
+// JSONL memory store. Two physical roots, one logical brain — hardened per
+// Codex's PR #4 review:
+//
+//   REPO ROOT   (config.projectRoot) → memory/company.jsonl
+//     Tracked in git, PII-guarded, survives every deploy because it ships with
+//     the repo. ALWAYS anchored to the repo — a MEMORY_ROOT override must never
+//     make the seeded company rules vanish (Codex reproduced exactly that).
+//   DATA ROOT   (MEMORY_ROOT env || config.memoryRoot || repo root)
+//     → data/memory/{records,episodes,proposals}.jsonl
+//     Client lane. Gitignored; on Render point MEMORY_ROOT at a persistent disk.
+//
+// Durability: all writes are atomic (temp file + rename). Corrupt JSONL lines
+// are never silently discarded — reads warn, and MUTATING operations refuse to
+// rewrite a corrupt file (a rewrite would destroy the malformed lines forever).
+// Single-writer design: the CLI/bridge runs one operation at a time; atomic
+// rename keeps concurrent readers safe from torn files.
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -16,35 +27,52 @@ import {
 } from "./contracts.js";
 
 export function memoryPaths(config) {
-  const root = process.env.MEMORY_ROOT || config?.projectRoot || process.cwd();
+  const repoRoot = config?.projectRoot || process.cwd();
+  const dataRoot = process.env.MEMORY_ROOT || config?.memoryRoot || repoRoot;
   return {
-    company: path.join(root, "memory", "company.jsonl"),
-    client: path.join(root, "data", "memory", "records.jsonl"),
-    episodes: path.join(root, "data", "memory", "episodes.jsonl"),
-    proposals: path.join(root, "data", "memory", "proposals.jsonl")
+    company: path.join(repoRoot, "memory", "company.jsonl"),
+    client: path.join(dataRoot, "data", "memory", "records.jsonl"),
+    episodes: path.join(dataRoot, "data", "memory", "episodes.jsonl"),
+    proposals: path.join(dataRoot, "data", "memory", "proposals.jsonl")
   };
 }
 
 function readJsonl(file) {
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => {
-    try { return JSON.parse(line); } catch { return null; }
-  }).filter(Boolean);
+  if (!fs.existsSync(file)) return { rows: [], corrupt: 0 };
+  const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+  const rows = [];
+  let corrupt = 0;
+  for (const line of lines) {
+    try { rows.push(JSON.parse(line)); } catch { corrupt++; }
+  }
+  if (corrupt) console.error(`WARN: ${file} has ${corrupt} corrupt JSONL line(s) — reads continue, mutations are blocked until repaired.`);
+  return { rows, corrupt };
 }
 
+// Atomic replace: write a temp file in the same directory, then rename over the
+// target. Readers never observe a torn file.
 function writeJsonl(file, rows) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""));
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""));
+  fs.renameSync(tmp, file);
+}
+
+function readForMutation(file) {
+  const { rows, corrupt } = readJsonl(file);
+  if (corrupt) throw new Error(`${file} contains ${corrupt} corrupt line(s). Repair the file before writing — rewriting now would silently destroy those lines.`);
+  return rows;
 }
 
 function laneFile(paths, lane) {
   return lane === "company" ? paths.company : paths.client;
 }
 
-// Save with dedup + supersession. If a record with the same dedupKey exists and
-// is not superseded/expired: merge evidence (keep strongest verification),
-// raise confidence to the max of the two, and DON'T create a duplicate. If the
-// draft names supersedesId, the old record is marked superseded.
+// Save with dedup + supersession. Same-dedupKey live record → merge evidence
+// (strongest verification wins), raise confidence/importance, no duplicate.
+// Provenance rule: evidence of type "chance" with confirmed verification means
+// Chance said it directly — the record is born verified. Everything else is a
+// candidate until explicitly verified.
 export function saveMemory(config, draft, { customerNames = [] } = {}) {
   const normalized = normalizeMemoryDraft(draft);
   if (normalized.lane === "company") {
@@ -56,7 +84,7 @@ export function saveMemory(config, draft, { customerNames = [] } = {}) {
 
   const paths = memoryPaths(config);
   const file = laneFile(paths, normalized.lane);
-  const rows = readJsonl(file);
+  const rows = readForMutation(file);
   const now = new Date().toISOString();
 
   const existing = rows.find((r) => r.dedupKey === normalized.dedupKey && !["superseded", "expired"].includes(r.status));
@@ -70,6 +98,11 @@ export function saveMemory(config, draft, { customerNames = [] } = {}) {
   }
 
   const record = { id: memoryId(), ...normalized, createdAt: now, updatedAt: now };
+  if (record.evidence.some((e) => e.type === "chance" && e.verification === "confirmed")) {
+    record.status = "verified";
+    record.verifiedBy = "chance-direct-instruction";
+    record.lastVerifiedAt = now;
+  }
   if (record.supersedesId) {
     const old = rows.find((r) => r.id === record.supersedesId);
     if (old) { old.status = "superseded"; old.supersededById = record.id; old.updatedAt = now; }
@@ -94,8 +127,8 @@ function mergeEvidence(previous, next) {
 export function listMemory(config, { lane = "", kind = "", status = "", subjectKey = "", includeRetired = false } = {}) {
   const paths = memoryPaths(config);
   const rows = [
-    ...readJsonl(paths.company).map((r) => ({ ...r, lane: r.lane || "company" })),
-    ...readJsonl(paths.client).map((r) => ({ ...r, lane: r.lane || "client" }))
+    ...readJsonl(paths.company).rows.map((r) => ({ ...r, lane: r.lane || "company" })),
+    ...readJsonl(paths.client).rows.map((r) => ({ ...r, lane: r.lane || "client" }))
   ];
   return rows.filter((r) =>
     (includeRetired || !["superseded", "expired"].includes(r.status)) &&
@@ -107,15 +140,19 @@ export function listMemory(config, { lane = "", kind = "", status = "", subjectK
   ).sort((a, b) => (b.importance - a.importance) || (b.updatedAt < a.updatedAt ? -1 : 1));
 }
 
-export function setMemoryStatus(config, id, status) {
+// Status transitions carry provenance: who moved it and why.
+export function setMemoryStatus(config, id, status, { by = "", reason = "" } = {}) {
   if (!MEMORY_STATUSES.includes(status)) throw new Error(`status must be one of ${MEMORY_STATUSES.join("/")}`);
+  if (!by) throw new Error("status change requires provenance: pass by (who authorized this)");
   const paths = memoryPaths(config);
   for (const file of [paths.company, paths.client]) {
-    const rows = readJsonl(file);
+    const rows = readForMutation(file);
     const hit = rows.find((r) => r.id === id);
     if (hit) {
       hit.status = status;
       hit.updatedAt = new Date().toISOString();
+      hit.statusChangedBy = by;
+      if (reason) hit.statusReason = reason;
       if (status === "verified") hit.lastVerifiedAt = hit.updatedAt;
       writeJsonl(file, rows);
       return hit;
@@ -138,21 +175,26 @@ export function recordEpisode(config, draft = {}) {
     corrections: strList(draft.corrections, 8)     // "was X -> Chance said Y"
   };
   const paths = memoryPaths(config);
-  const rows = readJsonl(paths.episodes);
+  const rows = readForMutation(paths.episodes);
   rows.push(episode);
   writeJsonl(paths.episodes, rows.slice(-40)); // keep last 40 sessions
   return episode;
 }
 
 export function latestEpisodes(config, count = 2) {
-  return readJsonl(memoryPaths(config).episodes).slice(-count).reverse();
+  return readJsonl(memoryPaths(config).episodes).rows.slice(-count).reverse();
 }
 
 // ---- Proposals: candidate plans awaiting Chance (never self-executing)
 export function saveProposal(config, draft) {
   const normalized = normalizeProposalDraft(draft);
+  // Every cited memory must actually exist and be live — a proposal built on
+  // phantom or retired memories is unreviewable.
+  const live = new Set(listMemory(config, { includeRetired: false }).map((r) => r.id));
+  const missing = normalized.memoryIds.filter((id) => !live.has(id));
+  if (missing.length) throw new Error(`proposal cites unknown/retired memory id(s): ${missing.join(", ")}`);
   const paths = memoryPaths(config);
-  const rows = readJsonl(paths.proposals);
+  const rows = readForMutation(paths.proposals);
   if (rows.some((r) => r.dedupKey === normalized.dedupKey && ["candidate", "approved"].includes(r.status))) {
     return { deduped: true };
   }
@@ -163,17 +205,19 @@ export function saveProposal(config, draft) {
 }
 
 export function listProposals(config, { status = "candidate" } = {}) {
-  return readJsonl(memoryPaths(config).proposals).filter((r) => !status || r.status === status);
+  return readJsonl(memoryPaths(config).proposals).rows.filter((r) => !status || r.status === status);
 }
 
-export function reviewProposal(config, id, status, reason = "") {
+export function reviewProposal(config, id, status, reason = "", { by = "" } = {}) {
   if (!PROPOSAL_STATUSES.includes(status)) throw new Error(`status must be one of ${PROPOSAL_STATUSES.join("/")}`);
+  if (!by) throw new Error("proposal review requires provenance: pass by (who decided)");
   const paths = memoryPaths(config);
-  const rows = readJsonl(paths.proposals);
+  const rows = readForMutation(paths.proposals);
   const hit = rows.find((r) => r.id === id);
   if (!hit) throw new Error(`proposal ${id} not found`);
   hit.status = status;
   hit.reviewReason = reason;
+  hit.reviewedBy = by;
   hit.reviewedAt = new Date().toISOString();
   writeJsonl(paths.proposals, rows);
   return hit;
