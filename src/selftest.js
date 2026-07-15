@@ -296,6 +296,16 @@ check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allst
   fsm.rmSync(dataRoot, { recursive: true, force: true });
 }
 
+// ---- Scope miner parsers (synthetic snippets, both carrier styles) ----
+const { parseEstimateText, normalizeItem } = await import("./assistant/scopeMiner.js");
+const { classifyDocument } = await import("./assistant/historyMiner.js");
+const styleA = parseEstimateText("1.  3 tab - 25 yr. - composition shingle roofing 3.00 EA 19.69 59.07 7/25 yrs Avg. 28% (16.54) 42.53\nReplacement Cost Value $244.39");
+check("scope: inline (Allstate) style parses", styleA.items.length === 1 && styleA.items[0].qty === 3 && styleA.totals.rcv === 244.39);
+const styleB = parseEstimateText("R&R Drip edge\n74.00 LF 9.04 24.66 693.62 693.62\nReplacement Cost Value 3,145.82");
+check("scope: split (State Farm) style parses", styleB.items.length === 1 && /drip edge/i.test(styleB.items[0].description) && styleB.totals.rcv === 3145.82);
+check("scope: item normalization collides abbreviations", normalizeItem("R&R Laminated - comp. shingle rfg.") === normalizeItem("remove replace laminated composition shingle roofing"));
+check("scope: document classifier", classifyDocument("_Final Draft with_without Removal Depreciation.pdf") === "our-estimate" && classifyDocument("Carrier Estimate 1.pdf") === "carrier-scope" && classifyDocument("JAIRO.ESX") === "our-estimate");
+
 console.log("");
 if (failures) {
   console.error(`Self-test failed: ${failures} check(s) failed.`);

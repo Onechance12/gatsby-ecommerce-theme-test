@@ -32,6 +32,7 @@ import { runChanceBrief } from "./assistant/chanceBrief.js";
 import { runLorPackage } from "./assistant/lorPackage.js";
 import { runMemoryTool } from "./memory/index.js";
 import { runHistoryMiner } from "./assistant/historyMiner.js";
+import { runScopeMiner } from "./assistant/scopeMiner.js";
 
 const command = process.argv[2] || "help";
 const commandArgs = process.argv.slice(3);
@@ -192,6 +193,11 @@ async function main() {
 
   if (command === "history:mine") {
     await runHistoryMiner(config, commandArgs);
+    return;
+  }
+
+  if (command === "scope:mine") {
+    await runScopeMiner(config, commandArgs);
     return;
   }
 

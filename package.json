@@ -43,7 +43,8 @@
     "chance:brief": "node src/index.js chance:brief",
     "lor-package": "node src/index.js lor-package",
     "memory": "node src/index.js memory",
-    "history:mine": "node src/index.js history:mine"
+    "history:mine": "node src/index.js history:mine",
+    "scope:mine": "node src/index.js scope:mine"
   },
   "engines": {
     "node": ">=20"

@@ -32,6 +32,23 @@ export async function runHistoryMiner(config, args) {
     : { from: "-", to: "-", rows: 0, complete: false };
   console.log(`  ${actsMeta.rows.length} activities (${statusChanges.length} status changes), window ${coverage.from} → ${coverage.to}`);
 
+  console.log("- pulling document metadata (newest-first window, photos excluded)...");
+  const docsMeta = await client.listResourceWithMeta("files", "/files");
+  const { PHOTO_CONTENT_TYPES } = await import("../jobnimbus/documentFilters.js");
+  const docs = docsMeta.rows
+    .filter((f) => !PHOTO_CONTENT_TYPES.includes(String(f.content_type || "").toLowerCase()))
+    .map((f) => ({
+      filename: String(f.filename || ""),
+      kind: classifyDocument(f.filename),
+      contactIds: [...new Set([f.primary?.id, ...(f.related || []).map((r) => r.id)].filter(Boolean))],
+      date: f.date_created || 0,
+      size: f.size || 0
+    }))
+    .filter((d) => d.kind !== "other");
+  const docDates = docsMeta.rows.map((f) => f.date_created || 0).filter((t) => t > 0 && t <= now + 7 * DAY);
+  const docCoverage = docDates.length ? new Date(Math.min(...docDates) * 1000).toISOString().slice(0, 10) : "-";
+  console.log(`  ${docsMeta.rows.length} of ${docsMeta.meta?.pages?.[0]?.total ?? "?"} docs pulled (window back to ${docCoverage}); ${docs.length} classified operational docs`);
+
   console.log("- pulling payments...");
   let payments = [];
   try { payments = (await client.listResourceWithMeta("payments", config.endpoints.payments || "/payments")).rows; }
@@ -125,6 +142,26 @@ export async function runHistoryMiner(config, args) {
     oldestDays: Math.max(0, ...rows.map((f) => f.updated ? Math.floor((now - f.updated) / DAY) : 0))
   })).sort((x, y) => y.active - x.active);
 
+  // ---- scope-document inventory: who has our estimate vs the carrier's ----
+  const docsByContact = {};
+  for (const d of docs) for (const id of d.contactIds) (docsByContact[id] = docsByContact[id] || new Set()).add(d.kind);
+  const scopeRows = [...working, ...settlement, ...closed].map((f) => {
+    const kinds = docsByContact[f.id] || new Set();
+    return { ...f, hasOurEstimate: kinds.has("our-estimate"), hasCarrierScope: kinds.has("carrier-scope"), hasDecPage: kinds.has("policy-doc"), hasDenial: kinds.has("denial") };
+  });
+  const scopeStats = {
+    considered: scopeRows.length,
+    ourEstimate: scopeRows.filter((r) => r.hasOurEstimate).length,
+    carrierScope: scopeRows.filter((r) => r.hasCarrierScope).length,
+    both: scopeRows.filter((r) => r.hasOurEstimate && r.hasCarrierScope).length,
+    neither: scopeRows.filter((r) => !r.hasOurEstimate && !r.hasCarrierScope).length,
+    workingMissingOurs: scopeRows.filter((r) => r.bucket === "working" && !r.hasOurEstimate).length
+  };
+  // comparison-ready pairs = the training set for the carrier-scope build
+  const scopePairs = scopeRows.filter((r) => r.hasOurEstimate && r.hasCarrierScope).map((r) => ({ id: r.id, name: r.name, carrier: r.carrier, bucket: r.bucket }));
+  fs.mkdirSync(config.paths.reportsDir, { recursive: true });
+  fs.writeFileSync(path.join(config.paths.reportsDir, "scope-pairs.json"), JSON.stringify(scopePairs, null, 2));
+
   // ---- payments ----
   const paySum = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
 
@@ -134,6 +171,7 @@ export async function runHistoryMiner(config, args) {
   const digest = renderDigest({
     now, files, leads, working, settlement, closed, dead, active, league, dwell, transitionCounts,
     staleLimit, staleActive, repBoard, payments, paySum, byYear, coverage,
+    scopeStats, scopePairs, docCoverage,
     statuses: countBy(files, (f) => f.status)
   });
 
@@ -274,6 +312,20 @@ function renderDigest(d) {
   lines.push(`|---|---|---|---|`);
   for (const r of d.repBoard) lines.push(`| ${r.rep} | ${r.active} | ${r.stale} | ${r.oldestDays} |`);
   lines.push(``);
+  lines.push(`## Scope-of-loss document inventory (photos excluded; doc window back to ${d.docCoverage})`);
+  lines.push(``);
+  lines.push(`Of ${d.scopeStats.considered} claim files (working + settlement + closed):`);
+  lines.push(`- Our estimate on file: **${d.scopeStats.ourEstimate}**`);
+  lines.push(`- Carrier scope/estimate on file: **${d.scopeStats.carrierScope}**`);
+  lines.push(`- BOTH (comparison-ready pairs for the scope build): **${d.scopeStats.both}** -> reports/scope-pairs.json`);
+  lines.push(`- Neither: **${d.scopeStats.neither}**`);
+  lines.push(`- Working files missing OUR estimate: **${d.scopeStats.workingMissingOurs}**`);
+  lines.push(``);
+  if (d.scopePairs.length) {
+    lines.push(`Comparison-ready pairs (first 15):`);
+    for (const p of d.scopePairs.slice(0, 15)) lines.push(`- ${p.name} | ${p.carrier || "?"} | ${p.bucket}`);
+    lines.push(``);
+  }
   lines.push(`## Payments (visible to this key)`);
   lines.push(``);
   lines.push(`${d.payments.length} records, total $${d.paySum.toLocaleString()}. (Payment visibility may be scoped — treat as floor, not total.)`);
@@ -316,6 +368,21 @@ export function normalizeCarrier(name) {
   if (/lemonade/.test(s)) return "Lemonade";
   if (/homeowners of america|hoa/.test(s)) return "Homeowners of America";
   return s.split(" ").map((w) => w[0] ? w[0].toUpperCase() + w.slice(1) : w).join(" ");
+}
+
+// Filename-based document classifier. Photos are excluded upstream by content
+// type; "other" is dropped. Exported for selftest coverage.
+export function classifyDocument(filename) {
+  const f = String(filename || "").toLowerCase();
+  if (/\.esx$/.test(f) || /final draft|xactimate|wave estimate|our estimate/.test(f)) return "our-estimate";
+  if (/scope|carrier est|adjuster (summary|estimate|report)|claim summary|settlement (summary|letter)|acv (letter|breakdown)|loss (summary|statement)|insurance estimate/.test(f)) return "carrier-scope";
+  if (/denial|denied|declin/.test(f)) return "denial";
+  if (/dec(laration)? ?page|policy|ins\.? policy|coverage/.test(f)) return "policy-doc";
+  if (/\blor\b|letter of representation/.test(f)) return "lor";
+  if (/\btdi\b|fin ?535/.test(f)) return "tdi";
+  if (/w-?9\b/.test(f)) return "w9";
+  if (/check|payment|draft ?check|proceeds/.test(f)) return "payment-doc";
+  return "other";
 }
 
 function pickField(record, names) {
