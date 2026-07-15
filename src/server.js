@@ -1431,15 +1431,19 @@ async function configureRetellAgent(input = {}) {
   }
   assertApprovalDigest(input.configDigest, configDigest, "configDigest");
 
-  const llm = await retellApi("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, {
+  const llm = await retellApi("POST", "/create-retell-llm", {
+    name: "HCN Wave Claims and Homeowner Assistant",
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
     begin_message: ""
   });
+  const publishedLlmId = String(llm.llm_id || "").trim();
   const llmVersion = Number(llm.version);
-  if (!Number.isInteger(llmVersion) || llmVersion < 0) badRequest("Retell updated the LLM but did not return a usable version.");
+  if (!publishedLlmId || !Number.isInteger(llmVersion) || llmVersion < 0) {
+    badRequest("Retell created the LLM but did not return a usable id and version.");
+  }
   const updatedAgent = await retellApi("PATCH", `/update-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, {
-    response_engine: { type: "retell-llm", llm_id: llmId, version: llmVersion },
+    response_engine: { type: "retell-llm", llm_id: publishedLlmId, version: llmVersion },
     post_call_analysis_data: analysisSchema,
     post_call_analysis_model: "gpt-4.1-mini",
     timezone: OPERATIONS_TIME_ZONE
@@ -1457,6 +1461,7 @@ async function configureRetellAgent(input = {}) {
     published: true,
     ...preview,
     publishedAgentVersion: version,
+    retellLlmId: publishedLlmId,
     retellLlmVersion: llmVersion,
     nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
   };
