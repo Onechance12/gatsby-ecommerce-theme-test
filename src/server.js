@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +19,9 @@ import {
   validateRetellCallChainOwnership
 } from "./claim-filing-adapter.js";
 import { renderBrain } from "./memory/brain.js";
+import { safeCloseoutAction } from "./memory/actionCloseout.js";
+import { latestActionReceipts } from "./memory/store.js";
+import { listQuoNumbers, readQuoHistory, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import {
   appointmentFitsAvailability,
@@ -38,11 +41,14 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GMAIL_USER = process.env.GMAIL_USER || "me";
-const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-handoffs.json");
-const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-handoff-uploads");
-const ARTIFACT_STORE_PATH = process.env.ARTIFACT_STORE_PATH || path.join(tmpdir(), "jobnimbus-chatgpt-artifacts.json");
-const ARTIFACT_UPLOAD_DIR = process.env.ARTIFACT_UPLOAD_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-artifact-uploads");
-const ARTIFACT_FILE_DIR = process.env.ARTIFACT_FILE_DIR || path.join(tmpdir(), "jobnimbus-chatgpt-artifacts");
+const ALLOW_GMAIL_SEND = process.env.ALLOW_GMAIL_SEND === "true";
+const PERSISTENT_DATA_ROOT = process.env.MEMORY_ROOT || tmpdir();
+const BRIDGE_DATA_DIR = path.join(PERSISTENT_DATA_ROOT, "bridge");
+const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(BRIDGE_DATA_DIR, "handoffs.json");
+const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(BRIDGE_DATA_DIR, "handoff-uploads");
+const ARTIFACT_STORE_PATH = process.env.ARTIFACT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "artifacts.json");
+const ARTIFACT_UPLOAD_DIR = process.env.ARTIFACT_UPLOAD_DIR || path.join(BRIDGE_DATA_DIR, "artifact-uploads");
+const ARTIFACT_FILE_DIR = process.env.ARTIFACT_FILE_DIR || path.join(BRIDGE_DATA_DIR, "artifacts");
 const MAX_ARTIFACT_BYTES = positiveIntegerEnv("MAX_ARTIFACT_BYTES", 5 * 1024 * 1024);
 const ARTIFACT_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("ARTIFACT_TTL_HOURS", 72), 168));
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
@@ -64,7 +70,13 @@ const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agen
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
-const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(tmpdir(), "jobnimbus-claim-call-ledger.json");
+const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
+const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
+const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
+const QUO_API_KEY = process.env.QUO_API_KEY || "";
+const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.openphone.com/v1");
+const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
+const ALLOW_QUO_SEND = process.env.ALLOW_QUO_SEND === "true";
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
@@ -79,6 +91,7 @@ const SCHEDULING_WORKDAY_END = process.env.SCHEDULING_WORKDAY_END || "17:00";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
+const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText };
 
 const routes = new Map([
   ["GET /health", health],
@@ -100,6 +113,10 @@ const routes = new Map([
   ["POST /artifacts/get", getArtifact],
   ["POST /artifacts/complete", completeArtifact],
   ["POST /brain/context", brainContext],
+  ["POST /memory/file-actions", memoryFileActions],
+  ["POST /memory/persistence-check", memoryPersistenceCheck],
+  ["POST /ops/review-chance-files", reviewChanceFiles],
+  ["POST /ops/action-batch", processActionBatch],
   ["POST /scheduling/availability", schedulingAvailability],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
@@ -127,8 +144,13 @@ const routes = new Map([
   ["POST /retell/inbound", retellInbound],
   ["POST /gmail/search", gmailSearch],
   ["POST /gmail/thread", gmailThread],
+  ["POST /gmail/attachment-review", gmailAttachmentReview],
   ["POST /gmail/draft", gmailDraft],
-  ["POST /gmail/send", gmailSend]
+  ["POST /gmail/send", gmailSend],
+  ["POST /quo/numbers", quoNumbers],
+  ["POST /quo/history", quoHistory],
+  ["POST /quo/transcript", quoTranscript],
+  ["POST /quo/send", quoSend]
 ]);
 
 const server = createServer(async (req, res) => {
@@ -191,7 +213,18 @@ function health() {
     service: "jobnimbus-chatgpt-bridge",
     jobNimbusConfigured: Boolean(API_KEY),
     gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+    gmailSendAllowed: ALLOW_GMAIL_SEND,
+    quoConfigured: Boolean(QUO_API_KEY),
+    quoSendAllowed: ALLOW_QUO_SEND,
     writesAllowed: ALLOW_WRITES,
+    outboundSafety: {
+      automaticEmailOrTextSending: false,
+      explicitChanceApprovalRequired: true,
+      exactDryRunDigestRequired: true,
+      changedPayloadInvalidatesApproval: true,
+      duplicateSendBlocked: true,
+      failedSendRequiresFreshApproval: true
+    },
     ocrMode: "poppler+tesseract",
     artifactMailbox: {
       available: Boolean(BRIDGE_TOKEN),
@@ -234,10 +267,11 @@ function health() {
     },
     brain: {
       available: true,
-      mode: "read_only_company_context",
+      mode: "verified_company_context_with_private_action_receipts",
       autonomousLearning: false,
       externalActions: false,
-      clientMemoryExposed: false
+      clientMemoryExposed: "exact_Chance_file_only",
+      persistentRootConfigured: Boolean(process.env.MEMORY_ROOT)
     }
   };
 }
@@ -250,10 +284,56 @@ function brainContext(input = {}) {
     authority: "verified records guide review; candidates are quarantined; live JobNimbus/Gmail/Quo evidence always wins",
     execution: "none",
     context: renderBrain(
-      { projectRoot: process.cwd() },
+      MEMORY_CONFIG,
       { maxPerSection, clientLane: "none", includeEpisodes: false }
     )
   };
+}
+
+async function memoryFileActions(input = {}) {
+  const query = required(input.query, "query");
+  const limit = clamp(Number(input.limit || 20), 1, 100);
+  const { contact } = await findChanceContact(query);
+  const file = compactContact(contact);
+  return {
+    generatedAt: new Date().toISOString(),
+    file,
+    subjectKey: file.id,
+    receipts: latestActionReceipts(MEMORY_CONFIG, limit, { subjectKey: file.id }),
+    context: renderBrain(MEMORY_CONFIG, {
+      maxPerSection: clamp(Number(input.maxPerSection || 15), 1, 25),
+      clientLane: "subject",
+      subjectKey: file.id,
+      includeEpisodes: true
+    }),
+    authority: "Receipts prove past execution only. Re-read live evidence before proposing the next action."
+  };
+}
+
+function memoryPersistenceCheck(input = {}) {
+  const label = String(input.label || "render-disk-check").trim().replace(/[^a-z0-9._-]+/gi, "-").slice(0, 80) || "render-disk-check";
+  const subjectKey = `persistence:${label}`;
+  if (input.execute !== true) {
+    return {
+      mode: "read_only",
+      subjectKey,
+      receipts: latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey }),
+      instruction: "Set execute:true only for an approved persistence probe. No external system is contacted."
+    };
+  }
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true to record a persistence probe.");
+  const marker = randomUUID();
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "bridge",
+    action: "persistence_probe",
+    status: "recorded",
+    subjectKey,
+    fileLabel: label,
+    summary: `Recorded approved Render persistence probe ${label}.`,
+    externalId: marker,
+    evidence: [`probe:${marker}`]
+  });
+  return { mode: "recorded", marker, subjectKey, memoryCloseout };
 }
 
 function openapi() {
@@ -754,7 +834,11 @@ async function searchContacts(input) {
   const query = required(input.query, "query").toLowerCase();
   const limit = clamp(Number(input.limit || 10), 1, 25);
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 10) });
-  const matches = contacts.filter((contact) => contactMatches(contact, query)).slice(0, limit);
+  const matches = contacts
+    .filter(isInsuranceFile)
+    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter((contact) => contactMatches(contact, query))
+    .slice(0, limit);
   const compactMatches = matches.map(compactContact);
   return {
     query,
@@ -767,7 +851,7 @@ async function searchContacts(input) {
 
 async function reviewFile(input) {
   const query = required(input.query, "query");
-  const { contact, alternatives } = await findOneContact(query);
+  const { contact, alternatives } = await findChanceContact(query);
   const activities = await listRelated("/activities", contact.jnid, 30);
   const tasks = await listRelated("/tasks", contact.jnid, 30);
   const documents = await listRelated("/files", contact.jnid, 50);
@@ -1024,18 +1108,29 @@ async function placeClaimFilingCall(input) {
   };
   ledger.push(record);
   await writeClaimCallLedger(ledger.slice(-500));
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "retell",
+    action: "place_claim_call",
+    status: result.call_status || "registered",
+    subjectKey: context.file.id,
+    fileLabel: `${context.file.number || ""} ${context.file.name || ""}`.trim(),
+    summary: `Placed approved Retell carrier call for ${plan.packet.goal}.`,
+    externalId: result.call_id,
+    evidence: result.call_id ? [`retell:${result.call_id}`] : []
+  });
   return {
     mode: "executed",
     file: context.file,
     planDigest: plan.planDigest,
     callId: result.call_id,
     callStatus: result.call_status,
-    nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId."
+    nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId.",
+    memoryCloseout
   };
 }
 
 async function retellHomeownerCall(input) {
-  const { contact } = await findOneContact(required(input.query, "query"));
+  const { contact } = await findChanceContact(required(input.query, "query"));
   const file = compactContact(contact);
   const to = normalizePhone(file.phone);
   const dateStart = required(input.dateStart, "dateStart");
@@ -1112,13 +1207,24 @@ async function retellHomeownerCall(input) {
     };
   }
   const result = await retellApi("POST", "/v2/create-phone-call", request);
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "retell",
+    action: "place_homeowner_appointment_call",
+    status: result.call_status || "registered",
+    subjectKey: file.id,
+    fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
+    summary: "Placed approved Retell homeowner appointment confirmation call.",
+    externalId: result.call_id,
+    evidence: result.call_id ? [`retell:${result.call_id}`] : []
+  });
   return {
     mode: "executed",
     file,
     planDigest,
     callId: result.call_id,
     callStatus: result.call_status,
-    nextStep: "Review the call result before sending any fallback text."
+    nextStep: "Review the call result before sending any fallback text.",
+    memoryCloseout
   };
 }
 
@@ -1380,12 +1486,19 @@ async function claimFilingWriteback(input) {
   record.writebackAt = new Date().toISOString();
   if (!ledger.includes(record)) ledger.push(record);
   await writeClaimCallLedger(ledger.slice(-500));
+  const memoryCloseout = closeoutJobNimbusAction(
+    analysis.file,
+    "claim_call_writeback",
+    results.note || results.contact,
+    "Applied the separately approved JobNimbus writeback from a completed carrier call."
+  );
   return {
     mode: "executed",
     file: analysis.file,
     callId: analysis.call.callId,
     writebackDigest: analysis.writebackDigest,
-    results
+    results,
+    memoryCloseout
   };
 }
 
@@ -1825,12 +1938,14 @@ async function updateContact(input) {
   const query = required(input.query, "query");
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const normalizedFields = normalizeContactFields(fields);
   const plan = { endpoint: `/contacts/${contact.jnid}`, fields: normalizedFields };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: normalizedFields });
-  return { mode: "executed", file: compactContact(contact), result };
+  const file = compactContact(contact);
+  const memoryCloseout = closeoutJobNimbusAction(file, "update_contact", result, `Updated approved JobNimbus fields: ${Object.keys(normalizedFields).join(", ")}.`);
+  return { mode: "executed", file, result, memoryCloseout };
 }
 
 async function updateStatus(input) {
@@ -1839,12 +1954,14 @@ async function updateStatus(input) {
   }
   const query = required(input.query, "query");
   const status = required(input.status || input.statusName || input.workflowStatus, "status");
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const body = { status_name: status };
   const plan = { endpoint: `/contacts/${contact.jnid}`, body };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
-  return { mode: "executed", file: compactContact(contact), result };
+  const file = compactContact(contact);
+  const memoryCloseout = closeoutJobNimbusAction(file, "update_status", result, `Moved JobNimbus file to ${status}.`);
+  return { mode: "executed", file, result, memoryCloseout };
 }
 
 async function processUpdate(input) {
@@ -1858,7 +1975,7 @@ async function processUpdate(input) {
   if (!Object.keys(fields).length && !status && !note) {
     badRequest("At least one of fields, status, or note is required.");
   }
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const file = compactContact(contact);
   const contactBody = normalizeContactFields({ ...fields, ...(status ? { status_name: status } : {}) });
   const noteBody = note ? {
@@ -1883,7 +2000,11 @@ async function processUpdate(input) {
   if (noteBody) {
     results.note = await jobNimbus("/activities", { method: "POST", body: noteBody });
   }
-  return { mode: "executed", file, results };
+  const parts = [];
+  if (Object.keys(contactBody).length) parts.push(`fields ${Object.keys(contactBody).join(", ")}`);
+  if (noteBody) parts.push("internal note");
+  const memoryCloseout = closeoutJobNimbusAction(file, "process_update", results.note || results.contact, `Applied approved JobNimbus update: ${parts.join(" and ")}.`);
+  return { mode: "executed", file, results, memoryCloseout };
 }
 
 async function documentText(input) {
@@ -1891,7 +2012,7 @@ async function documentText(input) {
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 12000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
@@ -1920,7 +2041,7 @@ async function documentReview(input) {
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
@@ -1956,7 +2077,7 @@ async function createNote(input) {
   }
   const query = required(input.query, "query");
   const note = required(input.note, "note");
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const body = {
     note,
     date_created: Math.floor(Date.now() / 1000),
@@ -1965,7 +2086,9 @@ async function createNote(input) {
   };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/activities", body } };
   const result = await jobNimbus("/activities", { method: "POST", body });
-  return { mode: "executed", file: compactContact(contact), result };
+  const file = compactContact(contact);
+  const memoryCloseout = closeoutJobNimbusAction(file, "create_note", result, "Created approved JobNimbus internal note.");
+  return { mode: "executed", file, result, memoryCloseout };
 }
 
 async function createTask(input) {
@@ -1974,7 +2097,7 @@ async function createTask(input) {
   }
   const query = required(input.query, "query");
   const title = required(input.title || input.subject, "title");
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const body = cleanObject({
     title,
     subject: title,
@@ -1997,7 +2120,9 @@ async function createTask(input) {
     };
   }
   const result = await jobNimbus("/tasks", { method: "POST", body });
-  return { mode: "executed", file: compactContact(contact), result };
+  const file = compactContact(contact);
+  const memoryCloseout = closeoutJobNimbusAction(file, "create_task", result, `Created approved JobNimbus task: ${title}.`);
+  return { mode: "executed", file, result, memoryCloseout };
 }
 
 async function uploadJobNimbusFile(input) {
@@ -2013,29 +2138,43 @@ async function uploadJobNimbusFile(input) {
   if (!content.length) badRequest("Uploaded file is empty.");
   if (content.length > 8 * 1024 * 1024) badRequest("Uploaded file exceeds the bridge's 8 MB single-file limit.");
 
-  const { contact } = await findOneContact(query);
-  const plan = {
+  const { contact } = await findChanceContact(query);
+  const plan = jobNimbusUploadPlan(contact, {
     filename,
     description,
-    sizeBytes: content.length,
+    bytes: content,
+    isPrivate: Boolean(input.isPrivate || false)
+  });
+  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
+  const result = await uploadBytesToJobNimbus(plan, content);
+  return {
+    mode: "executed",
+    file: compactContact(contact),
+    result,
+    memoryCloseout: closeoutJobNimbusAction(compactContact(contact), "upload_file", result, `Uploaded verified JobNimbus document ${filename} (${content.length} bytes).`)
+  };
+}
+
+function jobNimbusUploadPlan(contact, input) {
+  return {
+    filename: safeMimeFilename(input.filename),
+    description: String(input.description || "").trim().slice(0, 1000),
+    sizeBytes: input.bytes.length,
     type: 1,
     related: [contact.jnid],
-    isPrivate: Boolean(input.isPrivate || false)
+    isPrivate: Boolean(input.isPrivate)
   };
-  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
+}
 
-  const reservation = await jobNimbusFileApi("/files/v1/uploads/url", {
-    method: "POST",
-    body: plan
-  });
+async function uploadBytesToJobNimbus(plan, bytes) {
+  const reservation = await jobNimbusFileApi("/files/v1/uploads/url", { method: "POST", body: plan });
   const uploadUrl = reservation?.data?.url;
   const fileId = reservation?.data?.jnid;
   if (!uploadUrl || !fileId) badRequest("JobNimbus did not return a presigned upload URL and file id.");
-
   const upload = await fetch(uploadUrl, {
     method: "PUT",
     headers: { "content-type": "application/octet-stream" },
-    body: content
+    body: bytes
   });
   if (!upload.ok) {
     const text = await upload.text().catch(() => "");
@@ -2043,19 +2182,12 @@ async function uploadJobNimbusFile(input) {
     error.statusCode = upload.status;
     throw error;
   }
-
-  const completion = await jobNimbusFileApi(`/files/v1/uploads/${encodeURIComponent(fileId)}/complete?generateThumbnail=true`, {
-    method: "POST"
-  });
+  const completion = await jobNimbusFileApi(`/files/v1/uploads/${encodeURIComponent(fileId)}/complete?generateThumbnail=true`, { method: "POST" });
   return {
-    mode: "executed",
-    file: compactContact(contact),
-    result: {
-      id: fileId,
-      filename,
-      sizeBytes: content.length,
-      thumbnailUrl: completion?.data?.thumbnailUrl || ""
-    }
+    id: fileId,
+    filename: plan.filename,
+    sizeBytes: bytes.length,
+    thumbnailUrl: completion?.data?.thumbnailUrl || ""
   };
 }
 
@@ -2076,7 +2208,16 @@ async function updateTask(input) {
     };
   }
   const result = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`, { method: "PUT", body });
-  return { mode: "executed", taskId, result };
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "jobnimbus",
+    action: "update_task",
+    subjectKey: String(input.subjectKey || ""),
+    fileLabel: String(input.fileLabel || input.query || ""),
+    summary: `Updated approved JobNimbus task ${taskId}.`,
+    externalId: resultId(result) || taskId,
+    evidence: [`jobnimbus:task:${taskId}`]
+  });
+  return { mode: "executed", taskId, result, memoryCloseout };
 }
 
 async function createCalendarEvent(input) {
@@ -2088,7 +2229,7 @@ async function createCalendarEvent(input) {
   const dateStart = toUnixSeconds(required(input.dateStart || input.start, "dateStart"));
   const dateEnd = toUnixSeconds(input.dateEnd || input.end) || dateStart;
   validateDateRange(dateStart, dateEnd);
-  const { contact } = await findOneContact(query);
+  const { contact } = await findChanceContact(query);
   const body = cleanObject({
     title,
     subject: title,
@@ -2109,7 +2250,9 @@ async function createCalendarEvent(input) {
     };
   }
   const result = await jobNimbus("/activities", { method: "POST", body });
-  return { mode: "executed", file: compactContact(contact), result };
+  const file = compactContact(contact);
+  const memoryCloseout = closeoutJobNimbusAction(file, "create_calendar_event", result, `Created approved JobNimbus calendar event: ${title}.`);
+  return { mode: "executed", file, result, memoryCloseout };
 }
 
 async function updateCalendarEvent(input) {
@@ -2120,6 +2263,7 @@ async function updateCalendarEvent(input) {
   if (!eventId) badRequest("eventId is required");
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
+  const file = input.query ? compactContact((await findChanceContact(input.query)).contact) : null;
   const body = normalizeDateFields(fields);
   validateDateRange(body.date_start, body.date_end);
   if (input.execute !== true) {
@@ -2129,7 +2273,16 @@ async function updateCalendarEvent(input) {
     };
   }
   const result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
-  return { mode: "executed", eventId, result };
+  const memoryCloseout = file
+    ? closeoutJobNimbusAction(file, "update_calendar_event", result, `Updated approved JobNimbus calendar event ${eventId}.`)
+    : safeCloseoutAction(MEMORY_CONFIG, {
+      channel: "jobnimbus",
+      action: "update_calendar_event",
+      summary: `Updated approved JobNimbus calendar event ${eventId}.`,
+      externalId: resultId(result) || eventId,
+      evidence: [`jobnimbus:activity:${eventId}`]
+    });
+  return { mode: "executed", eventId, result, memoryCloseout };
 }
 
 async function gmailSearch(input) {
@@ -2163,6 +2316,60 @@ async function gmailThread(input) {
   };
 }
 
+async function gmailAttachmentReview(input) {
+  const messageId = required(input.messageId, "messageId");
+  const attachmentId = required(input.attachmentId, "attachmentId");
+  const filename = safeMimeFilename(required(input.filename, "filename"));
+  const contentType = String(input.contentType || "application/octet-stream").trim();
+  const payload = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`);
+  const bytes = base64UrlToBuffer(payload?.data || "");
+  const attachment = validateEmailAttachment({ filename, contentType, bytes });
+  const document = { filename: attachment.filename, content_type: attachment.contentType };
+  const extracted = await extractDocumentText(
+    { bytes: attachment.bytes, contentType: attachment.contentType },
+    document,
+    clamp(Number(input.maxChars || 20000), 1000, 50000),
+    { forceOcr: input.forceOcr === true, maxOcrPages: clamp(Number(input.maxOcrPages || 5), 1, 20) }
+  );
+
+  let upload = null;
+  if (input.uploadToJobNimbus === true) {
+    const query = required(input.query, "query");
+    const { contact } = await findChanceContact(query);
+    const file = compactContact(contact);
+    const plan = jobNimbusUploadPlan(contact, {
+      filename: attachment.filename,
+      description: String(input.description || "Received by email and verified before upload.").trim().slice(0, 1000),
+      bytes: attachment.bytes,
+      isPrivate: Boolean(input.isPrivate)
+    });
+    if (input.execute === true) {
+      if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true to upload Gmail attachments.");
+      const result = await uploadBytesToJobNimbus(plan, attachment.bytes);
+      upload = {
+        mode: "executed",
+        file,
+        result,
+        memoryCloseout: closeoutJobNimbusAction(file, "upload_gmail_attachment", result, `Uploaded verified Gmail attachment ${attachment.filename} to JobNimbus.`)
+      };
+    } else {
+      upload = { mode: "dry_run", file, plan };
+    }
+  }
+
+  return {
+    messageId,
+    attachmentId,
+    attachment: emailAttachmentDescriptor(attachment, "gmail"),
+    extraction: extracted.extraction,
+    pageCount: extracted.pageCount || null,
+    truncated: Boolean(extracted.truncated),
+    extractionError: extracted.error || "",
+    textPreview: String(extracted.text || "").slice(0, clamp(Number(input.previewChars || 8000), 500, 12000)),
+    upload
+  };
+}
+
 async function gmailDraft(input) {
   const to = required(input.to, "to");
   const subject = required(input.subject, "subject");
@@ -2170,7 +2377,8 @@ async function gmailDraft(input) {
   const cc = String(input.cc || "").trim();
   const bcc = String(input.bcc || "").trim();
   const threadId = String(input.threadId || "").trim();
-  const raw = buildRawEmail({ to, cc, bcc, subject, body });
+  const attachments = await loadEmailAttachments(input);
+  const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const draftBody = { message: cleanObject({ raw, threadId }) };
   if (input.execute !== true) {
     return {
@@ -2182,7 +2390,8 @@ async function gmailDraft(input) {
         bcc,
         subject,
         body,
-        threadId
+        threadId,
+        attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
       }
     };
   }
@@ -2191,7 +2400,9 @@ async function gmailDraft(input) {
     method: "POST",
     body: draftBody
   });
-  return { mode: "executed", draft: compactGmailDraft(result) };
+  const file = await optionalChanceFile(input.query || input.fileQuery);
+  const memoryCloseout = closeoutGmailAction(input, file, "create_draft", result.id || result.message?.id, `Created approved Gmail draft with subject ${subject} and ${attachments.length} verified attachment(s).`, "drafted");
+  return { mode: "executed", draft: compactGmailDraft(result), attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source)), memoryCloseout };
 }
 
 async function gmailSend(input) {
@@ -2201,35 +2412,313 @@ async function gmailSend(input) {
   const cc = String(input.cc || "").trim();
   const bcc = String(input.bcc || "").trim();
   const threadId = String(input.threadId || "").trim();
-  const raw = buildRawEmail({ to, cc, bcc, subject, body });
+  const attachments = await loadEmailAttachments(input);
+  const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const sendBody = cleanObject({ raw, threadId });
+  const plan = {
+    endpoint: "/gmail/v1/users/me/messages/send",
+    to,
+    cc,
+    bcc,
+    subject,
+    body,
+    threadId,
+    attemptId: String(input.attemptId || "initial"),
+    attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
+  };
+  const approvalDigest = digest({ channel: "gmail", action: "send", plan });
   if (input.execute !== true) {
     return {
       mode: "dry_run",
-      plan: {
-        endpoint: "/gmail/v1/users/me/messages/send",
-        to,
-        cc,
-        bcc,
-        subject,
-        body,
-        threadId
-      }
+      plan,
+      approvalDigest,
+      instruction: "Nothing was sent. After Chance approves this exact plan, repeat with execute:true and this approvalDigest."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
-  const result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/send`, {
-    method: "POST",
-    body: sendBody
-  });
-  return { mode: "executed", message: compactGmailMessage(result) };
+  if (!ALLOW_GMAIL_SEND) badRequest("Gmail sending is disabled. Set ALLOW_GMAIL_SEND=true in Render.");
+  requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail send");
+  const reservation = await reserveOutboundSend("gmail", approvalDigest, { to, subject });
+  let result;
+  try {
+    result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/send`, {
+      method: "POST",
+      body: sendBody
+    });
+    await completeOutboundSend(reservation.id, "completed", result.id || "");
+  } catch (error) {
+    await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
+    throw error;
+  }
+  const file = await optionalChanceFile(input.query || input.fileQuery);
+  const memoryCloseout = closeoutGmailAction(input, file, "send_email", result.id, `Sent approved Gmail message with subject ${subject} and ${attachments.length} verified attachment(s).`);
+  return { mode: "executed", message: compactGmailMessage(result), attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source)), memoryCloseout };
 }
 
-async function findOneContact(query) {
-  const matches = (await searchContacts({ query, limit: 6, maxPages: 15 })).matches;
-  if (!matches.length) badRequest(`No JobNimbus contact found for: ${query}`);
-  const contact = await jobNimbus(`/contacts/${encodeURIComponent(matches[0].id)}`);
-  return { contact, alternatives: matches.slice(1) };
+function quoConfig() {
+  return {
+    apiKey: QUO_API_KEY,
+    baseUrl: QUO_API_BASE_URL,
+    defaultFrom: QUO_DEFAULT_FROM_NUMBER,
+    allowSend: ALLOW_QUO_SEND,
+    redact: redactSensitiveText
+  };
+}
+
+async function quoNumbers() {
+  const numbers = await listQuoNumbers(quoConfig());
+  return { count: numbers.length, numbers };
+}
+
+async function quoHistory(input = {}) {
+  let file = null;
+  let phone = String(input.phone || "").trim();
+  if (input.query) {
+    file = compactContact((await findChanceContact(input.query)).contact);
+    phone ||= file.phone;
+  }
+  if (!phone) badRequest("phone or a Chance file query with a phone number is required");
+  const history = await readQuoHistory(quoConfig(), {
+    phone,
+    maxResults: input.maxResults,
+    includeTranscripts: input.includeTranscripts === true
+  });
+  return { generatedAt: new Date().toISOString(), file, ...history };
+}
+
+async function quoTranscript(input = {}) {
+  const callId = required(input.callId, "callId");
+  return readQuoTranscript(quoConfig(), callId);
+}
+
+async function quoSend(input = {}) {
+  const query = required(input.query, "query");
+  const { contact } = await findChanceContact(query);
+  const file = compactContact(contact);
+  const to = String(input.to || file.phone || "").trim();
+  const content = required(input.content || input.message, "content");
+  const preview = await sendQuoText(quoConfig(), {
+    from: input.from,
+    to,
+    content,
+    userId: input.userId,
+    execute: false
+  });
+  const plan = { ...preview.plan, attemptId: String(input.attemptId || "initial") };
+  const approvalDigest = digest({ channel: "quo", action: "send_text", fileId: file.id, plan });
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      file,
+      plan,
+      approvalDigest,
+      instruction: "Nothing was sent. After Chance approves this exact text and recipient, repeat with execute:true and this approvalDigest."
+    };
+  }
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Quo texts.");
+  if (!ALLOW_QUO_SEND) badRequest("Quo sending is disabled. Set ALLOW_QUO_SEND=true in Render.");
+  requireApprovalDigest(input.approvalDigest, approvalDigest, "Quo send");
+  const reservation = await reserveOutboundSend("quo", approvalDigest, { to: plan.to });
+  let result;
+  try {
+    result = await sendQuoText(quoConfig(), {
+      from: preview.plan.from,
+      to: preview.plan.to,
+      content: preview.plan.content,
+      userId: input.userId,
+      execute: true
+    });
+    await completeOutboundSend(reservation.id, "completed", result.message.id || "");
+  } catch (error) {
+    await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
+    throw error;
+  }
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "quo",
+    action: "send_text",
+    status: result.message.status || "accepted",
+    subjectKey: file.id,
+    fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
+    summary: "Sent approved Quo text from Chance's configured line.",
+    externalId: result.message.id || "",
+    followUps: input.followUps || [],
+    evidence: result.message.id ? [`quo:${result.message.id}`] : []
+  });
+  return { ...result, file, memoryCloseout };
+}
+
+async function reviewChanceFiles(input = {}) {
+  const page = clamp(Number(input.page || 1), 1, 1000);
+  const limit = clamp(Number(input.limit || (input.query ? 1 : 5)), 1, 10);
+  let contacts;
+  if (input.query) {
+    contacts = [(await findChanceContact(input.query)).contact];
+  } else {
+    contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
+      .filter(isInsuranceFile)
+      .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+      .filter((contact) => input.activeOnly === false || isOpenActive(contact))
+      .sort(fileSort);
+  }
+  const total = contacts.length;
+  const selected = input.query ? contacts : contacts.slice((page - 1) * limit, page * limit);
+  const packets = [];
+  for (const contact of selected) packets.push(await buildChanceEvidencePacket(contact, input));
+  return {
+    generatedAt: new Date().toISOString(),
+    owner: { id: CHANCE_OWNER_ID, name: "Chance Pearson" },
+    query: String(input.query || ""),
+    page,
+    limit,
+    total,
+    pageCount: Math.ceil(total / limit),
+    complete: packets.every((packet) => packet.complete),
+    packets,
+    assistantDirective: [
+      "These are fresh evidence packets, not automatic decisions.",
+      "Compare current JobNimbus fields, activities, tasks, operational documents, Gmail, Quo, and prior action receipts.",
+      "For each file, choose one primary next action, draft its exact content, and show Chance what requires approval.",
+      "Do not treat memory or an old task as proof that work is still needed. Do not execute without approval."
+    ]
+  };
+}
+
+async function buildChanceEvidencePacket(contact, input) {
+  const file = compactContact(contact);
+  const [activities, tasks, documents] = await Promise.all([
+    listRelated("/activities", contact.jnid, 60),
+    listRelated("/tasks", contact.jnid, 60),
+    listRelated("/files", contact.jnid, 150)
+  ]);
+  const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
+  const sourceStatus = { jobNimbus: { status: "fresh", at: new Date().toISOString() } };
+
+  let gmail = { status: "not_requested", query: "", messages: [], threads: [] };
+  if (input.includeGmail !== false) {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+      gmail = { status: "unavailable", error: "Gmail is not configured.", messages: [], threads: [] };
+    } else {
+      try {
+        const query = buildFileGmailQuery(file, input.communicationDays);
+        const search = await gmailSearch({ query, limit: clamp(Number(input.gmailLimit || 8), 1, 15) });
+        const threads = [];
+        for (const row of search.threads.slice(0, clamp(Number(input.gmailThreadLimit || 3), 1, 5))) {
+          const thread = await gmailThread({ threadId: row.threadId });
+          threads.push(compactGmailEvidenceThread(thread));
+        }
+        gmail = { status: "fresh", query, messages: search.messages, threads };
+      } catch (error) {
+        gmail = { status: "error", error: redactSensitiveText(error.message), messages: [], threads: [] };
+      }
+    }
+  }
+  sourceStatus.gmail = { status: gmail.status, at: new Date().toISOString() };
+
+  let quo = { status: "not_requested", timeline: [], transcripts: [] };
+  if (input.includeQuo !== false) {
+    if (!QUO_API_KEY) {
+      quo = { status: "unavailable", error: "Quo is not configured.", timeline: [], transcripts: [] };
+    } else if (!file.phone) {
+      quo = { status: "no_file_phone", timeline: [], transcripts: [] };
+    } else {
+      try {
+        const history = await readQuoHistory(quoConfig(), {
+          phone: file.phone,
+          maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
+          includeTranscripts: input.includeQuoTranscripts === true
+        });
+        quo = { status: "fresh", ...history, timeline: history.timeline.slice(-30).reverse() };
+      } catch (error) {
+        quo = { status: "error", error: redactSensitiveText(error.message), timeline: [], transcripts: [] };
+      }
+    }
+  }
+  sourceStatus.quo = { status: quo.status, at: new Date().toISOString() };
+
+  const sortedActivities = [...activities].sort((a, b) => Number(b.date_created || 0) - Number(a.date_created || 0));
+  const openTasks = tasks.filter((task) => !task.is_completed).sort((a, b) => Number(a.date_start || a.date_end || 0) - Number(b.date_start || b.date_end || 0));
+  const requestedSourcesComplete = [gmail.status, quo.status].every((status) => !["unavailable", "error"].includes(status));
+  return {
+    complete: requestedSourcesComplete,
+    file,
+    liveJobNimbus: {
+      rawContact: contact,
+      recentActivities: sortedActivities.slice(0, 30).map(compactActivity),
+      openTasks: openTasks.slice(0, 30).map(compactTask),
+      operationalDocuments: operationalDocuments.slice(0, 60).map(compactDocument),
+      excludedPhotoLikeDocumentCount: documents.length - operationalDocuments.length,
+      assistantRead: buildAssistantRead(contact, activities, tasks, operationalDocuments)
+    },
+    gmail,
+    quo,
+    actionReceipts: latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id }),
+    sourceStatus,
+    factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, gmail, quo)
+  };
+}
+
+async function processActionBatch(input = {}) {
+  const operations = normalizeActionOperations(input.operations);
+  const plans = [];
+  for (const operation of operations) plans.push(await prepareActionOperation(operation));
+  const approvalDigest = digest({ version: 1, operations, plans: stableApprovalPlans(plans) });
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      operationCount: operations.length,
+      operations: plans,
+      approvalDigest,
+      instruction: "Nothing was executed. Show Chance every exact action. After approval, repeat unchanged with execute:true and this approvalDigest."
+    };
+  }
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true before executing an approved batch.");
+  requireApprovalDigest(input.approvalDigest, approvalDigest, "action batch");
+
+  const ledger = await readActionBatchLedger();
+  const existing = ledger.find((row) => row.approvalDigest === approvalDigest);
+  if (existing) {
+    return {
+      mode: "blocked_duplicate",
+      reason: `This exact approved batch is already ${existing.status}. Review its receipt before attempting anything again.`,
+      batch: existing
+    };
+  }
+  const batch = {
+    id: randomUUID(),
+    approvalDigest,
+    status: "in_progress",
+    createdAt: new Date().toISOString(),
+    operationCount: operations.length,
+    completed: []
+  };
+  ledger.push(batch);
+  await writeActionBatchLedger(ledger);
+
+  for (let index = 0; index < operations.length; index += 1) {
+    try {
+      const result = await executeActionOperation(operations[index], plans[index]);
+      batch.completed.push({ index, type: operations[index].type, status: "executed", receipt: summarizeOperationResult(result) });
+      await writeActionBatchLedger(ledger);
+    } catch (error) {
+      batch.status = "partial_failure";
+      batch.failedAt = index;
+      batch.error = redactSensitiveText(error.message || String(error));
+      batch.updatedAt = new Date().toISOString();
+      await writeActionBatchLedger(ledger);
+      return { mode: "partial_failure", batch, reason: "Execution stopped immediately. Review completed receipts before retrying any action." };
+    }
+  }
+  batch.status = "completed";
+  batch.completedAt = new Date().toISOString();
+  await writeActionBatchLedger(ledger);
+  return { mode: "executed", batch };
+}
+
+function stableApprovalPlans(plans) {
+  return JSON.parse(JSON.stringify(plans, (key, value) => {
+    if (["date_created", "generatedAt", "instruction"].includes(key)) return undefined;
+    return value;
+  }));
 }
 
 async function findChanceContact(query) {
@@ -3192,20 +3681,152 @@ function walkGmailParts(part, visitor) {
   for (const child of Array.isArray(part.parts) ? part.parts : []) walkGmailParts(child, visitor);
 }
 
-function buildRawEmail({ to, cc, bcc, subject, body }) {
+async function loadEmailAttachments(input = {}) {
+  const specs = Array.isArray(input.attachments) ? input.attachments : [];
+  if (specs.length > 8) badRequest("A Gmail message may include at most 8 attachments through this bridge.");
+  const attachments = [];
+  for (const [index, spec] of specs.entries()) {
+    if (!spec || typeof spec !== "object" || Array.isArray(spec)) badRequest(`attachments[${index}] must be an object`);
+    const source = String(spec.source || (spec.contentBase64 ? "base64" : "jobnimbus")).trim().toLowerCase();
+    if (source === "jobnimbus") {
+      const query = required(spec.query || input.query || input.fileQuery, `attachments[${index}].query`);
+      const { contact } = await findChanceContact(query);
+      const documents = await listRelated("/files", contact.jnid, 100);
+      const document = selectDocument(documents, String(spec.documentQuery || spec.documentId || "").trim());
+      if (!document) badRequest(`No matching JobNimbus document found for attachment ${index + 1}.`);
+      const downloaded = await downloadJobNimbusFile(document);
+      attachments.push(validateEmailAttachment({
+        filename: spec.filename || compactDocument(document).name || `attachment-${index + 1}`,
+        contentType: spec.contentType || downloaded.contentType || "application/octet-stream",
+        bytes: downloaded.bytes,
+        source,
+        sourceId: document.jnid || document.id || "",
+        sourceFileId: contact.jnid
+      }));
+      continue;
+    }
+    if (source === "base64") {
+      const contentBase64 = required(spec.contentBase64, `attachments[${index}].contentBase64`).replace(/\s+/g, "");
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) badRequest(`attachments[${index}].contentBase64 is not valid base64`);
+      attachments.push(validateEmailAttachment({
+        filename: required(spec.filename, `attachments[${index}].filename`),
+        contentType: spec.contentType || "application/octet-stream",
+        bytes: Buffer.from(contentBase64, "base64"),
+        source
+      }));
+      continue;
+    }
+    badRequest(`Unsupported Gmail attachment source: ${source}`);
+  }
+  const totalBytes = attachments.reduce((sum, attachment) => sum + attachment.bytes.length, 0);
+  if (totalBytes > 20 * 1024 * 1024) badRequest("Verified Gmail attachments exceed the bridge's 20 MB total limit.");
+  return attachments;
+}
+
+function validateEmailAttachment(attachment) {
+  const filename = safeMimeFilename(attachment.filename);
+  const bytes = Buffer.isBuffer(attachment.bytes) ? attachment.bytes : Buffer.from(attachment.bytes || []);
+  if (!bytes.length) badRequest(`Attachment ${filename} is empty; refusing to draft or send.`);
+  const contentType = String(attachment.contentType || "application/octet-stream").trim();
+  const isPdf = contentType === "application/pdf" || /\.pdf$/i.test(filename);
+  if (isPdf) {
+    if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
+      badRequest(`Attachment ${filename} is labeled as a PDF but has no PDF header.`);
+    }
+    const tail = bytes.subarray(Math.max(0, bytes.length - 4096)).toString("latin1");
+    if (!tail.includes("%%EOF")) {
+      badRequest(`Attachment ${filename} is missing the PDF end marker; refusing a possibly truncated document.`);
+    }
+  }
+  return { ...attachment, filename, contentType, bytes };
+}
+
+function emailAttachmentDescriptor(attachment, source = "") {
+  return cleanObject({
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    bytes: attachment.bytes.length,
+    sha256: createHash("sha256").update(attachment.bytes).digest("hex"),
+    source,
+    sourceId: attachment.sourceId || "",
+    sourceFileId: attachment.sourceFileId || ""
+  });
+}
+
+function buildRawEmail({ to, cc, bcc, subject, body, attachments = [] }) {
+  if (attachments.length) return buildMultipartRawEmail({ to, cc, bcc, subject, body, attachments });
   const headers = [
     `To: ${to}`,
     cc ? `Cc: ${cc}` : "",
     bcc ? `Bcc: ${bcc}` : "",
-    `Subject: ${subject}`,
+    `Subject: ${encodeHeaderWord(subject)}`,
     "MIME-Version: 1.0",
     "Content-Type: text/plain; charset=utf-8"
   ].filter(Boolean);
   return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${body}`);
 }
 
+function buildMultipartRawEmail({ to, cc, bcc, subject, body, attachments }) {
+  const checked = attachments.map(validateEmailAttachment);
+  const boundary = `wave_mixed_${Date.now()}_${randomUUID().replace(/-/g, "")}`;
+  const parts = [
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    body
+  ];
+  for (const attachment of checked) {
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: ${attachment.contentType}; name="${attachment.filename}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${attachment.filename}"`,
+      "",
+      wrapBase64(attachment.bytes)
+    );
+  }
+  parts.push(`--${boundary}--`, "");
+  const headers = [
+    `To: ${to}`,
+    cc ? `Cc: ${cc}` : "",
+    bcc ? `Bcc: ${bcc}` : "",
+    `Subject: ${encodeHeaderWord(subject)}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`
+  ].filter(Boolean);
+  const rawText = `${headers.join("\r\n")}\r\n\r\n${parts.join("\r\n")}`;
+  for (const attachment of checked) {
+    if (!rawText.includes(`filename="${attachment.filename}"`) || !rawText.includes(wrapBase64(attachment.bytes))) {
+      badRequest(`MIME verification failed for attachment ${attachment.filename}.`);
+    }
+  }
+  return base64UrlEncode(rawText);
+}
+
+function wrapBase64(bytes) {
+  return Buffer.from(bytes).toString("base64").match(/.{1,76}/g)?.join("\r\n") || "";
+}
+
+function safeMimeFilename(value) {
+  const clean = path.basename(String(value || "attachment"))
+    .replace(/[\r\n"\\]/g, "_")
+    .replace(/[^\x20-\x7E]/g, "_")
+    .trim();
+  return clean || "attachment";
+}
+
+function encodeHeaderWord(value) {
+  const text = String(value || "");
+  return /^[\x00-\x7F]*$/.test(text) ? text : `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
+}
+
 function base64UrlDecode(value) {
   return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function base64UrlToBuffer(value) {
+  return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
 
 function base64UrlEncode(value) {
@@ -3438,6 +4059,278 @@ function buildAssistantRead(contact, activities, tasks, documents) {
     recentNoteCount: activities.length,
     openTaskCount: tasks.filter((task) => !task.is_completed).length
   };
+}
+
+function isOperationalDocumentMetadata(document) {
+  const compact = compactDocument(document);
+  const name = String(compact.name || "").toLowerCase();
+  const contentType = String(document.content_type || document.contentType || document.mime_type || "").toLowerCase();
+  if (contentType.startsWith("image/")) return false;
+  if (/\.(?:jpe?g|png|gif|heic|webp|tiff?)$/i.test(name)) return false;
+  if (/\b(?:photo report|photo file|roof photos?|site photos?|damage photos?|image report)\b/i.test(name)) return false;
+  return true;
+}
+
+function buildFileGmailQuery(file, requestedDays) {
+  const days = clamp(Number(requestedDays || 365), 1, 3650);
+  const addressLine = String(file.address || "").split(",")[0].trim();
+  const terms = [...new Set([
+    file.claimNumber,
+    file.policyNumber,
+    file.email,
+    file.name,
+    addressLine,
+    file.number ? `#${file.number}` : ""
+  ].map((value) => String(value || "").trim()).filter((value) => value.length >= 4))].slice(0, 6);
+  if (!terms.length) return `newer_than:${days}d`;
+  const group = terms.map((term) => `"${term.replace(/["{}]/g, " ")}"`).join(" ");
+  return `{${group}} newer_than:${days}d`;
+}
+
+function compactGmailEvidenceThread(thread) {
+  const messages = (Array.isArray(thread.messages) ? thread.messages : []).slice(-5).map((message) => ({
+    id: message.id,
+    date: message.date,
+    from: message.from,
+    to: message.to,
+    subject: message.subject,
+    text: String(message.plainText || message.htmlText || message.snippet || "").slice(0, 1800),
+    attachments: message.attachments
+  }));
+  return {
+    id: thread.id,
+    messageCount: thread.messageCount,
+    messages,
+    assistantRead: thread.assistantRead
+  };
+}
+
+function buildFactualSignals(file, activities, openTasks, documents, gmail, quo) {
+  const latestActivity = activities[0]?.date_created || "";
+  const latestActivityDate = toIsoTimestamp(latestActivity);
+  const daysSinceActivity = latestActivityDate
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(latestActivityDate)) / 86400000))
+    : null;
+  const missing = [];
+  if (!file.carrier) missing.push("carrier");
+  if (!file.policyNumber) missing.push("policy number");
+  if (!file.claimNumber) missing.push("claim number");
+  if (!file.dateOfLoss) missing.push("date of loss");
+  if (!file.adjusterName && !file.adjusterPhone && !file.adjusterEmail) missing.push("adjuster contact");
+  return {
+    status: file.status,
+    missingJobNimbusFields: missing,
+    latestJobNimbusActivityAt: latestActivityDate,
+    daysSinceJobNimbusActivity: daysSinceActivity,
+    openTaskCount: openTasks.length,
+    operationalDocumentCount: documents.length,
+    gmailMessageCount: Array.isArray(gmail.messages) ? gmail.messages.length : 0,
+    quoTimelineItemCount: Array.isArray(quo.timeline) ? quo.timeline.length : 0
+  };
+}
+
+function toIsoTimestamp(value) {
+  if (!value) return "";
+  if (typeof value === "number" || /^\d+$/.test(String(value))) {
+    const number = Number(value);
+    const millis = number > 9999999999 ? number : number * 1000;
+    const date = new Date(millis);
+    return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? "" : new Date(parsed).toISOString();
+}
+
+function normalizeActionOperations(value) {
+  if (!Array.isArray(value) || !value.length) badRequest("operations must be a non-empty array");
+  if (value.length > 12) badRequest("An approval batch may contain at most 12 actions.");
+  return value.map((operation, index) => {
+    if (!operation || typeof operation !== "object" || Array.isArray(operation)) badRequest(`operations[${index}] must be an object`);
+    const type = String(operation.type || "").trim().toLowerCase();
+    const payload = operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
+      ? { ...operation.payload }
+      : {};
+    delete payload.execute;
+    delete payload.approvalDigest;
+    if (!ACTION_OPERATION_TYPES.has(type)) badRequest(`Unsupported action type: ${type}`);
+    return { type, payload };
+  });
+}
+
+const ACTION_OPERATION_TYPES = new Set([
+  "jobnimbus.update_contact",
+  "jobnimbus.update_status",
+  "jobnimbus.process_update",
+  "jobnimbus.create_note",
+  "jobnimbus.create_task",
+  "jobnimbus.update_task",
+  "jobnimbus.create_calendar_event",
+  "jobnimbus.update_calendar_event",
+  "gmail.create_draft",
+  "gmail.send",
+  "quo.send_text"
+]);
+
+async function prepareActionOperation(operation) {
+  const input = { ...operation.payload, execute: false };
+  let plan;
+  switch (operation.type) {
+    case "jobnimbus.update_contact": plan = await updateContact(input); break;
+    case "jobnimbus.update_status": plan = await updateStatus(input); break;
+    case "jobnimbus.process_update": plan = await processUpdate(input); break;
+    case "jobnimbus.create_note": plan = await createNote(input); break;
+    case "jobnimbus.create_task": plan = await createTask(input); break;
+    case "jobnimbus.update_task": plan = await updateTask(input); break;
+    case "jobnimbus.create_calendar_event": plan = await createCalendarEvent(input); break;
+    case "jobnimbus.update_calendar_event": plan = await updateCalendarEvent(input); break;
+    case "gmail.create_draft": plan = await gmailDraft(input); break;
+    case "gmail.send": plan = await gmailSend(input); break;
+    case "quo.send_text": plan = await quoSend(input); break;
+    default: badRequest(`Unsupported action type: ${operation.type}`);
+  }
+  return { type: operation.type, plan };
+}
+
+async function executeActionOperation(operation, prepared) {
+  const input = { ...operation.payload, execute: true };
+  switch (operation.type) {
+    case "jobnimbus.update_contact": return updateContact(input);
+    case "jobnimbus.update_status": return updateStatus(input);
+    case "jobnimbus.process_update": return processUpdate(input);
+    case "jobnimbus.create_note": return createNote(input);
+    case "jobnimbus.create_task": return createTask(input);
+    case "jobnimbus.update_task": return updateTask(input);
+    case "jobnimbus.create_calendar_event": return createCalendarEvent(input);
+    case "jobnimbus.update_calendar_event": return updateCalendarEvent(input);
+    case "gmail.create_draft": return gmailDraft(input);
+    case "gmail.send": return gmailSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
+    case "quo.send_text": return quoSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
+    default: badRequest(`Unsupported action type: ${operation.type}`);
+  }
+}
+
+async function readActionBatchLedger() {
+  const rows = await readJsonFile(ACTION_BATCH_STORE_PATH, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function writeActionBatchLedger(rows) {
+  await mkdir(path.dirname(ACTION_BATCH_STORE_PATH), { recursive: true });
+  const temporary = `${ACTION_BATCH_STORE_PATH}.tmp-${process.pid}`;
+  await writeFile(temporary, `${JSON.stringify(rows.slice(-300), null, 2)}\n`, "utf8");
+  await rename(temporary, ACTION_BATCH_STORE_PATH);
+}
+
+async function reserveOutboundSend(channel, approvalDigest, metadata = {}) {
+  const rows = await readJsonFile(OUTBOUND_SEND_STORE_PATH, []);
+  const ledger = Array.isArray(rows) ? rows : [];
+  const existing = ledger.find((row) => row.channel === channel && row.approvalDigest === approvalDigest);
+  if (existing) {
+    const error = new Error(`This exact approved ${channel} send is already ${existing.status}. Review its receipt before any retry.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const row = {
+    id: randomUUID(),
+    channel,
+    approvalDigest,
+    status: "in_progress",
+    createdAt: new Date().toISOString(),
+    destinationHash: metadata.to ? createHash("sha256").update(String(metadata.to)).digest("hex") : "",
+    subject: String(metadata.subject || "").slice(0, 160)
+  };
+  ledger.push(row);
+  await writeOutboundSendLedger(ledger);
+  return row;
+}
+
+async function completeOutboundSend(id, status, externalId = "", error = "") {
+  const rows = await readJsonFile(OUTBOUND_SEND_STORE_PATH, []);
+  const ledger = Array.isArray(rows) ? rows : [];
+  const row = ledger.find((item) => item.id === id);
+  if (!row) return;
+  row.status = status;
+  row.externalId = String(externalId || "").slice(0, 300);
+  row.error = String(error || "").slice(0, 500);
+  row.updatedAt = new Date().toISOString();
+  await writeOutboundSendLedger(ledger);
+}
+
+async function writeOutboundSendLedger(rows) {
+  await mkdir(path.dirname(OUTBOUND_SEND_STORE_PATH), { recursive: true });
+  const temporary = `${OUTBOUND_SEND_STORE_PATH}.tmp-${process.pid}`;
+  await writeFile(temporary, `${JSON.stringify(rows.slice(-500), null, 2)}\n`, "utf8");
+  await rename(temporary, OUTBOUND_SEND_STORE_PATH);
+}
+
+function summarizeOperationResult(result) {
+  return cleanObject({
+    mode: result?.mode || "executed",
+    fileId: result?.file?.id || "",
+    fileNumber: result?.file?.number || "",
+    externalId: resultId(result?.message || result?.draft || result?.result || result?.results || result),
+    memoryReceiptId: result?.memoryCloseout?.receipt?.id || ""
+  });
+}
+
+function resultId(result) {
+  if (!result || typeof result !== "object") return "";
+  return String(
+    result.id || result.jnid || result.message?.id || result.data?.id || result.data?.jnid ||
+    result.note?.jnid || result.contact?.jnid || result.activity?.jnid || ""
+  );
+}
+
+function closeoutJobNimbusAction(file, action, result, summary) {
+  const externalId = resultId(result);
+  return safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "jobnimbus",
+    action,
+    subjectKey: file.id,
+    fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
+    summary,
+    externalId,
+    evidence: externalId ? [`jobnimbus:${externalId}`] : []
+  });
+}
+
+async function optionalChanceFile(query) {
+  if (!query) return null;
+  return compactContact((await findChanceContact(query)).contact);
+}
+
+function closeoutGmailAction(input, file, action, externalId, summary, status = "executed") {
+  return safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "gmail",
+    action,
+    status,
+    subjectKey: file?.id || String(input.subjectKey || ""),
+    fileLabel: file ? `${file.number || ""} ${file.name || ""}`.trim() : String(input.fileLabel || ""),
+    summary,
+    externalId: String(externalId || ""),
+    followUps: input.followUps || [],
+    evidence: externalId ? [`gmail:${externalId}`] : []
+  });
+}
+
+function requireApprovalDigest(provided, expected, label) {
+  const value = String(provided || "").trim();
+  if (!value) badRequest(`${label} requires the approvalDigest from its exact dry run.`);
+  if (value !== expected) {
+    const error = new Error(`${label} approval digest no longer matches the current plan. Nothing was sent or executed; review a fresh dry run.`);
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
+function redactSensitiveText(value) {
+  let text = String(value || "");
+  for (const secret of [API_KEY, BRIDGE_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+    text = text.split(secret).join("[REDACTED]");
+  }
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:sk|key|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]");
 }
 
 function authorized(req) {
@@ -4098,6 +4991,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           eventId: { type: "string", description: "JobNimbus activity/event id." },
+          query: { type: "string", description: "Optional Chance file identifier so the update is ownership-verified and recorded on that file's private action history." },
           fields: { type: "object", additionalProperties: true, description: "Calendar event fields to update. dateStart/dateEnd timestamps must include an explicit UTC offset; timezone-free times are rejected." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
@@ -4118,6 +5012,37 @@ const OPENAPI = {
         },
         required: ["threadId"]
       },
+      GmailAttachmentReviewRequest: {
+        type: "object",
+        properties: {
+          messageId: { type: "string", description: "Gmail message id containing the attachment." },
+          attachmentId: { type: "string", description: "Gmail attachment id returned by readGmailThread." },
+          filename: { type: "string" },
+          contentType: { type: "string" },
+          maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 20000 },
+          previewChars: { type: "integer", minimum: 500, maximum: 12000, default: 8000 },
+          forceOcr: { type: "boolean", default: false },
+          maxOcrPages: { type: "integer", minimum: 1, maximum: 20, default: 5 },
+          uploadToJobNimbus: { type: "boolean", default: false, description: "When true, also prepares an upload to the exact Chance file." },
+          query: { type: "string", description: "Required when uploadToJobNimbus is true." },
+          description: { type: "string" },
+          isPrivate: { type: "boolean", default: false },
+          execute: { type: "boolean", default: false, description: "Only affects the optional JobNimbus upload. Attachment review itself is read-only." }
+        },
+        required: ["messageId", "attachmentId", "filename"]
+      },
+      GmailAttachmentSpec: {
+        type: "object",
+        properties: {
+          source: { type: "string", enum: ["jobnimbus", "base64"], default: "jobnimbus" },
+          query: { type: "string", description: "Chance file identifier. May be inherited from the message-level query." },
+          documentQuery: { type: "string", description: "JobNimbus document id or filename." },
+          documentId: { type: "string", description: "Alias for documentQuery." },
+          filename: { type: "string", description: "Optional safe output filename, or required for base64 attachments." },
+          contentType: { type: "string" },
+          contentBase64: { type: "string", description: "Only for source=base64. JobNimbus documents are fetched server-side." }
+        }
+      },
       GmailMessageRequest: {
         type: "object",
         properties: {
@@ -4127,9 +5052,100 @@ const OPENAPI = {
           subject: { type: "string", description: "Email subject. For insurance emails, use claim number only when applicable." },
           body: { type: "string", description: "Plain text email body." },
           threadId: { type: "string", description: "Optional Gmail thread id to reply in an existing thread." },
-          execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
+          query: { type: "string", description: "Chance file identifier used for JobNimbus attachments, ownership validation, and the private action receipt." },
+          fileQuery: { type: "string", description: "Alias for query." },
+          attemptId: { type: "string", description: "Defaults to initial. After a failed/uncertain send, use a new explicit value only when Chance approves a fresh retry dry run." },
+          attachments: { type: "array", maxItems: 8, items: { $ref: "#/components/schemas/GmailAttachmentSpec" }, description: "Verified attachments. Prefer source=jobnimbus so the bridge fetches and validates the exact document bytes." },
+          approvalDigest: { type: "string", description: "Required only for a live send. Must exactly match the immediately preceding send dry run." },
+          execute: { type: "boolean", default: false, description: "False returns a dry run. A live send additionally requires ALLOW_GMAIL_SEND=true and the exact approvalDigest." }
         },
         required: ["to", "subject", "body"]
+      },
+      QuoHistoryRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional exact Chance file identifier. Its current phone number will be used." },
+          phone: { type: "string", description: "US phone number. Used when query is omitted or as an explicit override." },
+          maxResults: { type: "integer", minimum: 1, maximum: 50, default: 25 },
+          includeTranscripts: { type: "boolean", default: false, description: "Try to include transcripts for up to the three most recent recorded calls." }
+        }
+      },
+      QuoTranscriptRequest: {
+        type: "object",
+        properties: { callId: { type: "string" } },
+        required: ["callId"]
+      },
+      QuoSendRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Exact Chance file identifier. Required for ownership validation and private receipt." },
+          to: { type: "string", description: "Destination override. Defaults to the current JobNimbus file phone." },
+          from: { type: "string", description: "Optional configured Quo line override." },
+          content: { type: "string", maxLength: 1600, description: "Exact text Chance will approve." },
+          message: { type: "string", maxLength: 1600, description: "Alias for content." },
+          attemptId: { type: "string", description: "Defaults to initial. After a failed/uncertain send, use a new explicit value only when Chance approves a fresh retry dry run." },
+          approvalDigest: { type: "string", description: "Required for a live send and must exactly match the immediately preceding dry run." },
+          execute: { type: "boolean", default: false, description: "False returns a dry run. True also requires ALLOW_QUO_SEND=true and the exact approvalDigest." }
+        },
+        required: ["query", "content"]
+      },
+      MemoryFileActionsRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Exact Chance file identifier." },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+          maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 15 }
+        },
+        required: ["query"]
+      },
+      MemoryPersistenceCheckRequest: {
+        type: "object",
+        properties: {
+          label: { type: "string", description: "Harmless probe label." },
+          execute: { type: "boolean", default: false, description: "False reads prior probes. True records one approved local persistence probe only." }
+        }
+      },
+      ChanceReviewRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional exact Chance file. Omit for a paginated Chance-only sweep." },
+          page: { type: "integer", minimum: 1, default: 1 },
+          limit: { type: "integer", minimum: 1, maximum: 10, default: 5 },
+          maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
+          activeOnly: { type: "boolean", default: true },
+          includeGmail: { type: "boolean", default: true },
+          includeQuo: { type: "boolean", default: true },
+          includeQuoTranscripts: { type: "boolean", default: false },
+          communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
+          gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
+          gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
+          quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 25 }
+        }
+      },
+      ActionOperation: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: [
+              "jobnimbus.update_contact", "jobnimbus.update_status", "jobnimbus.process_update",
+              "jobnimbus.create_note", "jobnimbus.create_task", "jobnimbus.update_task",
+              "jobnimbus.create_calendar_event", "jobnimbus.update_calendar_event",
+              "gmail.create_draft", "gmail.send", "quo.send_text"
+            ]
+          },
+          payload: { type: "object", additionalProperties: true, description: "Exact payload for the selected action. Do not include execute or approvalDigest; the batch controls both." }
+        },
+        required: ["type", "payload"]
+      },
+      ActionBatchRequest: {
+        type: "object",
+        properties: {
+          operations: { type: "array", minItems: 1, maxItems: 12, items: { $ref: "#/components/schemas/ActionOperation" } },
+          approvalDigest: { type: "string", description: "Required for execution. Must match the immediately preceding unchanged batch dry run." },
+          execute: { type: "boolean", default: false, description: "False prepares the exact batch. True executes once after Chance approves its digest. Duplicate execution is blocked." }
+        },
+        required: ["operations"]
       },
       ClaimFilingPrepareRequest: {
         type: "object",
@@ -4528,6 +5544,35 @@ const OPENAPI = {
         responses: { "200": { description: "Read-only company operating context. Never writes memory, exposes client memory, or executes an action." } }
       }
     },
+    "/memory/file-actions": {
+      post: {
+        operationId: "readChanceFileActionReceipts",
+        requestBody: jsonBody("MemoryFileActionsRequest"),
+        responses: { "200": { description: "Private, exact-file action receipts and isolated client context. Past receipts are proof only, never approval for future work." } }
+      }
+    },
+    "/memory/persistence-check": {
+      post: {
+        operationId: "checkRenderMemoryPersistence",
+        requestBody: jsonBody("MemoryPersistenceCheckRequest"),
+        responses: { "200": { description: "Reads or records a harmless approved persistence probe. No external system is contacted." } }
+      }
+    },
+    "/ops/review-chance-files": {
+      post: {
+        operationId: "reviewChanceFilesForApproval",
+        requestBody: jsonBody("ChanceReviewRequest"),
+        responses: { "200": { description: "Fresh, paginated Chance-only evidence packets combining JobNimbus, operational documents, Gmail, Quo, and private execution receipts. Returns evidence for assistant judgment, not automatic decisions." } }
+      }
+    },
+    "/ops/action-batch": {
+      post: {
+        operationId: "processApprovedWaveActionBatch",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("ActionBatchRequest"),
+        responses: { "200": { description: "Two-step approval transaction. Dry run shows every exact action and digest; execute runs the unchanged approved batch once and blocks duplicates." } }
+      }
+    },
     "/jobnimbus/search": {
       post: {
         operationId: "searchJobNimbus",
@@ -4647,6 +5692,13 @@ const OPENAPI = {
         responses: { "200": { description: "Full Gmail thread with parsed text and attachment metadata." } }
       }
     },
+    "/gmail/attachment-review": {
+      post: {
+        operationId: "reviewGmailAttachment",
+        requestBody: jsonBody("GmailAttachmentReviewRequest"),
+        responses: { "200": { description: "Downloads and validates a Gmail attachment, extracts text/OCR when supported, and optionally dry-runs or executes an upload to an exact Chance JobNimbus file." } }
+      }
+    },
     "/gmail/draft": {
       post: {
         operationId: "createGmailDraft",
@@ -4657,8 +5709,38 @@ const OPENAPI = {
     "/gmail/send": {
       post: {
         operationId: "sendGmail",
+        "x-openai-isConsequential": true,
         requestBody: jsonBody("GmailMessageRequest"),
-        responses: { "200": { description: "Dry run or sent Gmail message." } }
+        responses: { "200": { description: "Two-step Gmail send. Nothing is sent during dry run. A live send requires Chance's explicit approval, execute:true, both server write gates, and the exact unchanged digest." } }
+      }
+    },
+    "/quo/numbers": {
+      post: {
+        operationId: "listQuoPhoneNumbers",
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {} } } } },
+        responses: { "200": { description: "Configured Quo team lines." } }
+      }
+    },
+    "/quo/history": {
+      post: {
+        operationId: "reviewQuoHistory",
+        requestBody: jsonBody("QuoHistoryRequest"),
+        responses: { "200": { description: "Messages and calls across every Quo team line for one exact phone/file, with optional recorded-call transcripts." } }
+      }
+    },
+    "/quo/transcript": {
+      post: {
+        operationId: "reviewQuoCallTranscript",
+        requestBody: jsonBody("QuoTranscriptRequest"),
+        responses: { "200": { description: "Transcript for one recorded Quo call." } }
+      }
+    },
+    "/quo/send": {
+      post: {
+        operationId: "sendApprovedQuoText",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("QuoSendRequest"),
+        responses: { "200": { description: "Two-step Quo send. Dry run returns the exact text/recipient digest; live send requires Chance approval, execute:true, ALLOW_QUO_SEND=true, and the unchanged digest." } }
       }
     }
   }

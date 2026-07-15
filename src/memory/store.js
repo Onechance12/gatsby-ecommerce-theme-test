@@ -33,7 +33,8 @@ export function memoryPaths(config) {
     company: path.join(repoRoot, "memory", "company.jsonl"),
     client: path.join(dataRoot, "data", "memory", "records.jsonl"),
     episodes: path.join(dataRoot, "data", "memory", "episodes.jsonl"),
-    proposals: path.join(dataRoot, "data", "memory", "proposals.jsonl")
+    proposals: path.join(dataRoot, "data", "memory", "proposals.jsonl"),
+    actions: path.join(dataRoot, "data", "memory", "actions.jsonl")
   };
 }
 
@@ -185,6 +186,53 @@ export function recordEpisode(config, draft = {}) {
 
 export function latestEpisodes(config, count = 2) {
   return readJsonl(memoryPaths(config).episodes).rows.slice(-count).reverse();
+}
+
+// Immutable proof that an approved external action ran. Receipts live in the
+// private client lane and store concise summaries, never raw messages/secrets.
+export function recordActionReceipt(config, draft = {}) {
+  const channel = String(draft.channel || "").trim().toLowerCase();
+  const action = String(draft.action || "").trim().toLowerCase();
+  const summary = String(draft.summary || "").trim();
+  if (!channel) throw new Error("action receipt requires channel");
+  if (!action) throw new Error("action receipt requires action");
+  if (summary.length < 8) throw new Error("action receipt needs a real summary");
+
+  const externalId = String(draft.externalId || "").trim();
+  const subjectKey = String(draft.subjectKey || "").trim();
+  const dedupKey = String(draft.dedupKey || (externalId ? `${channel}:${action}:${externalId}` : "")).trim();
+  const paths = memoryPaths(config);
+  const rows = readForMutation(paths.actions);
+  if (dedupKey) {
+    const existing = rows.find((row) => row.dedupKey === dedupKey);
+    if (existing) return { receipt: existing, deduped: true };
+  }
+
+  const receipt = {
+    id: memoryId().replace("mem_", "act_"),
+    at: new Date().toISOString(),
+    channel,
+    action,
+    status: String(draft.status || "executed").trim().toLowerCase(),
+    subjectKey,
+    fileLabel: String(draft.fileLabel || "").trim().slice(0, 240),
+    summary: summary.slice(0, 1600),
+    externalId: externalId.slice(0, 300),
+    dedupKey,
+    followUps: strList(draft.followUps, 12),
+    evidence: strList(draft.evidence, 12)
+  };
+  rows.push(receipt);
+  writeJsonl(paths.actions, rows.slice(-1000));
+  return { receipt, deduped: false };
+}
+
+export function latestActionReceipts(config, count = 10, { subjectKey = "" } = {}) {
+  const rows = readJsonl(memoryPaths(config).actions).rows;
+  return rows
+    .filter((row) => !subjectKey || row.subjectKey === subjectKey)
+    .slice(-Math.max(1, Number(count) || 10))
+    .reverse();
 }
 
 // ---- Proposals: candidate plans awaiting Chance (never self-executing)

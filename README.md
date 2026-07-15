@@ -1,7 +1,9 @@
 # JobNimbus ChatGPT Bridge
 
 Small authenticated bridge that lets a ChatGPT Custom GPT Action read and, when explicitly enabled, update JobNimbus.
-It also supports Gmail search/thread review and dry-run email drafting/sending when Gmail OAuth credentials are configured.
+It also supports Gmail search/thread/attachment review, verified PDF attachments,
+Quo messages/calls/transcripts, durable private action receipts, and a unified
+Chance-only review/approval transaction.
 It includes a handoff inbox so another ChatGPT chat with Gmail/Quo access can pass findings into this JobNimbus bridge.
 It also includes an authenticated, non-executing patch mailbox so Claude and
 Codex can exchange short-lived `.patch`/`.diff` packages when an agent's Git
@@ -13,7 +15,16 @@ transport is unavailable.
 - Set `JOBNIMBUS_BRIDGE_TOKEN` and use it as the Custom GPT bearer token.
 - Leave `BRIDGE_ALLOW_WRITES=false` until you intentionally want approved write actions.
 - Write endpoints are dry-run unless the request includes `execute:true` and Render has `BRIDGE_ALLOW_WRITES=true`.
-- Gmail draft/send endpoints are also dry-run unless `execute:true` and `BRIDGE_ALLOW_WRITES=true`.
+- A live Gmail send requires `BRIDGE_ALLOW_WRITES=true`, `ALLOW_GMAIL_SEND=true`,
+  `execute:true`, and the exact digest returned by the unchanged dry run.
+- A live Quo send requires `BRIDGE_ALLOW_WRITES=true`, `ALLOW_QUO_SEND=true`,
+  `execute:true`, and the exact digest returned by the unchanged dry run.
+- Gmail and Quo sends are explicitly marked consequential in the Custom GPT
+  schema. The assistant must show the dry run and wait for Chance's approval;
+  review, memory closeout, and sweep endpoints never send messages.
+- Changing one character, recipient, subject, or attachment invalidates the
+  approval digest. Duplicate approved action batches are blocked by a persistent ledger.
+- JobNimbus write actions resolve only Chance Pearson-owned insurance files.
 - The handoff inbox allows public handoff creation so browser agents can submit Gmail/Quo findings. Listing/completing handoffs still requires the bridge bearer token.
 - Artifact endpoints always require the bridge bearer token. They never apply,
   execute, commit, push, or deploy an uploaded patch.
@@ -40,20 +51,52 @@ JOBNIMBUS_BRIDGE_TOKEN=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
+QUO_API_KEY=
 ```
 
-Optional env vars:
+Persistent and channel-control variables:
 
 ```text
-HANDOFF_STORE_PATH=/tmp/jobnimbus-chatgpt-handoffs.json
-HANDOFF_UPLOAD_DIR=/tmp/jobnimbus-chatgpt-handoff-uploads
+MEMORY_ROOT=/var/data
+ALLOW_GMAIL_SEND=false
+QUO_DEFAULT_FROM_NUMBER=
+ALLOW_QUO_SEND=false
+HANDOFF_STORE_PATH=/var/data/bridge/handoffs.json
+HANDOFF_UPLOAD_DIR=/var/data/bridge/handoff-uploads
 MAX_JSON_BODY_BYTES=12582912
-ARTIFACT_STORE_PATH=/tmp/jobnimbus-chatgpt-artifacts.json
-ARTIFACT_UPLOAD_DIR=/tmp/jobnimbus-chatgpt-artifact-uploads
-ARTIFACT_FILE_DIR=/tmp/jobnimbus-chatgpt-artifacts
+ARTIFACT_STORE_PATH=/var/data/bridge/artifacts.json
+ARTIFACT_UPLOAD_DIR=/var/data/bridge/artifact-uploads
+ARTIFACT_FILE_DIR=/var/data/bridge/artifacts
 MAX_ARTIFACT_BYTES=5242880
 ARTIFACT_TTL_HOURS=72
+CLAIM_CALL_STORE_PATH=/var/data/bridge/claim-call-ledger.json
+ACTION_BATCH_STORE_PATH=/var/data/bridge/action-batches.json
+OUTBOUND_SEND_STORE_PATH=/var/data/bridge/outbound-sends.json
 ```
+
+## Fresh Review And Approval
+
+`POST /ops/review-chance-files` gathers fresh JobNimbus fields, recent activity,
+open tasks, non-photo operational documents, Gmail evidence, Quo evidence, and
+private action receipts. It deliberately returns evidence rather than pretending
+that fixed rules can replace assistant judgment.
+
+`POST /ops/action-batch` then provides the two-step execution flow:
+
+1. Send exact operations with `execute:false` and show Chance the resulting plan.
+2. After Chance approves, repeat the unchanged operations with `execute:true`
+   and the returned `approvalDigest`.
+
+The bridge records successful actions on the persistent disk and refuses to run
+the same approved batch twice.
+
+## Custom ChatGPT
+
+A normal ChatGPT experience can use this service through a Custom GPT Action.
+Import `https://jobnimbus-chatgpt-bridge.onrender.com/openapi.json`, configure
+HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
+and start a new chat after schema changes. Arbitrary standard chats do not gain
+the bridge automatically; the Action must be installed on that GPT.
 
 ## Handoff Inbox
 

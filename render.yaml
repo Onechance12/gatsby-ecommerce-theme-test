@@ -5,6 +5,10 @@ services:
     plan: starter
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
+    disk:
+      name: jobnimbus-bridge-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: JOBNIMBUS_API_BASE_URL
         value: https://app.jobnimbus.com/api1
@@ -14,6 +18,8 @@ services:
         sync: false
       - key: BRIDGE_ALLOW_WRITES
         value: "false"
+      - key: MEMORY_ROOT
+        value: /var/data
       - key: MAX_ARTIFACT_BYTES
         value: "5242880"
       - key: ARTIFACT_TTL_HOURS
@@ -26,6 +32,16 @@ services:
         sync: false
       - key: GMAIL_USER
         value: me
+      - key: ALLOW_GMAIL_SEND
+        value: "false"
+      - key: QUO_API_KEY
+        sync: false
+      - key: QUO_API_BASE_URL
+        value: https://api.openphone.com/v1
+      - key: QUO_DEFAULT_FROM_NUMBER
+        sync: false
+      - key: ALLOW_QUO_SEND
+        value: "false"
       - key: GOOGLE_CALENDAR_ID
         value: primary
       - key: SCHEDULING_HORIZON_DAYS
@@ -75,4 +91,8 @@ services:
       - key: CHANCE_JOBNIMBUS_OWNER_ID
         value: fc95a213f70e4c9daddc5fa366be9941
       - key: CLAIM_CALL_STORE_PATH
-        value: /tmp/jobnimbus-claim-call-ledger.json
+        value: /var/data/bridge/claim-call-ledger.json
+      - key: ACTION_BATCH_STORE_PATH
+        value: /var/data/bridge/action-batches.json
+      - key: OUTBOUND_SEND_STORE_PATH
+        value: /var/data/bridge/outbound-sends.json

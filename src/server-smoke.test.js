@@ -30,9 +30,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.claimFiling.callbackPacketRestoration, "full_approved_packet");
   assert.equal(health.claimFiling.retryRequiresPriorCallId, true);
   assert.equal(health.claimFiling.callsAllowed, false);
-  assert.equal(health.brain.mode, "read_only_company_context");
+  assert.equal(health.brain.mode, "verified_company_context_with_private_action_receipts");
   assert.equal(health.brain.autonomousLearning, false);
   assert.equal(health.brain.externalActions, false);
+  assert.equal(health.outboundSafety.automaticEmailOrTextSending, false);
+  assert.equal(health.outboundSafety.explicitChanceApprovalRequired, true);
   assert.equal(health.voice.streamPath, "/voice/twilio-stream");
   assert.equal(health.voice.streamUrl, undefined);
 
@@ -49,6 +51,13 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
   assert.equal(schema.paths["/retell/homeowner-call-result"].post.operationId, "reviewHomeownerAppointmentCall");
   assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
+  assert.equal(schema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
+  assert.equal(schema.paths["/ops/action-batch"].post.operationId, "processApprovedWaveActionBatch");
+  assert.equal(schema.paths["/quo/send"].post.operationId, "sendApprovedQuoText");
+  assert.equal(schema.paths["/quo/send"].post["x-openai-isConsequential"], true);
+  assert.equal(schema.paths["/gmail/send"].post["x-openai-isConsequential"], true);
+  assert.equal(schema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
+  assert.equal(schema.paths["/gmail/attachment-review"].post.operationId, "reviewGmailAttachment");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
 
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {
@@ -126,7 +135,11 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       RETELL_FROM_NUMBER: "+12145550100",
       RETELL_API_KEY: "fixture-retell-key",
       ALLOW_RETELL_CALLS: "false",
-      BRIDGE_ALLOW_WRITES: "false"
+      BRIDGE_ALLOW_WRITES: "true",
+      ALLOW_GMAIL_SEND: "true",
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      ALLOW_QUO_SEND: "true"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -208,6 +221,100 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(uploadDryRun.plan.filename, "Certified policy.pdf");
   assert.equal(uploadDryRun.plan.sizeBytes, 16);
   assert.deepEqual(uploadDryRun.plan.related, [chance.jnid]);
+
+  const gmailDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      to: "carrier@example.test",
+      subject: "CLAIM-1",
+      body: "Approved test body.",
+      execute: false
+    })
+  });
+  assert.equal(gmailDryRunResponse.status, 200);
+  const gmailDryRun = await gmailDryRunResponse.json();
+  assert.match(gmailDryRun.approvalDigest, /^[a-f0-9]{64}$/);
+
+  const gmailUnapprovedResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      to: "carrier@example.test",
+      subject: "CLAIM-1",
+      body: "Approved test body.",
+      execute: true
+    })
+  });
+  assert.equal(gmailUnapprovedResponse.status, 400);
+
+  const gmailChangedResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      to: "carrier@example.test",
+      subject: "CLAIM-1",
+      body: "Changed after approval.",
+      approvalDigest: gmailDryRun.approvalDigest,
+      execute: true
+    })
+  });
+  assert.equal(gmailChangedResponse.status, 409);
+
+  const quoDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", content: "Approved homeowner text.", execute: false })
+  });
+  assert.equal(quoDryRunResponse.status, 200);
+  const quoDryRun = await quoDryRunResponse.json();
+  assert.match(quoDryRun.approvalDigest, /^[a-f0-9]{64}$/);
+
+  const quoUnapprovedResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", content: "Approved homeowner text.", execute: true })
+  });
+  assert.equal(quoUnapprovedResponse.status, 400);
+
+  const quoChangedResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      content: "Changed homeowner text.",
+      approvalDigest: quoDryRun.approvalDigest,
+      execute: true
+    })
+  });
+  assert.equal(quoChangedResponse.status, 409);
+
+  const batchPayload = {
+    operations: [{
+      type: "jobnimbus.create_note",
+      payload: { query: "2739", note: "Approved fixture note." }
+    }],
+    execute: false
+  };
+  const firstBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify(batchPayload)
+  });
+  assert.equal(firstBatchResponse.status, 200);
+  const firstBatch = await firstBatchResponse.json();
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const secondBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify(batchPayload)
+  });
+  assert.equal(secondBatchResponse.status, 200);
+  const secondBatch = await secondBatchResponse.json();
+  assert.equal(secondBatch.approvalDigest, firstBatch.approvalDigest);
 
   const timezoneFreeResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",

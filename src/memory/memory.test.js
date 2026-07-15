@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { saveMemory, listMemory, setMemoryStatus, saveProposal, reviewProposal, recordEpisode, memoryPaths } from "./store.js";
+import { saveMemory, listMemory, setMemoryStatus, saveProposal, reviewProposal, recordEpisode, recordActionReceipt, latestActionReceipts, memoryPaths } from "./store.js";
 import { renderBrain } from "./brain.js";
 import { assertCompanyLaneSafe, normalizeMemoryDraft } from "./contracts.js";
 
@@ -21,6 +21,7 @@ test("storage roots: company anchors to repo root, client follows data root", ()
   assert.ok(paths.company.startsWith(cfg.projectRoot));
   assert.ok(paths.client.startsWith(cfg.memoryRoot));
   assert.ok(paths.episodes.startsWith(cfg.memoryRoot));
+  assert.ok(paths.actions.startsWith(cfg.memoryRoot));
 });
 
 test("seeded company rules survive a data-root override", () => {
@@ -155,4 +156,35 @@ test("candidate commitments and client facts stay quarantined", () => {
 
 test("contracts: evidence is mandatory", () => {
   assert.throws(() => normalizeMemoryDraft({ lane: "company", kind: "lesson", content: "no evidence provided here" }), /evidence/);
+});
+
+test("action receipts are private, deduplicated, and subject-isolated", () => {
+  const cfg = freshCfg();
+  const first = recordActionReceipt(cfg, {
+    channel: "gmail",
+    action: "send_email",
+    subjectKey: "fileA",
+    summary: "Sent approved carrier email.",
+    externalId: "message-1"
+  });
+  const duplicate = recordActionReceipt(cfg, {
+    channel: "gmail",
+    action: "send_email",
+    subjectKey: "fileA",
+    summary: "Sent approved carrier email again.",
+    externalId: "message-1"
+  });
+  recordActionReceipt(cfg, {
+    channel: "quo",
+    action: "send_text",
+    subjectKey: "fileB",
+    summary: "Sent approved homeowner text.",
+    externalId: "message-2"
+  });
+  assert.equal(duplicate.deduped, true);
+  assert.equal(duplicate.receipt.id, first.receipt.id);
+  assert.equal(latestActionReceipts(cfg, 10, { subjectKey: "fileA" }).length, 1);
+  assert.equal(latestActionReceipts(cfg, 10, { subjectKey: "fileB" }).length, 1);
+  assert.match(renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA", includeEpisodes: true }), /Sent approved carrier email/);
+  assert.doesNotMatch(renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA", includeEpisodes: true }), /homeowner text/);
 });
