@@ -96,6 +96,7 @@ const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText 
 const routes = new Map([
   ["GET /health", health],
   ["GET /openapi.json", openapi],
+  ["GET /openapi-chatgpt.json", chatgptOpenapi],
   ["GET /privacy", privacy],
   ["GET /handoff", handoffPage],
   ["GET /voice/twiml", voiceTwiml],
@@ -338,6 +339,52 @@ function memoryPersistenceCheck(input = {}) {
 
 function openapi() {
   return { ...OPENAPI, servers: [{ url: PUBLIC_BASE_URL }] };
+}
+
+const CHATGPT_ACTION_PATHS = [
+  "/brain/context",
+  "/ops/review-chance-files",
+  "/ops/action-batch",
+  "/memory/file-actions",
+  "/scheduling/availability",
+  "/jobnimbus/search",
+  "/jobnimbus/review-file",
+  "/jobnimbus/document-review",
+  "/jobnimbus/upload-file",
+  "/jobnimbus/process-update",
+  "/jobnimbus/create-task",
+  "/jobnimbus/update-task",
+  "/jobnimbus/create-calendar-event",
+  "/jobnimbus/update-calendar-event",
+  "/gmail/search",
+  "/gmail/thread",
+  "/gmail/attachment-review",
+  "/gmail/draft",
+  "/gmail/send",
+  "/quo/numbers",
+  "/quo/history",
+  "/quo/transcript",
+  "/quo/send",
+  "/claim-filing/prepare",
+  "/claim-filing/call",
+  "/claim-filing/result",
+  "/claim-filing/callbacks",
+  "/claim-filing/writeback",
+  "/retell/homeowner-call",
+  "/retell/homeowner-call-result"
+];
+
+function chatgptOpenapi() {
+  return {
+    ...OPENAPI,
+    info: {
+      ...OPENAPI.info,
+      title: "Chance JobNimbus Ops Assistant",
+      description: "Curated 30-operation schema for the Chance Pearson HCN/Wave Custom GPT. Gmail and Quo live sends require Chance's explicit approval of the exact unchanged dry run."
+    },
+    servers: [{ url: PUBLIC_BASE_URL }],
+    paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
+  };
 }
 
 function privacy() {
@@ -4339,7 +4386,7 @@ function authorized(req) {
 }
 
 function isPublicRoute(method, pathname) {
-  return (method === "GET" && ["/health", "/openapi.json", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
+  return (method === "GET" && ["/health", "/openapi.json", "/openapi-chatgpt.json", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
     || (method === "POST" && ["/handoff", "/handoff/chunk"].includes(pathname));
 }
 

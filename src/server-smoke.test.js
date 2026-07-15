@@ -60,6 +60,18 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/gmail/attachment-review"].post.operationId, "reviewGmailAttachment");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
 
+  const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
+  assert.equal(chatgptSchemaResponse.status, 200);
+  const chatgptSchema = await chatgptSchemaResponse.json();
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 30);
+  assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
+  assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
+  assert.equal(chatgptSchema.paths["/gmail/send"].post["x-openai-isConsequential"], true);
+  assert.equal(chatgptSchema.paths["/quo/send"].post["x-openai-isConsequential"], true);
+  assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
+  assert.equal(chatgptSchema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
+  assert.equal(chatgptSchema.paths["/voice/outbound-call"], undefined);
+
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {
     method: "POST",
     headers: { "content-type": "application/json" },
