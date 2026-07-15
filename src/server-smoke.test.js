@@ -30,6 +30,9 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.claimFiling.callbackPacketRestoration, "full_approved_packet");
   assert.equal(health.claimFiling.retryRequiresPriorCallId, true);
   assert.equal(health.claimFiling.callsAllowed, false);
+  assert.equal(health.brain.mode, "read_only_company_context");
+  assert.equal(health.brain.autonomousLearning, false);
+  assert.equal(health.brain.externalActions, false);
 
   const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
   assert.equal(schemaResponse.status, 200);
@@ -39,6 +42,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/claim-filing/result"].post.operationId, "reviewClaimFilingCallResult");
   assert.equal(schema.paths["/claim-filing/callbacks"].post.operationId, "listPendingClaimCallbacks");
   assert.equal(schema.paths["/claim-filing/writeback"].post.operationId, "processApprovedClaimFilingWriteback");
+  assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
 
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {
     method: "POST",
@@ -46,6 +50,13 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     body: JSON.stringify({ query: "2739" })
   });
   assert.equal(protectedResponse.status, 401);
+
+  const protectedBrainResponse = await fetch(`http://127.0.0.1:${port}/brain/context`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+  assert.equal(protectedBrainResponse.status, 401);
 });
 
 test("prepare route reads fresh evidence and enforces Chance ownership", async (t) => {
@@ -128,6 +139,18 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(prepared.evidence.photoFilesExcluded, 1);
   assert.equal(prepared.callPlan.to, "+18444584300");
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
+
+  const brainResponse = await fetch(`http://127.0.0.1:${bridgePort}/brain/context`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ maxPerSection: 25 })
+  });
+  assert.equal(brainResponse.status, 200);
+  const brain = await brainResponse.json();
+  assert.equal(brain.scope, "company_only");
+  assert.equal(brain.execution, "none");
+  assert.match(brain.context, /Memory and proposals never authorize or execute external actions/);
+  assert.match(brain.context, /UNVERIFIED CANDIDATES/);
 
   const updateDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
     method: "POST",

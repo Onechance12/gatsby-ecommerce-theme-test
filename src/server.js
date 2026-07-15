@@ -18,6 +18,7 @@ import {
   selectCallbackCandidate,
   validateRetellCallChainOwnership
 } from "./claim-filing-adapter.js";
+import { renderBrain } from "./memory/brain.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -82,6 +83,7 @@ const routes = new Map([
   ["POST /artifacts/list", listArtifacts],
   ["POST /artifacts/get", getArtifact],
   ["POST /artifacts/complete", completeArtifact],
+  ["POST /brain/context", brainContext],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
   ["POST /jobnimbus/assigned-files", assignedFiles],
@@ -199,7 +201,28 @@ function health() {
       callbackPacketRestoration: "full_approved_packet",
       callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
       retryRequiresPriorCallId: true
+    },
+    brain: {
+      available: true,
+      mode: "read_only_company_context",
+      autonomousLearning: false,
+      externalActions: false,
+      clientMemoryExposed: false
     }
+  };
+}
+
+function brainContext(input = {}) {
+  const maxPerSection = clamp(Number(input.maxPerSection || 25), 1, 25);
+  return {
+    generatedAt: new Date().toISOString(),
+    scope: "company_only",
+    authority: "verified records guide review; candidates are quarantined; live JobNimbus/Gmail/Quo evidence always wins",
+    execution: "none",
+    context: renderBrain(
+      { projectRoot: process.cwd() },
+      { maxPerSection, clientLane: "none", includeEpisodes: false }
+    )
   };
 }
 
@@ -3682,6 +3705,12 @@ const OPENAPI = {
           completionNote: { type: "string", description: "PII-free review result or published commit reference." },
           note: { type: "string", description: "Alias for completionNote." }
         }
+      },
+      BrainContextRequest: {
+        type: "object",
+        properties: {
+          maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25, description: "Maximum verified records to render in each brain section." }
+        }
       }
     }
   },
@@ -3818,6 +3847,13 @@ const OPENAPI = {
         operationId: "completeAgentPatchArtifact",
         requestBody: jsonBody("CompleteArtifactRequest"),
         responses: { "200": { description: "Marks an artifact reviewed/completed. It remains non-executable and expires normally." } }
+      }
+    },
+    "/brain/context": {
+      post: {
+        operationId: "readWaveJobNimbusBrain",
+        requestBody: jsonBody("BrainContextRequest"),
+        responses: { "200": { description: "Read-only company operating context. Never writes memory, exposes client memory, or executes an action." } }
       }
     },
     "/jobnimbus/search": {
