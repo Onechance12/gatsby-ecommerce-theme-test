@@ -98,7 +98,7 @@ export async function runLorPackage(config, args) {
     "",
     `Attached please find ${docList} for the above-referenced claim (policyholder: ${file.customer}).`,
     "",
-    `Pursuant to the enclosed Letter of Representation, please direct all future claim correspondence to our office and issue all claim payments accordingly: make every claim payment check payable to ${file.customer} and Wave Public Adjusting LLC as co-payees, and mail it to our office at the address below rather than to the insured directly.`,
+    "Pursuant to the enclosed Letter of Representation, please direct all future claim correspondence to our office, add Wave Public Adjusting LLC as a payee on all claim payments, and send payment to our office at the address below.",
     "",
     "Thank you,",
     "Chance Pearson",
