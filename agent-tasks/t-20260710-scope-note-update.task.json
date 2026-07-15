@@ -1,0 +1,53 @@
+{
+  "id": "t-20260710-scope-note-update",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "done",
+  "mode": "code",
+  "title": "Scope note edits to a verified Chance file",
+  "goal": "Harden update_jobnimbus_note so a raw activity id cannot bypass the normal Chance-file match and edit an unrelated company note. Require a file query, resolve the Chance-owned file, and verify the target activity belongs to that file before planning or executing PUT /activities/{id}.",
+  "workBranch": "claude/jobnimbus-tool-search-cpeh4n",
+  "files": [
+    "src/assistant/actionTools.js",
+    "src/assistant/fileReview.js",
+    "src/jobnimbus/client.js"
+  ],
+  "doneCriteria": [
+    "The action requires both a Chance-file query and noteId.",
+    "The target activity is verified as related to the resolved file before execution.",
+    "Dry-run remains the default and ALLOW_JOBNIMBUS_WRITES plus execute:true remain mandatory.",
+    "A wrong-file or unrelated note id fails without issuing a PUT.",
+    "Fixture-safe checks cover the allowed and rejected paths."
+  ],
+  "constraints": [
+    "Do not weaken write gates or Chance-only scope.",
+    "Do not test with a live write.",
+    "Do not include client PII, note bodies, credentials, or runtime exports in Git.",
+    "Use the artifact mailbox only if normal Git push fails."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "created during review of e28024c; update_jobnimbus_note skips requireFileMatch and plans a PUT from noteId alone"
+    },
+    {
+      "at": "2026-07-10",
+      "by": "claude",
+      "note": "Hardened. The dispatcher no longer special-cases update_jobnimbus_note: ALL actions now resolve a Chance file via requireFileMatch, so a bare noteId can no longer plan a PUT. planUpdateNote requires {query, noteId}, fetches the activity read-only, and refuses the edit unless the activity is related to the resolved file (activityFileIds + noteOwnershipError). Dry-run default and ALLOW_JOBNIMBUS_WRITES+execute gates unchanged; fixture mode refuses (ownership needs a live read). Fixture-safe checks in selftest.js cover primary-match/related-match allowed and wrong-file/missing-activity rejected. npm run check exit 0."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Reviewed commit 2e2717e. Ownership helpers and dispatcher behavior satisfy the task; fixture-safe allowed/rejected checks pass. No live write was performed. Task closed."
+    }
+  ],
+  "result": {
+    "branch": "claude/jobnimbus-tool-search-cpeh4n",
+    "commit": "2e2717e",
+    "summary": "update_jobnimbus_note now requires a Chance-file query + noteId and verifies the activity belongs to the resolved file before any PUT.",
+    "verification": "npm run check exit 0; note-ownership guard unit-checked (allowed via primary/related, rejected on wrong-file/missing activity)."
+  }
+}

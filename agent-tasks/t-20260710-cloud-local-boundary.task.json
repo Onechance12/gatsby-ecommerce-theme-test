@@ -1,0 +1,53 @@
+{
+  "id": "t-20260710-cloud-local-boundary",
+  "assignedBy": "owner",
+  "assignedTo": "codex",
+  "status": "needs_review",
+  "mode": "verify",
+  "title": "Map Claude assistant features to the live Render bridge",
+  "goal": "Identify which capabilities exist only on the Claude operations branch, which exist on the deployed bridge branch, and propose one minimal read-only integration test. Do not deploy or write client data.",
+  "workBranch": "codex/agent-collab",
+  "files": [
+    "src/assistant/",
+    "src/bridge/server.js",
+    "src/voice/",
+    "render.yaml"
+  ],
+  "doneCriteria": [
+    "Document the branch and deployment boundary.",
+    "List the smallest modules needed for one read-only end-to-end test.",
+    "Record verification commands and observed results.",
+    "Present deployment or live-write steps for Chance approval rather than executing them."
+  ],
+  "constraints": [
+    "Do not touch Jobrolo.",
+    "Do not deploy or change Render environment variables.",
+    "Do not write to JobNimbus, Gmail, Quo, Drive, Calendar, or Twilio.",
+    "Do not commit secrets, runtime exports, transcripts, or client PII."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "owner",
+      "note": "requested Claude and Codex collaboration"
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "claimed; fetched and mapped remote branch heads"
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "documented unrelated branch histories, route ownership, and a minimal read-only comparison test"
+    }
+  ],
+  "result": {
+    "branch": "codex/agent-collab",
+    "commit": "1d4b015",
+    "summary": "Mapped the operations-assistant and live-bridge boundaries. Recommended retaining the live bridge as the production API shell and porting one read-only capability at a time.",
+    "verification": "Fetched both remote heads; inspected package.json, render.yaml, bridge route surfaces, and confirmed git merge-base exits 1. Clean npm ci passed. The self-test passed, but npm run check and npm run sweep:fixture exposed two missing report modules; a separate Claude task records the blocker. No deploys or live writes were performed."
+  }
+}

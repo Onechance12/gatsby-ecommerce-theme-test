@@ -1,0 +1,66 @@
+{
+  "id": "t-20260710-claim-filer-production-review",
+  "assignedBy": "codex",
+  "assignedTo": "claude",
+  "status": "done",
+  "mode": "review",
+  "title": "Document and harden the AI claim filer before bridge integration",
+  "goal": "Capture the redacted evidence from the successful live Allstate filing, document the current Retell/CLI deployment boundary, and resolve the production-safety questions in the claim packet, readiness gates, post-call extraction, and JobNimbus writeback before file:claim is exposed through the Render bridge.",
+  "workBranch": "claude/jobnimbus-tool-search-cpeh4n",
+  "files": [
+    "src/assistant/fileClaim.js",
+    "src/assistant/claimCallPrompt.js",
+    "src/assistant/postCallWriteback.js",
+    "src/voice/retell.js",
+    "src/voice/carrierDirectory.js",
+    "docs/carriers/",
+    "docs/AGENT_HANDOFF.md"
+  ],
+  "doneCriteria": [
+    "A redacted operational record explains the successful Allstate filing path, result capture, manual cleanup, and writeback method without client PII or secrets.",
+    "The handoff states whether file:claim is local CLI only or exposed anywhere live and identifies the live Retell configuration generation without IDs or secrets.",
+    "Retell post-call custom analysis fields are documented and configured in code, or the writeback clearly treats transcript-derived values as unverified proposals.",
+    "The company-approved standard answers remain: no injuries reported, home habitable, temporary repairs made, and Titan Reconstruction is the contractor. Current file evidence or Chance's explicit instruction overrides a default when a claim differs.",
+    "Missing-policy readiness is carrier-aware and consistent with the Wave playbook instead of universally blocking when alternate lookup is viable.",
+    "Post-call JobNimbus proposals keep claim, adjuster, and status values in fields and use one short operational note consistent with Chance's note rules.",
+    "Existing-claim confirmation is distinguishable from a newly filed claim in the extracted outcome.",
+    "Fixture-safe tests cover a normal filing candidate, an existing-claim duplicate guard, missing/unknown standard answers, and post-call extraction confidence."
+  ],
+  "constraints": [
+    "Do not place another live carrier call for this task.",
+    "Do not perform a live JobNimbus write, Gmail send, Quo send, deploy, or environment change.",
+    "Do not commit client PII, call transcripts, call IDs, phone numbers, credentials, or Retell/Twilio identifiers.",
+    "Normal Git is the primary handoff; use the artifact mailbox only if Git fails.",
+    "Do not expose file:claim on the production bridge until Codex reviews the result and Chance approves deployment."
+  ],
+  "createdAt": "2026-07-10",
+  "updatedAt": "2026-07-10",
+  "log": [
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Created after code review and fixture dry runs. The architecture is strong and a real Allstate filing reportedly succeeded; production questions were posted to PR #1 in comment 4936725671."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "chance/codex",
+      "note": "Chance confirmed the four standard filing answers are intentional business defaults: no injuries, habitable home, temporary repairs made, and Titan Reconstruction as contractor. Preserve them unless current evidence or Chance identifies an exception."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "claude",
+      "note": "Answered all 7 review questions in the PR thread and landed the fixture-safe hardening. Q3: post-call analysis schema is now configured in code (postCallAnalysisSchema in retell.js), field names matched to postCallWriteback; transcript-derived values stay flagged transcript-guess. Q5: policy readiness is carrier-aware (warning by default, hard-block only when carrier.requiresPolicyNumber). Q6: writeback keeps claim/adjuster/status in FIELDS + one short operational note. Q7: outcome distinguishes existing_claim_confirmed (status_follow_up goal) from claim_filed. Q4: the four business defaults were PRESERVED per Chance. Redacted operational record added at docs/operational-record-claim-filing.md; deployment truth documented (file:claim is local CLI only, not on the bridge). Fixture-safe tests added to selftest.js. No live call/write/deploy."
+    },
+    {
+      "at": "2026-07-10",
+      "by": "codex",
+      "note": "Reviewed commit 2e2717e independently. npm ci, npm run check, npm run sweep:fixture, and git diff --check all pass. Retell's current official create-agent documentation confirms post_call_analysis_data is supported. Task closed; bridge integration remains a separate approval-gated task."
+    }
+  ],
+  "result": {
+    "branch": "claude/jobnimbus-tool-search-cpeh4n",
+    "commit": "2e2717e",
+    "summary": "Claim filer hardened for production review: post-call schema in code, carrier-aware policy readiness, writeback field/note hygiene, existing-vs-new outcome, redacted operational record. Business defaults preserved.",
+    "verification": "npm run check exit 0; 16 new fixture-safe checks (extraction, outcome distinction, note hygiene, no-result, spelled-out claim parse, note-ownership guard). No live actions."
+  }
+}

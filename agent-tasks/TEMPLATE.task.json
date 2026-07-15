@@ -1,0 +1,32 @@
+{
+  "id": "t-YYYYMMDD-short-slug",
+  "assignedBy": "owner",
+  "assignedTo": "codex",
+  "status": "open",
+  "mode": "verify",
+  "title": "One-line task summary",
+  "goal": "Self-contained context and requested outcome without client PII.",
+  "workBranch": "codex/task-short-slug",
+  "files": [],
+  "doneCriteria": [],
+  "constraints": [
+    "Do not weaken safety gates.",
+    "Do not include secrets or client PII.",
+    "Do not deploy or write live data without owner approval."
+  ],
+  "createdAt": "YYYY-MM-DD",
+  "updatedAt": "YYYY-MM-DD",
+  "log": [
+    {
+      "at": "YYYY-MM-DD",
+      "by": "owner",
+      "note": "created"
+    }
+  ],
+  "result": {
+    "branch": null,
+    "commit": null,
+    "summary": null,
+    "verification": null
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "id": "t-20260715-scope-intelligence-collab",
+  "title": "Scope Intelligence — shared build (carrier-scope-build system)",
+  "requestedBy": "chance",
+  "coOwners": ["claude", "codex"],
+  "status": "open",
+  "priority": "high",
+  "goal": "Turn mined estimate-pair data into a live capability: when a carrier scope lands on a file, automatically flag what it omits vs our estimate and vs the carrier's known omission profile. History becomes a real-time negotiation check.",
+  "builtSoFar_claude": {
+    "branch": "claude/jobnimbus-tool-search-cpeh4n @ 518ed3f",
+    "history:mine": "whole-book read-only stats + scope-of-loss document inventory (photos excluded) + reports/scope-pairs.json (comparison-ready files)",
+    "scope:mine": "per-file estimate-pair extraction: parses our Final Draft PDF + carrier scope PDF into line items + money totals (RCV/ACV/depreciation/deductible/net), computes carrier omissions via fuzzy item matching. Dual-mode parser (Allstate inline + State Farm split layouts).",
+    "brain": "27 verified company-lane lessons incl. carrier-scope findings (opening-position rule, omission checklist, sub-deductible tactic, ESX-encryption/Final-Draft-PDF workflow)",
+    "known_limits": "2 of 8 carrier PDFs were scanned images (0 text) -> 0 items parsed; ESX inner payload is encrypted (use the PDF)."
+  },
+  "divisionOfLabor": {
+    "claude": [
+      "Owns the analysis layer: history:mine, scope:mine, and a new per-carrier OMISSION PROFILE generator (aggregate all scope-compare reports -> per-carrier 'what they systematically omit' profile).",
+      "Distills profiles into verified brain lessons (Chance verifies).",
+      "Keeps the scope parser + profiles PII-safe and in-sync (no-drift rule)."
+    ],
+    "codex": [
+      "OCR port: bring the pdftoppm+tesseract pipeline from the old bridge branch so scanned/image carrier PDFs parse (this is your wheelhouse — you built OCR before). Feed OCR text into the SAME parseEstimateText so both runtimes agree.",
+      "Live bridge action: expose scope-review as an approval-gated bridge endpoint for the GPT connector — given a file, parse its carrier scope, run it against the omission profile, return the gaps. Read-only analysis; any writeback stays gated.",
+      "Format coverage: you see more carrier PDF layouts in the field. Extend parseEstimateText for new carriers and flag the change here so Claude back-ports (no-drift)."
+    ]
+  },
+  "sharedArtifacts": [
+    "src/assistant/scopeMiner.js (parseEstimateText, normalizeItem, classifyDocument) — treat like claim-filing-core: changes on either side flagged here and back-ported.",
+    "the per-carrier omission profiles (Claude generates; Codex consumes at runtime)."
+  ],
+  "constraints": [
+    "Read-only mining; no JobNimbus/Gmail/Quo writes without Chance's approval.",
+    "Public repo: scope reports live in gitignored reports/; only PII-free per-carrier profiles/lessons may be tracked.",
+    "Jobrolo is reference-only; never modify it."
+  ],
+  "firstMoves": {
+    "claude": "Build the omission-profile generator across the mined pairs.",
+    "codex": "Port OCR for the 2 unreadable carrier PDFs, then stand up the read-only scope-review bridge action."
+  }
+}
