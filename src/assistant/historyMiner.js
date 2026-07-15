@@ -225,7 +225,7 @@ export function normalizeCarrier(name) {
     .replace(/[^a-z ]/g, "").replace(/\s+/g, " ").trim();
   if (!s) return "";
   if (/all\s*state/.test(s)) return "Allstate";
-  if (/s?tate\s*farm/.test(s)) return "State Farm";
+  if (/(?:state|sate|stat)\s*farm/.test(s)) return "State Farm";
   if (/foremost/.test(s)) return "Foremost";
   if (/travelers/.test(s)) return "Travelers";
   if (/liberty/.test(s)) return "Liberty Mutual";
