@@ -7,7 +7,8 @@ const redirectUri = `http://127.0.0.1:${port}/oauth2callback`;
 const scopes = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose",
-  "https://www.googleapis.com/auth/gmail.send"
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/calendar.readonly"
 ];
 
 if (!clientId || !clientSecret) {
@@ -63,7 +64,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-    res.end("Gmail refresh token created. You can close this tab and copy the token from the terminal.");
+    res.end("Gmail and Google Calendar refresh token created. You can close this tab and copy the token from the terminal.");
     console.log("\nGOOGLE_REFRESH_TOKEN=");
     console.log(tokenJson.refresh_token);
     console.log("\nAdd that value to Render as GOOGLE_REFRESH_TOKEN.");
@@ -77,6 +78,6 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`OAuth callback listening on ${redirectUri}`);
-  console.log("\nOpen this URL in Chrome, approve Gmail access, then return here:\n");
+  console.log("\nOpen this URL in Chrome, approve Gmail and Google Calendar access, then return here:\n");
   console.log(authUrl.toString());
 });

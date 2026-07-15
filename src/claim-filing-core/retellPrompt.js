@@ -50,6 +50,11 @@ export function postCallAnalysisSchema() {
     { type: "string", name: "adjuster_email", description: "Email address for the adjuster, if given. Empty if not provided." },
     { type: "string", name: "document_submission", description: "The email address or portal the rep said to use for sending the Letter of Representation and documents. Empty if not provided." },
     { type: "string", name: "next_step", description: "The next step or timeframe the rep described (e.g. 'adjuster will call in 24-48 hours', 'inspection to be scheduled'). Empty if none." },
+    { type: "boolean", name: "inspection_scheduled", description: "True only when the carrier or adjuster and the assistant finalized an exact inspection date and arrival window on this call. False for proposed options, voicemails, or unresolved scheduling." },
+    { type: "string", name: "inspection_start", description: "Confirmed inspection arrival-window start as an ISO 8601 timestamp with an explicit UTC offset, for example 2026-07-17T14:00:00-05:00. Empty unless inspection_scheduled is true." },
+    { type: "string", name: "inspection_end", description: "Confirmed inspection arrival-window end as an ISO 8601 timestamp with an explicit UTC offset. Empty unless inspection_scheduled is true." },
+    { type: "string", name: "inspection_timezone", description: "Timezone for the confirmed inspection. Use America/Chicago for Central time. Empty unless inspection_scheduled is true." },
+    { type: "string", name: "inspection_access_requirements", description: "Whether interior access, homeowner presence, contractor attendance, or another access condition was stated. Empty if none was stated." },
     { type: "string", name: "representative_name", description: "The carrier representative's name, if a human representative participated. Empty if not provided." },
     { type: "string", name: "blocking_reason", description: "The exact reason the claim could not be filed or the objective could not be completed. Empty when completed." },
     { type: "boolean", name: "callback_requested", description: "True only when the carrier explicitly confirmed a queue or scheduled callback request. False otherwise." },
@@ -154,6 +159,7 @@ export function renderRetellPrompt(packet) {
     "For every callback, finish the original objective: obtain the claim/reference number, adjuster assignment, LOR " +
       "destination, and next step. The callback result still requires Chance's approval before any JobNimbus writeback.",
     "",
+    "Call goal code for THIS call: {{goal}}",
     "Call objective for THIS call: {{objective}}",
     "Approved same-carrier follow-on claims: {{batchClaimCount}}. Approved batch data: {{batchClaims}}.",
     "",
@@ -194,6 +200,29 @@ export function renderRetellPrompt(packet) {
       "don't have that handy.' Do NOT append 'I can follow up' to every answer — that repetition sounds robotic and " +
       "weak. Offer to follow up only ONCE in a while, for something genuinely gettable, not on every unknown. NEVER " +
       "say robotic phrases like 'that information is missing' or 'that information is not available.'",
+    "",
+    "=== LIVE INSPECTION SCHEDULING AUTHORITY ===",
+    "Use this section only when the call goal code is exactly 'inspection_scheduling'. For every other goal, do not " +
+      "offer or book an appointment unless the representative unexpectedly requires scheduling to complete that call.",
+    "Availability status: {{availabilityStatus}}. Availability sources: {{availabilitySources}}. Timezone: " +
+      "{{availabilityTimeZone}}. Required appointment duration: {{appointmentDurationMinutes}} minutes.",
+    "The ONLY appointment windows you are authorized to accept are: {{availableAppointmentWindows}}",
+    "- If availability status is not exactly 'READY', do not schedule. Say you cannot confirm a time on this call, " +
+      "collect the representative's name, direct number, email, and any options they offer, then end without booking.",
+    "- If availability status is 'READY', you may finalize an appointment during this live call. Do not defer to Chance " +
+      "or say you need to check the calendar; the merged JobNimbus and Google Calendar availability above is the check.",
+    "- Accept an offered appointment only when its full arrival window fits entirely inside one authorized window. " +
+      "The start and end must both fit. Never infer availability between listed windows, outside business hours, or from " +
+      "a date that merely looks open.",
+    "- If the representative offers multiple choices, select the earliest offered choice that fully fits an authorized " +
+      "window. If none fit, give the earliest two or three authorized windows and ask whether one is available.",
+    "- Before agreeing, repeat the exact calendar date, arrival-window start and end, and Central time. Resolve any " +
+      "weekday/date mismatch before booking. Never accept a relative phrase such as 'tomorrow' without converting it to " +
+      "the exact date.",
+    "- After the representative confirms the booking, capture the exact date, arrival window, timezone, duration, whether " +
+      "interior access or homeowner presence is required, adjuster name, phone, email, and any confirmation number.",
+    "- A proposed time is not a scheduled appointment. Mark it scheduled only after the representative explicitly " +
+      "confirms it. JobNimbus calendar creation remains a separate approval-gated action after the call.",
     "",
     "=== CLAIMS FILING MENU NAVIGATION RULES (IVR) ===",
     "The primary objective is to navigate the automated phone system and open the claim with the least time and " +

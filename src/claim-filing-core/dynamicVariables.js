@@ -3,6 +3,7 @@
 // would be spoken literally ("curly brace insured name"), so we default them all.
 // Keep PROMPT_PLACEHOLDERS in sync with renderRetellPrompt.
 export const PROMPT_PLACEHOLDERS = [
+  "goal",
   "objective",
   "insuredName",
   "propertyAddress",
@@ -36,7 +37,12 @@ export const PROMPT_PLACEHOLDERS = [
   "callbackPacketStatus",
   "pendingCallbackCases",
   "batchClaimCount",
-  "batchClaims"
+  "batchClaims",
+  "availabilityStatus",
+  "availableAppointmentWindows",
+  "availabilityTimeZone",
+  "appointmentDurationMinutes",
+  "availabilitySources"
 ];
 
 export function flattenFactsForDynamicVariables(packet) {
@@ -62,6 +68,11 @@ export function flattenFactsForDynamicVariables(packet) {
   out.pendingCallbackCases = "Missing";
   out.batchClaimCount = "0";
   out.batchClaims = "None";
+  out.availabilityStatus = "NOT_REQUESTED";
+  out.availableAppointmentWindows = "None. Do not schedule an appointment.";
+  out.availabilityTimeZone = "America/Chicago";
+  out.appointmentDurationMinutes = "120";
+  out.availabilitySources = "Not checked for this call";
   // The goal rides along so post-call extraction can tell a new filing from a
   // status follow-up even without call metadata.
   if (packet.goal) out.goal = String(packet.goal);

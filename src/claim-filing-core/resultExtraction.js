@@ -15,6 +15,11 @@ export function extractCallResults(call) {
   const adjusterEmail = firstNonEmpty(cad.adjuster_email, transcriptEmail(transcript));
   const documentSubmission = firstNonEmpty(cad.document_submission, transcriptEmail(transcript));
   const nextStep = firstNonEmpty(cad.next_step);
+  const inspectionScheduled = cad.inspection_scheduled === true || /^true$/i.test(String(cad.inspection_scheduled || ""));
+  const inspectionStart = inspectionScheduled ? firstNonEmpty(cad.inspection_start) : "";
+  const inspectionEnd = inspectionScheduled ? firstNonEmpty(cad.inspection_end) : "";
+  const inspectionTimezone = inspectionScheduled ? firstNonEmpty(cad.inspection_timezone) : "";
+  const inspectionAccessRequirements = firstNonEmpty(cad.inspection_access_requirements);
   const representativeName = firstNonEmpty(cad.representative_name);
   const blockingReason = firstNonEmpty(cad.blocking_reason);
   const callbackRequested = cad.callback_requested === true || /^true$/i.test(String(cad.callback_requested || ""));
@@ -31,7 +36,11 @@ export function extractCallResults(call) {
     adjusterName: cad.adjuster_name ? "retell-analysis" : "none",
     adjusterPhone: cad.adjuster_phone ? "retell-analysis" : (adjusterPhone ? "transcript-guess" : "none"),
     adjusterEmail: cad.adjuster_email ? "retell-analysis" : (adjusterEmail ? "transcript-guess" : "none"),
-    documentSubmission: cad.document_submission ? "retell-analysis" : (documentSubmission ? "transcript-guess" : "none")
+    documentSubmission: cad.document_submission ? "retell-analysis" : (documentSubmission ? "transcript-guess" : "none"),
+    inspectionStart: cad.inspection_start ? "retell-analysis" : "none",
+    inspectionEnd: cad.inspection_end ? "retell-analysis" : "none",
+    inspectionTimezone: cad.inspection_timezone ? "retell-analysis" : "none",
+    inspectionAccessRequirements: cad.inspection_access_requirements ? "retell-analysis" : "none"
   };
 
   return {
@@ -45,6 +54,11 @@ export function extractCallResults(call) {
     adjusterEmail,
     documentSubmission,
     nextStep,
+    inspectionScheduled,
+    inspectionStart,
+    inspectionEnd,
+    inspectionTimezone,
+    inspectionAccessRequirements,
     representativeName,
     blockingReason,
     callbackRequested,

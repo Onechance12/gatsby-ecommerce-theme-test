@@ -26,6 +26,20 @@ services:
         sync: false
       - key: GMAIL_USER
         value: me
+      - key: GOOGLE_CALENDAR_ID
+        value: primary
+      - key: SCHEDULING_HORIZON_DAYS
+        value: "21"
+      - key: SCHEDULING_APPOINTMENT_MINUTES
+        value: "120"
+      - key: SCHEDULING_TRAVEL_BUFFER_MINUTES
+        value: "60"
+      - key: SCHEDULING_MIN_LEAD_HOURS
+        value: "24"
+      - key: SCHEDULING_WORKDAY_START
+        value: "08:00"
+      - key: SCHEDULING_WORKDAY_END
+        value: "17:00"
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_REALTIME_MODEL

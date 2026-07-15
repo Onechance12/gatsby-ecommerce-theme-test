@@ -19,6 +19,13 @@ import {
   validateRetellCallChainOwnership
 } from "./claim-filing-adapter.js";
 import { renderBrain } from "./memory/brain.js";
+import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
+import {
+  appointmentFitsAvailability,
+  availabilityRange,
+  buildUnifiedAvailability,
+  busyIntervalsFromJobNimbusTasks
+} from "./scheduling/availability.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -61,6 +68,13 @@ const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN ||
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
 const OPERATIONS_TIME_ZONE = "America/Chicago";
+const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || "primary";
+const SCHEDULING_HORIZON_DAYS = positiveIntegerEnv("SCHEDULING_HORIZON_DAYS", 21);
+const SCHEDULING_APPOINTMENT_MINUTES = positiveIntegerEnv("SCHEDULING_APPOINTMENT_MINUTES", 120);
+const SCHEDULING_TRAVEL_BUFFER_MINUTES = nonNegativeIntegerEnv("SCHEDULING_TRAVEL_BUFFER_MINUTES", 60);
+const SCHEDULING_MIN_LEAD_HOURS = nonNegativeIntegerEnv("SCHEDULING_MIN_LEAD_HOURS", 24);
+const SCHEDULING_WORKDAY_START = process.env.SCHEDULING_WORKDAY_START || "08:00";
+const SCHEDULING_WORKDAY_END = process.env.SCHEDULING_WORKDAY_END || "17:00";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
@@ -85,6 +99,7 @@ const routes = new Map([
   ["POST /artifacts/get", getArtifact],
   ["POST /artifacts/complete", completeArtifact],
   ["POST /brain/context", brainContext],
+  ["POST /scheduling/availability", schedulingAvailability],
   ["POST /jobnimbus/search", searchContacts],
   ["POST /jobnimbus/review-file", reviewFile],
   ["POST /jobnimbus/assigned-files", assignedFiles],
@@ -104,6 +119,7 @@ const routes = new Map([
   ["POST /claim-filing/result", claimFilingResult],
   ["POST /claim-filing/callbacks", pendingClaimCallbacks],
   ["POST /claim-filing/writeback", claimFilingWriteback],
+  ["POST /retell/configure-agent", configureRetellAgent],
   ["POST /retell/inbound", retellInbound],
   ["POST /gmail/search", gmailSearch],
   ["POST /gmail/thread", gmailThread],
@@ -202,6 +218,15 @@ function health() {
       callbackPacketRestoration: "full_approved_packet",
       callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
       retryRequiresPriorCallId: true
+    },
+    schedulingAvailability: {
+      jobNimbusCalendarConfigured: Boolean(API_KEY),
+      googleCalendarConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+      googleCalendarId: GOOGLE_CALENDAR_ID === "primary" ? "primary" : "configured",
+      timeZone: OPERATIONS_TIME_ZONE,
+      appointmentMinutes: SCHEDULING_APPOINTMENT_MINUTES,
+      travelBufferMinutes: SCHEDULING_TRAVEL_BUFFER_MINUTES,
+      failClosed: true
     },
     brain: {
       available: true,
@@ -793,10 +818,132 @@ async function assignedCounts(input = {}) {
   };
 }
 
+async function schedulingAvailability() {
+  return collectUnifiedSchedulingAvailability();
+}
+
+async function collectUnifiedSchedulingAvailability() {
+  const range = availabilityRange({
+    timeZone: OPERATIONS_TIME_ZONE,
+    horizonDays: SCHEDULING_HORIZON_DAYS
+  });
+  const [jobNimbusResult, googleResult] = await Promise.allSettled([
+    loadChanceJobNimbusBusy(range),
+    loadGoogleCalendarBusy(range)
+  ]);
+  const jobNimbusBusy = jobNimbusResult.status === "fulfilled" ? jobNimbusResult.value : [];
+  const googleBusy = googleResult.status === "fulfilled" ? googleResult.value : [];
+  const sources = [
+    sourceStatus("jobnimbus", jobNimbusResult, jobNimbusBusy.length),
+    sourceStatus("google_calendar", googleResult, googleBusy.length)
+  ];
+
+  return buildUnifiedAvailability({
+    range,
+    timeZone: OPERATIONS_TIME_ZONE,
+    horizonDays: SCHEDULING_HORIZON_DAYS,
+    durationMinutes: SCHEDULING_APPOINTMENT_MINUTES,
+    bufferMinutes: SCHEDULING_TRAVEL_BUFFER_MINUTES,
+    minLeadHours: SCHEDULING_MIN_LEAD_HOURS,
+    workdayStart: SCHEDULING_WORKDAY_START,
+    workdayEnd: SCHEDULING_WORKDAY_END,
+    jobNimbusBusy,
+    googleBusy,
+    sources
+  });
+}
+
+async function attachSchedulingAvailability(plan) {
+  if (plan.packet.goal !== "inspection_scheduling") return plan;
+  const availability = await collectUnifiedSchedulingAvailability();
+  const availabilityDigest = digest({
+    status: availability.status,
+    range: availability.range,
+    settings: availability.settings,
+    sources: availability.sources.map(({ name, status, busyCount }) => ({ name, status, busyCount })),
+    availableWindows: availability.availableWindows
+  });
+  applyAvailabilityDynamicVariables(plan.callPlan.dynamicVariables, availability);
+
+  if (availability.status !== "READY") {
+    plan.readiness.ready = false;
+    plan.readiness.blockers = [...new Set([
+      ...(plan.readiness.blockers || []),
+      availability.reason
+    ])];
+  }
+
+  plan.planDigest = digest({ basePlanDigest: plan.planDigest, availabilityDigest });
+  plan.callPlan.metadata.planDigest = plan.planDigest;
+  plan.callPlan.metadata.availabilityDigest = availabilityDigest;
+  plan.schedulingAvailability = availability;
+  return plan;
+}
+
+function applyAvailabilityDynamicVariables(dynamicVariables, availability) {
+  dynamicVariables.availabilityStatus = availability.status;
+  dynamicVariables.availableAppointmentWindows = availability.voiceWindows;
+  dynamicVariables.availabilityTimeZone = OPERATIONS_TIME_ZONE;
+  dynamicVariables.appointmentDurationMinutes = String(SCHEDULING_APPOINTMENT_MINUTES);
+  dynamicVariables.availabilitySources = "JobNimbus calendar and Google Calendar";
+  dynamicVariables.availabilityWindowsJson = JSON.stringify(availability.availableWindows || []);
+}
+
+async function loadChanceJobNimbusBusy(range) {
+  const tasks = await listResourcePages("/tasks", 25);
+  return busyIntervalsFromJobNimbusTasks(tasks, {
+    ownerId: CHANCE_OWNER_ID,
+    timeMin: range.timeMin,
+    timeMax: range.timeMax,
+    defaultDurationMinutes: 60
+  });
+}
+
+async function loadGoogleCalendarBusy(range) {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+    throw new Error("Google Calendar OAuth is not configured.");
+  }
+  const token = await getGoogleAccessToken();
+  const response = await fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      timeMin: range.timeMin,
+      timeMax: range.timeMax,
+      timeZone: OPERATIONS_TIME_ZONE,
+      items: [{ id: GOOGLE_CALENDAR_ID }]
+    })
+  });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const reason = json?.error?.message || `HTTP ${response.status}`;
+    throw new Error(`Google Calendar availability failed: ${reason}`);
+  }
+  const calendar = json?.calendars?.[GOOGLE_CALENDAR_ID] || {};
+  if (Array.isArray(calendar.errors) && calendar.errors.length) {
+    throw new Error(`Google Calendar availability failed: ${calendar.errors.map((row) => row.reason || row.domain || "unknown").join(", ")}`);
+  }
+  return (calendar.busy || []).map((row) => ({
+    start: row.start,
+    end: row.end,
+    source: "google_calendar"
+  }));
+}
+
+function sourceStatus(name, settled, busyCount) {
+  return settled.status === "fulfilled"
+    ? { name, status: "ready", busyCount }
+    : { name, status: "blocked", busyCount: 0, error: String(settled.reason?.message || settled.reason || "unavailable").slice(0, 300) };
+}
+
 async function prepareClaimFiling(input) {
   const context = await buildLiveClaimContext(required(input.query, "query"));
   let plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
   plan = await attachSameCarrierBatch(plan, context, input);
+  plan = await attachSchedulingAvailability(plan);
   return {
     mode: "dry_run",
     approvalRequired: true,
@@ -813,6 +960,7 @@ async function placeClaimFilingCall(input) {
   const context = await buildLiveClaimContext(required(input.query, "query"));
   let plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
   plan = await attachSameCarrierBatch(plan, context, input);
+  plan = await attachSchedulingAvailability(plan);
   assertApprovalDigest(input.planDigest, plan.planDigest);
 
   const request = retellCallBody(plan);
@@ -983,6 +1131,7 @@ async function claimFilingResult(input) {
       nextStep: "The carrier call or callback is still active. Review the result again after it ends."
     };
   }
+  const proposedCalendarEvent = buildInspectionCalendarProposal(analysis);
   return {
     mode: "read_only",
     file: analysis.file,
@@ -997,13 +1146,67 @@ async function claimFilingResult(input) {
       callSuccessful: analysis.call.callAnalysis?.call_successful ?? null
     },
     extracted: analysis.extracted,
+    proposedCalendarEvent,
     proposedWriteback: analysis.writeback,
     fieldConfidence: analysis.proposal.fieldConfidence,
     unverified: analysis.proposal.unverified,
     writebackDigest: analysis.writebackDigest,
     approvalRequired: true,
-    nextStep: "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
+    nextStep: proposedCalendarEvent?.ready
+      ? "Review the result and exact appointment. JobNimbus writeback and calendar creation remain separate approval-gated actions."
+      : "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
   };
+}
+
+function buildInspectionCalendarProposal(analysis) {
+  const extracted = analysis.extracted || {};
+  if (extracted.goal !== "inspection_scheduling" || !extracted.inspectionScheduled) return null;
+  if (!explicitOffsetDateTime(extracted.inspectionStart) || !explicitOffsetDateTime(extracted.inspectionEnd)) {
+    return {
+      ready: false,
+      reason: "Retell did not return both inspection times as ISO timestamps with an explicit UTC offset. Confirm the transcript before creating a calendar item."
+    };
+  }
+
+  const dynamicVariables = analysis.call.raw?.retell_llm_dynamic_variables || {};
+  let availableWindows = [];
+  try {
+    const parsed = JSON.parse(String(dynamicVariables.availabilityWindowsJson || "[]"));
+    if (Array.isArray(parsed)) availableWindows = parsed;
+  } catch {
+    availableWindows = [];
+  }
+  const availability = {
+    status: dynamicVariables.availabilityStatus,
+    availableWindows
+  };
+  if (!appointmentFitsAvailability(extracted.inspectionStart, extracted.inspectionEnd, availability)) {
+    return {
+      ready: false,
+      reason: "The extracted appointment does not fit entirely inside the availability approved for this call. Do not create it without reviewing the transcript and calendars."
+    };
+  }
+
+  return {
+    ready: true,
+    approvalRequired: true,
+    action: "create JobNimbus calendar task",
+    request: {
+      query: analysis.file.number || analysis.file.id,
+      title: `${analysis.file.carrier || "Carrier"} property inspection - ${analysis.file.name}`,
+      dateStart: extracted.inspectionStart,
+      dateEnd: extracted.inspectionEnd,
+      description: extracted.inspectionAccessRequirements || "Carrier property inspection",
+      execute: false
+    },
+    note: "Creating this JobNimbus calendar item requires separate approval."
+  };
+}
+
+function explicitOffsetDateTime(value) {
+  const text = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(text)
+    && Number.isFinite(Date.parse(text));
 }
 
 async function claimFilingWriteback(input) {
@@ -1053,6 +1256,107 @@ async function claimFilingWriteback(input) {
   };
 }
 
+async function configureRetellAgent(input = {}) {
+  if (!RETELL_API_KEY || !RETELL_AGENT_ID) badRequest("RETELL_API_KEY and RETELL_AGENT_ID are required.");
+  const agent = await retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`);
+  const llmId = String(agent?.response_engine?.llm_id || "").trim();
+  if (agent?.response_engine?.type !== "retell-llm" || !llmId) {
+    badRequest("The configured Retell agent does not use a Retell LLM response engine.");
+  }
+
+  const llmConfig = buildRetellLlmFromPacket(retellConfigurationPacket()).toLlmRequestBody();
+  const analysisSchema = postCallAnalysisSchema();
+  const configDigest = digest({
+    agentId: RETELL_AGENT_ID,
+    llmId,
+    generalPrompt: llmConfig.general_prompt,
+    generalTools: llmConfig.general_tools,
+    postCallAnalysisData: analysisSchema,
+    timeZone: OPERATIONS_TIME_ZONE
+  });
+  const preview = {
+    agentId: RETELL_AGENT_ID,
+    llmId,
+    currentAgentVersion: agent.version,
+    currentPublished: Boolean(agent.is_published),
+    configDigest,
+    promptCharacters: llmConfig.general_prompt.length,
+    toolNames: llmConfig.general_tools.map((tool) => tool.name),
+    analysisFields: analysisSchema.map((field) => field.name)
+  };
+
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      approvalRequired: true,
+      publishRequired: true,
+      ...preview,
+      nextStep: "Review this exact configuration. execute=true updates the latest draft; publish=true also publishes that returned draft version."
+    };
+  }
+  if (input.publish !== true) {
+    badRequest("publish=true is required with execute=true so the bridge and live Retell agent cannot be left on different prompt versions.");
+  }
+  assertApprovalDigest(input.configDigest, configDigest, "configDigest");
+
+  const llm = await retellApi("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, {
+    general_prompt: llmConfig.general_prompt,
+    general_tools: llmConfig.general_tools,
+    begin_message: ""
+  });
+  const llmVersion = Number(llm.version);
+  if (!Number.isInteger(llmVersion) || llmVersion < 0) badRequest("Retell updated the LLM but did not return a usable version.");
+  const updatedAgent = await retellApi("PATCH", `/update-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, {
+    response_engine: { type: "retell-llm", llm_id: llmId, version: llmVersion },
+    post_call_analysis_data: analysisSchema,
+    post_call_analysis_model: "gpt-4.1-mini",
+    timezone: OPERATIONS_TIME_ZONE
+  });
+  const version = Number(updatedAgent.version);
+  if (!Number.isInteger(version) || version < 0) badRequest("Retell updated the draft but did not return a publishable agent version.");
+  await retellApi("POST", `/publish-agent-version/${encodeURIComponent(RETELL_AGENT_ID)}`, {
+    version,
+    version_title: "Unified appointment availability",
+    version_description: "Chance-scoped JobNimbus and Google Calendar scheduling authority with approval-gated calendar writeback."
+  });
+
+  return {
+    mode: "executed",
+    published: true,
+    ...preview,
+    publishedAgentVersion: version,
+    retellLlmVersion: llmVersion,
+    nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
+  };
+}
+
+function retellConfigurationPacket() {
+  return {
+    informationToCapture: [
+      "claim or reference number",
+      "representative and adjuster contact information",
+      "document-submission destination and subject rule",
+      "confirmed inspection date, arrival window, timezone, and access requirements",
+      "carrier next step and expected timeframe"
+    ],
+    stopRules: [
+      "Never guess a client, claim, policy, date, damage fact, or appointment time.",
+      "Never schedule outside the merged availability supplied for the call.",
+      "Never provide sensitive identity, banking, card, PIN, or password information.",
+      "Never update JobNimbus or send a carrier email from the phone call."
+    ],
+    resultFormat: {
+      objectiveCompleted: "yes/no/partial",
+      claimNumber: "",
+      adjuster: {},
+      inspection: { scheduled: false, start: "", end: "", timezone: "", accessRequirements: "" },
+      documentSubmission: "",
+      nextStep: "",
+      blocker: ""
+    }
+  };
+}
+
 async function retellInbound(input) {
   const event = input?.event;
   const inbound = input?.call_inbound;
@@ -1071,6 +1375,11 @@ async function retellInbound(input) {
         policyNumberSpoken: "Unknown",
         claimNumber: "Unknown"
       }, match);
+
+  if (String(dynamicVariables.goal || "") === "inspection_scheduling") {
+    const availability = await collectUnifiedSchedulingAvailability();
+    applyAvailabilityDynamicVariables(dynamicVariables, availability);
+  }
 
   if (!selected && candidates.length) {
     dynamicVariables.pendingCallbackCases = candidates.slice(0, 8).map(callbackCaseLabel).join(" | ");
@@ -1774,12 +2083,18 @@ function chanceMatchScore(contact, query) {
 }
 
 async function listContacts({ maxPages }) {
+  return listResourcePages("/contacts", maxPages);
+}
+
+async function listResourcePages(endpoint, maxPages = 10) {
   const all = [];
   const pageSize = 1000;
-  for (let page = 0; page < maxPages; page++) {
+  const name = endpoint.replace(/^\//, "").split("?")[0];
+  for (let page = 0; page < maxPages; page += 1) {
     const offset = page * pageSize;
-    const batch = await jobNimbus(`/contacts?size=${pageSize}&from=${offset}`);
-    const rows = unwrapList(batch, "contacts");
+    const separator = endpoint.includes("?") ? "&" : "?";
+    const batch = await jobNimbus(`${endpoint}${separator}size=${pageSize}&from=${offset}`);
+    const rows = unwrapList(batch, name);
     all.push(...rows);
     if (rows.length < pageSize) break;
   }
@@ -3391,6 +3706,11 @@ function positiveIntegerEnv(name, fallback) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+function nonNegativeIntegerEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
 function clamp(value, min, max) {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : min;
 }
@@ -3435,6 +3755,11 @@ const OPENAPI = {
           sampleLimit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 }
         }
+      },
+      SchedulingAvailabilityRequest: {
+        type: "object",
+        description: "Read-only unified availability check for Chance Pearson. Merges active Chance-assigned JobNimbus calendar tasks with Google Calendar and fails closed if either source is unavailable.",
+        properties: {}
       },
       DocumentTextRequest: {
         type: "object",
@@ -3640,6 +3965,14 @@ const OPENAPI = {
         },
         required: ["callId", "writebackDigest"]
       },
+      RetellAgentConfigurationRequest: {
+        type: "object",
+        properties: {
+          configDigest: { type: "string", description: "Exact digest returned by the dry-run configuration review." },
+          execute: { type: "boolean", default: false, description: "False returns a dry-run. True updates the Retell LLM and agent only when configDigest matches." },
+          publish: { type: "boolean", default: false, description: "Must be true with execute=true. Publishes the updated draft so the live caller cannot drift from bridge code." }
+        }
+      },
       VoiceCallRequest: {
         type: "object",
         properties: {
@@ -3784,25 +4117,32 @@ const OPENAPI = {
   paths: {
     "/health": { get: { operationId: "health", responses: { "200": { description: "OK" } } } },
     "/privacy": { get: { operationId: "privacy", responses: { "200": { description: "Privacy policy" } } } },
+    "/scheduling/availability": {
+      post: {
+        operationId: "reviewUnifiedSchedulingAvailability",
+        requestBody: jsonBody("SchedulingAvailabilityRequest"),
+        responses: { "200": { description: "Fresh merged Chance availability from JobNimbus and Google Calendar. Returns BLOCKED and no bookable windows if either source cannot be checked." } }
+      }
+    },
     "/claim-filing/prepare": {
       post: {
         operationId: "prepareClaimFilingCall",
         requestBody: jsonBody("ClaimFilingPrepareRequest"),
-        responses: { "200": { description: "Fresh Chance-only JobNimbus evidence packet, readiness review, exact call plan, and approval digest. Never places a call." } }
+        responses: { "200": { description: "Fresh Chance-only JobNimbus evidence packet, readiness review, exact call plan, and approval digest. For inspection scheduling, includes live merged JobNimbus and Google Calendar authority. Never places a call." } }
       }
     },
     "/claim-filing/call": {
       post: {
         operationId: "placeApprovedClaimFilingCall",
         requestBody: jsonBody("ClaimFilingCallRequest"),
-        responses: { "200": { description: "Rechecks the Chance file and dry-runs or places the exact approved Retell carrier call. Duplicate calls are blocked." } }
+        responses: { "200": { description: "Rechecks the Chance file and, for inspection scheduling, both calendars; then dry-runs or places the exact approved Retell carrier call. Calendar changes invalidate the prior digest and duplicate calls are blocked." } }
       }
     },
     "/claim-filing/result": {
       post: {
         operationId: "reviewClaimFilingCallResult",
         requestBody: jsonBody("ClaimFilingResultRequest"),
-        responses: { "200": { description: "Retell transcript, structured extraction, confidence, unverified guesses, and a dry-run JobNimbus writeback proposal." } }
+        responses: { "200": { description: "Retell transcript, structured extraction, confidence, unverified guesses, a dry-run JobNimbus writeback proposal, and an approval-gated JobNimbus calendar proposal when an inspection was confirmed inside an authorized window." } }
       }
     },
     "/claim-filing/callbacks": {
@@ -3817,6 +4157,13 @@ const OPENAPI = {
         operationId: "processApprovedClaimFilingWriteback",
         requestBody: jsonBody("ClaimFilingWritebackRequest"),
         responses: { "200": { description: "Rechecks the Chance file and call result, then dry-runs or executes the exact approved JobNimbus field/status/note update." } }
+      }
+    },
+    "/retell/configure-agent": {
+      post: {
+        operationId: "configureApprovedRetellAgent",
+        requestBody: jsonBody("RetellAgentConfigurationRequest"),
+        responses: { "200": { description: "Dry-runs or, after exact digest approval, updates and publishes the Retell prompt, tools, timezone, and post-call extraction schema." } }
       }
     },
     "/voice/outbound-call": {

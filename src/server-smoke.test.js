@@ -44,6 +44,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/claim-filing/result"].post.operationId, "reviewClaimFilingCallResult");
   assert.equal(schema.paths["/claim-filing/callbacks"].post.operationId, "listPendingClaimCallbacks");
   assert.equal(schema.paths["/claim-filing/writeback"].post.operationId, "processApprovedClaimFilingWriteback");
+  assert.equal(schema.paths["/scheduling/availability"].post.operationId, "reviewUnifiedSchedulingAvailability");
+  assert.equal(schema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
 
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {

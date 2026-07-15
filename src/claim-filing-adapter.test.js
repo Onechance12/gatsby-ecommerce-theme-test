@@ -18,6 +18,7 @@ import {
 import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
 import { normalizeDateOfLoss } from "./claim-filing-core/packet.js";
 import { buildRetellLlmFromPacket, renderRetellPrompt } from "./claim-filing-core/retellPrompt.js";
+import { extractCallResults } from "./claim-filing-core/resultExtraction.js";
 
 const OWNER_ID = "chance-owner";
 
@@ -258,6 +259,41 @@ test("carrier prompt stays silent for IVR openings and accepts transfers", () =>
   assert.match(prompt, /first response to that audio must contain NO spoken words/i);
   assert.match(prompt, /A transfer is not a completed objective/i);
   assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
+});
+
+test("inspection scheduling prompt uses only merged live calendar authority", () => {
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /LIVE INSPECTION SCHEDULING AUTHORITY/);
+  assert.match(prompt, /Availability status: \{\{availabilityStatus\}\}/);
+  assert.match(prompt, /ONLY appointment windows you are authorized to accept/);
+  assert.match(prompt, /If availability status is not exactly 'READY', do not schedule/);
+  assert.match(prompt, /full arrival window fits entirely inside one authorized window/);
+  assert.match(prompt, /merged JobNimbus and Google Calendar availability above is the check/);
+  assert.match(prompt, /JobNimbus calendar creation remains a separate approval-gated action/);
+});
+
+test("structured inspection result preserves exact confirmed calendar details", () => {
+  const extracted = extractCallResults({
+    raw: {
+      metadata: { goal: "inspection_scheduling" },
+      retell_llm_dynamic_variables: { insuredName: "Fixture Homeowner", carrier: "Allstate" },
+      call_analysis: {
+        custom_analysis_data: {
+          inspection_scheduled: true,
+          inspection_start: "2026-07-17T14:00:00-05:00",
+          inspection_end: "2026-07-17T16:00:00-05:00",
+          inspection_timezone: "America/Chicago",
+          inspection_access_requirements: "Interior access required"
+        }
+      }
+    }
+  });
+  assert.equal(extracted.inspectionScheduled, true);
+  assert.equal(extracted.inspectionStart, "2026-07-17T14:00:00-05:00");
+  assert.equal(extracted.inspectionEnd, "2026-07-17T16:00:00-05:00");
+  assert.equal(extracted.inspectionTimezone, "America/Chicago");
+  assert.equal(extracted.inspectionAccessRequirements, "Interior access required");
+  assert.equal(extracted.source.inspectionStart, "retell-analysis");
 });
 
 test("claim packet separates the short damage opening from detailed follow-up scope", () => {
