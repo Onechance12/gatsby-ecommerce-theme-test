@@ -60,6 +60,7 @@ const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(tmp
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
+const OPERATIONS_TIME_ZONE = "America/Chicago";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
@@ -1545,7 +1546,14 @@ async function createTask(input) {
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
   });
-  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/tasks", body } };
+  validateDateRange(body.date_start, body.date_end);
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      file: compactContact(contact),
+      plan: { endpoint: "/tasks", body, schedule: centralSchedulePreview(body.date_start, body.date_end) }
+    };
+  }
   const result = await jobNimbus("/tasks", { method: "POST", body });
   return { mode: "executed", file: compactContact(contact), result };
 }
@@ -1559,7 +1567,13 @@ async function updateTask(input) {
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
   const body = normalizeDateFields(fields);
-  if (input.execute !== true) return { mode: "dry_run", plan: { endpoint: `/tasks/${taskId}`, body } };
+  validateDateRange(body.date_start, body.date_end);
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      plan: { endpoint: `/tasks/${taskId}`, body, schedule: centralSchedulePreview(body.date_start, body.date_end) }
+    };
+  }
   const result = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`, { method: "PUT", body });
   return { mode: "executed", taskId, result };
 }
@@ -1572,6 +1586,7 @@ async function createCalendarEvent(input) {
   const title = required(input.title || input.subject, "title");
   const dateStart = toUnixSeconds(required(input.dateStart || input.start, "dateStart"));
   const dateEnd = toUnixSeconds(input.dateEnd || input.end) || dateStart;
+  validateDateRange(dateStart, dateEnd);
   const { contact } = await findOneContact(query);
   const body = cleanObject({
     title,
@@ -1585,7 +1600,13 @@ async function createCalendarEvent(input) {
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
   });
-  if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/activities", body } };
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      file: compactContact(contact),
+      plan: { endpoint: "/activities", body, schedule: centralSchedulePreview(dateStart, dateEnd) }
+    };
+  }
   const result = await jobNimbus("/activities", { method: "POST", body });
   return { mode: "executed", file: compactContact(contact), result };
 }
@@ -1599,7 +1620,13 @@ async function updateCalendarEvent(input) {
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
   const body = normalizeDateFields(fields);
-  if (input.execute !== true) return { mode: "dry_run", plan: { endpoint: `/activities/${eventId}`, body } };
+  validateDateRange(body.date_start, body.date_end);
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      plan: { endpoint: `/activities/${eventId}`, body, schedule: centralSchedulePreview(body.date_start, body.date_end) }
+    };
+  }
   const result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
   return { mode: "executed", eventId, result };
 }
@@ -2814,9 +2841,49 @@ function toUnixSeconds(value) {
   }
   const text = String(value).trim();
   if (/^\d+$/.test(text)) return toUnixSeconds(Number(text));
+
+  // A date-only value is safe because it carries no appointment clock time.
+  // Any timestamp must include an explicit offset. Render runs in UTC, so a
+  // timezone-free value such as 2026-07-15T14:00:00 would otherwise display in
+  // Dallas as 9:00 AM instead of the intended 2:00 PM.
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(text);
+  const isOffsetDateTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(text);
+  if (!isDateOnly && !isOffsetDateTime) {
+    badRequest(
+      `Invalid date/time: ${value}. Appointment times require ISO 8601 with an explicit offset, for example 2026-07-15T14:00:00-05:00.`
+    );
+  }
   const parsed = Date.parse(text);
   if (Number.isNaN(parsed)) badRequest(`Invalid date/time: ${value}`);
   return Math.floor(parsed / 1000);
+}
+
+function validateDateRange(dateStart, dateEnd) {
+  if (dateStart !== undefined && dateEnd !== undefined && dateEnd < dateStart) {
+    badRequest("dateEnd must be at or after dateStart.");
+  }
+}
+
+function centralSchedulePreview(dateStart, dateEnd) {
+  if (dateStart === undefined && dateEnd === undefined) return undefined;
+  return cleanObject({
+    timeZone: OPERATIONS_TIME_ZONE,
+    start: formatCentralUnix(dateStart),
+    end: formatCentralUnix(dateEnd)
+  });
+}
+
+function formatCentralUnix(value) {
+  if (value === undefined) return undefined;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: OPERATIONS_TIME_ZONE,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short"
+  }).format(new Date(value * 1000));
 }
 
 function compactDocument(doc) {
@@ -3447,9 +3514,9 @@ const OPENAPI = {
           title: { type: "string", description: "Task title." },
           description: { type: "string", description: "Task details." },
           note: { type: "string", description: "Optional task note/details." },
-          dueDate: { type: "string", description: "Due date/time as ISO string, natural date string, or Unix timestamp." },
-          dateStart: { type: "string", description: "Start date/time as ISO string, natural date string, or Unix timestamp." },
-          dateEnd: { type: "string", description: "End date/time as ISO string, natural date string, or Unix timestamp." },
+          dueDate: { type: "string", description: "Date as YYYY-MM-DD, Unix timestamp, or ISO datetime with an explicit offset. Never send a timezone-free appointment time." },
+          dateStart: { type: "string", description: "ISO datetime with an explicit offset, such as 2026-07-15T14:00:00-05:00, or a Unix timestamp." },
+          dateEnd: { type: "string", description: "ISO datetime with an explicit offset, such as 2026-07-15T16:00:00-05:00, or a Unix timestamp." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["query", "title"]
@@ -3458,7 +3525,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           taskId: { type: "string", description: "JobNimbus task id." },
-          fields: { type: "object", additionalProperties: true, description: "Task fields to update. Supports dateStart/dateEnd/dueDate aliases." },
+          fields: { type: "object", additionalProperties: true, description: "Task fields to update. dateStart/dateEnd timestamps must include an explicit UTC offset; YYYY-MM-DD and Unix timestamps are also accepted." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["taskId", "fields"]
@@ -3468,8 +3535,8 @@ const OPENAPI = {
         properties: {
           query: { type: "string", description: "File/client identifier." },
           title: { type: "string", description: "Calendar event title." },
-          dateStart: { type: "string", description: "Start date/time as ISO string, natural date string, or Unix timestamp." },
-          dateEnd: { type: "string", description: "End date/time as ISO string, natural date string, or Unix timestamp." },
+          dateStart: { type: "string", description: "ISO datetime with an explicit offset, such as 2026-07-15T14:00:00-05:00, or a Unix timestamp. Timezone-free times are rejected." },
+          dateEnd: { type: "string", description: "ISO datetime with an explicit offset, such as 2026-07-15T16:00:00-05:00, or a Unix timestamp. Timezone-free times are rejected." },
           location: { type: "string", description: "Event location. Defaults to the file property address." },
           description: { type: "string", description: "Event details." },
           note: { type: "string", description: "Optional event note/details." },
@@ -3481,7 +3548,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           eventId: { type: "string", description: "JobNimbus activity/event id." },
-          fields: { type: "object", additionalProperties: true, description: "Calendar event fields to update. Supports dateStart/dateEnd aliases." },
+          fields: { type: "object", additionalProperties: true, description: "Calendar event fields to update. dateStart/dateEnd timestamps must include an explicit UTC offset; timezone-free times are rejected." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["eventId", "fields"]

@@ -179,6 +179,26 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const calendarDryRun = await calendarDryRunResponse.json();
   assert.equal(calendarDryRun.plan.body.location, undefined);
   assert.deepEqual(calendarDryRun.plan.body.owners, [{ id: chanceOwnerId }]);
+  assert.deepEqual(calendarDryRun.plan.schedule, {
+    timeZone: "America/Chicago",
+    start: "Jul 17, 2026, 2:00 PM CDT",
+    end: "Jul 17, 2026, 4:00 PM CDT"
+  });
+
+  const timezoneFreeResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      title: "Bad timezone-free meeting",
+      dateStart: "2026-07-17T14:00:00",
+      dateEnd: "2026-07-17T16:00:00",
+      execute: false
+    })
+  });
+  assert.equal(timezoneFreeResponse.status, 400);
+  const timezoneFree = await timezoneFreeResponse.json();
+  assert.match(timezoneFree.error, /explicit offset/);
 
   const rejectedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
