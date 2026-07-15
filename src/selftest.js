@@ -248,7 +248,8 @@ check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allst
   // seed survives a data-root override
   fsm.mkdirSync(pathm.join(repoRoot, "memory"), { recursive: true });
   const seeded = saveMemory(cfg, { lane: "company", kind: "lesson", content: "seeded rule for selftest coverage", evidence: [{ type: "chance", note: "synthetic" }] }).record;
-  check("memory: chance-confirmed evidence births a verified record", seeded.status === "verified");
+  check("memory: caller-supplied Chance evidence stays candidate", seeded.status === "candidate");
+  setMemoryStatus(cfg, seeded.id, "verified", { by: "Chance Pearson" });
   check("memory: seeded company rule visible with data-root override", listMemory(cfg, { lane: "company" }).length === 1);
 
   // authority: candidate quarantined, disputed never guidance
@@ -261,8 +262,9 @@ check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allst
   check("memory: disputed record renders nowhere as guidance", !brain.includes("candidate decision must be quarantined"));
 
   // isolation: subject mode hides other files
-  saveMemory(cfg, { lane: "client", kind: "fact", content: "file A synthetic fact", evidence: ["a"], subjectKey: "fileA" });
+  const fileA = saveMemory(cfg, { lane: "client", kind: "fact", content: "file A synthetic fact", evidence: ["a"], subjectKey: "fileA" }).record;
   saveMemory(cfg, { lane: "client", kind: "fact", content: "file B synthetic fact", evidence: ["b"], subjectKey: "fileB" });
+  setMemoryStatus(cfg, fileA.id, "verified", { by: "Chance Pearson" });
   const isolated = renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA" });
   check("memory: subject isolation shows file A", isolated.includes("file A synthetic fact"));
   check("memory: subject isolation hides file B", !isolated.includes("file B synthetic fact"));
@@ -279,7 +281,11 @@ check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allst
   // proposals must cite live memory ids
   let propThrew2 = "";
   try { saveProposal(cfg, { type: "risk", title: "phantom", detail: "cites a memory that does not exist", memoryIds: ["mem_nope"] }); } catch (e) { propThrew2 = e.message; }
-  check("memory: proposal citing unknown memory id rejected", /unknown|retired/.test(propThrew2));
+  check("memory: proposal citing unknown memory id rejected", /unknown|retired|unverified/.test(propThrew2));
+  const proposalCandidate = saveMemory(cfg, { lane: "company", kind: "lesson", content: "candidate proposal support is not authority", evidence: ["x"] }).record;
+  let unverifiedProposalThrew = "";
+  try { saveProposal(cfg, { type: "risk", title: "too early", detail: "candidate support must be rejected", memoryIds: [proposalCandidate.id] }); } catch (e) { unverifiedProposalThrew = e.message; }
+  check("memory: proposal citing candidate memory rejected", /unverified/.test(unverifiedProposalThrew));
 
   // corruption surfacing: mutations blocked on corrupt files
   fsm.appendFileSync(paths.company, "{not-json\n");

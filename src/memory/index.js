@@ -21,14 +21,15 @@ export async function runMemoryTool(config, args) {
         brain: "render session-start orientation (run FIRST every session)",
         remember: '{"lane":"company|client","kind":"lesson|correction|fact|decision|preference|commitment|outcome","content":"...","evidence":[{"type":"chance|gmail|jobnimbus|quo|git|note","id":"...","note":"..."}],"importance":1-10,"subjectKey":"optional"}',
         list: '{"lane":"","kind":"","status":"","subjectKey":""}',
-        verify: '{"id":"mem_..."} — mark verified',
-        dispute: '{"id":"mem_..."} — mark disputed',
+        verify: '{"id":"mem_...","approved":true,"by":"Chance Pearson"} — mark verified after explicit approval',
+        dispute: '{"id":"mem_...","approved":true,"by":"Chance Pearson"} — mark disputed after explicit approval',
         handoff: '{"summary":"...","decisions":[],"commitments":[],"openQuestions":[],"corrections":[]} — run LAST every session',
         propose: '{"type":"recommendation|risk|opportunity|process_change","title":"","detail":"","memoryIds":["mem_..."]}',
         proposals: '{"status":"candidate"}',
-        review: '{"id":"prop_...","status":"approved|rejected|executed|obsolete","reason":""}'
+        review: '{"id":"prop_...","status":"approved|rejected|executed|obsolete","reason":"","approved":true,"by":"Chance Pearson"}'
       },
-      lanes: { company: "memory/company.jsonl — COMMITTED to the PUBLIC repo. No client names/numbers (enforced).", client: "data/memory/ — gitignored, local only. PII allowed." }
+      lanes: { company: "memory/company.jsonl — COMMITTED to the PUBLIC repo. No client names/numbers (enforced).", client: "data/memory/ — gitignored, local only. PII allowed." },
+      authority: "remember creates candidates only; verify/dispute/review require explicit Chance approval; memory and proposals never execute external actions"
     });
     return;
   }
@@ -36,7 +37,7 @@ export async function runMemoryTool(config, args) {
   if (tool === "brain") {
     // Local ops sessions default to the full client lane (single operator, one
     // machine). Pass {"clientLane":"subject","subjectKey":"<jnid>"} to isolate.
-    console.log(renderBrain(config, { clientLane: input.clientLane || "full", subjectKey: input.subjectKey || "" }));
+    console.log(renderBrain(config, { clientLane: input.clientLane || "full", subjectKey: input.subjectKey || "", includeEpisodes: input.includeEpisodes === true }));
     return;
   }
 
@@ -56,8 +57,8 @@ export async function runMemoryTool(config, args) {
   }
 
   if (tool === "verify" || tool === "dispute") {
-    // Provenance: the ops CLI acts on Chance's direct instruction in-session.
-    const record = setMemoryStatus(config, required(input.id, "id"), tool === "verify" ? "verified" : "disputed", { by: input.by || "chance-via-session", reason: input.reason || "" });
+    requireApproval(input);
+    const record = setMemoryStatus(config, required(input.id, "id"), tool === "verify" ? "verified" : "disputed", { by: input.by, reason: input.reason || "" });
     printJson({ mode: tool, record: compact(record) });
     return;
   }
@@ -84,7 +85,8 @@ export async function runMemoryTool(config, args) {
   }
 
   if (tool === "review") {
-    printJson({ proposal: reviewProposal(config, required(input.id, "id"), required(input.status, "status"), input.reason || "", { by: input.by || "chance-via-session" }) });
+    requireApproval(input);
+    printJson({ proposal: reviewProposal(config, required(input.id, "id"), required(input.status, "status"), input.reason || "", { by: input.by }) });
     return;
   }
 
@@ -116,6 +118,12 @@ function parseInput(text) {
 function required(value, name) {
   if (!value) throw new Error(`Missing required input: ${name}`);
   return value;
+}
+
+function requireApproval(input) {
+  if (input.approved !== true || String(input.by || "").trim().toLowerCase() !== "chance pearson") {
+    throw new Error('authoritative memory changes require approved:true and by:"Chance Pearson"');
+  }
 }
 
 function printJson(value) {

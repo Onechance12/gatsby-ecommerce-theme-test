@@ -70,9 +70,8 @@ function laneFile(paths, lane) {
 
 // Save with dedup + supersession. Same-dedupKey live record → merge evidence
 // (strongest verification wins), raise confidence/importance, no duplicate.
-// Provenance rule: evidence of type "chance" with confirmed verification means
-// Chance said it directly — the record is born verified. Everything else is a
-// candidate until explicitly verified.
+// Every new record is a candidate. Evidence supplied by a caller can support a
+// later review, but cannot promote itself to verified authority.
 export function saveMemory(config, draft, { customerNames = [] } = {}) {
   const normalized = normalizeMemoryDraft(draft);
   if (normalized.lane === "company") {
@@ -98,14 +97,10 @@ export function saveMemory(config, draft, { customerNames = [] } = {}) {
   }
 
   const record = { id: memoryId(), ...normalized, createdAt: now, updatedAt: now };
-  if (record.evidence.some((e) => e.type === "chance" && e.verification === "confirmed")) {
-    record.status = "verified";
-    record.verifiedBy = "chance-direct-instruction";
-    record.lastVerifiedAt = now;
-  }
   if (record.supersedesId) {
     const old = rows.find((r) => r.id === record.supersedesId);
-    if (old) { old.status = "superseded"; old.supersededById = record.id; old.updatedAt = now; }
+    if (!old) throw new Error(`superseded memory ${record.supersedesId} not found in ${record.lane} lane`);
+    if (["superseded", "expired"].includes(old.status)) throw new Error("cannot replace a retired memory");
   }
   rows.push(record);
   writeJsonl(file, rows);
@@ -149,11 +144,18 @@ export function setMemoryStatus(config, id, status, { by = "", reason = "" } = {
     const rows = readForMutation(file);
     const hit = rows.find((r) => r.id === id);
     if (hit) {
+      if (hit.status === status) return hit;
+      assertStatusTransition(hit.status, status);
+      if (status === "verified") activateVerifiedReplacement(rows, hit);
+      const previousStatus = hit.status;
       hit.status = status;
       hit.updatedAt = new Date().toISOString();
       hit.statusChangedBy = by;
       if (reason) hit.statusReason = reason;
       if (status === "verified") hit.lastVerifiedAt = hit.updatedAt;
+      if (previousStatus === "verified" && ["disputed", "expired"].includes(status)) {
+        reconcilePredecessor(rows, hit);
+      }
       writeJsonl(file, rows);
       return hit;
     }
@@ -190,9 +192,9 @@ export function saveProposal(config, draft) {
   const normalized = normalizeProposalDraft(draft);
   // Every cited memory must actually exist and be live — a proposal built on
   // phantom or retired memories is unreviewable.
-  const live = new Set(listMemory(config, { includeRetired: false }).map((r) => r.id));
+  const live = new Set(listMemory(config, { includeRetired: false, status: "verified" }).map((r) => r.id));
   const missing = normalized.memoryIds.filter((id) => !live.has(id));
-  if (missing.length) throw new Error(`proposal cites unknown/retired memory id(s): ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`proposal cites unknown, retired, or unverified memory id(s): ${missing.join(", ")}`);
   const paths = memoryPaths(config);
   const rows = readForMutation(paths.proposals);
   if (rows.some((r) => r.dedupKey === normalized.dedupKey && ["candidate", "approved"].includes(r.status))) {
@@ -225,4 +227,59 @@ export function reviewProposal(config, id, status, reason = "", { by = "" } = {}
 
 function strList(value, max) {
   return (Array.isArray(value) ? value : value ? [value] : []).map((v) => String(v).trim()).filter(Boolean).slice(0, max);
+}
+
+const STATUS_TRANSITIONS = {
+  candidate: new Set(["verified", "disputed", "expired"]),
+  verified: new Set(["disputed", "expired"]),
+  disputed: new Set(["verified", "expired"]),
+  superseded: new Set([]),
+  expired: new Set([])
+};
+
+function assertStatusTransition(from, to) {
+  if (!STATUS_TRANSITIONS[from]?.has(to)) throw new Error(`memory cannot transition from ${from} to ${to}`);
+}
+
+function activateVerifiedReplacement(rows, record) {
+  if (!record.supersedesId) return;
+  const predecessor = rows.find((row) => row.id === record.supersedesId);
+  if (!predecessor) throw new Error(`superseded memory ${record.supersedesId} not found`);
+  if (["superseded", "expired"].includes(predecessor.status)) throw new Error("replacement predecessor is not active");
+  const lineage = lineageIds(rows, record.id, predecessor.id);
+  const otherVerified = rows.find((row) => lineage.has(row.id) && row.id !== predecessor.id && row.id !== record.id && row.status === "verified");
+  if (otherVerified) throw new Error("another verified memory already exists in this replacement lineage");
+  record.predecessorStatus = predecessor.status;
+  predecessor.status = "superseded";
+  predecessor.supersededById = record.id;
+  predecessor.updatedAt = new Date().toISOString();
+}
+
+function reconcilePredecessor(rows, record) {
+  if (!record.supersedesId) return;
+  const predecessor = rows.find((row) => row.id === record.supersedesId);
+  if (!predecessor || predecessor.status !== "superseded") return;
+  const lineage = lineageIds(rows, predecessor.id);
+  const otherVerified = rows.find((row) => lineage.has(row.id) && row.id !== predecessor.id && row.id !== record.id && row.status === "verified");
+  predecessor.status = !otherVerified && record.predecessorStatus === "verified" ? "verified" : "disputed";
+  predecessor.updatedAt = new Date().toISOString();
+  delete predecessor.supersededById;
+}
+
+function lineageIds(rows, ...seeds) {
+  const seen = new Set(seeds.filter(Boolean));
+  const queue = [...seen];
+  while (queue.length) {
+    const current = queue.shift();
+    const adjacent = rows
+      .filter((row) => row.id === current || row.supersedesId === current)
+      .flatMap((row) => [row.id, row.supersedesId])
+      .filter(Boolean);
+    for (const id of adjacent) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      queue.push(id);
+    }
+  }
+  return seen;
 }
