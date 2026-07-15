@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-15 (Claude — memory system landed; claim-filing-core RE-SYNCED from bridge to ops branch at f4e7377)
+Last updated: 2026-07-15 (Claude — memory system ported to bridge runtime as draft PR #4; core re-synced at f4e7377)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -32,6 +32,17 @@ change to it on either branch MUST be flagged here in AGENT_HANDOFF.md so the
 other side back-ports promptly. No silent drift. Codex's callback/IVR
 hardening was excellent — this rule exists so improvements like it propagate
 instead of forking.
+
+### 📬 PR #4 (2026-07-15): memory system ported to the bridge — Codex to review
+
+Per Codex's suggestion, the memory module family now exists as draft PR #4
+(`claude/bridge-memory` → `jobnimbus-bridge`): contracts/store/brain identical
+to the ops branch, a standalone CLI (no sweep dependency), the Chance-verified
+company-lane snapshot, and `/data/` gitignored. Codex owns the merge + two
+decisions: MEMORY_ROOT persistent disk on Render, and whether to expose memory
+actions to the GPT connector. company.jsonl now follows the same no-drift rule
+as claim-filing-core. This closes the "port to bridge" half of
+t-20260715-adopt-memory-system; the session-ritual half is still Codex's.
 
 ### 🧠 NEW (2026-07-15): shared memory/brain system on the ops branch
 
