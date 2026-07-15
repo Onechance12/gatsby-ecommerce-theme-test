@@ -76,12 +76,14 @@ export function inferDamageCategories(file = {}, evidence = {}) {
     ["gutters/downspouts", /gutter|downspout/],
     ["fascia/soffit", /fascia|soffit/],
     ["window screens/windows", /window|screen|glazing/],
-    ["siding/exterior paint", /siding|exterior paint|paint damage|elevation/],
+    ["siding/exterior paint", /siding|exterior paint|paint damage|prime\s*&?\s*paint exterior/],
     ["fence", /fence/],
-    ["HVAC/soft metals", /hvac|a\/c|ac unit|soft metal|vent|flashing/],
-    ["detached structures", /shed|detached|carport/],
+    ["garage door", /garage door|overhead door/],
+    ["HVAC/soft metals", /hvac|a\/c|ac unit|air condition|condenser|soft metal/],
+    ["detached structures", /shed|carport|detached\s+(?:structure|building|garage)/],
     ["interior water/ceiling damage", /interior|water stain|ceiling|drywall|leak/],
-    ["personal property", /personal property|grill|chairs|patio|table/]
+    ["bathroom ceiling and adjoining walls", /bathroom[\s\S]{0,2500}(?:ceiling|wall)[\s\S]{0,500}(?:water|damage|paint|seal|texture)|damage extends from ceiling to corner where it meets the wall/],
+    ["personal property", /personal\s+property/]
   ];
 
   const categories = [];

@@ -7,6 +7,7 @@ import { normalizeClaimFileInput } from "./inputContract.js";
 import { resolveStandardAnswers, inferCause, inferDamageCategories } from "./standardAnswers.js";
 
 export const DEFAULT_GOAL = "file_new_claim";
+export const DEFAULT_DAMAGE_OPENING = "It has roof damage along with collateral on the exterior of the home, mostly paint, window screens, and gutters. I also believe there is some interior damage.";
 
 const ALLOWED_GOALS = new Set([
   "file_new_claim",
@@ -41,7 +42,7 @@ export function buildClaimCallPacket(input, options = {}) {
     carrier: file.carrier || "Missing",
     policyNumber: file.policyNumber || "Missing",
     claimNumber: cleanClaimNumber(file.claimNumber) || "Missing / not filed",
-    dateOfLoss: file.dateOfLoss || "Missing",
+    dateOfLoss: normalizeDateOfLoss(file.dateOfLoss),
     stormTime: overrides.stormTime || captured.stormTime || "Missing",
     causeOfLoss,
     currentStatus: file.status || "Missing",
@@ -57,7 +58,10 @@ export function buildClaimCallPacket(input, options = {}) {
     carrierPhone: overrides.carrierPhone || "User will provide / caller should find claims phone if needed"
   };
 
-  const damageCategories = inferDamageCategories(file, normalized.evidence);
+  const inferredDamageCategories = inferDamageCategories(file, normalized.evidence);
+  const damageOpening = String(overrides.damageOpening || DEFAULT_DAMAGE_OPENING).trim();
+  const damageDetails = normalizeDamageDetails(overrides.damageDetails, inferredDamageCategories);
+  const damageCategories = overrides.damageDetails ? [...damageDetails] : inferredDamageCategories;
   const missingFields = missingCallFields(facts, goal, damageCategories);
 
   return {
@@ -65,11 +69,13 @@ export function buildClaimCallPacket(input, options = {}) {
     goal,
     verifiedFileFacts: facts,
     damageSummary: damageCategories,
+    damageOpening,
+    damageDetails,
     missingFields,
     quoLearnedCallPattern: buildQuoLearnedPattern(goal),
-    callScript: buildCallScript(goal, facts, damageCategories),
+    callScript: buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails),
     shortIvrAnswers: buildIvrAnswers(goal, facts),
-    humanRepresentativeScript: buildHumanScript(goal, facts, damageCategories),
+    humanRepresentativeScript: buildHumanScript(goal, facts, damageCategories, damageOpening, damageDetails),
     informationToCapture: captureFieldsFor(goal),
     stopRules: buildStopRules(goal),
     resultFormat: buildResultFormat(goal),
@@ -80,11 +86,42 @@ export function buildClaimCallPacket(input, options = {}) {
   };
 }
 
+function normalizeDamageDetails(value, fallback) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (value && String(value).trim()) return String(value).split(/[,;\n]+/).map((item) => item.trim()).filter(Boolean);
+  return [...fallback];
+}
+
 export function normalizeGoal(value, file) {
   const goal = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (ALLOWED_GOALS.has(goal)) return goal;
   const claimNumber = cleanClaimNumber(file?.claimNumber);
   return claimNumber ? "status_follow_up" : DEFAULT_GOAL;
+}
+
+export function normalizeDateOfLoss(value) {
+  if (value === undefined || value === null || value === "") return "Missing";
+  const raw = String(value).trim();
+  let date;
+
+  if (/^\d{10}$/.test(raw)) date = new Date(Number(raw) * 1000);
+  else if (/^\d{13}$/.test(raw)) date = new Date(Number(raw));
+  else {
+    const matched = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+    if (matched) {
+      const [, month, day, year] = matched;
+      return `${month.padStart(2, "0")}/${day.padStart(2, "0")}/${year}`;
+    }
+    date = new Date(raw);
+  }
+
+  if (Number.isNaN(date.getTime())) return raw;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric"
+  }).format(date);
 }
 
 function objectiveFor(goal, facts) {
@@ -96,13 +133,13 @@ function objectiveFor(goal, facts) {
   return `Follow up on the claim status for ${facts.insuredName}.`;
 }
 
-function buildCallScript(goal, facts, damageCategories) {
+function buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails) {
   return [
     "Use strict IVR discipline: wait for the full prompt, wait about 3 seconds, then answer shortly.",
     "Do not identify as the homeowner.",
     "Only give the full public adjuster introduction to a human representative.",
     "",
-    buildHumanScript(goal, facts, damageCategories)
+    buildHumanScript(goal, facts, damageCategories, damageOpening, damageDetails)
   ].join("\n");
 }
 
@@ -118,13 +155,14 @@ function buildIvrAnswers(goal, facts) {
   return answers;
 }
 
-function buildHumanScript(goal, facts, damageCategories) {
-  const intro = `Hi, this is Chance Pearson's assistant calling regarding a property damage claim for ${facts.insuredName} at ${facts.propertyAddress}.`;
+function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT_DAMAGE_OPENING, damageDetails = damageCategories) {
+  const intro = `Hi, this is Chance Pearson's AI assistant calling regarding a property damage claim for ${facts.insuredName} at ${facts.propertyAddress}.`;
   if (goal === "file_new_claim") {
     return [
       intro,
       `I need to file a new residential property claim. The carrier is ${facts.carrier}, policy number ${facts.policyNumber}, date of loss ${facts.dateOfLoss}, cause of loss ${facts.causeOfLoss}.`,
-      `The reported damage categories are: ${damageCategories.join(", ")}.`,
+      `Initial damage answer: ${damageOpening}`,
+      `If asked follow-up questions, use only these verified details: ${damageDetails.join(", ")}.`,
       "Can you help get this claim opened and give me the claim number and document submission instructions?"
     ].join("\n");
   }
@@ -164,7 +202,7 @@ function buildQuoLearnedPattern(goal) {
     "Confirm the client/claim before moving forward.",
     "Ask one direct question at a time.",
     "If documents are requested, ask for the exact destination and subject-line rule.",
-    "Ask whether anything else is needed from Chance before ending the call.",
+    "Only after the claim/reference number and required closing details are captured, ask once whether the representative needs anything else before ending the call.",
     "Capture promised follow-up documents/emails and expected timing."
   ];
   if (goal === "file_new_claim") {
@@ -205,6 +243,8 @@ function buildResultFormat(goal) {
     documentSubmissionInstructions: "",
     documentsRequested: [],
     carrierNextStep: "",
+    callbackRequested: "yes/no",
+    callbackNumberConfirmed: "",
     blocker: "",
     recommendedJobNimbusUpdates: { fields: {}, status: "", note: "" },
     rawSummary: `Short summary of what happened on the ${goal} call.`

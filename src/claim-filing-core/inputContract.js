@@ -23,7 +23,7 @@
 //     overrides: {                    // approved per-call answers/goal
 //       goal, carrierPhone,
 //       injuries, homeLivable, temporaryRepairs, contractorHired,
-//       occupancy, damageDiscovered, stormTime
+//       occupancy, damageDiscovered, stormTime, damageOpening, damageDetails
 //     }
 //   }
 export function normalizeClaimFileInput(raw = {}) {

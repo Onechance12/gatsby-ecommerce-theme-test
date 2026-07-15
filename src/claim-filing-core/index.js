@@ -7,7 +7,7 @@
 // See docs/claim-filing-core-contract.md for the input contract and usage.
 
 export { normalizeClaimFileInput } from "./inputContract.js";
-export { buildClaimCallPacket, normalizeGoal, cleanClaimNumber, DEFAULT_GOAL } from "./packet.js";
+export { buildClaimCallPacket, normalizeGoal, normalizeDateOfLoss, cleanClaimNumber, DEFAULT_GOAL } from "./packet.js";
 export {
   STANDARD_FILING_ANSWERS,
   resolveStandardAnswers,
