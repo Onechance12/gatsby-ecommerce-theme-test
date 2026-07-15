@@ -33,6 +33,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.brain.mode, "read_only_company_context");
   assert.equal(health.brain.autonomousLearning, false);
   assert.equal(health.brain.externalActions, false);
+  assert.equal(health.voice.streamPath, "/voice/twilio-stream");
+  assert.equal(health.voice.streamUrl, undefined);
 
   const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
   assert.equal(schemaResponse.status, 200);

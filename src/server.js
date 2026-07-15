@@ -185,7 +185,7 @@ function health() {
       available: Boolean(OPENAI_API_KEY),
       model: OPENAI_REALTIME_MODEL,
       voice: OPENAI_VOICE,
-      streamUrl: voiceStreamUrl(),
+      streamPath: VOICE_STREAM_PATH,
       streamAuth: VOICE_STREAM_TOKEN ? "token_required" : "disabled",
       twilioConfigured: Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER),
       callsAllowed: ALLOW_VOICE_CALLS
