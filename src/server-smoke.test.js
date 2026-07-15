@@ -184,6 +184,19 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.match(brain.context, /Memory and proposals never authorize or execute external actions/);
   assert.match(brain.context, /UNVERIFIED CANDIDATES/);
 
+  const chanceIndexResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ indexOnly: true, activeOnly: true, includeGmail: false, includeQuo: false })
+  });
+  assert.equal(chanceIndexResponse.status, 200);
+  const chanceIndex = await chanceIndexResponse.json();
+  assert.equal(chanceIndex.mode, "index");
+  assert.equal(chanceIndex.total, 1);
+  assert.equal(chanceIndex.files[0].number, 2739);
+  assert.equal(chanceIndex.files[0].missing.claimNumber, true);
+  assert.equal(chanceIndex.files[0].missing.policyNumber, false);
+
   const updateDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },

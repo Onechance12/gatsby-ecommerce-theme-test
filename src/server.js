@@ -2608,6 +2608,21 @@ async function reviewChanceFiles(input = {}) {
       .sort(fileSort);
   }
   const total = contacts.length;
+  if (input.indexOnly === true && !input.query) {
+    return {
+      generatedAt: new Date().toISOString(),
+      owner: { id: CHANCE_OWNER_ID, name: "Chance Pearson" },
+      mode: "index",
+      total,
+      files: contacts.map(compactChanceIndexContact),
+      assistantDirective: [
+        "This is a lightweight, fresh JobNimbus index for prioritization only.",
+        "Choose the highest-priority candidate using current status, missing claim facts, and last update.",
+        "Then call this endpoint again with that exact file as query, limit 1, and Gmail/Quo enabled before proposing any action.",
+        "Do not execute or infer completed work from this index."
+      ]
+    };
+  }
   const selected = input.query ? contacts : contacts.slice((page - 1) * limit, page * limit);
   const packets = [];
   for (const contact of selected) packets.push(await buildChanceEvidencePacket(contact, input));
@@ -2627,6 +2642,20 @@ async function reviewChanceFiles(input = {}) {
       "For each file, choose one primary next action, draft its exact content, and show Chance what requires approval.",
       "Do not treat memory or an old task as proof that work is still needed. Do not execute without approval."
     ]
+  };
+}
+
+function compactChanceIndexContact(contact) {
+  const file = compactContact(contact);
+  return {
+    ...file,
+    dateUpdated: contact.date_updated || "",
+    missing: {
+      claimNumber: !file.claimNumber,
+      policyNumber: !file.policyNumber,
+      dateOfLoss: !file.dateOfLoss,
+      adjuster: !file.adjusterName && !file.adjusterPhone && !file.adjusterEmail
+    }
   };
 }
 
@@ -5156,8 +5185,9 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Optional exact Chance file. Omit for a paginated Chance-only sweep." },
+          indexOnly: { type: "boolean", default: false, description: "Use true first for a lightweight current index of every active Chance file. Then deep-review one selected file using query and limit 1." },
           page: { type: "integer", minimum: 1, default: 1 },
-          limit: { type: "integer", minimum: 1, maximum: 10, default: 5 },
+          limit: { type: "integer", minimum: 1, maximum: 10, default: 1, description: "Use 1 for full evidence reviews so JobNimbus, Gmail, Quo, documents, tasks, and receipts fit within connector response limits." },
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           activeOnly: { type: "boolean", default: true },
           includeGmail: { type: "boolean", default: true },
