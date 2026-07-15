@@ -1,42 +1,60 @@
 // Session-start brain: render everything a fresh session must know, compactly.
-// This is the answer to "a scheduled session wakes up knowing nothing" — it
-// reads the durable memory lanes + the last episodes and prints an orientation
-// block. Modeled on Jobrolo's buildTurnMemoryContext/renderEpisode (read-only
-// reference), rebuilt file-based.
+// Hardened per Codex's PR #4 review:
+//   AUTHORITY — only VERIFIED records render as operating rules/corrections.
+//     Candidates are visibly quarantined for review; disputed records never
+//     render as guidance at all (only a count, so they get resolved).
+//   ISOLATION — clientLane controls exposure: "full" (local single-operator
+//     ops sessions), "subject" (only records matching subjectKey — the bridge
+//     default, so a session working file A never sees file B), or "none".
 import { listMemory, latestEpisodes, listProposals } from "./store.js";
 
-export function renderBrain(config, { maxPerSection = 10 } = {}) {
+export function renderBrain(config, { maxPerSection = 10, clientLane = "full", subjectKey = "" } = {}) {
   const lines = [];
   const company = listMemory(config, { lane: "company" });
-  const client = listMemory(config, { lane: "client" });
-  const episodes = latestEpisodes(config, 2);
+  const clientAll = listMemory(config, { lane: "client" });
+  const client = clientLane === "full" ? clientAll
+    : clientLane === "subject" ? clientAll.filter((r) => subjectKey && r.subjectKey === subjectKey)
+    : [];
+  const episodes = clientLane === "full" ? latestEpisodes(config, 2) : [];
   const proposals = listProposals(config, { status: "candidate" });
 
-  lines.push("BRAIN — durable memory for this session");
-  lines.push(`records: company=${company.length} client=${client.length} | open proposals: ${proposals.length}`);
+  const verified = (rows) => rows.filter((r) => r.status === "verified");
+  const candidates = (rows) => rows.filter((r) => r.status === "candidate");
+  const disputedCount = [...company, ...client].filter((r) => r.status === "disputed").length;
 
-  const corrections = [...company, ...client].filter((r) => r.kind === "correction").slice(0, maxPerSection);
+  lines.push("BRAIN — durable memory for this session");
+  lines.push(`records: company=${company.length} client=${client.length}${clientLane !== "full" ? ` (isolation: ${clientLane}${subjectKey ? ` → ${subjectKey}` : ""})` : ""} | open proposals: ${proposals.length}${disputedCount ? ` | DISPUTED needing resolution: ${disputedCount}` : ""}`);
+
+  const corrections = verified([...company, ...client].filter((r) => r.kind === "correction")).slice(0, maxPerSection);
   if (corrections.length) {
-    lines.push("", "CORRECTIONS FROM CHANCE (highest authority — never repeat these mistakes):");
+    lines.push("", "CORRECTIONS FROM CHANCE (verified — never repeat these mistakes):");
     for (const r of corrections) lines.push(`- ${flag(r)} ${r.content}`);
   }
 
-  const rules = company.filter((r) => ["preference", "decision", "lesson"].includes(r.kind)).slice(0, maxPerSection + 5);
+  const rules = verified(company.filter((r) => ["preference", "decision", "lesson"].includes(r.kind))).slice(0, maxPerSection + 5);
   if (rules.length) {
-    lines.push("", "OPERATING RULES & LESSONS (company lane):");
+    lines.push("", "OPERATING RULES & LESSONS (company lane, verified):");
     for (const r of rules) lines.push(`- ${flag(r)} [${r.kind}] ${r.content}`);
   }
 
-  const commitments = [...company, ...client].filter((r) => r.kind === "commitment").slice(0, maxPerSection);
+  const commitments = [...company, ...client].filter((r) => r.kind === "commitment" && r.status !== "disputed").slice(0, maxPerSection);
   if (commitments.length) {
     lines.push("", "OPEN COMMITMENTS:");
     for (const r of commitments) lines.push(`- ${flag(r)} ${r.content}${r.subjectKey ? ` (subject: ${r.subjectKey})` : ""}`);
   }
 
-  const clientFacts = client.filter((r) => ["fact", "outcome", "decision"].includes(r.kind)).slice(0, maxPerSection + 5);
+  const clientFacts = client.filter((r) => ["fact", "outcome", "decision"].includes(r.kind) && r.status !== "disputed").slice(0, maxPerSection + 5);
   if (clientFacts.length) {
     lines.push("", "CLIENT-FILE FACTS (local lane, PII-allowed, verify against JobNimbus before acting):");
     for (const r of clientFacts) lines.push(`- ${flag(r)} [${r.kind}] ${r.content}`);
+  }
+
+  // Quarantine: candidates are context, not law. Rendered separately so they
+  // can never be mistaken for verified guidance.
+  const pending = candidates([...company, ...client].filter((r) => ["correction", "preference", "decision", "lesson"].includes(r.kind))).slice(0, maxPerSection);
+  if (pending.length) {
+    lines.push("", "UNVERIFIED CANDIDATES (quarantined — treat as hypotheses; ask Chance to verify):");
+    for (const r of pending) lines.push(`- ${r.id} [${r.lane}/${r.kind}] ${r.content}`);
   }
 
   if (episodes.length) {

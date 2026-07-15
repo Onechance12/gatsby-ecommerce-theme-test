@@ -34,7 +34,9 @@ export async function runMemoryTool(config, args) {
   }
 
   if (tool === "brain") {
-    console.log(renderBrain(config));
+    // Local ops sessions default to the full client lane (single operator, one
+    // machine). Pass {"clientLane":"subject","subjectKey":"<jnid>"} to isolate.
+    console.log(renderBrain(config, { clientLane: input.clientLane || "full", subjectKey: input.subjectKey || "" }));
     return;
   }
 
@@ -54,7 +56,8 @@ export async function runMemoryTool(config, args) {
   }
 
   if (tool === "verify" || tool === "dispute") {
-    const record = setMemoryStatus(config, required(input.id, "id"), tool === "verify" ? "verified" : "disputed");
+    // Provenance: the ops CLI acts on Chance's direct instruction in-session.
+    const record = setMemoryStatus(config, required(input.id, "id"), tool === "verify" ? "verified" : "disputed", { by: input.by || "chance-via-session", reason: input.reason || "" });
     printJson({ mode: tool, record: compact(record) });
     return;
   }
@@ -81,7 +84,7 @@ export async function runMemoryTool(config, args) {
   }
 
   if (tool === "review") {
-    printJson({ proposal: reviewProposal(config, required(input.id, "id"), required(input.status, "status"), input.reason || "") });
+    printJson({ proposal: reviewProposal(config, required(input.id, "id"), required(input.status, "status"), input.reason || "", { by: input.by || "chance-via-session" }) });
     return;
   }
 

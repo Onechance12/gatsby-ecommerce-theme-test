@@ -227,6 +227,74 @@ check("miner buckets leads separately", bucketStatus("Cold Lead (Recycle)") === 
 check("miner buckets billing as settlement", bucketStatus("Ready for Billing") === "settlement");
 check("miner normalizes carrier typos", normalizeCarrier("All State") === "Allstate" && normalizeCarrier("Sate Farm") === "State Farm");
 
+// ---- Memory hardening (Codex PR #4 acceptance checks) — temp-dir isolated ----
+{
+  const fsm = await import("node:fs");
+  const osm = await import("node:os");
+  const pathm = await import("node:path");
+  const { saveMemory, listMemory, setMemoryStatus, saveProposal, memoryPaths } = await import("./memory/store.js");
+  const { renderBrain } = await import("./memory/brain.js");
+  const { assertCompanyLaneSafe } = await import("./memory/contracts.js");
+
+  const repoRoot = fsm.mkdtempSync(pathm.join(osm.tmpdir(), "mem-repo-"));
+  const dataRoot = fsm.mkdtempSync(pathm.join(osm.tmpdir(), "mem-data-"));
+  const cfg = { projectRoot: repoRoot, memoryRoot: dataRoot };
+
+  // split roots: company anchors to repo root even when memoryRoot differs
+  const paths = memoryPaths(cfg);
+  check("memory: company lane anchored to repo root", paths.company.startsWith(repoRoot));
+  check("memory: client lane follows data root", paths.client.startsWith(dataRoot));
+
+  // seed survives a data-root override
+  fsm.mkdirSync(pathm.join(repoRoot, "memory"), { recursive: true });
+  const seeded = saveMemory(cfg, { lane: "company", kind: "lesson", content: "seeded rule for selftest coverage", evidence: [{ type: "chance", note: "synthetic" }] }).record;
+  check("memory: chance-confirmed evidence births a verified record", seeded.status === "verified");
+  check("memory: seeded company rule visible with data-root override", listMemory(cfg, { lane: "company" }).length === 1);
+
+  // authority: candidate quarantined, disputed never guidance
+  const cand = saveMemory(cfg, { lane: "company", kind: "decision", content: "candidate decision must be quarantined", evidence: [{ type: "note", note: "synthetic observation" }] }).record;
+  let brain = renderBrain(cfg);
+  check("memory: candidate decision NOT under operating rules", !brain.split("UNVERIFIED CANDIDATES")[0].includes("candidate decision must be quarantined"));
+  check("memory: candidate decision IS quarantined", brain.includes("UNVERIFIED CANDIDATES") && brain.includes("candidate decision must be quarantined"));
+  setMemoryStatus(cfg, cand.id, "disputed", { by: "selftest" });
+  brain = renderBrain(cfg);
+  check("memory: disputed record renders nowhere as guidance", !brain.includes("candidate decision must be quarantined"));
+
+  // isolation: subject mode hides other files
+  saveMemory(cfg, { lane: "client", kind: "fact", content: "file A synthetic fact", evidence: ["a"], subjectKey: "fileA" });
+  saveMemory(cfg, { lane: "client", kind: "fact", content: "file B synthetic fact", evidence: ["b"], subjectKey: "fileB" });
+  const isolated = renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA" });
+  check("memory: subject isolation shows file A", isolated.includes("file A synthetic fact"));
+  check("memory: subject isolation hides file B", !isolated.includes("file B synthetic fact"));
+
+  // PII patterns fail closed (no customerNames list needed)
+  const rejects = (txt) => { try { assertCompanyLaneSafe(txt); return false; } catch { return true; } };
+  check("memory PII: email rejected", rejects("carrier desk is reachable at desk@example.com for scheduling"));
+  check("memory PII: phone rejected", rejects("call the adjuster line 214-555-0142 before noon"));
+  check("memory PII: street address rejected", rejects("the property at 1012 Sunset Dr needs a tarp"));
+  check("memory PII: named insured rejected", rejects("the policyholder John Smith prefers texts"));
+  check("memory PII: clean operating rule accepted", !rejects("always verify the claim number by fetching the created activity"));
+
+  // proposals must cite live memory ids
+  let propThrew2 = "";
+  try { saveProposal(cfg, { type: "risk", title: "phantom", detail: "cites a memory that does not exist", memoryIds: ["mem_nope"] }); } catch (e) { propThrew2 = e.message; }
+  check("memory: proposal citing unknown memory id rejected", /unknown|retired/.test(propThrew2));
+
+  // corruption surfacing: mutations blocked on corrupt files
+  fsm.appendFileSync(paths.company, "{not-json\n");
+  let corrThrew = "";
+  try { saveMemory(cfg, { lane: "company", kind: "lesson", content: "should not write over corruption", evidence: ["x"] }); } catch (e) { corrThrew = e.message; }
+  check("memory: mutation refuses corrupt file", /corrupt/i.test(corrThrew));
+
+  // provenance required on status changes
+  let provThrew = "";
+  try { setMemoryStatus(cfg, seeded.id, "disputed", {}); } catch (e) { provThrew = e.message; }
+  check("memory: status change without provenance rejected", /provenance/.test(provThrew));
+
+  fsm.rmSync(repoRoot, { recursive: true, force: true });
+  fsm.rmSync(dataRoot, { recursive: true, force: true });
+}
+
 console.log("");
 if (failures) {
   console.error(`Self-test failed: ${failures} check(s) failed.`);
