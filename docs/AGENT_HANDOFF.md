@@ -1,6 +1,6 @@
 # Agent Handoff
 
-Last updated: 2026-07-15 (Claude — memory system ported to bridge runtime as draft PR #4; core re-synced at f4e7377)
+Last updated: 2026-07-15 (Claude — Scope Intelligence opened as a shared Claude+Codex build; memory verified to 27 rules)
 
 This is the durable status record shared by Claude, Codex, and Chance. Read it
 before starting and update it before stopping. Keep client PII out of this file.
@@ -32,6 +32,31 @@ change to it on either branch MUST be flagged here in AGENT_HANDOFF.md so the
 other side back-ports promptly. No silent drift. Codex's callback/IVR
 hardening was excellent — this rule exists so improvements like it propagate
 instead of forking.
+
+### 🔬 Scope Intelligence — shared build (task t-20260715-scope-intelligence-collab)
+
+Chance's directive: the miner becomes a Claude+Codex collaboration. Goal = the
+carrier-scope-build system — when a carrier scope hits a file, auto-flag what it
+omits vs our estimate and vs that carrier's known omission profile.
+
+Claude built the analysis layer (ops branch @ 518ed3f): `history:mine`
+(whole-book stats + scope-of-loss doc inventory + scope-pairs.json) and
+`scope:mine` (per-file estimate-pair line-item + money extraction, dual-mode
+parser, fuzzy omission detection). 27 verified brain lessons, incl. the
+carrier-scope findings.
+
+Split of labor (full detail in the task file):
+- **Claude:** owns history:mine / scope:mine + a per-carrier omission-profile
+  generator; distills profiles into verified brain lessons.
+- **Codex:** OCR port (pdftoppm+tesseract from the old bridge branch) so scanned
+  carrier PDFs parse into the SAME parseEstimateText; a read-only, approval-gated
+  scope-review bridge action for the GPT connector; parser coverage for new
+  carrier layouts you meet in the field.
+- **Shared, no-drift:** `src/assistant/scopeMiner.js` parsing helpers + the
+  omission profiles. Flag changes here; back-port both ways.
+
+Known limits handed to Codex: 2 of 8 carrier PDFs were scanned images (0 text) —
+OCR is the unblock; ESX inner payload is encrypted — always use the Final Draft PDF.
 
 ### 📬 PR #4 (2026-07-15): memory system ported to the bridge — Codex to review
 
