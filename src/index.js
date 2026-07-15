@@ -33,6 +33,7 @@ import { runLorPackage } from "./assistant/lorPackage.js";
 import { runMemoryTool } from "./memory/index.js";
 import { runHistoryMiner } from "./assistant/historyMiner.js";
 import { runScopeMiner } from "./assistant/scopeMiner.js";
+import { runScopeProfiles } from "./assistant/scopeProfiles.js";
 
 const command = process.argv[2] || "help";
 const commandArgs = process.argv.slice(3);
@@ -198,6 +199,11 @@ async function main() {
 
   if (command === "scope:mine") {
     await runScopeMiner(config, commandArgs);
+    return;
+  }
+
+  if (command === "scope:profiles") {
+    runScopeProfiles(config);
     return;
   }
 

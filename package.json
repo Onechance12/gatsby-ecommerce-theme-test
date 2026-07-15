@@ -44,7 +44,8 @@
     "lor-package": "node src/index.js lor-package",
     "memory": "node src/index.js memory",
     "history:mine": "node src/index.js history:mine",
-    "scope:mine": "node src/index.js scope:mine"
+    "scope:mine": "node src/index.js scope:mine",
+    "scope:profiles": "node src/index.js scope:profiles"
   },
   "engines": {
     "node": ">=20"

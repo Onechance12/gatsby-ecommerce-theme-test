@@ -306,6 +306,19 @@ check("scope: split (State Farm) style parses", styleB.items.length === 1 && /dr
 check("scope: item normalization collides abbreviations", normalizeItem("R&R Laminated - comp. shingle rfg.") === normalizeItem("remove replace laminated composition shingle roofing"));
 check("scope: document classifier", classifyDocument("_Final Draft with_without Removal Depreciation.pdf") === "our-estimate" && classifyDocument("Carrier Estimate 1.pdf") === "carrier-scope" && classifyDocument("JAIRO.ESX") === "our-estimate");
 
+// ---- Scope profile generator (synthetic reports) ----
+const { buildProfiles } = await import("./assistant/scopeProfiles.js");
+const synthReports = [
+  { file: { carrier: "Farmers" }, sides: { ours: { items: [{ description: "R&R paint exterior" }, { description: "detach reset gutter" }, { description: "roof shingle" }], totals: { rcv: 1000 } }, carrier: { totals: { rcv: 110 } } }, comparison: { missingFromCarrier: [{ description: "R&R paint exterior" }, { description: "detach reset gutter" }] } },
+  { file: { carrier: "Farmers Insurance" }, sides: { ours: { items: [{ description: "paint wall" }, { description: "roof shingle" }], totals: { rcv: 2000 } }, carrier: { totals: { rcv: 200 } } }, comparison: { missingFromCarrier: [{ description: "paint wall" }] } }
+];
+const prof = buildProfiles(synthReports);
+check("scope profiles: carrier name normalization merges Farmers variants", prof.profiles.length === 1 && prof.profiles[0].carrier === "Farmers");
+check("scope profiles: pairs counted", prof.profiles[0].pairs === 2);
+check("scope profiles: median RCV ratio computed", Math.abs(prof.profiles[0].medianRcvRatio - 0.1) < 0.01);
+check("scope profiles: paint flagged as systematic omission", prof.profiles[0].topOmissions.includes("paint-seal"));
+check("scope profiles: paint 100% omitted in carrier detail", prof.profiles[0].categories.some((c) => c.category === "paint-seal" && c.omissionRate === 100));
+
 console.log("");
 if (failures) {
   console.error(`Self-test failed: ${failures} check(s) failed.`);
