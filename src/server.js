@@ -40,6 +40,7 @@ import {
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
+import { createLorPdf } from "./documents/lor.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -55,6 +56,7 @@ const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GOOGLE_TOKEN_URL = process.env.GOOGLE_TOKEN_URL || "https://oauth2.googleapis.com/token";
 const GMAIL_API_BASE_URL = stripTrailingSlash(process.env.GMAIL_API_BASE_URL || "https://gmail.googleapis.com");
 const GMAIL_USER = process.env.GMAIL_USER || "me";
+const STANDARD_W9_GMAIL_MESSAGE_ID = process.env.STANDARD_W9_GMAIL_MESSAGE_ID || "19e88b6a5da1ac61";
 const ALLOW_GMAIL_SEND = process.env.ALLOW_GMAIL_SEND === "true";
 const PERSISTENT_DATA_ROOT = process.env.MEMORY_ROOT || tmpdir();
 const BRIDGE_DATA_DIR = path.join(PERSISTENT_DATA_ROOT, "bridge");
@@ -3333,8 +3335,10 @@ async function resolveGmailMessageBody(input, attachments) {
   if (requestedTemplate === "payment_redirection" || packageReview.isComplete) {
     const query = required(input.query || input.fileQuery, "query");
     const file = await optionalChanceFile(query);
-    if (!file?.name) badRequest("A verified policyholder name is required for the payment-redirection email template.");
-    return { body: paymentRedirectionEmailBody(file.name), template: "payment_redirection" };
+    const generatedPolicyholder = attachments.find((attachment) => attachment.source === "generated_lor")?.insuredName;
+    const policyholder = String(input.policyholderName || generatedPolicyholder || file?.name || "").trim();
+    if (!policyholder) badRequest("A verified policyholder name is required for the payment-redirection email template.");
+    return { body: paymentRedirectionEmailBody(policyholder), template: "payment_redirection" };
   }
   return { body: required(input.body, "body"), template: "custom" };
 }
@@ -5035,6 +5039,45 @@ async function loadEmailAttachments(input = {}) {
       }));
       continue;
     }
+    if (source === "generated_lor") {
+      const query = required(spec.query || input.query || input.fileQuery, `attachments[${index}].query`);
+      const { contact } = await findChanceContact(query);
+      const file = compactContact(contact);
+      const insured = String(spec.insuredName || file.name || "").trim();
+      const carrier = String(spec.carrier || file.carrier || "").trim();
+      const claimNumber = String(spec.claimNumber || file.claimNumber || input.subject || "").trim();
+      const dateOfLoss = formatLorDate(spec.dateOfLoss || file.dateOfLoss);
+      const letterDate = formatLorDate(spec.letterDate || new Date().toISOString().slice(0, 10));
+      const addressLine1 = String(contact.address_line1 || "").trim();
+      const addressLine2 = [contact.city, contact.state_text, contact.zip].filter(Boolean).join(", ").replace(/, (\d{5}(?:-\d{4})?)$/, " $1");
+      const bytes = await createLorPdf({
+        insured,
+        carrier,
+        addressLine1,
+        addressLine2,
+        dateOfLoss,
+        claimNumber,
+        letterDate
+      });
+      attachments.push(validateEmailAttachment({
+        filename: spec.filename || `${filenameToken(insured)}_LOR_${filenameToken(claimNumber)}.pdf`,
+        contentType: "application/pdf",
+        bytes,
+        source,
+        insuredName: insured,
+        sourceFileId: contact.jnid || contact.id || ""
+      }));
+      continue;
+    }
+    if (source === "standard_w9") {
+      const attachment = await loadStandardW9Attachment();
+      attachments.push(validateEmailAttachment({
+        ...attachment,
+        filename: spec.filename || attachment.filename,
+        source
+      }));
+      continue;
+    }
     if (source === "base64") {
       const contentBase64 = required(spec.contentBase64, `attachments[${index}].contentBase64`).replace(/\s+/g, "");
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) badRequest(`attachments[${index}].contentBase64 is not valid base64`);
@@ -5051,6 +5094,50 @@ async function loadEmailAttachments(input = {}) {
   const totalBytes = attachments.reduce((sum, attachment) => sum + attachment.bytes.length, 0);
   if (totalBytes > 20 * 1024 * 1024) badRequest("Verified Gmail attachments exceed the bridge's 20 MB total limit.");
   return attachments;
+}
+
+async function loadStandardW9Attachment() {
+  const query = 'from:richard@wavepa.com filename:"Wave W-9.pdf"';
+  const rows = [];
+  if (STANDARD_W9_GMAIL_MESSAGE_ID) rows.push({ id: STANDARD_W9_GMAIL_MESSAGE_ID });
+  const search = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages?q=${encodeURIComponent(query)}&maxResults=10`);
+  for (const row of Array.isArray(search?.messages) ? search.messages : []) {
+    if (!rows.some((candidate) => candidate.id === row.id)) rows.push(row);
+  }
+  for (const row of rows) {
+    let message;
+    try {
+      message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=full`);
+    } catch (error) {
+      if (error?.statusCode === 404) continue;
+      throw error;
+    }
+    const match = listGmailAttachments(message?.payload).find((attachment) => /(?:^|\b)wave[ _-]*w[ _-]*9\.pdf$/i.test(attachment.filename));
+    if (!match) continue;
+    const payload = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}/attachments/${encodeURIComponent(match.attachmentId)}`);
+    return {
+      filename: "Wave_W-9.pdf",
+      contentType: match.mimeType || "application/pdf",
+      bytes: base64UrlToBuffer(payload?.data || ""),
+      sourceId: `${row.id}:${match.attachmentId}`
+    };
+  }
+  badRequest("The standard Wave W-9 could not be found in authenticated Gmail. Search Richard's messages for Wave W-9.pdf and verify the attachment still exists.");
+}
+
+function formatLorDate(value) {
+  const iso = isoDateFromClaimValue(value);
+  if (!iso) return String(value || "").trim();
+  const [year, month, day] = iso.split("-");
+  return `${month}/${day}/${year}`;
+}
+
+function filenameToken(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80) || "document";
 }
 
 function validateEmailAttachment(attachment) {
@@ -6498,13 +6585,18 @@ const OPENAPI = {
       GmailAttachmentSpec: {
         type: "object",
         properties: {
-          source: { type: "string", enum: ["jobnimbus", "base64"], default: "jobnimbus" },
+          source: { type: "string", enum: ["jobnimbus", "generated_lor", "standard_w9", "base64"], default: "jobnimbus", description: "Use generated_lor to build the standard one-page Wave LOR from the current Chance file, standard_w9 to retrieve the verified company W-9 from Gmail, jobnimbus for TDI/FIN535 and other client documents, or base64 only for an already verified external file." },
           query: { type: "string", description: "Chance file identifier. May be inherited from the message-level query." },
           documentQuery: { type: "string", description: "JobNimbus document id or filename." },
           documentId: { type: "string", description: "Alias for documentQuery." },
           filename: { type: "string", description: "Optional safe output filename, or required for base64 attachments." },
           contentType: { type: "string" },
-          contentBase64: { type: "string", description: "Only for source=base64. JobNimbus documents are fetched server-side." }
+          contentBase64: { type: "string", description: "Only for source=base64. JobNimbus documents are fetched server-side." },
+          insuredName: { type: "string", description: "For generated_lor only. Use when a signed TDI/FIN535 verifies a spelling that differs from the JobNimbus display name." },
+          carrier: { type: "string", description: "Optional verified carrier override for generated_lor." },
+          claimNumber: { type: "string", description: "Optional verified claim-number override for generated_lor when JobNimbus has not yet been updated." },
+          dateOfLoss: { type: "string", description: "Optional verified DOL override for generated_lor." },
+          letterDate: { type: "string", description: "Optional LOR date. Defaults to the current date." }
         }
       },
       GmailMessageRequest: {
@@ -6517,6 +6609,7 @@ const OPENAPI = {
           subject: { type: "string", description: "Email subject. For insurance emails, use claim number only when applicable." },
           body: { type: "string", description: "Plain text email body. When the verified attachments contain LOR + FIN535/TDI + W-9, the bridge replaces this with Richard's standard payment-redirection template instead of allowing improvised wording." },
           template: { type: "string", enum: ["payment_redirection"], description: "Use payment_redirection for the standard LOR + FIN535/TDI + W-9 carrier packet. The bridge builds the approved body from the current JobNimbus policyholder and ignores improvised body text." },
+          policyholderName: { type: "string", description: "Optional verified policyholder spelling for payment redirection. Prefer the signed TDI/FIN535 spelling when it conflicts with JobNimbus." },
           threadId: { type: "string", description: "Optional Gmail thread id to reply in an existing thread." },
           query: { type: "string", description: "Chance file identifier used for JobNimbus attachments, ownership validation, and the private action receipt." },
           fileQuery: { type: "string", description: "Alias for query." },

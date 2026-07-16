@@ -371,6 +371,33 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       }));
       return;
     }
+    if (url.pathname === "/gmail/v1/users/me/messages" && req.method === "GET" && String(url.searchParams.get("q") || "").includes("Wave W-9.pdf")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ messages: [{ id: "gmail-w9-message", threadId: "gmail-w9-thread" }] }));
+      return;
+    }
+    if (url.pathname === "/gmail/v1/users/me/messages/gmail-w9-message" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "gmail-w9-message",
+        threadId: "gmail-w9-thread",
+        payload: {
+          mimeType: "multipart/mixed",
+          headers: [{ name: "From", value: "Richard <richard@wavepa.com>" }],
+          parts: [{
+            filename: "Wave W-9.pdf",
+            mimeType: "application/pdf",
+            body: { attachmentId: "gmail-w9-attachment", size: fixturePdf.length }
+          }]
+        }
+      }));
+      return;
+    }
+    if (url.pathname === "/gmail/v1/users/me/messages/gmail-w9-message/attachments/gmail-w9-attachment" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: fixturePdf.toString("base64url"), size: fixturePdf.length }));
+      return;
+    }
     if (url.pathname === "/gmail/v1/users/me/drafts/draft-1" && req.method === "GET") {
       if (!fixtureGmailDraftExists) {
         res.writeHead(404, { "content-type": "application/json" });
@@ -442,6 +469,11 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       res.end(fixturePdf);
       return;
     }
+    if (url.pathname === "/file-content/file-tdi") {
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end(fixturePdf);
+      return;
+    }
     if (url.pathname === "/tasks/task-1" && req.method === "PUT") {
       fixtureTaskCompleted = true;
       res.writeHead(400, { "content-type": "text/plain" });
@@ -474,6 +506,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
         content_type: "image/jpeg"
       })),
       { jnid: "file-1", primary: { id: chance.jnid }, filename: "Carrier estimate.pdf", content_type: "application/pdf" },
+      { jnid: "file-tdi", primary: { id: chance.jnid }, filename: "Fixture Homeowner - TDI.pdf", content_type: "application/pdf" },
       { jnid: "file-policy", primary: { id: chance.jnid }, filename: "Fixture Homeowner Insurance.pdf", content_type: "application/pdf" },
       { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" },
       { jnid: "file-other", primary: { id: other.jnid }, filename: "Other Owner - TDI.pdf", content_type: "application/pdf" },
@@ -508,6 +541,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       GOOGLE_CLIENT_ID: "fixture-google-client",
       GOOGLE_CLIENT_SECRET: "fixture-google-secret",
       GOOGLE_REFRESH_TOKEN: "fixture-google-refresh",
+      STANDARD_W9_GMAIL_MESSAGE_ID: "gmail-w9-message",
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
       GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_API_KEY: "fixture-quo-key",
@@ -529,7 +563,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const prepared = await preparedResponse.json();
   assert.equal(prepared.file.id, "contact-chance");
   assert.equal(prepared.readiness.ready, true);
-  assert.equal(prepared.evidence.documentsReviewed, 2);
+  assert.equal(prepared.evidence.documentsReviewed, 3);
   assert.equal(prepared.evidence.photoFilesExcluded, 121);
   assert.ok(relatedFilterRequests >= 3);
   assert.equal(prepared.callPlan.to, "+18444584300");
@@ -590,7 +624,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(coordinatorDryRun.file.id, chance.jnid);
   assert.equal(coordinatorDryRun.conversation.mode, "status_update");
   assert.equal(coordinatorDryRun.evidence.complete, true);
-  assert.equal(coordinatorDryRun.evidence.jobNimbus.operationalDocuments.length, 2);
+  assert.equal(coordinatorDryRun.evidence.jobNimbus.operationalDocuments.length, 3);
   assert.equal(coordinatorDryRun.evidence.jobNimbus.excludedPhotoLikeDocumentCount, 121);
   assert.equal(coordinatorDryRun.automaticFallbackText, false);
   assert.equal(coordinatorDryRun.automaticJobNimbusWriteback, false);
@@ -821,6 +855,33 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(paymentRedirectionDraft.plan.bodyTemplate, "payment_redirection");
   assert.match(paymentRedirectionDraft.plan.body, /Please send payment to our office with Wave Public Adjusting LLC included as a payee\./);
   assert.doesNotMatch(paymentRedirectionDraft.plan.body, /Generic wording/);
+
+  const generatedPackageResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/draft`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      to: "claims@example.test",
+      subject: "43-TEST-123",
+      template: "payment_redirection",
+      attachments: [
+        { source: "generated_lor", insuredName: "Fixture Signed Name", claimNumber: "43-TEST-123" },
+        { source: "jobnimbus", documentQuery: "Fixture Homeowner - TDI.pdf" },
+        { source: "standard_w9" }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(generatedPackageResponse.status, 200);
+  const generatedPackage = await generatedPackageResponse.json();
+  assert.equal(generatedPackage.plan.bodyTemplate, "payment_redirection");
+  assert.deepEqual(generatedPackage.plan.attachments.map((attachment) => attachment.source), ["generated_lor", "jobnimbus", "standard_w9"]);
+  assert.match(generatedPackage.plan.attachments[0].filename, /^Fixture_Signed_Name_LOR_43_TEST_123\.pdf$/);
+  assert.ok(generatedPackage.plan.attachments[0].bytes > 1000);
+  assert.equal(generatedPackage.plan.attachments[1].filename, "Fixture Homeowner - TDI.pdf");
+  assert.equal(generatedPackage.plan.attachments[2].filename, "Wave_W-9.pdf");
+  assert.match(generatedPackage.plan.attachments[0].sha256, /^[a-f0-9]{64}$/);
+  assert.match(generatedPackage.plan.body, /policyholder: Fixture Signed Name/);
 
   const gmailUnapprovedResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/send`, {
     method: "POST",

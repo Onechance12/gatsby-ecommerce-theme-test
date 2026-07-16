@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.17.2",
     "ws": "^8.21.0"
   },
   "engines": {
