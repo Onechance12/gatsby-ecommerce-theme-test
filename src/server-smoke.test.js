@@ -713,7 +713,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   });
   assert.equal(updateDryRunResponse.status, 200);
   const updateDryRun = await updateDryRunResponse.json();
-  assert.equal(updateDryRun.updates.contact.body.cf_date_1, 1777248000);
+  assert.equal(updateDryRun.updates.contact.body.cf_date_1, 1777291200);
 
   const calendarDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",

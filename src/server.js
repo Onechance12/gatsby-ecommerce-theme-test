@@ -5185,10 +5185,9 @@ function toUnixSeconds(value) {
   const text = String(value).trim();
   if (/^\d+$/.test(text)) return toUnixSeconds(Number(text));
 
-  // A date-only value is safe because it carries no appointment clock time.
-  // Any timestamp must include an explicit offset. Render runs in UTC, so a
-  // timezone-free value such as 2026-07-15T14:00:00 would otherwise display in
-  // Dallas as 9:00 AM instead of the intended 2:00 PM.
+  // JobNimbus renders date custom fields through the viewer's local timezone.
+  // Anchor date-only values at noon UTC so the calendar day remains stable in
+  // U.S. timezones instead of shifting backward from midnight UTC.
   const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(text);
   const isOffsetDateTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(text);
   if (!isDateOnly && !isOffsetDateTime) {
@@ -5196,7 +5195,7 @@ function toUnixSeconds(value) {
       `Invalid date/time: ${value}. Appointment times require ISO 8601 with an explicit offset, for example 2026-07-15T14:00:00-05:00.`
     );
   }
-  const parsed = Date.parse(text);
+  const parsed = Date.parse(isDateOnly ? `${text}T12:00:00Z` : text);
   if (Number.isNaN(parsed)) badRequest(`Invalid date/time: ${value}`);
   return Math.floor(parsed / 1000);
 }
