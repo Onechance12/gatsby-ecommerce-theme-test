@@ -2293,7 +2293,17 @@ async function updateTask(input) {
       plan: { endpoint: `/tasks/${taskId}`, body, schedule: centralSchedulePreview(body.date_start, body.date_end) }
     };
   }
-  const result = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`, { method: "PUT", body });
+  let result;
+  let reconciledAfterApiError = false;
+  try {
+    result = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`, { method: "PUT", body });
+  } catch (error) {
+    if (!isAmbiguousTaskUpdateError(error)) throw error;
+    const task = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`);
+    if (!recordMatchesFields(task, body)) throw error;
+    result = task;
+    reconciledAfterApiError = true;
+  }
   const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
     channel: "jobnimbus",
     action: "update_task",
@@ -2303,7 +2313,7 @@ async function updateTask(input) {
     externalId: resultId(result) || taskId,
     evidence: [`jobnimbus:task:${taskId}`]
   });
-  return { mode: "executed", taskId, result, memoryCloseout };
+  return { mode: "executed", taskId, result, reconciledAfterApiError, memoryCloseout };
 }
 
 async function createCalendarEvent(input) {
@@ -4175,6 +4185,20 @@ function normalizeTaskUpdateFields(input) {
     }
   }
   return cleanObject(source);
+}
+
+function isAmbiguousTaskUpdateError(error) {
+  return Number(error?.statusCode) === 400 && /jnLog is not a function/i.test(String(error?.message || ""));
+}
+
+function recordMatchesFields(record, fields) {
+  if (!record || typeof record !== "object") return false;
+  return Object.entries(fields).every(([key, expected]) => {
+    const actual = record[key];
+    if (typeof expected === "boolean") return Boolean(actual) === expected;
+    if (typeof expected === "number") return Number(actual) === expected;
+    return String(actual ?? "") === String(expected ?? "");
+  });
 }
 
 function normalizeContactFields(fields) {

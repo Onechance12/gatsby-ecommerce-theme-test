@@ -142,6 +142,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     owners: [{ id: "someone-else" }]
   };
   const fixturePdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "ascii");
+  let fixtureTaskCompleted = false;
+  let fixtureNoteCreated = false;
   const fakeApi = createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeApiPort}`);
     if (url.pathname === "/file-content/file-1") {
@@ -149,12 +151,29 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       res.end(fixturePdf);
       return;
     }
+    if (url.pathname === "/tasks/task-1" && req.method === "PUT") {
+      fixtureTaskCompleted = true;
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end("jnLog is not a function");
+      return;
+    }
+    if (url.pathname === "/tasks/task-1") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jnid: "task-1", primary: { id: chance.jnid }, title: "File claim", is_completed: fixtureTaskCompleted }));
+      return;
+    }
+    if (url.pathname === "/activities" && req.method === "POST") {
+      fixtureNoteCreated = true;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jnid: "activity-created", primary: { id: chance.jnid }, record_type_name: "Note" }));
+      return;
+    }
     let body = {};
     if (url.pathname === "/contacts") body = { contacts: [chance, other] };
     else if (url.pathname === "/contacts/contact-chance") body = chance;
     else if (url.pathname === "/contacts/contact-other") body = other;
     else if (url.pathname === "/activities") body = { activities: [{ jnid: "activity-1", primary: { id: chance.jnid }, note: "Exterior hail damage documented." }] };
-    else if (url.pathname === "/tasks") body = { tasks: [{ jnid: "task-1", primary: { id: chance.jnid }, title: "File claim" }] };
+    else if (url.pathname === "/tasks") body = { tasks: [{ jnid: "task-1", primary: { id: chance.jnid }, title: "File claim", is_completed: fixtureTaskCompleted }] };
     else if (url.pathname === "/files") body = { files: [
       { jnid: "file-1", primary: { id: chance.jnid }, filename: "Carrier estimate.pdf", content_type: "application/pdf" },
       { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" }
@@ -411,6 +430,31 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(taskAndNoteBatch.operationCount, 2);
   assert.equal(taskAndNoteBatch.operations[0].plan.plan.body.is_completed, true);
   assert.equal(taskAndNoteBatch.operations[1].plan.plan.body.note, "Approved inspection milestone.");
+
+  const taskAndNoteExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      operations: [
+        {
+          type: "jobnimbus.update_task",
+          payload: { taskId: "task-1", completed: true }
+        },
+        {
+          type: "jobnimbus.create_note",
+          payload: { query: "2739", note: "Approved inspection milestone." }
+        }
+      ],
+      approvalDigest: taskAndNoteBatch.approvalDigest,
+      execute: true
+    })
+  });
+  assert.equal(taskAndNoteExecuteResponse.status, 200);
+  const taskAndNoteExecute = await taskAndNoteExecuteResponse.json();
+  assert.equal(taskAndNoteExecute.mode, "executed");
+  assert.equal(taskAndNoteExecute.batch.completed.length, 2);
+  assert.equal(fixtureTaskCompleted, true);
+  assert.equal(fixtureNoteCreated, true);
 
   const timezoneFreeResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",
