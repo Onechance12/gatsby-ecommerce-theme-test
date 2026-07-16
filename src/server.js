@@ -103,7 +103,6 @@ const SCHEDULING_WORKDAY_START = process.env.SCHEDULING_WORKDAY_START || "08:00"
 const SCHEDULING_WORKDAY_END = process.env.SCHEDULING_WORKDAY_END || "17:00";
 const CENSUS_GEOCODER_URL = process.env.CENSUS_GEOCODER_URL || "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress";
 const HAIL_REPORTS_URL = process.env.HAIL_REPORTS_URL || "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py";
-const COMPANY_DOCUMENT_SCAN_MAX_PAGES = Number(process.env.COMPANY_DOCUMENT_SCAN_MAX_PAGES || 100);
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
@@ -3387,22 +3386,9 @@ async function findCompanyContactByExactDocument(query, documentQuery) {
   if (queryWords.length < 2 || !exactDocument) return null;
 
   const matches = [];
-  const pageSize = 1000;
-  let complete = false;
-  for (let page = 0; page < COMPANY_DOCUMENT_SCAN_MAX_PAGES; page += 1) {
-    const rows = unwrapList(
-      await jobNimbus(`/files?size=${pageSize}&from=${page * pageSize}`),
-      "files"
-    );
-    matches.push(...rows.filter((document) => normalizeCompare(compactDocument(document).name) === exactDocument));
-    if (rows.length < pageSize) {
-      complete = true;
-      break;
-    }
-  }
-  if (!complete) {
-    badRequest("The company document catalog exceeded the verified scan limit. Retry with the JobNimbus number, claim number, or exact address.");
-  }
+  const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { filename: documentQuery } }] }));
+  const rows = unwrapList(await jobNimbus(`/files?size=1000&from=0&filter=${filter}`), "files");
+  matches.push(...rows.filter((document) => normalizeCompare(compactDocument(document).name) === exactDocument));
   if (!matches.length) return null;
 
   const contactIds = new Set();
