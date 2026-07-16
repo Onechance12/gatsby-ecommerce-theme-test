@@ -107,7 +107,7 @@ HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
 and start a new chat after schema changes. Arbitrary standard chats do not gain
 the bridge automatically; the Action must be installed on that GPT.
 
-The GPT-facing schema is intentionally consolidated to 20 high-level operations.
+The GPT-facing schema is intentionally consolidated to 21 high-level operations.
 Detailed bridge routes remain available to the server and local agents, while
 routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
 texts are prepared and executed through `processApprovedWaveActionBatch`.
@@ -123,6 +123,14 @@ is not assigned to Chance, the three read-only document actions may resolve it
 only by an exact, unambiguous JobNimbus number, claim number, client name, or
 address. All writes, uploads, calls, emails, and texts remain Chance-scoped and
 approval-gated.
+
+When a current date of loss is missing or disputed, `researchPropertyHailDates`
+provides a read-only property-weather check. It geocodes the exact JobNimbus
+address, retrieves archived National Weather Service hail reports through the
+Iowa Environmental Mesonet, calculates distance and hail size, and returns
+ranked candidate dates. A candidate is not a confirmed date of loss: compare it
+with policy coverage, declarations, prior claims, and carrier evidence, then get
+Chance's approval before filing a claim or updating JobNimbus.
 
 ## Handoff Inbox
 

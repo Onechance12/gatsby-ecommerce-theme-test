@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "bridge": "node src/server.js",
-    "check": "node --check src/server.js && node --test src/claim-filing-adapter.test.js src/client-coordinator/agent.test.js src/server-smoke.test.js src/memory/memory.test.js src/quo/client.test.js src/scheduling/availability.test.js",
+    "check": "node --check src/server.js && node --test src/claim-filing-adapter.test.js src/client-coordinator/agent.test.js src/server-smoke.test.js src/memory/memory.test.js src/quo/client.test.js src/scheduling/availability.test.js src/weather/dolResearch.test.js",
     "gmail:oauth": "node scripts/gmail-oauth.mjs",
     "memory": "node src/memory/cli.js"
   },

@@ -47,6 +47,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.outboundSafety.explicitChanceApprovalRequired, true);
   assert.equal(health.chatgptDocumentReturn.nativeConversationFile, true);
   assert.equal(health.chatgptDocumentReturn.readOnly, true);
+  assert.equal(health.dateOfLossResearch.mode, "read_only_candidate_research");
+  assert.equal(health.dateOfLossResearch.automaticJobNimbusUpdate, false);
   assert.equal(health.voice.streamPath, "/voice/twilio-stream");
   assert.equal(health.voice.streamUrl, undefined);
 
@@ -77,15 +79,17 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/gmail/attachment-review"].post.operationId, "reviewGmailAttachment");
   assert.equal(schema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
+  assert.equal(schema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
 
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 20);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 21);
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
   assert.equal(chatgptSchema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
+  assert.equal(chatgptSchema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
   assert.equal(chatgptSchema.paths["/quo/numbers"], undefined);
   assert.equal(chatgptSchema.paths["/jobnimbus/process-update"], undefined);
   assert.equal(chatgptSchema.paths["/jobnimbus/create-task"], undefined);
@@ -278,6 +282,26 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   let fixtureNoteCreated = false;
   const fakeApi = createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeApiPort}`);
+    if (url.pathname === "/geocoder") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        result: {
+          addressMatches: [{
+            matchedAddress: "100 TEST ST, DALLAS, TX, 75201",
+            coordinates: { x: -96.797, y: 32.777 }
+          }]
+        }
+      }));
+      return;
+    }
+    if (url.pathname === "/lsr") {
+      res.writeHead(200, { "content-type": "text/csv" });
+      res.end([
+        "VALID,VALID2,LAT,LON,MAG,WFO,TYPECODE,TYPETEXT,CITY,COUNTY,STATE,SOURCE,REMARK,UGC,UGCNAME,QUALIFIER",
+        '202604252130,2026/04/25 21:30,32.779,-96.795,1.75,FWD,H,HAIL,Dallas,Dallas,TX,Public,"Golf ball hail, photographed.",TXC113,Dallas,M'
+      ].join("\n"));
+      return;
+    }
     if (url.pathname === "/file-content/file-1") {
       res.writeHead(200, { "content-type": "application/pdf" });
       res.end(fixturePdf);
@@ -332,6 +356,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       JOBNIMBUS_FILE_BASE_URL: `http://127.0.0.1:${fakeApiPort}/file-content`,
       JOBNIMBUS_API_KEY: "fixture-key",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-token",
+      CENSUS_GEOCODER_URL: `http://127.0.0.1:${fakeApiPort}/geocoder`,
+      HAIL_REPORTS_URL: `http://127.0.0.1:${fakeApiPort}/lsr`,
       RETELL_AGENT_ID: "fixture-agent",
       RETELL_FROM_NUMBER: "+12145550100",
       RETELL_API_KEY: "fixture-retell-key",
@@ -477,6 +503,19 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(companyDocument.readScope, "explicit_company_read");
   assert.equal(companyDocument.openaiFileResponse[0].name, "Other Owner - TDI.pdf");
   assert.deepEqual(Buffer.from(companyDocument.openaiFileResponse[0].content, "base64"), fixturePdf);
+
+  const dolResearchResponse = await fetch(`http://127.0.0.1:${bridgePort}/weather/dol-research`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", startDate: "2025-01-01", endDate: "2026-07-16" })
+  });
+  assert.equal(dolResearchResponse.status, 200);
+  const dolResearch = await dolResearchResponse.json();
+  assert.equal(dolResearch.file.id, chance.jnid);
+  assert.equal(dolResearch.currentJobNimbusDateOfLoss, "2026-04-25");
+  assert.equal(dolResearch.mode, "read_only_weather_research");
+  assert.equal(dolResearch.recommendedCandidate.date, "2026-04-25");
+  assert.match(dolResearch.instruction, /Never file a claim or update JobNimbus/i);
 
   const broadCompanyDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
     method: "POST",

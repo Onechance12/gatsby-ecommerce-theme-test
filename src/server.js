@@ -36,6 +36,7 @@ import {
   buildUnifiedAvailability,
   busyIntervalsFromJobNimbusTasks
 } from "./scheduling/availability.js";
+import { researchPropertyHailDates } from "./weather/dolResearch.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -100,6 +101,8 @@ const SCHEDULING_TRAVEL_BUFFER_MINUTES = nonNegativeIntegerEnv("SCHEDULING_TRAVE
 const SCHEDULING_MIN_LEAD_HOURS = nonNegativeIntegerEnv("SCHEDULING_MIN_LEAD_HOURS", 24);
 const SCHEDULING_WORKDAY_START = process.env.SCHEDULING_WORKDAY_START || "08:00";
 const SCHEDULING_WORKDAY_END = process.env.SCHEDULING_WORKDAY_END || "17:00";
+const CENSUS_GEOCODER_URL = process.env.CENSUS_GEOCODER_URL || "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress";
+const HAIL_REPORTS_URL = process.env.HAIL_REPORTS_URL || "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py";
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
@@ -138,6 +141,7 @@ const routes = new Map([
   ["POST /jobnimbus/document-text", documentText],
   ["POST /jobnimbus/document-review", documentReview],
   ["POST /jobnimbus/document-file", documentFileForChat],
+  ["POST /weather/dol-research", dateOfLossResearch],
   ["POST /jobnimbus/upload-file", uploadJobNimbusFile],
   ["POST /jobnimbus/update-contact", updateContact],
   ["POST /jobnimbus/update-status", updateStatus],
@@ -250,6 +254,16 @@ function health() {
       nativeConversationFile: true,
       readOnly: true,
       imagesAndVideoAllowed: false
+    },
+    dateOfLossResearch: {
+      available: true,
+      mode: "read_only_candidate_research",
+      automaticJobNimbusUpdate: false,
+      confirmedDateOfLoss: false,
+      sources: [
+        "U.S. Census Geocoder",
+        "Iowa Environmental Mesonet archive of National Weather Service Local Storm Reports"
+      ]
     },
     artifactMailbox: {
       available: Boolean(BRIDGE_TOKEN),
@@ -384,6 +398,7 @@ const CHATGPT_ACTION_PATHS = [
   "/jobnimbus/search",
   "/jobnimbus/document-review",
   "/jobnimbus/document-file",
+  "/weather/dol-research",
   "/jobnimbus/upload-file",
   "/gmail/search",
   "/gmail/thread",
@@ -405,7 +420,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 20-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. All JobNimbus writes, Gmail drafts/sends, and Quo sends flow through one exact approval-gated action batch."
+      description: "Consolidated 21-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. All JobNimbus writes, Gmail drafts/sends, and Quo sends flow through one exact approval-gated action batch."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
@@ -2556,6 +2571,51 @@ async function documentFileForChat(input) {
       mime_type: mimeType,
       content: checked.bytes.toString("base64")
     }]
+  };
+}
+
+async function dateOfLossResearch(input) {
+  const query = required(input.query, "query");
+  const { contact, readScope } = await findDocumentReadContact(query);
+  const file = compactContact(contact);
+  const address = [contact.address_line1, contact.city, contact.state_text, contact.zip]
+    .filter(Boolean)
+    .join(", ");
+  if (!contact.address_line1 || !contact.city || !contact.state_text) {
+    badRequest(`A complete JobNimbus property address is required for DOL research. Current address: ${address || "missing"}`);
+  }
+
+  const endDate = String(input.endDate || centralIsoDate()).trim();
+  const startDate = String(input.startDate || shiftIsoDate(endDate, -730)).trim();
+  let research;
+  try {
+    research = await researchPropertyHailDates({
+      address,
+      state: contact.state_text,
+      startDate,
+      endDate,
+      radiusMiles: input.radiusMiles,
+      minimumHailInches: input.minimumHailInches,
+      limit: input.limit
+    }, {
+      geocoderUrl: CENSUS_GEOCODER_URL,
+      reportsUrl: HAIL_REPORTS_URL
+    });
+  } catch (error) {
+    if (/required|YYYY-MM-DD|800-day|on or before|geocoded/i.test(error.message || "")) {
+      error.statusCode = 400;
+    } else {
+      error.statusCode = 502;
+    }
+    throw error;
+  }
+
+  return {
+    file,
+    readScope,
+    currentJobNimbusDateOfLoss: file.dateOfLoss || null,
+    ...research,
+    instruction: "These dates are research candidates only. Compare them with the policy/dec coverage period, current JobNimbus documents, prior claim history, and carrier evidence. Never file a claim or update JobNimbus from weather research alone; show Chance the evidence and obtain approval first."
   };
 }
 
@@ -5481,6 +5541,24 @@ function stripTrailingSlash(value) {
   return String(value || "").replace(/\/+$/, "");
 }
 
+function centralIsoDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: OPERATIONS_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function shiftIsoDate(value, days) {
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return value;
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function positiveIntegerEnv(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -5603,6 +5681,21 @@ const OPENAPI = {
           }
         },
         required: ["file", "readScope", "document", "bytes", "contentType", "reviewInstruction", "openaiFileResponse"]
+      },
+      DateOfLossResearchRequest: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Exact JobNimbus number, claim number, client name, or address. Chance files are preferred; an explicitly named exact company file is read-only."
+          },
+          startDate: { type: "string", format: "date", description: "Optional search start in YYYY-MM-DD. Defaults to two years before endDate." },
+          endDate: { type: "string", format: "date", description: "Optional search end in YYYY-MM-DD. Defaults to today in America/Chicago." },
+          radiusMiles: { type: "number", minimum: 1, maximum: 100, default: 35 },
+          minimumHailInches: { type: "number", minimum: 0.25, maximum: 6, default: 1 },
+          limit: { type: "integer", minimum: 1, maximum: 20, default: 10 }
+        },
+        required: ["query"]
       },
       JobNimbusUploadFileRequest: {
         type: "object",
@@ -6430,6 +6523,15 @@ const OPENAPI = {
             }
           }
         }
+      }
+    },
+    "/weather/dol-research": {
+      post: {
+        operationId: "researchPropertyHailDates",
+        summary: "Research nearby reported hail dates for one exact JobNimbus property",
+        description: "Read-only candidate research using the JobNimbus property address, U.S. Census geocoding, and archived National Weather Service Local Storm Reports. Results never confirm the date of loss and never write to JobNimbus.",
+        requestBody: jsonBody("DateOfLossResearchRequest"),
+        responses: { "200": { description: "Ranked nearby hail-report dates with distances, hail sizes, sources, and fail-closed warnings." } }
       }
     },
     "/jobnimbus/upload-file": {
