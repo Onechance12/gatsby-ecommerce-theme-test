@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 test("server exposes claim actions and protects them when auth is unconfigured", async (t) => {
@@ -251,6 +254,8 @@ test("Retell configuration creates an editable draft before publishing", async (
 test("prepare route reads fresh evidence and enforces Chance ownership", async (t) => {
   const bridgePort = 18880;
   const fakeApiPort = 18881;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "jobnimbus-bridge-smoke-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
   const chance = {
     jnid: "contact-chance",
@@ -356,7 +361,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       { jnid: "file-1", primary: { id: chance.jnid }, filename: "Carrier estimate.pdf", content_type: "application/pdf" },
       { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" },
       { jnid: "file-other", primary: { id: other.jnid }, filename: "Other Owner - TDI.pdf", content_type: "application/pdf" },
-      { jnid: "file-hidden", primary: { id: hidden.jnid }, filename: "Hidden Owner - TDI.pdf", content_type: "application/pdf" }
+      { jnid: "file-hidden", primary: { id: hidden.jnid }, filename: "Hidden Owne\u0301r - TDI .pdf", content_type: "application/pdf" }
     ] };
     else { res.writeHead(404); res.end("not found"); return; }
     res.writeHead(200, { "content-type": "application/json" });
@@ -382,6 +387,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
       BRIDGE_ALLOW_WRITES: "true",
+      MEMORY_ROOT: memoryRoot,
       ALLOW_GMAIL_SEND: "true",
       QUO_API_KEY: "fixture-quo-key",
       QUO_DEFAULT_FROM_NUMBER: "+19725550100",
@@ -532,7 +538,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const catalogDocument = await catalogDocumentResponse.json();
   assert.equal(catalogDocument.file.id, hidden.jnid);
   assert.equal(catalogDocument.readScope, "explicit_company_document_read");
-  assert.equal(catalogDocument.openaiFileResponse[0].name, "Hidden Owner - TDI.pdf");
+  assert.equal(catalogDocument.openaiFileResponse[0].name, "Hidden Owne_r - TDI .pdf");
 
   const dolResearchResponse = await fetch(`http://127.0.0.1:${bridgePort}/weather/dol-research`, {
     method: "POST",

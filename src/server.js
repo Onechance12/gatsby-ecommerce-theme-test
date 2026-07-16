@@ -3386,9 +3386,12 @@ async function findCompanyContactByExactDocument(query, documentQuery) {
   if (queryWords.length < 2 || !exactDocument) return null;
 
   const matches = [];
-  const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { filename: documentQuery } }] }));
-  const rows = unwrapList(await jobNimbus(`/files?size=1000&from=0&filter=${filter}`), "files");
-  matches.push(...rows.filter((document) => normalizeCompare(compactDocument(document).name) === exactDocument));
+  const filenameCandidates = uniqueDocumentFilenameCandidates(documentQuery);
+  for (const filename of filenameCandidates) {
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { filename } }] }));
+    const rows = unwrapList(await jobNimbus(`/files?size=1000&from=0&filter=${filter}`), "files");
+    matches.push(...rows.filter((document) => normalizeCompare(compactDocument(document).name) === exactDocument));
+  }
   if (!matches.length) return null;
 
   const contactIds = new Set();
@@ -3512,8 +3515,10 @@ function referencesContact(item, contactId) {
 function selectDocument(documents, documentQuery) {
   if (!documents.length) return null;
   if (!documentQuery) return documents[0];
-  const needle = documentQuery.toLowerCase();
+  const needle = String(documentQuery).trim().toLowerCase();
+  const normalizedNeedle = normalizeCompare(documentQuery);
   return documents.find((doc) => String(doc.jnid || doc.id || "").toLowerCase() === needle)
+    || documents.find((doc) => normalizeCompare(doc.name || doc.filename || doc.file_name) === normalizedNeedle)
     || documents.find((doc) => documentMatches(doc, needle))
     || null;
 }
@@ -3527,8 +3532,8 @@ function selectDocumentForChat(documents, documentQuery) {
   if (exactIdMatches.length === 1) return exactIdMatches[0];
 
   const exactNameMatches = documents.filter((doc) => {
-    const name = String(doc.name || doc.filename || doc.file_name || "").trim().toLowerCase();
-    return name === needle;
+    const name = doc.name || doc.filename || doc.file_name || "";
+    return normalizeCompare(name) === normalizeCompare(documentQuery);
   });
   if (exactNameMatches.length === 1) return exactNameMatches[0];
 
@@ -3546,7 +3551,7 @@ function selectDocumentForChat(documents, documentQuery) {
 }
 
 function documentMatches(doc, needle) {
-  return [
+  const searchable = [
     doc.jnid,
     doc.id,
     doc.name,
@@ -3555,7 +3560,8 @@ function documentMatches(doc, needle) {
     doc.description,
     doc.record_type_name,
     doc.type
-  ].filter(Boolean).join(" ").toLowerCase().includes(needle);
+  ].filter(Boolean).join(" ");
+  return normalizeCompare(searchable).includes(normalizeCompare(needle));
 }
 
 async function downloadJobNimbusFile(doc) {
@@ -4000,12 +4006,24 @@ function normalizePolicy(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
 }
 
+function stripDiacritics(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
 function normalizeCompare(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return stripDiacritics(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function normalizeNameWords(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return stripDiacritics(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function uniqueDocumentFilenameCandidates(value) {
+  const original = String(value || "").trim();
+  const ascii = stripDiacritics(original);
+  const withoutExtensionSpace = original.replace(/\s+(\.[a-z0-9]+)$/i, "$1");
+  const asciiWithoutExtensionSpace = ascii.replace(/\s+(\.[a-z0-9]+)$/i, "$1");
+  return [...new Set([original, ascii, withoutExtensionSpace, asciiWithoutExtensionSpace].filter(Boolean))];
 }
 
 function extractAddress(text) {
