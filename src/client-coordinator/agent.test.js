@@ -5,7 +5,8 @@ import {
   buildClientCoordinatorConversation,
   buildClientCoordinatorLlmConfig,
   clientCoordinatorAnalysisSchema,
-  extractClientCoordinatorResult
+  extractClientCoordinatorResult,
+  renderClientCoordinatorPrompt
 } from "./agent.js";
 
 test("appointment mode creates one conversational purpose and fallback text", () => {
@@ -23,6 +24,53 @@ test("appointment mode creates one conversational purpose and fallback text", ()
   assert.match(plan.purpose, /Will you or another adult be available/);
   assert.match(plan.fallbackText, /provide interior access/);
   assert.equal(plan.reminderTopics.length, 0);
+});
+
+test("appointment call makes no unsupported claim that Chance attends, and is consistent with the fallback", () => {
+  const accessPlan = buildClientCoordinatorConversation({
+    mode: "appointment_confirmation",
+    firstName: "Robert",
+    appointmentDate: "Tuesday, July 21",
+    appointmentWindow: "10:00 AM and 12:00 PM",
+    interiorAccessRequired: true
+  });
+  // must NOT claim Chance personally attends (unsupported)
+  assert.doesNotMatch(accessPlan.purpose, /meet Chance/i);
+  assert.doesNotMatch(accessPlan.fallbackText, /meet Chance/i);
+  // both channels are access-consistent
+  assert.match(accessPlan.purpose, /let the adjuster in/i);
+  assert.match(accessPlan.fallbackText, /provide interior access/i);
+
+  const noAccessPlan = buildClientCoordinatorConversation({
+    mode: "appointment_confirmation",
+    firstName: "Robert",
+    appointmentDate: "Tuesday, July 21",
+    appointmentWindow: "10:00 AM and 12:00 PM",
+    interiorAccessRequired: false
+  });
+  assert.match(noAccessPlan.purpose, /meet the adjuster/i);
+  assert.doesNotMatch(noAccessPlan.purpose, /interior access/i);
+});
+
+test("every fallback text discloses that it is an AI assistant (consent consistency with the opening)", () => {
+  for (const [mode, extra] of [
+    ["appointment_confirmation", { appointmentDate: "Tuesday, July 21", appointmentWindow: "10:00 AM and 12:00 PM" }],
+    ["missing_document_request", { documentNeeded: "a copy of the signed contract" }],
+    ["status_update", { statusUpdate: "the inspection is complete." }],
+    ["client_check_in", {}]
+  ]) {
+    const plan = buildClientCoordinatorConversation({ mode, firstName: "Robert", ...extra });
+    assert.match(plan.opening, /Chance's AI assistant/, `${mode} opening should disclose AI`);
+    assert.match(plan.fallbackText, /Chance's AI assistant/, `${mode} fallback should disclose AI`);
+  }
+});
+
+test("prompt confirms identity before revealing the appointment/claim purpose", () => {
+  const prompt = renderClientCoordinatorPrompt();
+  assert.match(prompt, /am I speaking with \{\{homeownerFirstName\}\}/i);
+  // the purpose reveal is gated behind confirmation, and privacy wins ties
+  assert.match(prompt, /Only once they confirm, say exactly: \{\{coordinatorPurpose\}\}/);
+  assert.match(prompt, /resolves in favor of the PRIVACY rule/i);
 });
 
 test("only explicitly selected Brain reminder topics enter a call plan", () => {

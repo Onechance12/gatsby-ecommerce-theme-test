@@ -36,20 +36,29 @@ export function buildClientCoordinatorConversation(input = {}) {
     accessRequirement = input.interiorAccessRequired === false
       ? "Interior access is not required for this appointment."
       : "Interior access is required. Confirm that the homeowner or another adult can provide access.";
-    purpose = `So I'm calling because we have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to meet Chance and the adjuster?`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. We have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available${input.interiorAccessRequired === false ? "" : " to provide interior access"}?`;
+    const accessRequired = input.interiorAccessRequired !== false;
+    // Access-focused, and consistent with the fallback text. Do NOT assert that
+    // Chance personally attends the inspection unless that is a confirmed fact —
+    // "meet Chance and the adjuster" was an unsupported claim (Chance may not
+    // attend), and it also contradicted the fallback text, which only asked for
+    // access. If Chance confirms he attends every inspection, restore that
+    // phrasing in BOTH the purpose and fallbackText together.
+    purpose = accessRequired
+      ? `So I'm calling because we have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to be there and let the adjuster in?`
+      : `So I'm calling because we have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to meet the adjuster?`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. We have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available${accessRequired ? " to be there and provide interior access" : " to meet the adjuster"}?`;
   } else if (mode === "missing_document_request") {
     const documentNeeded = requireText(input.documentNeeded, "documentNeeded");
     purpose = `So I'm calling because we still need ${documentNeeded}. Do you have a copy you can text or email to us?`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. Could you please send us ${documentNeeded} when you get a chance? You can text or email it to us.`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. Could you please send us ${documentNeeded} when you get a chance? You can text or email it to us.`;
   } else if (mode === "status_update") {
     const statusUpdate = requireText(input.statusUpdate, "statusUpdate");
     purpose = `So I'm calling to give you a quick update: ${statusUpdate}`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. Quick update: ${statusUpdate}`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. Quick update: ${statusUpdate}`;
   } else {
     const checkInReason = clean(input.checkInReason) || "I wanted to check in, see how you are doing, and find out whether you have any questions for us.";
     purpose = `So I'm calling because ${checkInReason}`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. I tried to reach you for a quick check-in. No rush; we can follow up by text or phone.`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. I tried to reach you for a quick check-in. No rush; we can follow up by text or phone.`;
   }
 
   return {
@@ -85,7 +94,8 @@ export function renderClientCoordinatorPrompt() {
     "You are Chance Pearson's AI client-coordination assistant for existing property-claim clients. You are not Chance, Andrea, the homeowner, an insurance adjuster, or an attorney. Never impersonate Andrea. If asked, clearly confirm that you are an AI assistant.",
     "This call has exactly one approved purpose. Do not broaden it, negotiate coverage, give legal or policy advice, discuss settlement strategy, promise approval, promise payment, or make a coverage determination. Never claim to have checked JobNimbus, Gmail, Quo, or a document during the live call.",
     "PRIVACY: Do not reveal the property, carrier, claim, policy, damage, or appointment details until the intended client is reasonably confirmed. If someone else answers, ask only for {{homeownerFirstName}}. If it is a wrong number, apologize, use end_call, and disclose nothing else.",
-    "OPENING: Wait for a person to say hello. Then say exactly: {{coordinatorOpening}} Listen to the answer and respond naturally in one short sentence. For a positive answer, say something like 'I'm glad to hear that.' For a difficult answer, acknowledge it with something like 'I'm sorry to hear that.' Do not sound scripted, overdo small talk, or skip their answer. Then say exactly: {{coordinatorPurpose}}",
+    "OPENING: Wait for a person to say hello. Then say exactly: {{coordinatorOpening}} Listen to the answer and respond naturally in one short sentence. For a positive answer, say something like 'I'm glad to hear that.' For a difficult answer, acknowledge it with something like 'I'm sorry to hear that.' Do not sound scripted, overdo small talk, or skip their answer.",
+    "CONFIRM IDENTITY BEFORE THE PURPOSE: The purpose contains appointment and claim details, so you must know you are speaking with {{homeownerFirstName}} before you say it. If it is not already clear from their greeting, ask 'Just to confirm, am I speaking with {{homeownerFirstName}}?' Only once they confirm, say exactly: {{coordinatorPurpose}} If someone other than {{homeownerFirstName}} answers, do NOT state the purpose or any appointment/claim detail — ask when {{homeownerFirstName}} is available or offer to follow up later, then end the call. This resolves in favor of the PRIVACY rule whenever the two seem to conflict.",
     "APPROVED PURPOSE: {{coordinatorMode}}. Complete only that purpose. Access rule: {{appointmentAccessRequirement}}",
     "APPROVED CONTEXT: {{coordinatorApprovedContext}} This context is a ceiling, not a script. Use it only to answer a directly related question. If the answer is not in the approved context, say you do not want to give the wrong answer and that Chance or Andrea will follow up.",
     "THREE CLIENT REMINDERS: Only the following reminder topics are approved for this call: {{coordinatorReminderTopics}}. Internal guidance: {{coordinatorReminderGuidance}} Use a reminder conversationally only when it fits the client's question or concern. Never recite all reminders mechanically. Never blame an individual carrier representative or guarantee an outcome.",
