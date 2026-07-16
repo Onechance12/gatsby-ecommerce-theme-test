@@ -862,6 +862,16 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const quoDryRun = await quoDryRunResponse.json();
   assert.match(quoDryRun.approvalDigest, /^[a-f0-9]{64}$/);
 
+  const quoTextAliasDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", text: "Approved adjuster text.", execute: false })
+  });
+  assert.equal(quoTextAliasDryRunResponse.status, 200);
+  const quoTextAliasDryRun = await quoTextAliasDryRunResponse.json();
+  assert.equal(quoTextAliasDryRun.plan.content, "Approved adjuster text.");
+  assert.match(quoTextAliasDryRun.approvalDigest, /^[a-f0-9]{64}$/);
+
   const quoUnapprovedResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },

@@ -3282,7 +3282,7 @@ async function quoSend(input = {}) {
   const { contact } = await findChanceContact(query);
   const file = compactContact(contact);
   const to = String(input.to || file.phone || "").trim();
-  const content = required(input.content || input.message, "content");
+  const content = required(input.content || input.message || input.text, "content");
   const preview = await sendQuoText(quoConfig(), {
     from: input.from,
     to,
@@ -6300,11 +6300,17 @@ const OPENAPI = {
           from: { type: "string", description: "Optional configured Quo line override." },
           content: { type: "string", maxLength: 1600, description: "Exact text Chance will approve." },
           message: { type: "string", maxLength: 1600, description: "Alias for content." },
+          text: { type: "string", maxLength: 1600, description: "Alias for content. Accepted for compatibility with assistants that label an SMS body as text." },
           attemptId: { type: "string", description: "Defaults to initial. After a failed/uncertain send, use a new explicit value only when Chance approves a fresh retry dry run." },
           approvalDigest: { type: "string", description: "Required for a live send and must exactly match the immediately preceding dry run." },
           execute: { type: "boolean", default: false, description: "False returns a dry run. True also requires ALLOW_QUO_SEND=true and the exact approvalDigest." }
         },
-        required: ["query", "content"]
+        required: ["query"],
+        anyOf: [
+          { required: ["content"] },
+          { required: ["message"] },
+          { required: ["text"] }
+        ]
       },
       MemoryFileActionsRequest: {
         type: "object",
