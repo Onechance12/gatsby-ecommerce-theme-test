@@ -240,6 +240,22 @@ export function analyzeClaimCall(call, file) {
   const extracted = extractCallResults(call);
   const proposal = buildWritebackProposal(file, extracted);
   const writeback = proposalToProcessUpdate(proposal);
+  const completedClaim = ["claim_filed", "existing_claim_confirmed"].includes(extracted.outcome);
+  const completionGaps = [];
+  if (completedClaim && !extracted.documentSubmissionRequested) {
+    completionGaps.push("The agent did not ask where to send the Letter of Representation and supporting documents.");
+  } else if (completedClaim && !extracted.documentSubmission) {
+    completionGaps.push("The agent asked about document submission, but no destination or carrier instruction was captured.");
+  }
+  const completionReview = {
+    claimNumberCaptured: Boolean(extracted.claimNumber),
+    adjusterContactCaptured: Boolean(extracted.adjusterName || extracted.adjusterPhone || extracted.adjusterEmail),
+    documentSubmissionRequested: extracted.documentSubmissionRequested,
+    documentSubmissionCaptured: Boolean(extracted.documentSubmission),
+    nextStepCaptured: Boolean(extracted.nextStep),
+    complete: completionGaps.length === 0,
+    gaps: completionGaps
+  };
   const writebackDigest = digest({
     version: CLAIM_PLAN_VERSION,
     contactId: file.id,
@@ -249,7 +265,7 @@ export function analyzeClaimCall(call, file) {
     note: writeback.note,
     unverified: proposal.unverified
   });
-  return { extracted, proposal, writeback, writebackDigest };
+  return { extracted, completionReview, proposal, writeback, writebackDigest };
 }
 
 export function proposalToProcessUpdate(proposal) {

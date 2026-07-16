@@ -14,6 +14,7 @@ export function extractCallResults(call) {
   const adjusterPhone = firstNonEmpty(cad.adjuster_phone, transcriptNear(transcript, /adjuster|team/i, /(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|1[\s.-]?8\d{2}[\s.-]?\d{3}[\s.-]?\d{4})/));
   const adjusterEmail = firstNonEmpty(cad.adjuster_email, transcriptEmail(transcript));
   const documentSubmission = firstNonEmpty(cad.document_submission, transcriptEmail(transcript));
+  const documentSubmissionRequested = cad.document_submission_requested === true || /^true$/i.test(String(cad.document_submission_requested || ""));
   const nextStep = firstNonEmpty(cad.next_step);
   const inspectionScheduled = cad.inspection_scheduled === true || /^true$/i.test(String(cad.inspection_scheduled || ""));
   const inspectionStart = inspectionScheduled ? firstNonEmpty(cad.inspection_start) : "";
@@ -53,6 +54,7 @@ export function extractCallResults(call) {
     adjusterPhone,
     adjusterEmail,
     documentSubmission,
+    documentSubmissionRequested,
     nextStep,
     inspectionScheduled,
     inspectionStart,

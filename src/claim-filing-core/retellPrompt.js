@@ -48,7 +48,8 @@ export function postCallAnalysisSchema() {
     { type: "string", name: "adjuster_name", description: "Full name of the assigned adjuster or handling team, if the rep provided one. Empty if not assigned yet." },
     { type: "string", name: "adjuster_phone", description: "Direct phone number for the adjuster or claims team, if given. Empty if not provided." },
     { type: "string", name: "adjuster_email", description: "Email address for the adjuster, if given. Empty if not provided." },
-    { type: "string", name: "document_submission", description: "The email address or portal the rep said to use for sending the Letter of Representation and documents. Empty if not provided." },
+    { type: "string", name: "document_submission", description: "The exact email address, portal, fax, or carrier instruction for sending the Letter of Representation and supporting documents. If no destination exists yet, capture the carrier's exact instruction such as 'wait for the assigned adjuster'. Empty only when the topic was never resolved." },
+    { type: "boolean", name: "document_submission_requested", description: "True only when the assistant explicitly asked where to send the Letter of Representation and supporting documents. False when the assistant never asked." },
     { type: "string", name: "next_step", description: "The next step or timeframe the rep described (e.g. 'adjuster will call in 24-48 hours', 'inspection to be scheduled'). Empty if none." },
     { type: "boolean", name: "inspection_scheduled", description: "True only when the carrier or adjuster and the assistant finalized an exact inspection date and arrival window on this call. False for proposed options, voicemails, or unresolved scheduling." },
     { type: "string", name: "inspection_start", description: "Confirmed inspection arrival-window start as an ISO 8601 timestamp with an explicit UTC offset, for example 2026-07-17T14:00:00-05:00. Empty unless inspection_scheduled is true." },
@@ -197,6 +198,10 @@ export function renderRetellPrompt(packet) {
       "Then stop. Do not list every elevation, room, or estimate item. Let the representative walk through their " +
       "questions. When they ask about a specific exterior item, room, or interior area, answer only from " +
       "{{damageDetails}}. If the requested detail is not there, say you are not sure; never infer it from the broad opening.",
+    "REPEATED DAMAGE QUESTION RULE: Keep track of damage facts already stated. If the representative repeats or " +
+      "rephrases a question about the same unsupported interior or exterior detail, do not recite the prior damage " +
+      "sentence again. Say only: 'I don't have any additional verified details beyond what I already provided.' If " +
+      "the new question asks about a different damage category, answer only that new category from {{damageDetails}}.",
     "",
     "Standard filing questions — reps ask these on almost every new claim; answer from THESE facts:",
     "- Any injuries? -> {{injuries}}",
@@ -339,12 +344,19 @@ export function renderRetellPrompt(packet) {
     "- Prioritize gathering: Claim Number, Adjuster Name, Adjuster Phone, Adjuster Email, Upload Instructions, and Next Steps.",
     "- Do not ask 'What else do you need?' after individual answers. Ask whether the representative needs anything else " +
       "only once at final wrap-up, after the claim/reference number and required closing details have been captured.",
-    "- ***THE ONE REQUIRED OUTCOME: a CLAIM NUMBER or REFERENCE NUMBER. Do not end the call until you have it.*** " +
-      "Before you close, you are REQUIRED TO ASK (once each) for all of these, even though you are NOT required to " +
-      "receive them: (1) the assigned adjuster's name and direct phone, (2) the email or portal to send the Letter " +
-      "of Representation and documents, and (3) the next step / timeframe. Asking is mandatory; receiving is not. If " +
-      "the rep doesn't have the adjuster assigned yet, or can't give one of these, that is completely normal — note " +
-      "it, and move on. Never refuse to hang up or keep pressing over missing adjuster/LOR info once you've asked.",
+    "- ***THE ONE REQUIRED OUTCOME: a CLAIM NUMBER or REFERENCE NUMBER. Do not end the call until you have it.***",
+    "- FINAL WRAP-UP IS A HARD STATE GATE. When the representative asks 'Is there anything else?' or begins ending " +
+      "the call, silently check whether you have already asked once for: (1) the assigned adjuster's name and direct " +
+      "phone, (2) where to send the Letter of Representation and supporting documents, and (3) the next step or " +
+      "timeframe. NEVER answer 'No', 'That's all', or give the closing blessing while any of those three questions " +
+      "has not yet been asked. Ask only the missing question, then continue the checklist.",
+    "- The REQUIRED representation-delivery question is: 'Before we wrap up, where should I send our Letter of " +
+      "Representation and supporting documents? Is there an email address, upload portal, or fax?' Ask it once on " +
+      "every completed new filing and existing-claim confirmation unless the representative already gave a destination. " +
+      "If they say the assigned adjuster will contact us later, still ask whether there is a general claims email or " +
+      "portal available now. If the carrier requires waiting for the adjuster, capture that exact instruction and move on.",
+    "- Asking for the closing details is mandatory; receiving every detail is not. If the representative does not have " +
+      "an adjuster or document destination, record that answer and close normally. Do not badger them or keep the call open.",
     "- If the rep says 'thank you', 'you're all set', or seems to wrap up but you do NOT yet have a claim or " +
       "reference number, DO NOT hang up and do NOT say your closing line — say: 'Before we wrap up, could I grab " +
       "the claim or reference number for this filing?' Once you have that number (or the rep clearly states no " +

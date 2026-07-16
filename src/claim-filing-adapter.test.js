@@ -259,6 +259,10 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /reply only 'Ok\.' once/i);
   assert.match(prompt, /Do not ask 'What else do you need\?'/i);
   assert.match(prompt, /only once at final wrap-up/i);
+  assert.match(prompt, /I don't have any additional verified details beyond what I already provided/i);
+  assert.match(prompt, /FINAL WRAP-UP IS A HARD STATE GATE/i);
+  assert.match(prompt, /where should I send our Letter of Representation and supporting documents/i);
+  assert.match(prompt, /NEVER answer 'No', 'That's all'/i);
 });
 
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
@@ -516,6 +520,40 @@ test("structured result produces a short writeback bundle", () => {
   assert.equal(result.writeback.status, "Submitted Awaiting Confirmation");
   assert.match(result.writeback.note, /Claim filed by phone/);
   assert.equal(result.writeback.note.includes("damage"), false);
+  assert.equal(result.completionReview.complete, false);
+  assert.match(result.completionReview.gaps.join(" "), /did not ask where to send the Letter of Representation/i);
+});
+
+test("call completion review confirms the representation destination was captured", () => {
+  const call = {
+    callId: "call-docs",
+    transcript: "",
+    callStatus: "ended",
+    raw: {
+      call_id: "call-docs",
+      metadata: {
+        source: "hcn-wave-jobnimbus-bridge",
+        ownerId: OWNER_ID,
+        contactId: "contact-2739",
+        planDigest: "approved",
+        goal: "file_new_claim"
+      },
+      retell_llm_dynamic_variables: { goal: "file_new_claim" },
+      call_analysis: {
+        custom_analysis_data: {
+          claim_number: "43-TEST-789",
+          filing_outcome: "claim_filed",
+          document_submission_requested: true,
+          document_submission: "claims@example.com"
+        }
+      }
+    }
+  };
+  const result = analyzeClaimCall(call, { id: "contact-2739", customer: "Fixture Homeowner", status: "Ready for PA Review", carrier: "State Farm" });
+  assert.equal(result.completionReview.documentSubmissionRequested, true);
+  assert.equal(result.completionReview.documentSubmissionCaptured, true);
+  assert.equal(result.completionReview.complete, true);
+  assert.deepEqual(result.completionReview.gaps, []);
 });
 
 test("rejects calls outside the Chance bridge scope", () => {
