@@ -72,6 +72,8 @@ export function buildClaimCallPacket(input, options = {}) {
     damageOpening,
     damageDetails,
     missingFields,
+    scriptAuthority: "retell_fixed_carrier_workflow",
+    scriptInstruction: "Do not invent or rewrite an opening script. Retell handles the IVR with short answers and uses the fixed human-representative opening only after a live person answers.",
     quoLearnedCallPattern: buildQuoLearnedPattern(goal),
     callScript: buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails),
     shortIvrAnswers: buildIvrAnswers(goal, facts),
@@ -135,7 +137,7 @@ function objectiveFor(goal, facts) {
 
 function buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails) {
   return [
-    "Use strict IVR discipline: wait for the full prompt, wait about 3 seconds, then answer shortly.",
+    "Use strict IVR discipline: listen to the complete prompt, take a short natural beat, then answer only what the IVR asked or press the explicitly requested digit.",
     "Do not identify as the homeowner.",
     "Only give the full public adjuster introduction to a human representative.",
     "",
@@ -156,14 +158,14 @@ function buildIvrAnswers(goal, facts) {
 }
 
 function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT_DAMAGE_OPENING, damageDetails = damageCategories) {
-  const intro = `Hi, this is Chance Pearson's AI assistant calling regarding a property damage claim for ${facts.insuredName} at ${facts.propertyAddress}.`;
+  const filingIntro = "Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting. We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf.";
+  const intro = `Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting calling regarding the property claim for ${facts.insuredName}.`;
   if (goal === "file_new_claim") {
     return [
-      intro,
-      `I need to file a new residential property claim. The carrier is ${facts.carrier}, policy number ${facts.policyNumber}, date of loss ${facts.dateOfLoss}, cause of loss ${facts.causeOfLoss}.`,
-      `Initial damage answer: ${damageOpening}`,
-      `If asked follow-up questions, use only these verified details: ${damageDetails.join(", ")}.`,
-      "Can you help get this claim opened and give me the claim number and document submission instructions?"
+      filingIntro,
+      "Stop and wait for the representative's next question. Do not volunteer the insured, address, policy, DOL, cause, or damage details in the opening.",
+      `When asked broadly what happened, answer: ${damageOpening}`,
+      `For follow-up questions, use only these verified details: ${damageDetails.join(", ")}.`
     ].join("\n");
   }
   if (goal === "lor_destination") {

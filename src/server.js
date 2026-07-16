@@ -1118,7 +1118,7 @@ function sourceStatus(name, settled, busyCount) {
 
 async function prepareClaimFiling(input) {
   const context = await buildLiveClaimContext(required(input.query, "query"));
-  let plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
+  let plan = await buildClaimPlanWithStormTime(input, context.canonicalInput, context.file);
   plan = await attachSameCarrierBatch(plan, context, input);
   plan = await attachSchedulingAvailability(plan);
   return {
@@ -1135,7 +1135,7 @@ async function prepareClaimFiling(input) {
 
 async function placeClaimFilingCall(input) {
   const context = await buildLiveClaimContext(required(input.query, "query"));
-  let plan = buildClaimFilingPlan(context.canonicalInput, claimPlanOptions(input, context.file));
+  let plan = await buildClaimPlanWithStormTime(input, context.canonicalInput, context.file);
   plan = await attachSameCarrierBatch(plan, context, input);
   plan = await attachSchedulingAvailability(plan);
   assertApprovalDigest(input.planDigest, plan.planDigest);
@@ -1660,7 +1660,7 @@ async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
       captured: {},
       overrides: {}
     };
-    const candidatePlan = buildClaimFilingPlan(candidateInput, claimPlanOptions(input, file));
+    const candidatePlan = await buildClaimPlanWithStormTime(input, candidateInput, file);
     if (!candidatePlan.readiness.ready) continue;
     batchClaims.push({
       fileNumber: file.number,
@@ -2279,6 +2279,110 @@ function claimPlanOptions(input, file) {
     contractorHired: input.contractorHired,
     overrides: input.overrides && typeof input.overrides === "object" ? input.overrides : {}
   };
+}
+
+async function buildClaimPlanWithStormTime(input, canonicalInput, file) {
+  const timing = await resolveClaimStormTime(input, canonicalInput, file);
+  const options = claimPlanOptions(input, file);
+  if (timing.stormTime) options.stormTime = timing.stormTime;
+  const plan = buildClaimFilingPlan(canonicalInput, options);
+  plan.stormTimeEvidence = timing.evidence;
+  if (timing.warning && !plan.readiness.warnings.includes(timing.warning)) {
+    plan.readiness.warnings.push(timing.warning);
+  }
+  return plan;
+}
+
+async function resolveClaimStormTime(input, canonicalInput, file) {
+  const supplied = String(input.stormTime || input.overrides?.stormTime || "").trim();
+  if (hasClockTime(supplied)) {
+    return {
+      stormTime: supplied,
+      evidence: { source: "chance_approved_or_file_specific_time", value: supplied, verifiedWeatherMatch: false }
+    };
+  }
+
+  const dol = isoDateFromClaimValue(file.dateOfLoss || canonicalInput.file?.dateOfLoss);
+  const cause = String(file.typeOfLoss || canonicalInput.file?.typeOfLoss || "");
+  const address = String(file.address || canonicalInput.file?.address || "").trim();
+  if (dol && address && /hail/i.test(cause)) {
+    try {
+      const research = await researchPropertyHailDates({
+        address,
+        state: addressState(address),
+        startDate: shiftIsoDate(dol, -1),
+        endDate: shiftIsoDate(dol, 1),
+        radiusMiles: 35,
+        minimumHailInches: 1,
+        limit: 10
+      }, {
+        geocoderUrl: CENSUS_GEOCODER_URL,
+        reportsUrl: HAIL_REPORTS_URL
+      });
+      const candidate = research.candidates.find((row) => row.date === dol);
+      const report = candidate?.nearestReport;
+      if (candidate && report?.localTime) {
+        const value = `Approximately ${report.localTime} based on a nearby reported hail event`;
+        return {
+          stormTime: value,
+          evidence: {
+            source: "NWS Local Storm Report via Iowa Environmental Mesonet",
+            dateMatchedToJobNimbusDol: dol,
+            value,
+            confidence: candidate.confidence,
+            hailInches: report.hailInches,
+            distanceMiles: report.distanceMiles,
+            reportedLocation: report.location,
+            reportedAtUtc: report.reportedAtUtc,
+            localDateTime: report.localDateTime,
+            verifiedWeatherMatch: true,
+            caution: "This is the time of a nearby reported hail observation, not a property-specific eyewitness time."
+          }
+        };
+      }
+    } catch (error) {
+      return {
+        stormTime: supplied,
+        evidence: supplied
+          ? { source: "chance_approved_approximation", value: supplied, verifiedWeatherMatch: false }
+          : { source: "weather_research_unavailable", verifiedWeatherMatch: false },
+        warning: `Storm-time weather research was unavailable: ${String(error.message || error).slice(0, 180)}`
+      };
+    }
+  }
+
+  if (supplied) {
+    return {
+      stormTime: supplied,
+      evidence: { source: "chance_approved_approximation", value: supplied, verifiedWeatherMatch: false },
+      warning: "Storm time is an approved approximation, not a verified property-specific time."
+    };
+  }
+  return {
+    stormTime: "",
+    evidence: { source: "not_found", verifiedWeatherMatch: false },
+    warning: "No verified or nearby reported storm time was found; Retell must say the exact time is unknown if asked."
+  };
+}
+
+function hasClockTime(value) {
+  return /\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|0?[1-9])\s*(?:a\.?m\.?|p\.?m\.?)\b/i.test(String(value || ""));
+}
+
+function isoDateFromClaimValue(value) {
+  const text = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const match = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (match) return `${match[3]}-${match[1].padStart(2, "0")}-${match[2].padStart(2, "0")}`;
+  if (/^\d{10,13}$/.test(text)) {
+    const millis = text.length === 10 ? Number(text) * 1000 : Number(text);
+    return new Date(millis).toLocaleDateString("en-CA", { timeZone: OPERATIONS_TIME_ZONE });
+  }
+  return "";
+}
+
+function addressState(address) {
+  return String(address).match(/,\s*([A-Z]{2})(?:\s+\d{5})?(?:-|,|$)/i)?.[1]?.toUpperCase() || "";
 }
 
 async function loadClaimCallAnalysis(callId) {
@@ -6269,7 +6373,7 @@ const OPENAPI = {
           goal: { type: "string", enum: ["file_new_claim", "find_existing_claim", "status_follow_up", "lor_destination", "inspection_scheduling", "adjuster_assignment"], default: "file_new_claim" },
           to: { type: "string", description: "Optional carrier destination override in E.164 or US format." },
           carrierPhone: { type: "string", description: "Alias for an approved carrier filing phone override." },
-          stormTime: { type: "string" },
+          stormTime: { type: "string", description: "Optional Chance-approved or document-verified time. Omit vague guesses: the bridge automatically matches the confirmed JobNimbus DOL to nearby public NWS hail reports and adds a sourced approximate time when available." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
           injuries: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
@@ -6288,7 +6392,7 @@ const OPENAPI = {
           goal: { type: "string" },
           to: { type: "string" },
           carrierPhone: { type: "string" },
-          stormTime: { type: "string" },
+          stormTime: { type: "string", description: "Use the same explicit time override supplied during preparation, if any. Otherwise omit so the bridge repeats automatic sourced weather-time enrichment before digest validation." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
           injuries: { type: "string" },

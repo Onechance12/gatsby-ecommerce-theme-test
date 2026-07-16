@@ -508,6 +508,10 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(prepared.evidence.photoFilesExcluded, 121);
   assert.ok(relatedFilterRequests >= 3);
   assert.equal(prepared.callPlan.to, "+18444584300");
+  assert.equal(prepared.packet.verifiedFileFacts.stormTime, "Approximately 4:30 PM CDT based on a nearby reported hail event");
+  assert.equal(prepared.stormTimeEvidence.verifiedWeatherMatch, true);
+  assert.equal(prepared.stormTimeEvidence.dateMatchedToJobNimbusDol, "2026-04-25");
+  assert.match(prepared.packet.scriptInstruction, /Do not invent or rewrite an opening script/);
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
 
   const brainResponse = await fetch(`http://127.0.0.1:${bridgePort}/brain/context`, {

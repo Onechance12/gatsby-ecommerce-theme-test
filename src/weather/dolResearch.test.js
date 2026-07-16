@@ -13,6 +13,8 @@ test("parses quoted hail reports and converts UTC timestamps to Central dates", 
   const reports = parseHailReportCsv(CSV);
   assert.equal(reports.length, 2);
   assert.equal(reports[0].localDate, "2026-04-25");
+  assert.equal(reports[0].localTime, "4:30 PM CDT");
+  assert.match(reports[0].localDateTime, /04\/25\/2026, 4:30 PM CDT/);
   assert.equal(reports[0].hailInches, 1.75);
   assert.equal(reports[0].remark, "Golf ball hail, photographed.");
   assert.equal(reports[1].localDate, "2026-04-25");
@@ -26,6 +28,7 @@ test("ranks close, large hail as a strong candidate", () => {
   assert.equal(candidates[0].date, "2026-04-25");
   assert.equal(candidates[0].confidence, "strong_report_candidate");
   assert.equal(candidates[0].reportCount, 2);
+  assert.equal(candidates[0].nearestReport.localTime, undefined);
 });
 
 test("researches a property without writing or treating the candidate as confirmed DOL", async () => {
@@ -46,6 +49,7 @@ test("researches a property without writing or treating the candidate as confirm
   }, { fetchImpl, geocoderUrl: "https://example.test/geocoder", reportsUrl: "https://example.test/lsr" });
   assert.equal(result.mode, "read_only_weather_research");
   assert.equal(result.recommendedCandidate.date, "2026-04-25");
+  assert.equal(result.recommendedCandidate.nearestReport.localTime, "4:30 PM CDT");
   assert.match(result.warnings.join(" "), /not proof/i);
   assert.ok(haversineMiles(32.7664, -96.6436, 32.77, -96.65) < 1);
 });

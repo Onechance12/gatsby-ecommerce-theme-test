@@ -264,8 +264,22 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /first response to that audio must contain NO spoken words/i);
+  assert.match(prompt, /We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf/);
+  assert.match(prompt, /Never substitute a made-up noon, morning, afternoon, or evening/i);
   assert.match(prompt, /A transfer is not a completed objective/i);
   assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
+});
+
+test("claim packet exposes only the fixed Retell-owned human opening", () => {
+  const plan = buildClaimFilingPlan(fixture(), {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.packet.scriptAuthority, "retell_fixed_carrier_workflow");
+  assert.match(plan.packet.humanRepresentativeScript, /We are the public adjuster for the homeowner/);
+  assert.doesNotMatch(plan.packet.humanRepresentativeScript.split("\n")[0], /Fixture Homeowner|100 Test St|POLICY-1|04\/25\/2026/);
+  assert.match(plan.packet.scriptInstruction, /Do not invent or rewrite an opening script/);
 });
 
 test("inspection scheduling prompt uses only merged live calendar authority", () => {

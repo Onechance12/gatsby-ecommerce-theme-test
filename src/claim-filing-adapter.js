@@ -11,7 +11,7 @@ import {
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-07-11.1";
+export const CLAIM_PLAN_VERSION = "2026-07-16.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export function buildClaimFilingPlan(input, options = {}) {

@@ -126,6 +126,8 @@ export function parseHailReportCsv(csv) {
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(hailInches) || !validUtc) return null;
     return {
       localDate: formatCentralDate(validUtc),
+      localTime: formatCentralTime(validUtc),
+      localDateTime: formatCentralDateTime(validUtc),
       reportedAtUtc: validUtc.toISOString(),
       hailInches,
       latitude,
@@ -163,6 +165,8 @@ export function rankCandidates(reports) {
       reportCount: rows.length,
       nearestReport: {
         reportedAtUtc: nearestReport.reportedAtUtc,
+        localTime: nearestReport.localTime,
+        localDateTime: nearestReport.localDateTime,
         hailInches: nearestReport.hailInches,
         distanceMiles: nearestReport.distanceMiles,
         location: [nearestReport.city, nearestReport.county, nearestReport.state].filter(Boolean).join(", "),
@@ -246,6 +250,27 @@ function formatCentralDate(date) {
   }).formatToParts(date);
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function formatCentralTime(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: CENTRAL_TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short"
+  }).format(date);
+}
+
+function formatCentralDateTime(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: CENTRAL_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short"
+  }).format(date);
 }
 
 function validIsoDate(value, label) {
