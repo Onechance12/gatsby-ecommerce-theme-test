@@ -115,6 +115,18 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     chatgptSchema.components.schemas.ActionOperation.properties.payload.description,
     /completed:true/
   );
+  assert.match(
+    chatgptSchema.components.schemas.ActionOperation.properties.payload.description,
+    /draftId:'RETURNED_DRAFT_ID'/
+  );
+  assert.match(
+    chatgptSchema.components.schemas.GmailMessageRequest.properties.draftId.description,
+    /sends and removes that exact draft/i
+  );
+  assert.deepEqual(chatgptSchema.components.schemas.GmailMessageRequest.anyOf, [
+    { required: ["draftId"] },
+    { required: ["to", "subject", "body"] }
+  ]);
   for (const actionType of [
     "jobnimbus.process_update",
     "jobnimbus.create_task",
@@ -302,6 +314,9 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   let fixtureTaskCompleted = false;
   let fixtureNoteCreated = false;
   let relatedFilterRequests = 0;
+  let fixtureGmailDraftExists = false;
+  let fixtureGmailDraftCreateCount = 0;
+  let fixtureGmailDraftSendCount = 0;
   const fakeApi = createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeApiPort}`);
     if (["/activities", "/tasks", "/files"].includes(url.pathname) && String(url.searchParams.get("filter") || "").includes("related.id")) {
@@ -325,6 +340,62 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
         "VALID,VALID2,LAT,LON,MAG,WFO,TYPECODE,TYPETEXT,CITY,COUNTY,STATE,SOURCE,REMARK,UGC,UGCNAME,QUALIFIER",
         '202604252130,2026/04/25 21:30,32.779,-96.795,1.75,FWD,H,HAIL,Dallas,Dallas,TX,Public,"Golf ball hail, photographed.",TXC113,Dallas,M'
       ].join("\n"));
+      return;
+    }
+    if (url.pathname === "/oauth-token") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ access_token: "fixture-google-token", expires_in: 3600 }));
+      return;
+    }
+    if (url.pathname === "/gmail/v1/users/me/drafts/draft-1" && req.method === "GET") {
+      if (!fixtureGmailDraftExists) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Draft not found" } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "draft-1",
+        message: {
+          id: "draft-message-1",
+          threadId: "draft-thread-1",
+          snippet: "Approved Gmail draft body.",
+          payload: {
+            mimeType: "text/plain",
+            headers: [
+              { name: "To", value: "carrier@example.test" },
+              { name: "Subject", value: "DRAFT-CLAIM" }
+            ],
+            body: { data: Buffer.from("Approved Gmail draft body.").toString("base64url") }
+          }
+        }
+      }));
+      return;
+    }
+    if (url.pathname === "/gmail/v1/users/me/drafts" && req.method === "POST") {
+      fixtureGmailDraftExists = true;
+      fixtureGmailDraftCreateCount += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "draft-1", message: { id: "draft-message-1", threadId: "draft-thread-1" } }));
+      return;
+    }
+    if (url.pathname === "/gmail/v1/users/me/drafts/send" && req.method === "POST") {
+      if (!fixtureGmailDraftExists) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Draft not found" } }));
+        return;
+      }
+      fixtureGmailDraftExists = false;
+      fixtureGmailDraftSendCount += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "sent-message-1",
+        threadId: "draft-thread-1",
+        payload: { headers: [
+          { name: "To", value: "carrier@example.test" },
+          { name: "Subject", value: "DRAFT-CLAIM" }
+        ] }
+      }));
       return;
     }
     if (url.pathname === "/file-content/file-1") {
@@ -410,6 +481,11 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       BRIDGE_ALLOW_WRITES: "true",
       MEMORY_ROOT: memoryRoot,
       ALLOW_GMAIL_SEND: "true",
+      GOOGLE_CLIENT_ID: "fixture-google-client",
+      GOOGLE_CLIENT_SECRET: "fixture-google-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-google-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_API_KEY: "fixture-quo-key",
       QUO_DEFAULT_FROM_NUMBER: "+19725550100",
       ALLOW_QUO_SEND: "true"
@@ -686,6 +762,83 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     })
   });
   assert.equal(gmailChangedResponse.status, 409);
+
+  const createDraftOperation = {
+    type: "gmail.create_draft",
+    payload: {
+      query: "2739",
+      to: "carrier@example.test",
+      subject: "DRAFT-CLAIM",
+      body: "Approved Gmail draft body."
+    }
+  };
+  const createDraftBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ operations: [createDraftOperation], execute: false })
+  });
+  assert.equal(createDraftBatchResponse.status, 200);
+  const createDraftBatch = await createDraftBatchResponse.json();
+  const executeCreateDraftResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ operations: [createDraftOperation], execute: true, approvalDigest: createDraftBatch.approvalDigest })
+  });
+  assert.equal(executeCreateDraftResponse.status, 200);
+  assert.equal(fixtureGmailDraftCreateCount, 1);
+
+  const duplicateDraftResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ operations: [createDraftOperation], execute: false })
+  });
+  assert.equal(duplicateDraftResponse.status, 200);
+  const duplicateDraft = await duplicateDraftResponse.json();
+  assert.equal(duplicateDraft.operations[0].plan.mode, "existing_draft");
+  assert.equal(duplicateDraft.operations[0].plan.draft.id, "draft-1");
+  assert.equal(fixtureGmailDraftCreateCount, 1);
+
+  const rebuiltSendResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      operations: [{
+        type: "gmail.send",
+        payload: {
+          query: "2739",
+          to: "carrier@example.test",
+          subject: "DRAFT-CLAIM",
+          body: "Approved Gmail draft body."
+        }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(rebuiltSendResponse.status, 400);
+  assert.match(await rebuiltSendResponse.text(), /send the reviewed draft.*draftId/i);
+
+  const sendDraftOperation = { type: "gmail.send", payload: { query: "2739", draftId: "draft-1" } };
+  const sendDraftBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ operations: [sendDraftOperation], execute: false })
+  });
+  assert.equal(sendDraftBatchResponse.status, 200);
+  const sendDraftBatch = await sendDraftBatchResponse.json();
+  assert.equal(sendDraftBatch.operations[0].plan.plan.action, "send_existing_draft");
+  assert.equal(sendDraftBatch.operations[0].plan.plan.draftId, "draft-1");
+  assert.match(sendDraftBatch.operations[0].plan.approvalDigest, /^[a-f0-9]{64}$/);
+
+  const executeSendDraftResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ operations: [sendDraftOperation], execute: true, approvalDigest: sendDraftBatch.approvalDigest })
+  });
+  assert.equal(executeSendDraftResponse.status, 200);
+  const executeSendDraft = await executeSendDraftResponse.json();
+  assert.equal(executeSendDraft.mode, "executed");
+  assert.equal(fixtureGmailDraftSendCount, 1);
+  assert.equal(fixtureGmailDraftExists, false);
 
   const quoDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
     method: "POST",

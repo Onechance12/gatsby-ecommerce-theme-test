@@ -112,6 +112,15 @@ Detailed bridge routes remain available to the server and local agents, while
 routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
 texts are prepared and executed through `processApprovedWaveActionBatch`.
 
+Gmail review-first sends preserve one message identity. A successful
+`gmail.create_draft` receipt returns the Gmail `draftId`. If Chance later says to
+send that reviewed draft, use `gmail.send` with `{ query, draftId }`; the bridge
+re-reads the current draft, produces a fresh exact approval digest, and sends it
+through Gmail's draft-send endpoint so the draft is consumed. Do not rebuild the
+same message as a raw send and do not create another draft. The bridge also
+detects a still-existing verified draft for the same Chance file and subject and
+refuses duplicate draft creation/raw resend.
+
 For document review, call `reviewJobNimbusDocument` with either an exact
 `documentQuery` or a natural-language `documentPurpose`. This is the canonical
 one-call workflow: when extraction is missing, incomplete, truncated, or

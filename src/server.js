@@ -49,6 +49,8 @@ const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || proces
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
+const GOOGLE_TOKEN_URL = process.env.GOOGLE_TOKEN_URL || "https://oauth2.googleapis.com/token";
+const GMAIL_API_BASE_URL = stripTrailingSlash(process.env.GMAIL_API_BASE_URL || "https://gmail.googleapis.com");
 const GMAIL_USER = process.env.GMAIL_USER || "me";
 const ALLOW_GMAIL_SEND = process.env.ALLOW_GMAIL_SEND === "true";
 const PERSISTENT_DATA_ROOT = process.env.MEMORY_ROOT || tmpdir();
@@ -2937,6 +2939,18 @@ async function gmailDraft(input) {
   const cc = String(input.cc || "").trim();
   const bcc = String(input.bcc || "").trim();
   const threadId = String(input.threadId || "").trim();
+  const reusable = await reusableGmailDraft(input, subject);
+  if (reusable) {
+    return {
+      mode: "existing_draft",
+      draft: reusable.snapshot,
+      instruction: "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId so Gmail sends and removes the reviewed draft.",
+      sendPayload: cleanObject({
+        query: input.query || input.fileQuery || "",
+        draftId: reusable.snapshot.id
+      })
+    };
+  }
   const attachments = await loadEmailAttachments(input);
   const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const draftBody = { message: cleanObject({ raw, threadId }) };
@@ -2966,12 +2980,19 @@ async function gmailDraft(input) {
 }
 
 async function gmailSend(input) {
+  const draftId = String(input.draftId || "").trim();
+  if (draftId) return gmailSendExistingDraft(input, draftId);
+
   const to = required(input.to, "to");
   const subject = required(input.subject, "subject");
   const body = required(input.body, "body");
   const cc = String(input.cc || "").trim();
   const bcc = String(input.bcc || "").trim();
   const threadId = String(input.threadId || "").trim();
+  const reusable = await reusableGmailDraft(input, subject);
+  if (reusable) {
+    badRequest(`A verified Gmail draft already exists for this file and subject. Send the reviewed draft with gmail.send payload {draftId:'${reusable.snapshot.id}', query:'${input.query || input.fileQuery || ""}'}; do not rebuild the email or create another draft.`);
+  }
   const attachments = await loadEmailAttachments(input);
   const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const sendBody = cleanObject({ raw, threadId });
@@ -3013,6 +3034,106 @@ async function gmailSend(input) {
   const file = await optionalChanceFile(input.query || input.fileQuery);
   const memoryCloseout = closeoutGmailAction(input, file, "send_email", result.id, `Sent approved Gmail message with subject ${subject} and ${attachments.length} verified attachment(s).`);
   return { mode: "executed", message: compactGmailMessage(result), attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source)), memoryCloseout };
+}
+
+async function gmailSendExistingDraft(input, draftId) {
+  const snapshot = await gmailDraftSnapshot(draftId);
+  const plan = {
+    endpoint: "/gmail/v1/users/me/drafts/send",
+    action: "send_existing_draft",
+    draftId: snapshot.id,
+    messageId: snapshot.messageId,
+    threadId: snapshot.threadId,
+    to: snapshot.to,
+    cc: snapshot.cc,
+    bcc: snapshot.bcc,
+    subject: snapshot.subject,
+    body: snapshot.body,
+    attachments: snapshot.attachments,
+    contentDigest: snapshot.contentDigest
+  };
+  const approvalDigest = digest({ channel: "gmail", action: "send_existing_draft", plan });
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      plan,
+      approvalDigest,
+      instruction: "Nothing was sent. After Chance approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. Gmail will send and remove the reviewed draft."
+    };
+  }
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
+  if (!ALLOW_GMAIL_SEND) badRequest("Gmail sending is disabled. Set ALLOW_GMAIL_SEND=true in Render.");
+  requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail existing-draft send");
+  const reservation = await reserveOutboundSend("gmail", approvalDigest, { to: snapshot.to, subject: snapshot.subject });
+  let result;
+  try {
+    result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts/send`, {
+      method: "POST",
+      body: { id: draftId }
+    });
+    await completeOutboundSend(reservation.id, "completed", result.id || "");
+  } catch (error) {
+    await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
+    throw error;
+  }
+  const file = await optionalChanceFile(input.query || input.fileQuery);
+  const memoryCloseout = closeoutGmailAction(
+    input,
+    file,
+    "send_draft",
+    result.id,
+    `Sent and consumed approved Gmail draft with subject ${snapshot.subject} and ${snapshot.attachments.length} verified attachment(s).`
+  );
+  return {
+    mode: "executed",
+    message: compactGmailMessage(result),
+    consumedDraftId: draftId,
+    attachments: snapshot.attachments,
+    memoryCloseout
+  };
+}
+
+async function reusableGmailDraft(input, subject) {
+  const query = input.query || input.fileQuery;
+  if (!query) return null;
+  const file = await optionalChanceFile(query);
+  if (!file) return null;
+  const receipt = latestActionReceipts(MEMORY_CONFIG, 40, { subjectKey: file.id })
+    .find((row) => row.channel === "gmail" && row.action === "create_draft" && row.status === "drafted" && row.externalId && row.summary.includes(`subject ${subject}`));
+  if (!receipt) return null;
+  try {
+    return { file, receipt, snapshot: await gmailDraftSnapshot(receipt.externalId) };
+  } catch (error) {
+    if (error?.statusCode === 404) return null;
+    throw error;
+  }
+}
+
+async function gmailDraftSnapshot(draftId) {
+  const draft = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts/${encodeURIComponent(draftId)}?format=full`);
+  const message = compactGmailFullMessage(draft.message || {});
+  const headers = gmailHeaders(draft.message || {});
+  const attachments = message.attachments.map((attachment) => ({
+    filename: attachment.filename,
+    mimeType: attachment.mimeType || ""
+  }));
+  return {
+    id: String(draft.id || draftId),
+    messageId: message.id,
+    threadId: message.threadId,
+    to: headers.to || "",
+    cc: headers.cc || "",
+    bcc: headers.bcc || "",
+    subject: headers.subject || "",
+    body: message.plainText || message.htmlText || message.snippet || "",
+    attachments,
+    contentDigest: digest({
+      draftId: String(draft.id || draftId),
+      messageId: message.id,
+      threadId: message.threadId,
+      payload: draft.message?.payload || null
+    })
+  };
 }
 
 function quoConfig() {
@@ -4380,7 +4501,7 @@ async function gmailApi(endpoint, options = {}) {
     badRequest("Gmail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in Render.");
   }
   const token = await getGoogleAccessToken();
-  const response = await fetch(`https://gmail.googleapis.com${endpoint}`, {
+  const response = await fetch(`${GMAIL_API_BASE_URL}${endpoint}`, {
     method: options.method || "GET",
     headers: {
       authorization: `Bearer ${token}`,
@@ -4400,7 +4521,7 @@ async function gmailApi(endpoint, options = {}) {
 }
 
 async function getGoogleAccessToken() {
-  const response = await fetch("https://oauth2.googleapis.com/token", {
+  const response = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -4456,7 +4577,7 @@ function gmailHeaders(message) {
   const out = {};
   for (const header of headers) {
     const key = String(header.name || "").toLowerCase();
-    if (["from", "to", "cc", "subject", "date"].includes(key)) out[key] = header.value || "";
+    if (["from", "to", "cc", "bcc", "subject", "date"].includes(key)) out[key] = header.value || "";
   }
   return out;
 }
@@ -6025,6 +6146,7 @@ const OPENAPI = {
       GmailMessageRequest: {
         type: "object",
         properties: {
+          draftId: { type: "string", description: "Existing Gmail draft id. For send-after-review, provide this instead of rebuilding to/subject/body; Gmail sends and removes that exact draft." },
           to: { type: "string", description: "Recipient email address or comma-separated addresses." },
           cc: { type: "string", description: "Optional CC recipients." },
           bcc: { type: "string", description: "Optional BCC recipients." },
@@ -6038,7 +6160,10 @@ const OPENAPI = {
           approvalDigest: { type: "string", description: "Required only for a live send. Must exactly match the immediately preceding send dry run." },
           execute: { type: "boolean", default: false, description: "False returns a dry run. A live send additionally requires ALLOW_GMAIL_SEND=true and the exact approvalDigest." }
         },
-        required: ["to", "subject", "body"]
+        anyOf: [
+          { required: ["draftId"] },
+          { required: ["to", "subject", "body"] }
+        ]
       },
       QuoHistoryRequest: {
         type: "object",
@@ -6117,7 +6242,7 @@ const OPENAPI = {
           payload: {
             type: "object",
             additionalProperties: true,
-            description: "Exact payload for the selected action. Do not include execute or approvalDigest. Examples: complete a task with {taskId:'TASK_ID',completed:true}; create a note with {query:'JOB_NUMBER',note:'Exact note'}; update fields/status/note together with {query:'JOB_NUMBER',fields:{...},status:'Exact status',note:'Exact note'}; send Gmail or Quo with the exact recipient and content."
+            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {taskId:'ID',completed:true}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. If that draft is approved later, send it with gmail.send {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy."
           }
         },
         required: ["type", "payload"]
