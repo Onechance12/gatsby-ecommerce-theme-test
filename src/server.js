@@ -373,7 +373,6 @@ const CHATGPT_ACTION_PATHS = [
   "/gmail/attachment-review",
   "/gmail/draft",
   "/gmail/send",
-  "/quo/numbers",
   "/quo/history",
   "/quo/transcript",
   "/quo/send",
@@ -392,7 +391,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Curated 31-operation schema for the Chance Pearson HCN/Wave Custom GPT. Gmail and Quo live sends require Chance's explicit approval of the exact unchanged dry run."
+      description: "Curated 30-operation schema for the Chance Pearson HCN/Wave Custom GPT. Gmail and Quo live sends require Chance's explicit approval of the exact unchanged dry run."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
