@@ -118,7 +118,11 @@ missing, incomplete, or contradicted by the page layout, call
 bridge returns the original file through `openaiFileResponse`; inspect that file
 and all relevant pages with ChatGPT's native document tools before reaching a
 conclusion. The attachment route is read-only, rejects ambiguous document names,
-and caps returned files at 8 MB.
+and caps returned files at 8 MB. If the user explicitly names a company file that
+is not assigned to Chance, the three read-only document actions may resolve it
+only by an exact, unambiguous JobNimbus number, claim number, client name, or
+address. All writes, uploads, calls, emails, and texts remain Chance-scoped and
+approval-gated.
 
 ## Handoff Inbox
 

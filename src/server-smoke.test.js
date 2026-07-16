@@ -283,6 +283,11 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       res.end(fixturePdf);
       return;
     }
+    if (url.pathname === "/file-content/file-other") {
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end(fixturePdf);
+      return;
+    }
     if (url.pathname === "/tasks/task-1" && req.method === "PUT") {
       fixtureTaskCompleted = true;
       res.writeHead(400, { "content-type": "text/plain" });
@@ -308,7 +313,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     else if (url.pathname === "/tasks") body = { tasks: [{ jnid: "task-1", primary: { id: chance.jnid }, title: "File claim", is_completed: fixtureTaskCompleted }] };
     else if (url.pathname === "/files") body = { files: [
       { jnid: "file-1", primary: { id: chance.jnid }, filename: "Carrier estimate.pdf", content_type: "application/pdf" },
-      { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" }
+      { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" },
+      { jnid: "file-other", primary: { id: other.jnid }, filename: "Other Owner - TDI.pdf", content_type: "application/pdf" }
     ] };
     else { res.writeHead(404); res.end("not found"); return; }
     res.writeHead(200, { "content-type": "application/json" });
@@ -459,6 +465,25 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(documentFile.openaiFileResponse[0].mime_type, "application/pdf");
   assert.deepEqual(Buffer.from(documentFile.openaiFileResponse[0].content, "base64"), fixturePdf);
   assert.match(documentFile.reviewInstruction, /actual file/i);
+
+  const companyDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "Other Owner", documentQuery: "Other Owner - TDI.pdf" })
+  });
+  assert.equal(companyDocumentResponse.status, 200);
+  const companyDocument = await companyDocumentResponse.json();
+  assert.equal(companyDocument.file.id, other.jnid);
+  assert.equal(companyDocument.readScope, "explicit_company_read");
+  assert.equal(companyDocument.openaiFileResponse[0].name, "Other Owner - TDI.pdf");
+  assert.deepEqual(Buffer.from(companyDocument.openaiFileResponse[0].content, "base64"), fixturePdf);
+
+  const broadCompanyDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "Other", documentQuery: "Other Owner - TDI.pdf" })
+  });
+  assert.equal(broadCompanyDocumentResponse.status, 400);
 
   const updateDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
     method: "POST",

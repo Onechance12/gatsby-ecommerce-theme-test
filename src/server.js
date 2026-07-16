@@ -2461,7 +2461,7 @@ async function documentText(input) {
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 12000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
-  const { contact } = await findChanceContact(query);
+  const { contact, readScope } = await findDocumentReadContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
@@ -2478,6 +2478,7 @@ async function documentText(input) {
   });
   return {
     file: compactContact(contact),
+    readScope,
     document: compactDocument(document),
     contentType: downloaded.contentType,
     bytes: downloaded.bytes.length,
@@ -2490,7 +2491,7 @@ async function documentReview(input) {
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
-  const { contact } = await findChanceContact(query);
+  const { contact, readScope } = await findDocumentReadContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
@@ -2508,6 +2509,7 @@ async function documentReview(input) {
   const review = reviewExtractedDocument(extracted.text || "", document, compactContact(contact));
   return {
     file: compactContact(contact),
+    readScope,
     document: compactDocument(document),
     contentType: downloaded.contentType,
     bytes: downloaded.bytes.length,
@@ -2523,7 +2525,7 @@ async function documentReview(input) {
 async function documentFileForChat(input) {
   const query = required(input.query, "query");
   const documentQuery = required(input.documentQuery || input.documentId, "documentQuery");
-  const { contact } = await findChanceContact(query);
+  const { contact, readScope } = await findDocumentReadContact(query);
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocumentForChat(documents, documentQuery);
   const downloaded = await downloadJobNimbusFile(document);
@@ -2544,6 +2546,7 @@ async function documentFileForChat(input) {
 
   return {
     file: compactContact(contact),
+    readScope,
     document: compactDocument(document),
     bytes: checked.bytes.length,
     contentType: mimeType,
@@ -3271,6 +3274,50 @@ async function findChanceContact(query) {
     badRequest(`Resolved record is not a Chance Pearson insurance file: ${needle}`);
   }
   return { contact, alternatives: matches.slice(1, 6).map(({ contact: row }) => row) };
+}
+
+async function findDocumentReadContact(query) {
+  const needle = String(query || "").trim();
+  if (!needle) badRequest("query is required");
+  const lower = needle.toLowerCase();
+  const contacts = await listContacts({ maxPages: 25 });
+  const ranked = contacts
+    .filter(isInsuranceFile)
+    .filter((contact) => contactMatches(contact, lower))
+    .map((contact) => ({ contact, score: chanceMatchScore(contact, needle) }))
+    .sort((a, b) => b.score - a.score || fileSort(a.contact, b.contact));
+  const chanceMatches = ranked.filter(({ contact }) => assignedTo(contact, CHANCE_OWNER_ID));
+
+  let matches = chanceMatches;
+  let readScope = "chance_assigned";
+  if (!matches.length) {
+    matches = ranked.filter(({ score }) => score >= 90);
+    readScope = "explicit_company_read";
+  }
+
+  if (!matches.length) {
+    badRequest(
+      `No Chance Pearson file or exact company insurance-file match found for document review: ${needle}. Use the JobNimbus number, claim number, exact client name, or exact address.`
+    );
+  }
+  if (matches.length > 1 && matches[0].score === matches[1].score) {
+    const choices = matches.slice(0, 5).map(({ contact }) => `${contact.number || contact.recid || "?"}: ${contact.display_name || contact.name || "Unnamed"}`);
+    badRequest(`Ambiguous document-review file query: ${needle}. Use the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
+  }
+
+  const selectedId = matches[0].contact.jnid || matches[0].contact.id;
+  const contact = await jobNimbus(`/contacts/${encodeURIComponent(selectedId)}`);
+  if (!isInsuranceFile(contact)) {
+    badRequest(`Resolved record is not a JobNimbus insurance file: ${needle}`);
+  }
+  if (readScope === "chance_assigned" && !assignedTo(contact, CHANCE_OWNER_ID)) {
+    badRequest(`Resolved record is not a Chance Pearson insurance file: ${needle}`);
+  }
+  return {
+    contact,
+    readScope,
+    alternatives: matches.slice(1, 6).map(({ contact: row }) => row)
+  };
 }
 
 function chanceMatchScore(contact, query) {
@@ -5497,7 +5544,7 @@ const OPENAPI = {
       DocumentTextRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "File/client identifier." },
+          query: { type: "string", description: "File/client identifier. Chance-assigned files are preferred. An exact, unambiguous JobNimbus number, claim number, client name, or address may be used for an explicitly named company-file read; this never expands write access." },
           documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
           maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 12000 },
           forceOcr: { type: "boolean", default: false, description: "When true, OCR is attempted even if PDF text extraction finds text." },
@@ -5508,7 +5555,7 @@ const OPENAPI = {
       DocumentReviewRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "File/client identifier." },
+          query: { type: "string", description: "File/client identifier. Chance-assigned files are preferred. An exact, unambiguous JobNimbus number, claim number, client name, or address may be used for an explicitly named company-file read; this never expands write access." },
           documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
           maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 20000 },
           previewChars: { type: "integer", minimum: 500, maximum: 12000, default: 4000 },
@@ -5520,7 +5567,7 @@ const OPENAPI = {
       DocumentFileRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Exact Chance file/client identifier, preferably JobNimbus number, claim number, or exact address." },
+          query: { type: "string", description: "Exact file/client identifier, preferably JobNimbus number, claim number, exact client name, or exact address. Read-only document retrieval may resolve an explicitly named company file; all write actions remain Chance-only." },
           documentQuery: { type: "string", description: "Required exact document id/name or a unique partial filename. Ambiguous matches are rejected." },
           documentId: { type: "string", description: "Alias for documentQuery." }
         },
@@ -5539,6 +5586,11 @@ const OPENAPI = {
         type: "object",
         properties: {
           file: { type: "object", additionalProperties: true },
+          readScope: {
+            type: "string",
+            enum: ["chance_assigned", "explicit_company_read"],
+            description: "Shows whether the read resolved inside Chance's assigned files or through an exact, unambiguous company-file lookup. This does not grant write access."
+          },
           document: { type: "object", additionalProperties: true },
           bytes: { type: "integer" },
           contentType: { type: "string" },
@@ -5550,7 +5602,7 @@ const OPENAPI = {
             items: { $ref: "#/components/schemas/ChatGPTFileReturn" }
           }
         },
-        required: ["file", "document", "bytes", "contentType", "reviewInstruction", "openaiFileResponse"]
+        required: ["file", "readScope", "document", "bytes", "contentType", "reviewInstruction", "openaiFileResponse"]
       },
       JobNimbusUploadFileRequest: {
         type: "object",
