@@ -22,9 +22,14 @@ transport is unavailable.
   `execute:true`, and the exact digest returned by the unchanged dry run.
 - A live Quo send requires `BRIDGE_ALLOW_WRITES=true`, `ALLOW_QUO_SEND=true`,
   `execute:true`, and the exact digest returned by the unchanged dry run.
-- Gmail and Quo sends are explicitly marked consequential in the Custom GPT
-  schema. The assistant must show the dry run and wait for Chance's approval;
-  review, memory closeout, and sweep endpoints never send messages.
+- The consolidated Custom GPT schema exposes one consequential action batch for
+  JobNimbus writes, Gmail drafts/sends, and Quo sends. The assistant must show
+  the exact dry run and wait for Chance's approval; review, memory closeout,
+  document, and sweep endpoints never send messages.
+- Quo review scans matching communication across every available company team
+  line, including Andrea's line, and labels the source line. That access is
+  evidence-only. Outbound texts use Chance's configured line and remain
+  approval-gated.
 - Changing one character, recipient, subject, or attachment invalidates the
   approval digest. Duplicate approved action batches are blocked by a persistent ledger.
 - JobNimbus write actions resolve only Chance Pearson-owned insurance files.
@@ -101,6 +106,11 @@ Import `https://jobnimbus-chatgpt-bridge.onrender.com/openapi-chatgpt.json`, con
 HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
 and start a new chat after schema changes. Arbitrary standard chats do not gain
 the bridge automatically; the Action must be installed on that GPT.
+
+The GPT-facing schema is intentionally consolidated to 20 high-level operations.
+Detailed bridge routes remain available to the server and local agents, while
+routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
+texts are prepared and executed through `processApprovedWaveActionBatch`.
 
 For document review, call `reviewJobNimbusDocument` first. If text extraction is
 missing, incomplete, or contradicted by the page layout, call

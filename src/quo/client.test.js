@@ -1,6 +1,43 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sendQuoText } from "./client.js";
+import { readQuoHistory, sendQuoText } from "./client.js";
+
+test("Quo history reads matching communication across every team line", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    requests.push(value);
+    if (value.endsWith("/phone-numbers")) {
+      return jsonResponse(200, { data: [
+        { id: "PN_chance", name: "Chance Pearson", number: "+19725731730" },
+        { id: "PN_andrea", name: "Andrea Ramirez", number: "+12145550101" }
+      ] });
+    }
+    if (value.includes("/messages?") && value.includes("PN_chance")) {
+      return jsonResponse(200, { data: [{ id: "MSG_chance", createdAt: "2026-07-15T14:00:00Z", direction: "outgoing", content: "Chance line update" }] });
+    }
+    if (value.includes("/messages?") && value.includes("PN_andrea")) {
+      return jsonResponse(200, { data: [{ id: "MSG_andrea", createdAt: "2026-07-15T15:00:00Z", direction: "outgoing", content: "Andrea line update" }] });
+    }
+    if (value.includes("/calls?")) return jsonResponse(200, { data: [] });
+    return jsonResponse(404, { message: "not found" });
+  };
+  try {
+    const result = await readQuoHistory({
+      apiKey: "fixture",
+      baseUrl: "https://api.quo.test/v1",
+      defaultFrom: "+19725731730",
+      allowSend: false
+    }, { phone: "+12145550199" });
+    assert.equal(result.messageCount, 2);
+    assert.deepEqual(result.timeline.map((item) => item.line), ["Chance Pearson", "Andrea Ramirez"]);
+    assert.equal(requests.filter((url) => url.includes("/messages?")).length, 2);
+    assert.equal(requests.filter((url) => url.includes("/calls?")).length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("Quo dry run never calls the API", async () => {
   const originalFetch = globalThis.fetch;

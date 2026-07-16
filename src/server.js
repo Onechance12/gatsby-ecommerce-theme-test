@@ -356,26 +356,16 @@ const CHATGPT_ACTION_PATHS = [
   "/brain/context",
   "/ops/review-chance-files",
   "/ops/action-batch",
-  "/memory/file-actions",
   "/scheduling/availability",
   "/jobnimbus/search",
-  "/jobnimbus/review-file",
   "/jobnimbus/document-review",
   "/jobnimbus/document-file",
   "/jobnimbus/upload-file",
-  "/jobnimbus/process-update",
-  "/jobnimbus/create-task",
-  "/jobnimbus/update-task",
-  "/jobnimbus/create-calendar-event",
-  "/jobnimbus/update-calendar-event",
   "/gmail/search",
   "/gmail/thread",
   "/gmail/attachment-review",
-  "/gmail/draft",
-  "/gmail/send",
   "/quo/history",
   "/quo/transcript",
-  "/quo/send",
   "/claim-filing/prepare",
   "/claim-filing/call",
   "/claim-filing/result",
@@ -391,7 +381,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Curated 30-operation schema for the Chance Pearson HCN/Wave Custom GPT. Gmail and Quo live sends require Chance's explicit approval of the exact unchanged dry run."
+      description: "Consolidated 20-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. All JobNimbus writes, Gmail drafts/sends, and Quo sends flow through one exact approval-gated action batch."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
@@ -5342,7 +5332,7 @@ const OPENAPI = {
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           activeOnly: { type: "boolean", default: true },
           includeGmail: { type: "boolean", default: true },
-          includeQuo: { type: "boolean", default: true },
+          includeQuo: { type: "boolean", default: true, description: "When true, reads matching homeowner/adjuster communications across every Quo team line, including other employees' lines, as evidence only." },
           includeQuoTranscripts: { type: "boolean", default: false },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
@@ -5864,6 +5854,7 @@ const OPENAPI = {
     "/jobnimbus/upload-file": {
       post: {
         operationId: "uploadJobNimbusFile",
+        "x-openai-isConsequential": true,
         requestBody: jsonBody("JobNimbusUploadFileRequest"),
         responses: { "200": { description: "Dry run or JobNimbus document upload result." } }
       }
@@ -5941,6 +5932,7 @@ const OPENAPI = {
     "/gmail/attachment-review": {
       post: {
         operationId: "reviewGmailAttachment",
+        "x-openai-isConsequential": true,
         requestBody: jsonBody("GmailAttachmentReviewRequest"),
         responses: { "200": { description: "Downloads and validates a Gmail attachment, extracts text/OCR when supported, and optionally dry-runs or executes an upload to an exact Chance JobNimbus file." } }
       }
