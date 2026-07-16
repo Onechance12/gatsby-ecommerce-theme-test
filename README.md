@@ -107,7 +107,7 @@ HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
 and start a new chat after schema changes. Arbitrary standard chats do not gain
 the bridge automatically; the Action must be installed on that GPT.
 
-The GPT-facing schema is intentionally consolidated to 21 high-level operations.
+The GPT-facing schema is intentionally consolidated to 22 high-level operations.
 Detailed bridge routes remain available to the server and local agents, while
 routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
 texts are prepared and executed through `processApprovedWaveActionBatch`.

@@ -412,6 +412,7 @@ const CHATGPT_ACTION_PATHS = [
   "/claim-filing/result",
   "/claim-filing/callbacks",
   "/claim-filing/writeback",
+  "/retell/configure-agent",
   "/retell/client-coordinator-call",
   "/retell/client-coordinator-call-result"
 ];
@@ -422,7 +423,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 21-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. All JobNimbus writes, Gmail drafts/sends, and Quo sends flow through one exact approval-gated action batch."
+      description: "Consolidated 22-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. All JobNimbus writes, Gmail drafts/sends, Quo sends, and Retell configuration changes are exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))

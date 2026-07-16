@@ -87,7 +87,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 21);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 22);
+  assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
