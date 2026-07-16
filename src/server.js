@@ -2504,15 +2504,23 @@ async function documentText(input) {
 async function documentReview(input) {
   const query = required(input.query, "query");
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
+  const documentPurpose = normalizeDocumentPurpose(input.documentPurpose);
+  if (!documentQuery && !documentPurpose) {
+    badRequest("documentQuery or documentPurpose is required so the bridge never reviews an arbitrary file.");
+  }
   const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
   const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
   const documents = await listRelated("/files", contact.jnid, 1000);
-  const document = selectDocument(documents, documentQuery);
+  const document = documentQuery
+    ? selectDocument(documents, documentQuery)
+    : selectDocumentByPurpose(documents, documentPurpose);
   if (!document) {
     return {
       file: compactContact(contact),
-      error: documentQuery ? `No matching document found for: ${documentQuery}` : "No documents found on this file.",
+      error: documentQuery
+        ? `No matching document found for: ${documentQuery}`
+        : `No unique ${documentPurpose} document found on this file.`,
       availableDocuments: documents.map(compactDocument).slice(0, 50)
     };
   }
@@ -2522,6 +2530,10 @@ async function documentReview(input) {
     maxOcrPages
   });
   const review = reviewExtractedDocument(extracted.text || "", document, compactContact(contact));
+  const nativeReviewRequired = shouldAttachForNativeReview(extracted, review);
+  const nativeAttachment = nativeReviewRequired
+    ? prepareChatgptDocumentAttachment(downloaded, document)
+    : null;
   return {
     file: compactContact(contact),
     readScope,
@@ -2533,7 +2545,12 @@ async function documentReview(input) {
     truncated: Boolean(extracted.truncated),
     extractionError: extracted.error || "",
     textPreview: (extracted.text || "").slice(0, clamp(Number(input.previewChars || 4000), 500, 12000)),
-    review
+    review,
+    nativeReviewRequired,
+    ...(nativeAttachment ? {
+      reviewInstruction: "The exact original JobNimbus document is attached to this response because bridge extraction was incomplete or unreliable. Inspect every relevant page with ChatGPT's native file/PDF analysis before reporting facts. Do not infer contents from the filename.",
+      openaiFileResponse: nativeAttachment.openaiFileResponse
+    } : {})
   };
 }
 
@@ -2544,33 +2561,16 @@ async function documentFileForChat(input) {
   const documents = await listRelated("/files", contact.jnid, 1000);
   const document = selectDocumentForChat(documents, documentQuery);
   const downloaded = await downloadJobNimbusFile(document);
-  const filename = safeMimeFilename(
-    downloaded.filename || compactDocument(document).name || `jobnimbus-document-${document.jnid || document.id || "file"}`
-  );
-  const mimeType = chatgptDocumentMimeType(downloaded.contentType, filename);
-  const checked = validateEmailAttachment({
-    filename,
-    contentType: mimeType,
-    bytes: downloaded.bytes
-  });
-  if (checked.bytes.length > MAX_CHATGPT_FILE_BYTES) {
-    badRequest(
-      `Document ${checked.filename} is ${checked.bytes.length} bytes. The ChatGPT conversation-file limit for this bridge is ${MAX_CHATGPT_FILE_BYTES} bytes.`
-    );
-  }
+  const prepared = prepareChatgptDocumentAttachment(downloaded, document);
 
   return {
     file: compactContact(contact),
     readScope,
     document: compactDocument(document),
-    bytes: checked.bytes.length,
-    contentType: mimeType,
+    bytes: prepared.bytes,
+    contentType: prepared.contentType,
     reviewInstruction: "The original JobNimbus document is now attached to this conversation. Inspect the actual file and every relevant page with ChatGPT's native file/PDF analysis. Do not infer its contents from the filename or from a failed bridge extraction.",
-    openaiFileResponse: [{
-      name: checked.filename,
-      mime_type: mimeType,
-      content: checked.bytes.toString("base64")
-    }]
+    openaiFileResponse: prepared.openaiFileResponse
   };
 }
 
@@ -3523,6 +3523,47 @@ function selectDocument(documents, documentQuery) {
     || null;
 }
 
+function normalizeDocumentPurpose(value) {
+  const purpose = String(value || "").trim().toLowerCase();
+  if (!purpose) return "";
+  const supported = new Set([
+    "insurance_policy",
+    "tdi_form",
+    "estimate_scope",
+    "carrier_claim_document",
+    "appraisal_document",
+    "representation_contract"
+  ]);
+  if (!supported.has(purpose)) badRequest(`Unsupported documentPurpose: ${purpose}`);
+  return purpose;
+}
+
+function selectDocumentByPurpose(documents, purpose) {
+  const patterns = {
+    insurance_policy: /\b(?:insurance|policy|declarations?|dec\s*page)\b/i,
+    tdi_form: /\btdi\b|texas department of insurance/i,
+    estimate_scope: /\b(?:estimate|scope|final draft|xactimate)\b|\.esx$/i,
+    carrier_claim_document: /\b(?:carrier estimate|scope of loss|claim letter|coverage letter|settlement)\b/i,
+    appraisal_document: /\b(?:appraisal|appraiser|umpire|award)\b/i,
+    representation_contract: /\b(?:fin\s*535|pa contract|public adjuster contract|letter of representation|lor)\b/i
+  };
+  const excludeForPolicy = /\b(?:tdi|part b|fin\s*535|w-?9|estimate|scope|esx|photo|appraisal|dcw)\b/i;
+  const pattern = patterns[purpose];
+  const matches = documents.filter(isOperationalDocumentMetadata).filter((doc) => {
+    const name = compactDocument(doc).name;
+    if (!pattern.test(name)) return false;
+    return purpose !== "insurance_policy" || !excludeForPolicy.test(name);
+  });
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    const choices = matches.slice(0, 20)
+      .map((doc) => `${doc.jnid || doc.id || "unknown-id"}: ${compactDocument(doc).name}`)
+      .join("; ");
+    badRequest(`Multiple ${purpose} documents matched. Retry with one exact document id. Matches: ${choices}`);
+  }
+  return null;
+}
+
 function selectDocumentForChat(documents, documentQuery) {
   if (!documents.length) badRequest("No documents are attached to this Chance file.");
   const needle = String(documentQuery || "").trim().toLowerCase();
@@ -3624,6 +3665,36 @@ function chatgptDocumentMimeType(contentType, filename) {
   ].includes(mimeType);
   if (!allowed) badRequest(`Unsupported ChatGPT conversation document type: ${mimeType}.`);
   return mimeType;
+}
+
+function shouldAttachForNativeReview(extracted, review) {
+  const text = String(extracted?.text || "").trim();
+  return !hasUsefulExtractedText(text)
+    || Boolean(extracted?.error)
+    || Boolean(extracted?.truncated)
+    || Boolean(review?.needsOcr);
+}
+
+function prepareChatgptDocumentAttachment(downloaded, document) {
+  const filename = safeMimeFilename(
+    downloaded.filename || compactDocument(document).name || `jobnimbus-document-${document.jnid || document.id || "file"}`
+  );
+  const mimeType = chatgptDocumentMimeType(downloaded.contentType, filename);
+  const checked = validateEmailAttachment({ filename, contentType: mimeType, bytes: downloaded.bytes });
+  if (checked.bytes.length > MAX_CHATGPT_FILE_BYTES) {
+    badRequest(
+      `Document ${checked.filename} is ${checked.bytes.length} bytes. The ChatGPT conversation-file limit for this bridge is ${MAX_CHATGPT_FILE_BYTES} bytes.`
+    );
+  }
+  return {
+    bytes: checked.bytes.length,
+    contentType: mimeType,
+    openaiFileResponse: [{
+      name: checked.filename,
+      mime_type: mimeType,
+      content: checked.bytes.toString("base64")
+    }]
+  };
 }
 
 async function extractDocumentText(downloaded, doc, maxChars, options = {}) {
@@ -5705,13 +5776,43 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "File/client identifier. Chance-assigned files are preferred. An exact, unambiguous JobNimbus number, claim number, client name, or address may be used for an explicitly named company-file read; this never expands write access." },
-          documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
+          documentQuery: { type: "string", description: "Exact document id/name or a unique partial filename. Use this when a specific filename is known." },
+          documentPurpose: {
+            type: "string",
+            enum: ["insurance_policy", "tdi_form", "estimate_scope", "carrier_claim_document", "appraisal_document", "representation_contract"],
+            description: "Use this for natural-language requests such as review the insurance policy. The bridge selects one unique operational document and rejects ambiguity. Either documentQuery or documentPurpose is required."
+          },
           maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 20000 },
           previewChars: { type: "integer", minimum: 500, maximum: 12000, default: 4000 },
           forceOcr: { type: "boolean", default: false, description: "When true, OCR is attempted even if PDF text extraction finds text." },
           maxOcrPages: { type: "integer", minimum: 1, maximum: 20, default: 5, description: "Maximum PDF pages to OCR." }
         },
         required: ["query"]
+      },
+      DocumentReviewResponse: {
+        type: "object",
+        properties: {
+          file: { type: "object", additionalProperties: true },
+          readScope: { type: "string" },
+          document: { type: "object", additionalProperties: true },
+          contentType: { type: "string" },
+          bytes: { type: "integer" },
+          extraction: { type: "string" },
+          pageCount: { type: ["integer", "null"] },
+          truncated: { type: "boolean" },
+          extractionError: { type: "string" },
+          textPreview: { type: "string" },
+          review: { type: "object", additionalProperties: true },
+          nativeReviewRequired: { type: "boolean" },
+          reviewInstruction: { type: "string" },
+          openaiFileResponse: {
+            type: "array",
+            minItems: 1,
+            maxItems: 1,
+            items: { $ref: "#/components/schemas/ChatGPTFileReturn" }
+          }
+        },
+        required: ["file", "readScope", "document", "contentType", "bytes", "extraction", "truncated", "extractionError", "textPreview", "review", "nativeReviewRequired"]
       },
       DocumentFileRequest: {
         type: "object",
@@ -6574,8 +6675,15 @@ const OPENAPI = {
     "/jobnimbus/document-review": {
       post: {
         operationId: "reviewJobNimbusDocument",
+        summary: "Reliably review one JobNimbus document in a single call",
+        description: "Canonical read-only document workflow. Selects an exact file by documentQuery or one unique file by documentPurpose, extracts text, and automatically attaches the exact original through openaiFileResponse when extraction is empty, truncated, or unreliable. When attached, inspect every relevant page natively before reporting facts. Never ask the user to retrieve the file manually.",
         requestBody: jsonBody("DocumentReviewRequest"),
-        responses: { "200": { description: "No-API document review with extracted text preview, likely fields, conflicts, and suggested uses." } }
+        responses: {
+          "200": {
+            description: "Verified extraction and review, with the exact original document attached automatically when native page inspection is required.",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/DocumentReviewResponse" } } }
+          }
+        }
       }
     },
     "/jobnimbus/document-file": {

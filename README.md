@@ -112,17 +112,18 @@ Detailed bridge routes remain available to the server and local agents, while
 routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
 texts are prepared and executed through `processApprovedWaveActionBatch`.
 
-For document review, call `reviewJobNimbusDocument` first. If text extraction is
-missing, incomplete, or contradicted by the page layout, call
-`attachJobNimbusDocumentToChat` with the exact Chance file and document. The
-bridge returns the original file through `openaiFileResponse`; inspect that file
-and all relevant pages with ChatGPT's native document tools before reaching a
-conclusion. The attachment route is read-only, rejects ambiguous document names,
-and caps returned files at 8 MB. If the user explicitly names a company file that
-is not assigned to Chance, the three read-only document actions may resolve it
-only by an exact, unambiguous JobNimbus number, claim number, client name, or
-address. All writes, uploads, calls, emails, and texts remain Chance-scoped and
-approval-gated.
+For document review, call `reviewJobNimbusDocument` with either an exact
+`documentQuery` or a natural-language `documentPurpose`. This is the canonical
+one-call workflow: when extraction is missing, incomplete, truncated, or
+contradicted by the page layout, the same response automatically returns the
+exact original file through `openaiFileResponse`. Inspect that attached file and
+all relevant pages with ChatGPT's native document tools before reaching a
+conclusion. Never ask the user to retrieve or attach a JobNimbus document
+manually. The attachment behavior is read-only, rejects ambiguous matches, and
+caps returned files at 8 MB. If the user explicitly names a company file that is
+not assigned to Chance, the read-only document actions may resolve it only by an
+exact, unambiguous JobNimbus number, claim number, client name, or address. All
+writes, uploads, calls, emails, and texts remain Chance-scoped and approval-gated.
 
 When a current date of loss is missing or disputed, `researchPropertyHailDates`
 provides a read-only property-weather check. It geocodes the exact JobNimbus
