@@ -80,6 +80,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/jobnimbus/upload-file"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/gmail/attachment-review"].post["x-openai-isConsequential"], true);
   const consolidatedActionTypes = chatgptSchema.components.schemas.ActionOperation.properties.type.enum;
+  assert.match(
+    chatgptSchema.components.schemas.ActionOperation.properties.payload.description,
+    /completed:true/
+  );
   for (const actionType of [
     "jobnimbus.process_update",
     "jobnimbus.create_task",
@@ -383,6 +387,30 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(secondBatchResponse.status, 200);
   const secondBatch = await secondBatchResponse.json();
   assert.equal(secondBatch.approvalDigest, firstBatch.approvalDigest);
+
+  const taskAndNoteBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      operations: [
+        {
+          type: "jobnimbus.update_task",
+          payload: { taskId: "task-1", completed: true }
+        },
+        {
+          type: "jobnimbus.create_note",
+          payload: { query: "2739", note: "Approved inspection milestone." }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(taskAndNoteBatchResponse.status, 200);
+  const taskAndNoteBatch = await taskAndNoteBatchResponse.json();
+  assert.equal(taskAndNoteBatch.mode, "dry_run");
+  assert.equal(taskAndNoteBatch.operationCount, 2);
+  assert.equal(taskAndNoteBatch.operations[0].plan.plan.body.is_completed, true);
+  assert.equal(taskAndNoteBatch.operations[1].plan.plan.body.note, "Approved inspection milestone.");
 
   const timezoneFreeResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",

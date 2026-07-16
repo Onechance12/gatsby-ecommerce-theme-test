@@ -2281,8 +2281,10 @@ async function updateTask(input) {
   }
   const taskId = String(input.taskId || input.id || "").trim();
   if (!taskId) badRequest("taskId is required");
-  const fields = input.fields;
-  if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
+  const fields = normalizeTaskUpdateFields(input);
+  if (!Object.keys(fields).length) {
+    badRequest("Task changes are required. To complete a task, use completed:true or fields:{is_completed:true}.");
+  }
   const body = normalizeDateFields(fields);
   validateDateRange(body.date_start, body.date_end);
   if (input.execute !== true) {
@@ -4157,6 +4159,24 @@ function normalizeDateFields(fields) {
   return cleanObject(body);
 }
 
+function normalizeTaskUpdateFields(input) {
+  const source = input.fields && typeof input.fields === "object" && !Array.isArray(input.fields)
+    ? { ...input.fields }
+    : {};
+  for (const alias of ["completed", "isCompleted"]) {
+    if (source[alias] !== undefined && source.is_completed === undefined) {
+      source.is_completed = Boolean(source[alias]);
+    }
+    delete source[alias];
+  }
+  for (const alias of ["completed", "isCompleted", "is_completed"]) {
+    if (input[alias] !== undefined && source.is_completed === undefined) {
+      source.is_completed = Boolean(input[alias]);
+    }
+  }
+  return cleanObject(source);
+}
+
 function normalizeContactFields(fields) {
   const body = { ...fields };
   for (const key of Object.keys(body)) {
@@ -5352,14 +5372,24 @@ const OPENAPI = {
               "gmail.create_draft", "gmail.send", "quo.send_text"
             ]
           },
-          payload: { type: "object", additionalProperties: true, description: "Exact payload for the selected action. Do not include execute or approvalDigest; the batch controls both." }
+          payload: {
+            type: "object",
+            additionalProperties: true,
+            description: "Exact payload for the selected action. Do not include execute or approvalDigest. Examples: complete a task with {taskId:'TASK_ID',completed:true}; create a note with {query:'JOB_NUMBER',note:'Exact note'}; update fields/status/note together with {query:'JOB_NUMBER',fields:{...},status:'Exact status',note:'Exact note'}; send Gmail or Quo with the exact recipient and content."
+          }
         },
         required: ["type", "payload"]
       },
       ActionBatchRequest: {
         type: "object",
         properties: {
-          operations: { type: "array", minItems: 1, maxItems: 12, items: { $ref: "#/components/schemas/ActionOperation" } },
+          operations: {
+            type: "array",
+            minItems: 1,
+            maxItems: 12,
+            items: { $ref: "#/components/schemas/ActionOperation" },
+            description: "Every exact approved action. For task completion use type jobnimbus.update_task with payload {taskId:'TASK_ID',completed:true}. The dry run returns the canonical JobNimbus body before anything executes."
+          },
           approvalDigest: { type: "string", description: "Required for execution. Must match the immediately preceding unchanged batch dry run." },
           execute: { type: "boolean", default: false, description: "False prepares the exact batch. True executes once after Chance approves its digest. Duplicate execution is blocked." }
         },
