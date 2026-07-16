@@ -5,6 +5,8 @@ const NO_NUMBER_YET = /\b(?:no|not)\b.{0,50}\b(?:claim|reference)\s*(?:number|#)
 const VOICEMAIL = /\b(?:leave (?:a|your) message|record your message|voicemail|mailbox is full|after the (?:tone|beep))\b/i;
 const WRONG_NUMBER = /\b(?:wrong number|not the right (?:number|department)|you have reached .{0,40}(?:instead|not))\b/i;
 const HUMAN_END_REQUEST = /\b(?:please )?(?:hang up|end the call|stop calling|do not call)\b/i;
+const BATCH_ATTEMPT = /\b(?:another|additional|second)\s+(?:claim|policyholder|client|insured)\b/i;
+const BATCH_REFUSAL = /\b(?:cannot|can't|unable|not able|won't)\b.{0,80}\b(?:another|additional|second)\s+(?:claim|policyholder|client|insured)\b|\b(?:another|additional|second)\s+(?:claim|policyholder|client|insured)\b.{0,80}\b(?:cannot|can't|unable|not able|separate call|different department)\b/i;
 
 export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const turns = transcriptTurns(call);
@@ -45,7 +47,7 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const outcome = String(args.outcome || "").trim();
   const claimNumber = String(args.claim_number || args.claimNumber || "").trim();
   const normalizedClaim = normalizeIdentifier(claimNumber);
-  const transcriptBacksClaimNumber = normalizedClaim.length >= 5 && normalizeIdentifier(transcript).includes(normalizedClaim);
+  const transcriptBacksClaimNumber = identifierAppearsInTranscript(normalizedClaim, transcript);
   const noNumberWithTiming = NO_NUMBER_YET.test(transcript) && /\b(?:later|within|after|when|once|by|business (?:day|hours?)|hours?|days?|assigned|generated|issued)\b/i.test(transcript);
   const callbackConfirmed = args.callback_confirmed === true && CALLBACK_CONFIRMED.test(transcript);
 
@@ -64,6 +66,28 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
     }
     if (args.next_step_requested !== true) {
       return deny("The carrier next-step question has not been asked.", "next_step_not_requested");
+    }
+    const additionalRequired = batchClaimCount(call);
+    if (additionalRequired > 0) {
+      const agentTranscript = turns.filter((turn) => turn.role === "agent").map((turn) => turn.content).join("\n");
+      if (!BATCH_ATTEMPT.test(agentTranscript)) {
+        return deny(
+          `There ${additionalRequired === 1 ? "is" : "are"} ${additionalRequired} approved additional same-carrier ${additionalRequired === 1 ? "claim" : "claims"}. Ask the representative to file the next approved policyholder before wrapping up.`,
+          "batch_claim_not_attempted"
+        );
+      }
+      const additionalNumbers = String(args.additional_claim_numbers || "")
+        .split(/[,;\n]+/)
+        .map((value) => normalizeIdentifier(value))
+        .filter(Boolean);
+      const completed = Number(args.additional_claims_completed || 0);
+      const completedAndVerified = completed >= additionalRequired
+        && additionalNumbers.length >= additionalRequired
+        && additionalNumbers.slice(0, additionalRequired).every((value) => identifierAppearsInTranscript(value, transcript));
+      const refusalVerified = args.batch_continuation_resolved === true && BATCH_REFUSAL.test(transcript);
+      if (!completedAndVerified && !refusalVerified) {
+        return deny("The approved same-carrier batch is not complete and the representative did not refuse it. Continue with the additional claim.", "batch_claim_incomplete");
+      }
     }
   }
 
@@ -93,6 +117,40 @@ export function transcriptTurns(call = {}) {
 
 function normalizeIdentifier(value) {
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function identifierAppearsInTranscript(normalizedIdentifier, transcript) {
+  if (normalizedIdentifier.length < 5) return false;
+  if (normalizeIdentifier(transcript).includes(normalizedIdentifier)) return true;
+  return spokenIdentifierSequences(transcript).some((sequence) => sequence.includes(normalizedIdentifier));
+}
+
+function spokenIdentifierSequences(value) {
+  const digitWords = {
+    zero: "0", oh: "0", o: "0", one: "1", two: "2", three: "3", four: "4",
+    five: "5", six: "6", seven: "7", eight: "8", nine: "9"
+  };
+  const prepared = String(value || "")
+    .toLowerCase()
+    .replace(/\b([a-z])\s+as\s+in\s+[a-z]+\b/g, " $1 ");
+  const sequences = [];
+  let current = "";
+  for (const token of prepared.match(/[a-z0-9]+/g) || []) {
+    const encoded = digitWords[token] || (/^[a-z0-9]$/.test(token) ? token.toUpperCase() : "");
+    if (encoded) current += encoded;
+    else if (current) {
+      if (current.length >= 5) sequences.push(current);
+      current = "";
+    }
+  }
+  if (current.length >= 5) sequences.push(current);
+  return sequences;
+}
+
+function batchClaimCount(call) {
+  const dynamicCount = Number(call.retell_llm_dynamic_variables?.batchClaimCount || 0);
+  if (Number.isInteger(dynamicCount) && dynamicCount > 0) return dynamicCount;
+  return String(call.metadata?.batchContactIds || "").split(",").map((value) => value.trim()).filter(Boolean).length;
 }
 
 function allow(message, code) {

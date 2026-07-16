@@ -275,6 +275,8 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /During a wait state, never say the closing blessing and never invoke request_guarded_end_call/i);
   assert.match(prompt, /request_guarded_end_call is forbidden while claim_number is empty/i);
   assert.match(prompt, /documentation delay.*never satisfies this rule/i);
+  assert.match(prompt, /The phrases 'I can follow up'.*are forbidden during claim intake/i);
+  assert.match(prompt, /NEVER answer 'No'.*additional claim has been attempted/i);
 });
 
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
@@ -534,6 +536,35 @@ test("structured result produces a short writeback bundle", () => {
   assert.equal(result.writeback.note.includes("damage"), false);
   assert.equal(result.completionReview.complete, false);
   assert.match(result.completionReview.gaps.join(" "), /did not ask where to send the Letter of Representation/i);
+});
+
+test("post-call extraction rejects Wave contact details as carrier adjuster fields", () => {
+  const extracted = extractCallResults({
+    transcript: "",
+    raw: {
+      metadata: { goal: "file_new_claim" },
+      retell_llm_dynamic_variables: {
+        insuredName: "Emigdio Lejia",
+        homeownerPhone: "4694635168",
+        homeownerEmail: "ezleija1025@yahoo.com"
+      },
+      call_analysis: {
+        custom_analysis_data: {
+          claim_number: "0833375173",
+          adjuster_name: "Chance Pearson",
+          adjuster_phone: "9725731730",
+          adjuster_email: "cpearson@wavepa.com",
+          filing_outcome: "claim_filed"
+        }
+      }
+    }
+  });
+  assert.equal(extracted.adjusterName, "");
+  assert.equal(extracted.adjusterPhone, "");
+  assert.equal(extracted.adjusterEmail, "");
+  assert.equal(extracted.source.adjusterName, "none");
+  assert.equal(extracted.source.adjusterPhone, "none");
+  assert.equal(extracted.source.adjusterEmail, "none");
 });
 
 test("call completion review confirms the representation destination was captured", () => {

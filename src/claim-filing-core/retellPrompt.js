@@ -35,9 +35,12 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
           claim_number: { type: "string", description: "Exact claim/reference number spoken by the carrier, or empty if none." },
           callback_confirmed: { type: "boolean" },
           document_submission_requested: { type: "boolean", description: "True only after asking where to send the LOR and supporting documents." },
-          next_step_requested: { type: "boolean", description: "True only after asking for the carrier next step or timeframe." }
+          next_step_requested: { type: "boolean", description: "True only after asking for the carrier next step or timeframe." },
+          additional_claims_completed: { type: "integer", description: "Number of approved additional same-carrier claims completed on this call." },
+          additional_claim_numbers: { type: "string", description: "Comma-separated claim/reference numbers for completed additional claims." },
+          batch_continuation_resolved: { type: "boolean", description: "True only when every approved additional claim was completed or the representative explicitly refused/could not continue." }
         },
-        required: ["goal", "reason", "outcome", "claim_number", "callback_confirmed", "document_submission_requested", "next_step_requested"]
+        required: ["goal", "reason", "outcome", "claim_number", "callback_confirmed", "document_submission_requested", "next_step_requested", "additional_claims_completed", "additional_claim_numbers", "batch_continuation_resolved"]
       }
     },
     {
@@ -69,9 +72,9 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
 export function postCallAnalysisSchema() {
   return [
     { type: "string", name: "claim_number", description: "The claim or reference number the carrier gave for this filing, digits/letters only. Empty if none was issued on the call." },
-    { type: "string", name: "adjuster_name", description: "Full name of the assigned adjuster or handling team, if the rep provided one. Empty if not assigned yet." },
-    { type: "string", name: "adjuster_phone", description: "Direct phone number for the adjuster or claims team, if given. Empty if not provided." },
-    { type: "string", name: "adjuster_email", description: "Email address for the adjuster, if given. Empty if not provided." },
+    { type: "string", name: "adjuster_name", description: "Full name of the CARRIER-ASSIGNED adjuster or handling team only. Never put Chance Pearson, Wave Public Adjusting, the insured, or the carrier intake representative here. Empty if no carrier adjuster was assigned." },
+    { type: "string", name: "adjuster_phone", description: "Direct phone number for the CARRIER-ASSIGNED adjuster or carrier claims team only. Never use Chance's, Wave's, the homeowner's, or the intake representative's number. Empty if not provided." },
+    { type: "string", name: "adjuster_email", description: "Email address for the CARRIER-ASSIGNED adjuster only. Never use cpearson@wavepa.com, the homeowner email, or the general document-submission email. Empty if not provided." },
     { type: "string", name: "document_submission", description: "The exact email address, portal, fax, or carrier instruction for sending the Letter of Representation and supporting documents. If no destination exists yet, capture the carrier's exact instruction such as 'wait for the assigned adjuster'. Empty only when the topic was never resolved." },
     { type: "boolean", name: "document_submission_requested", description: "True only when the assistant explicitly asked where to send the Letter of Representation and supporting documents. False when the assistant never asked." },
     { type: "string", name: "next_step", description: "The next step or timeframe the rep described (e.g. 'adjuster will call in 24-48 hours', 'inspection to be scheduled'). Empty if none." },
@@ -237,11 +240,11 @@ export function renderRetellPrompt(packet) {
     "- How/when was the damage discovered? -> {{damageDiscovered}}",
     "- Best contact for the claim going forward -> our office: (972) 573-1730, cpearson@wavepa.com. Give the " +
       "homeowner's phone only if they specifically need to reach the homeowner directly.",
-    "When any fact above says 'Missing', or a rep asks for something not listed here, say it NATURALLY and briefly. " +
-      "VARY your answer and keep it short — mostly just 'Not that I'm aware of' or 'I'm not sure', sometimes 'I " +
-      "don't have that handy.' Do NOT append 'I can follow up' to every answer — that repetition sounds robotic and " +
-      "weak. Offer to follow up only ONCE in a while, for something genuinely gettable, not on every unknown. NEVER " +
-      "say robotic phrases like 'that information is missing' or 'that information is not available.'",
+    "When any fact above says 'Missing', or a rep asks for something not listed here, answer NATURALLY, briefly, and " +
+      "only once: 'I don't have that verified in front of me.' Then stop speaking and let the representative decide how " +
+      "to proceed. The phrases 'I can follow up', 'I will follow up', 'I can get that for you', and any similar promise " +
+      "are forbidden during claim intake unless the representative explicitly creates a real follow-up requirement. " +
+      "Never debate the same missing fact, offer multiple alternatives, or guess because the representative pressures you.",
     "",
     "=== LIVE INSPECTION SCHEDULING AUTHORITY ===",
     "Use this section only when the call goal code is exactly 'inspection_scheduling'. For every other goal, do not " +
@@ -324,7 +327,10 @@ export function renderRetellPrompt(packet) {
       "agree, file every approved case in {{batchClaims}} one at a time. Treat each case as a fresh claim: give only the " +
       "requested facts, obtain its separate claim/reference number, and ask for document instructions and next steps. Do " +
       "not end the call until all approved batch cases are completed or the representative refuses/cannot continue. Never " +
-      "file a case that is not present in {{batchClaims}}. If {{batchClaimCount}} is zero, do not ask to file another claim.",
+      "file a case that is not present in {{batchClaims}}. If {{batchClaimCount}} is greater than zero, NEVER answer 'No' " +
+      "when the representative asks whether anything else is needed until the additional claim has been attempted. The " +
+      "guarded-end tool independently blocks termination while an approved batch case remains unresolved. If " +
+      "{{batchClaimCount}} is zero, do not ask to file another claim.",
     "- CRITICAL (especially Liberty Mutual): wait for the system to completely read ALL options before responding. " +
       "Never press buttons or speak before the final option is complete. Once the system stops talking, wait about " +
       "0.75 to 1 second and make the selection before the menu begins repeating. This prevents getting misrouted to " +

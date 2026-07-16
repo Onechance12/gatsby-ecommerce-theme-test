@@ -10,9 +10,12 @@ export function extractCallResults(call) {
   const dv = call?.raw?.retell_llm_dynamic_variables || {};
 
   const claimNumber = firstNonEmpty(cad.claim_number, transcriptClaimNumber(transcript));
-  const adjusterName = firstNonEmpty(cad.adjuster_name);
-  const adjusterPhone = firstNonEmpty(cad.adjuster_phone, transcriptNear(transcript, /adjuster|team/i, /(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|1[\s.-]?8\d{2}[\s.-]?\d{3}[\s.-]?\d{4})/));
-  const adjusterEmail = firstNonEmpty(cad.adjuster_email, transcriptEmail(transcript));
+  const adjusterName = carrierAdjusterName(cad.adjuster_name, dv);
+  const adjusterPhone = carrierAdjusterPhone(
+    firstNonEmpty(cad.adjuster_phone, transcriptNear(transcript, /adjuster|team/i, /(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|1[\s.-]?8\d{2}[\s.-]?\d{3}[\s.-]?\d{4})/)),
+    dv
+  );
+  const adjusterEmail = carrierAdjusterEmail(cad.adjuster_email, dv);
   const documentSubmission = firstNonEmpty(cad.document_submission, transcriptEmail(transcript));
   const documentSubmissionRequested = cad.document_submission_requested === true || /^true$/i.test(String(cad.document_submission_requested || ""));
   const nextStep = firstNonEmpty(cad.next_step);
@@ -34,9 +37,9 @@ export function extractCallResults(call) {
   // (regex from transcript, UNVERIFIED), or "none".
   const source = {
     claimNumber: cad.claim_number ? "retell-analysis" : (claimNumber ? "transcript-guess" : "none"),
-    adjusterName: cad.adjuster_name ? "retell-analysis" : "none",
-    adjusterPhone: cad.adjuster_phone ? "retell-analysis" : (adjusterPhone ? "transcript-guess" : "none"),
-    adjusterEmail: cad.adjuster_email ? "retell-analysis" : (adjusterEmail ? "transcript-guess" : "none"),
+    adjusterName: adjusterName && cad.adjuster_name ? "retell-analysis" : "none",
+    adjusterPhone: adjusterPhone && cad.adjuster_phone ? "retell-analysis" : (adjusterPhone ? "transcript-guess" : "none"),
+    adjusterEmail: adjusterEmail && cad.adjuster_email ? "retell-analysis" : "none",
     documentSubmission: cad.document_submission ? "retell-analysis" : (documentSubmission ? "transcript-guess" : "none"),
     inspectionStart: cad.inspection_start ? "retell-analysis" : "none",
     inspectionEnd: cad.inspection_end ? "retell-analysis" : "none",
@@ -131,4 +134,27 @@ export function transcriptNear(t, anchor, pattern) {
 function firstNonEmpty(...vals) {
   for (const v of vals) { const s = String(v ?? "").trim(); if (s && !/^n\/?a$/i.test(s)) return s; }
   return "";
+}
+
+function carrierAdjusterName(value, dynamicVariables) {
+  const text = firstNonEmpty(value);
+  const normalized = text.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const insured = firstNonEmpty(dynamicVariables?.insuredName).toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!text || normalized === "chancepearson" || normalized.includes("wavepublicadjusting") || (insured && normalized === insured)) return "";
+  return text;
+}
+
+function carrierAdjusterPhone(value, dynamicVariables) {
+  const text = firstNonEmpty(value);
+  const digits = text.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  const homeowner = firstNonEmpty(dynamicVariables?.homeownerPhone).replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  if (!digits || digits === "9725731730" || (homeowner && digits === homeowner)) return "";
+  return text;
+}
+
+function carrierAdjusterEmail(value, dynamicVariables) {
+  const text = firstNonEmpty(value).toLowerCase();
+  const homeowner = firstNonEmpty(dynamicVariables?.homeownerEmail).toLowerCase();
+  if (!text || text === "cpearson@wavepa.com" || (homeowner && text === homeowner)) return "";
+  return text;
 }
