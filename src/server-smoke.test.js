@@ -165,10 +165,18 @@ test("Retell configuration creates an editable draft before publishing", async (
       assert.equal(url.searchParams.get("version"), "5");
       assert.match(body.general_prompt, /respond naturally in one short sentence/);
       assert.deepEqual(body.general_tools.map((tool) => tool.name), ["end_call"]);
+      assert.equal(body.begin_message, "");
+      assert.equal(body.start_speaker, "user");
       response = { llm_id: "fixture-coordinator-llm", version: 5, is_published: false };
     } else if (req.method === "PATCH" && url.pathname === "/update-agent/fixture-coordinator-agent") {
       assert.equal(url.searchParams.get("version"), "8");
       assert.equal(body.response_engine.version, 5);
+      assert.equal(body.reminder_trigger_ms, 30000);
+      assert.equal(body.reminder_max_count, 1);
+      assert.equal(body.end_call_after_silence_ms, 90000);
+      assert.equal(body.max_call_duration_ms, 300000);
+      assert.deepEqual(body.voicemail_option, { action: { type: "hangup" } });
+      assert.deepEqual(body.ivr_option, { action: { type: "hangup" } });
       response = {
         agent_id: "fixture-coordinator-agent",
         version: 8,
@@ -217,6 +225,8 @@ test("Retell configuration creates an editable draft before publishing", async (
   assert.equal(dryRun.mode, "dry_run");
   assert.deepEqual(dryRun.toolNames, ["end_call"]);
   assert.match(dryRun.exactConfiguration.generalPrompt, /respond naturally in one short sentence/);
+  assert.equal(dryRun.exactConfiguration.startSpeaker, "user");
+  assert.equal(dryRun.exactConfiguration.agentSettings.max_call_duration_ms, 300000);
 
   const publishResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/configure-client-coordinator`, {
     method: "POST",

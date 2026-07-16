@@ -24,6 +24,7 @@ import { latestActionReceipts, listMemory } from "./memory/store.js";
 import { listQuoNumbers, readQuoHistory, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import {
+  buildClientCoordinatorAgentSettings,
   buildClientCoordinatorConversation,
   buildClientCoordinatorLlmConfig,
   clientCoordinatorAnalysisSchema,
@@ -1932,12 +1933,16 @@ async function configureClientCoordinatorAgent(input = {}) {
   }
 
   const llmConfig = buildClientCoordinatorLlmConfig();
+  const agentSettings = buildClientCoordinatorAgentSettings();
   const analysisSchema = clientCoordinatorAnalysisSchema();
   const configDigest = digest({
     agentId: RETELL_CLIENT_COORDINATOR_AGENT_ID,
     llmId,
     generalPrompt: llmConfig.general_prompt,
     generalTools: llmConfig.general_tools,
+    beginMessage: llmConfig.begin_message,
+    startSpeaker: llmConfig.start_speaker,
+    agentSettings,
     postCallAnalysisData: analysisSchema,
     timeZone: OPERATIONS_TIME_ZONE
   });
@@ -1955,6 +1960,8 @@ async function configureClientCoordinatorAgent(input = {}) {
       generalPrompt: llmConfig.general_prompt,
       generalTools: llmConfig.general_tools,
       beginMessage: llmConfig.begin_message,
+      startSpeaker: llmConfig.start_speaker,
+      agentSettings,
       postCallAnalysisData: analysisSchema,
       timeZone: OPERATIONS_TIME_ZONE
     }
@@ -1983,7 +1990,8 @@ async function configureClientCoordinatorAgent(input = {}) {
   const llm = await retellApi("PATCH", versionedRetellEndpoint(`/update-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion), {
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
-    begin_message: llmConfig.begin_message
+    begin_message: llmConfig.begin_message,
+    start_speaker: llmConfig.start_speaker
   });
   const llmVersion = Number(llm.version);
   if (!Number.isInteger(llmVersion) || llmVersion < 0) {
@@ -1991,6 +1999,7 @@ async function configureClientCoordinatorAgent(input = {}) {
   }
   const updatedAgent = await retellApi("PATCH", versionedRetellEndpoint(`/update-agent/${encodeURIComponent(RETELL_CLIENT_COORDINATOR_AGENT_ID)}`, draftAgent.version), {
     response_engine: { type: "retell-llm", llm_id: draftLlmId, version: llmVersion },
+    ...agentSettings,
     post_call_analysis_data: analysisSchema,
     post_call_analysis_model: "gpt-4.1-mini",
     timezone: OPERATIONS_TIME_ZONE

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildClientCoordinatorAgentSettings,
   buildClientCoordinatorConversation,
   buildClientCoordinatorLlmConfig,
   clientCoordinatorAnalysisSchema,
@@ -20,9 +21,37 @@ test("appointment mode creates one conversational purpose and fallback text", ()
   assert.equal(plan.opening, "Hey Rosa, this is Chance's AI assistant. How are you doing today?");
   assert.match(plan.purpose, /^So I'm calling because/);
   assert.match(plan.purpose, /adjuster appointment scheduled Friday, July 17/);
-  assert.match(plan.purpose, /Will you or another adult be available/);
-  assert.match(plan.fallbackText, /provide interior access/);
+  assert.match(plan.purpose, /Will you or another adult be available to meet Chance and the adjuster\?$/);
+  assert.match(plan.fallbackText, /Chance's AI assistant/);
+  assert.match(plan.fallbackText, /meet Chance and the adjuster and provide interior access/);
   assert.equal(plan.reminderTopics.length, 0);
+});
+
+test("every fallback message identifies Chance's AI assistant", () => {
+  const plans = [
+    buildClientCoordinatorConversation({
+      mode: "appointment_confirmation",
+      firstName: "Robert",
+      appointmentDate: "Tuesday, July 21",
+      appointmentWindow: "10:00 AM and 12:00 PM"
+    }),
+    buildClientCoordinatorConversation({
+      mode: "missing_document_request",
+      firstName: "Sonia",
+      documentNeeded: "the current declarations page"
+    }),
+    buildClientCoordinatorConversation({
+      mode: "status_update",
+      firstName: "Rosa",
+      statusUpdate: "the carrier inspection is scheduled."
+    }),
+    buildClientCoordinatorConversation({
+      mode: "client_check_in",
+      firstName: "David"
+    })
+  ];
+
+  for (const plan of plans) assert.match(plan.fallbackText, /Chance's AI assistant/);
 });
 
 test("only explicitly selected Brain reminder topics enter a call plan", () => {
@@ -60,7 +89,23 @@ test("client coordinator prompt cannot send, write, impersonate, or promise", ()
   assert.match(config.general_prompt, /promise approval/);
   assert.match(config.general_prompt, /Do not leave a voicemail/);
   assert.match(config.general_prompt, /respond naturally in one short sentence/);
+  assert.match(config.general_prompt, /CONFIRM IDENTITY BEFORE THE PURPOSE/);
+  assert.match(config.general_prompt, /Only after confirmation, say exactly/);
+  assert.equal(config.start_speaker, "user");
+  assert.equal(config.begin_message, "");
   assert.deepEqual(config.general_tools.map((tool) => tool.name), ["end_call"]);
+});
+
+test("client coordinator agent settings bound silence, voicemail, and IVR behavior", () => {
+  const settings = buildClientCoordinatorAgentSettings();
+  assert.equal(settings.reminder_trigger_ms, 30000);
+  assert.equal(settings.reminder_max_count, 1);
+  assert.equal(settings.end_call_after_silence_ms, 90000);
+  assert.equal(settings.max_call_duration_ms, 300000);
+  assert.deepEqual(settings.voicemail_option, { action: { type: "hangup" } });
+  assert.deepEqual(settings.ivr_option, { action: { type: "hangup" } });
+  assert.equal(settings.responsiveness, 0.85);
+  assert.equal(settings.interruption_sensitivity, 0.8);
 });
 
 test("post-call extraction keeps structured client commitments separate", () => {

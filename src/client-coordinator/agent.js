@@ -33,23 +33,24 @@ export function buildClientCoordinatorConversation(input = {}) {
   if (mode === "appointment_confirmation") {
     const date = requireText(input.appointmentDate, "appointmentDate");
     const window = requireText(input.appointmentWindow, "appointmentWindow");
-    accessRequirement = input.interiorAccessRequired === false
-      ? "Interior access is not required for this appointment."
-      : "Interior access is required. Confirm that the homeowner or another adult can provide access.";
+    const accessRequired = input.interiorAccessRequired !== false;
+    accessRequirement = accessRequired
+      ? "Interior access is required. Confirm that the homeowner or another adult can provide access."
+      : "Interior access is not required for this appointment.";
     purpose = `So I'm calling because we have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to meet Chance and the adjuster?`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. We have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available${input.interiorAccessRequired === false ? "" : " to provide interior access"}?`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. We have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to meet Chance and the adjuster${accessRequired ? " and provide interior access" : ""}?`;
   } else if (mode === "missing_document_request") {
     const documentNeeded = requireText(input.documentNeeded, "documentNeeded");
     purpose = `So I'm calling because we still need ${documentNeeded}. Do you have a copy you can text or email to us?`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. Could you please send us ${documentNeeded} when you get a chance? You can text or email it to us.`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. Could you please send us ${documentNeeded} when you get a chance? You can text or email it to us.`;
   } else if (mode === "status_update") {
     const statusUpdate = requireText(input.statusUpdate, "statusUpdate");
     purpose = `So I'm calling to give you a quick update: ${statusUpdate}`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. Quick update: ${statusUpdate}`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. Quick update: ${statusUpdate}`;
   } else {
     const checkInReason = clean(input.checkInReason) || "I wanted to check in, see how you are doing, and find out whether you have any questions for us.";
     purpose = `So I'm calling because ${checkInReason}`;
-    fallbackText = `Hi ${firstName}, this is Chance's assistant. I tried to reach you for a quick check-in. No rush; we can follow up by text or phone.`;
+    fallbackText = `Hi ${firstName}, this is Chance's AI assistant. I tried to reach you for a quick check-in. No rush; we can follow up by text or phone.`;
   }
 
   return {
@@ -68,6 +69,7 @@ export function buildClientCoordinatorLlmConfig() {
   return {
     general_prompt: renderClientCoordinatorPrompt(),
     begin_message: "",
+    start_speaker: "user",
     general_tools: [
       {
         type: "end_call",
@@ -79,13 +81,27 @@ export function buildClientCoordinatorLlmConfig() {
   };
 }
 
+export function buildClientCoordinatorAgentSettings() {
+  return {
+    responsiveness: 0.85,
+    interruption_sensitivity: 0.8,
+    reminder_trigger_ms: 30000,
+    reminder_max_count: 1,
+    end_call_after_silence_ms: 90000,
+    max_call_duration_ms: 300000,
+    voicemail_option: { action: { type: "hangup" } },
+    ivr_option: { action: { type: "hangup" } }
+  };
+}
+
 export function renderClientCoordinatorPrompt() {
   return [
     "=== CHANCE CLIENT COORDINATOR ===",
     "You are Chance Pearson's AI client-coordination assistant for existing property-claim clients. You are not Chance, Andrea, the homeowner, an insurance adjuster, or an attorney. Never impersonate Andrea. If asked, clearly confirm that you are an AI assistant.",
     "This call has exactly one approved purpose. Do not broaden it, negotiate coverage, give legal or policy advice, discuss settlement strategy, promise approval, promise payment, or make a coverage determination. Never claim to have checked JobNimbus, Gmail, Quo, or a document during the live call.",
     "PRIVACY: Do not reveal the property, carrier, claim, policy, damage, or appointment details until the intended client is reasonably confirmed. If someone else answers, ask only for {{homeownerFirstName}}. If it is a wrong number, apologize, use end_call, and disclose nothing else.",
-    "OPENING: Wait for a person to say hello. Then say exactly: {{coordinatorOpening}} Listen to the answer and respond naturally in one short sentence. For a positive answer, say something like 'I'm glad to hear that.' For a difficult answer, acknowledge it with something like 'I'm sorry to hear that.' Do not sound scripted, overdo small talk, or skip their answer. Then say exactly: {{coordinatorPurpose}}",
+    "OPENING: Wait for a person to say hello. Then say exactly: {{coordinatorOpening}} Listen to the answer and respond naturally in one short sentence. For a positive answer, say something like 'I'm glad to hear that.' For a difficult answer, acknowledge it with something like 'I'm sorry to hear that.' Do not sound scripted, overdo small talk, or skip their answer.",
+    "CONFIRM IDENTITY BEFORE THE PURPOSE: Do not reveal the purpose or any appointment details until the intended homeowner is reasonably confirmed. If the person clearly answers to {{homeownerFirstName}} or identifies themself as that person, continue. Otherwise ask, 'Just to confirm, am I speaking with {{homeownerFirstName}}?' Only after confirmation, say exactly: {{coordinatorPurpose}}. If it is not the intended homeowner, follow the PRIVACY rule and disclose nothing else.",
     "APPROVED PURPOSE: {{coordinatorMode}}. Complete only that purpose. Access rule: {{appointmentAccessRequirement}}",
     "APPROVED CONTEXT: {{coordinatorApprovedContext}} This context is a ceiling, not a script. Use it only to answer a directly related question. If the answer is not in the approved context, say you do not want to give the wrong answer and that Chance or Andrea will follow up.",
     "THREE CLIENT REMINDERS: Only the following reminder topics are approved for this call: {{coordinatorReminderTopics}}. Internal guidance: {{coordinatorReminderGuidance}} Use a reminder conversationally only when it fits the client's question or concern. Never recite all reminders mechanically. Never blame an individual carrier representative or guarantee an outcome.",
