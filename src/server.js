@@ -347,11 +347,25 @@ async function memoryFileActions(input = {}) {
   const limit = clamp(Number(input.limit || 20), 1, 100);
   const { contact } = await findChanceContact(query);
   const file = compactContact(contact);
+  const receipts = latestActionReceipts(MEMORY_CONFIG, limit, { subjectKey: file.id });
+  const claimCallLedger = (await readClaimCallLedger())
+    .filter((row) => row.contactId === file.id || String(row.fileNumber || "") === String(file.number || ""))
+    .slice(-limit)
+    .reverse();
   return {
     generatedAt: new Date().toISOString(),
     file,
     subjectKey: file.id,
-    receipts: latestActionReceipts(MEMORY_CONFIG, limit, { subjectKey: file.id }),
+    references: buildFileReferenceRegistry(file, receipts, claimCallLedger),
+    receipts,
+    claimCalls: claimCallLedger.map((row) => cleanObject({
+      callId: row.callId,
+      callStatus: row.callStatus,
+      goal: row.goal,
+      createdAt: row.createdAt,
+      retryOfCallId: row.retryOfCallId,
+      writebackAt: row.writebackAt
+    })),
     context: renderBrain(MEMORY_CONFIG, {
       maxPerSection: clamp(Number(input.maxPerSection || 15), 1, 25),
       clientLane: "subject",
@@ -360,6 +374,41 @@ async function memoryFileActions(input = {}) {
     }),
     authority: "Receipts prove past execution only. Re-read live evidence before proposing the next action."
   };
+}
+
+function buildFileReferenceRegistry(file, receipts, claimCalls) {
+  const references = [];
+  for (const receipt of receipts) {
+    if (!receipt.externalId) continue;
+    references.push(cleanObject({
+      source: receipt.channel,
+      kind: receipt.action,
+      id: receipt.externalId,
+      at: receipt.at,
+      status: receipt.status,
+      summary: receipt.summary,
+      origin: "action_receipt"
+    }));
+  }
+  for (const call of claimCalls) {
+    if (!call.callId) continue;
+    references.push(cleanObject({
+      source: "retell",
+      kind: "claim_call",
+      id: call.callId,
+      at: call.createdAt,
+      status: call.callStatus,
+      summary: `Retell claim call for JobNimbus #${file.number || file.id}.`,
+      origin: "claim_call_ledger"
+    }));
+  }
+  const deduped = new Map();
+  for (const reference of references) {
+    const key = `${reference.source}:${reference.id}`;
+    const prior = deduped.get(key);
+    if (!prior || String(reference.at || "") > String(prior.at || "")) deduped.set(key, reference);
+  }
+  return [...deduped.values()].sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
 }
 
 function memoryPersistenceCheck(input = {}) {
@@ -394,6 +443,7 @@ function openapi() {
 
 const CHATGPT_ACTION_PATHS = [
   "/brain/context",
+  "/memory/file-actions",
   "/ops/review-chance-files",
   "/ops/action-batch",
   "/scheduling/availability",
@@ -423,7 +473,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 22-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. All JobNimbus writes, Gmail drafts/sends, Quo sends, and Retell configuration changes are exact and approval-gated."
+      description: "Consolidated 23-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. Exact-file external IDs are available through readChanceFileActionReceipts. All JobNimbus writes, Gmail drafts/sends, Quo sends, and Retell configuration changes are exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
@@ -6873,7 +6923,7 @@ const OPENAPI = {
       post: {
         operationId: "readChanceFileActionReceipts",
         requestBody: jsonBody("MemoryFileActionsRequest"),
-        responses: { "200": { description: "Private, exact-file action receipts and isolated client context. Past receipts are proof only, never approval for future work." } }
+        responses: { "200": { description: "Private, exact-file action receipts, Retell claim-call ledger entries, and a normalized external reference registry. Use this before asking Chance for a prior Retell call id, Quo message id, Gmail message/draft id, or JobNimbus action id. Past receipts are proof only, never approval for future work." } }
       }
     },
     "/memory/persistence-check": {

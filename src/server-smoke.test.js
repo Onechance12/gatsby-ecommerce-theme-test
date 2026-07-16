@@ -87,7 +87,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 22);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 23);
+  assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
@@ -928,6 +929,16 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(quoExecuted.delivery.confirmed, false);
   assert.equal(quoExecuted.delivery.failed, false);
   assert.match(quoExecuted.delivery.instruction, /not confirmed/i);
+
+  const fileReferencesResponse = await fetch(`http://127.0.0.1:${bridgePort}/memory/file-actions`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739" })
+  });
+  assert.equal(fileReferencesResponse.status, 200);
+  const fileReferences = await fileReferencesResponse.json();
+  assert.equal(fileReferences.subjectKey, chance.jnid);
+  assert.equal(fileReferences.references.some((row) => row.source === "quo" && row.id === "AC-fixture-message"), true);
 
   const batchPayload = {
     operations: [{
