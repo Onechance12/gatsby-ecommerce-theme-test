@@ -103,6 +103,7 @@ const SCHEDULING_WORKDAY_START = process.env.SCHEDULING_WORKDAY_START || "08:00"
 const SCHEDULING_WORKDAY_END = process.env.SCHEDULING_WORKDAY_END || "17:00";
 const CENSUS_GEOCODER_URL = process.env.CENSUS_GEOCODER_URL || "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress";
 const HAIL_REPORTS_URL = process.env.HAIL_REPORTS_URL || "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py";
+const COMPANY_DOCUMENT_SCAN_MAX_PAGES = Number(process.env.COMPANY_DOCUMENT_SCAN_MAX_PAGES || 100);
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
@@ -2476,7 +2477,7 @@ async function documentText(input) {
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 12000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
-  const { contact, readScope } = await findDocumentReadContact(query);
+  const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
@@ -2506,7 +2507,7 @@ async function documentReview(input) {
   const documentQuery = String(input.documentQuery || input.documentId || "").trim();
   const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
-  const { contact, readScope } = await findDocumentReadContact(query);
+  const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
@@ -2540,7 +2541,7 @@ async function documentReview(input) {
 async function documentFileForChat(input) {
   const query = required(input.query, "query");
   const documentQuery = required(input.documentQuery || input.documentId, "documentQuery");
-  const { contact, readScope } = await findDocumentReadContact(query);
+  const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
   const documents = await listRelated("/files", contact.jnid, 100);
   const document = selectDocumentForChat(documents, documentQuery);
   const downloaded = await downloadJobNimbusFile(document);
@@ -3336,7 +3337,7 @@ async function findChanceContact(query) {
   return { contact, alternatives: matches.slice(1, 6).map(({ contact: row }) => row) };
 }
 
-async function findDocumentReadContact(query) {
+async function findDocumentReadContact(query, { documentQuery = "" } = {}) {
   const needle = String(query || "").trim();
   if (!needle) badRequest("query is required");
   const lower = needle.toLowerCase();
@@ -3356,9 +3357,9 @@ async function findDocumentReadContact(query) {
   }
 
   if (!matches.length) {
-    badRequest(
-      `No Chance Pearson file or exact, unambiguous company insurance-file match found for document review: ${needle}. Use the JobNimbus number, claim number, full client name, or exact address.`
-    );
+    const documentMatch = await findCompanyContactByExactDocument(needle, documentQuery);
+    if (documentMatch) return documentMatch;
+    badRequest(`No Chance Pearson file or exact, unambiguous company insurance-file match found for document review: ${needle}. Use the JobNimbus number, claim number, full client name, exact address, or exact document filename.`);
   }
   if (matches.length > 1 && matches[0].score === matches[1].score) {
     const choices = matches.slice(0, 5).map(({ contact }) => `${contact.number || contact.recid || "?"}: ${contact.display_name || contact.name || "Unnamed"}`);
@@ -3378,6 +3379,59 @@ async function findDocumentReadContact(query) {
     readScope,
     alternatives: matches.slice(1, 6).map(({ contact: row }) => row)
   };
+}
+
+async function findCompanyContactByExactDocument(query, documentQuery) {
+  const queryWords = normalizeNameWords(query).split(" ").filter((token) => token.length >= 2);
+  const exactDocument = normalizeCompare(documentQuery);
+  if (queryWords.length < 2 || !exactDocument) return null;
+
+  const matches = [];
+  const pageSize = 1000;
+  let complete = false;
+  for (let page = 0; page < COMPANY_DOCUMENT_SCAN_MAX_PAGES; page += 1) {
+    const rows = unwrapList(
+      await jobNimbus(`/files?size=${pageSize}&from=${page * pageSize}`),
+      "files"
+    );
+    matches.push(...rows.filter((document) => normalizeCompare(compactDocument(document).name) === exactDocument));
+    if (rows.length < pageSize) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) {
+    badRequest("The company document catalog exceeded the verified scan limit. Retry with the JobNimbus number, claim number, or exact address.");
+  }
+  if (!matches.length) return null;
+
+  const contactIds = new Set();
+  for (const document of matches) {
+    const ids = [];
+    for (const key of ["primary", "related", "customer", "contact"]) collectIds(document?.[key], ids);
+    ids.filter(Boolean).forEach((id) => contactIds.add(String(id)));
+  }
+  const contacts = [];
+  for (const contactId of contactIds) {
+    const contact = await jobNimbus(`/contacts/${encodeURIComponent(contactId)}`);
+    if (!isInsuranceFile(contact)) continue;
+    const names = [contact.display_name, contact.name, [contact.first_name, contact.last_name].filter(Boolean).join(" ")]
+      .map(normalizeNameWords)
+      .filter(Boolean);
+    if (!names.some((name) => {
+      const words = new Set(name.split(" ").filter(Boolean));
+      return queryWords.every((word) => words.has(word));
+    })) continue;
+    contacts.push(contact);
+  }
+
+  const uniqueContacts = [...new Map(contacts.map((contact) => [String(contact.jnid || contact.id), contact])).values()];
+  if (uniqueContacts.length > 1) {
+    const choices = uniqueContacts.slice(0, 5).map((contact) => `${contact.number || contact.recid || "?"}: ${contact.display_name || contact.name || "Unnamed"}`);
+    badRequest(`Exact document filename matched multiple company insurance files. Retry with the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
+  }
+  if (!uniqueContacts.length) return null;
+  return { contact: uniqueContacts[0], readScope: "explicit_company_document_read", alternatives: [] };
 }
 
 function chanceMatchScore(contact, query) {

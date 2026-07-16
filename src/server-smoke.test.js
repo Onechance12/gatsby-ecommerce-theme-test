@@ -277,6 +277,13 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     display_name: "Other Owner 9999",
     owners: [{ id: "someone-else" }]
   };
+  const hidden = {
+    ...chance,
+    jnid: "contact-hidden",
+    number: 8888,
+    display_name: "Hidden Owner 8888",
+    owners: [{ id: "someone-else" }]
+  };
   const fixturePdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "ascii");
   let fixtureTaskCompleted = false;
   let fixtureNoteCreated = false;
@@ -312,6 +319,11 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       res.end(fixturePdf);
       return;
     }
+    if (url.pathname === "/file-content/file-hidden") {
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end(fixturePdf);
+      return;
+    }
     if (url.pathname === "/tasks/task-1" && req.method === "PUT") {
       fixtureTaskCompleted = true;
       res.writeHead(400, { "content-type": "text/plain" });
@@ -333,12 +345,14 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     if (url.pathname === "/contacts") body = { contacts: [chance, other] };
     else if (url.pathname === "/contacts/contact-chance") body = chance;
     else if (url.pathname === "/contacts/contact-other") body = other;
+    else if (url.pathname === "/contacts/contact-hidden") body = hidden;
     else if (url.pathname === "/activities") body = { activities: [{ jnid: "activity-1", primary: { id: chance.jnid }, note: "Exterior hail damage documented." }] };
     else if (url.pathname === "/tasks") body = { tasks: [{ jnid: "task-1", primary: { id: chance.jnid }, title: "File claim", is_completed: fixtureTaskCompleted }] };
     else if (url.pathname === "/files") body = { files: [
       { jnid: "file-1", primary: { id: chance.jnid }, filename: "Carrier estimate.pdf", content_type: "application/pdf" },
       { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" },
-      { jnid: "file-other", primary: { id: other.jnid }, filename: "Other Owner - TDI.pdf", content_type: "application/pdf" }
+      { jnid: "file-other", primary: { id: other.jnid }, filename: "Other Owner - TDI.pdf", content_type: "application/pdf" },
+      { jnid: "file-hidden", primary: { id: hidden.jnid }, filename: "Hidden Owner - TDI.pdf", content_type: "application/pdf" }
     ] };
     else { res.writeHead(404); res.end("not found"); return; }
     res.writeHead(200, { "content-type": "application/json" });
@@ -503,6 +517,17 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(companyDocument.readScope, "explicit_company_read");
   assert.equal(companyDocument.openaiFileResponse[0].name, "Other Owner - TDI.pdf");
   assert.deepEqual(Buffer.from(companyDocument.openaiFileResponse[0].content, "base64"), fixturePdf);
+
+  const catalogDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "Hidden Owner", documentQuery: "Hidden Owner - TDI.pdf" })
+  });
+  assert.equal(catalogDocumentResponse.status, 200);
+  const catalogDocument = await catalogDocumentResponse.json();
+  assert.equal(catalogDocument.file.id, hidden.jnid);
+  assert.equal(catalogDocument.readScope, "explicit_company_document_read");
+  assert.equal(catalogDocument.openaiFileResponse[0].name, "Hidden Owner - TDI.pdf");
 
   const dolResearchResponse = await fetch(`http://127.0.0.1:${bridgePort}/weather/dol-research`, {
     method: "POST",
