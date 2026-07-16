@@ -434,6 +434,21 @@ test("uses the verified National General homeowners claims number", () => {
   assert.equal(plan.readiness.ready, true);
 });
 
+test("uses The Hartford official non-AARP homeowners claims number", () => {
+  const input = fixture();
+  input.file.carrier = "Hartford Insurance Company of the Southeast";
+  input.file.policyNumber = "55200160102";
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    fileNumber: "2765",
+    from: "+18176867361",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.callPlan.to, "+18002435860");
+  assert.equal(plan.carrier.display, "The Hartford Home Claims (non-AARP)");
+  assert.equal(plan.readiness.ready, true);
+});
+
 test("routes National General master policies to lender services property claims", () => {
   const input = fixture();
   input.file.carrier = "National General Insurance Company";

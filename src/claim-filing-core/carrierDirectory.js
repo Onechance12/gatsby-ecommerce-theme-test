@@ -41,6 +41,17 @@ const CARRIERS = [
     ivrType: "dtmf",
     requiresPolicyNumber: false,
     notes: "Verified by National General callback on 2026-07-10. Lender services is 800-211-4533; homeowners claims is 800-325-1088."
+  },
+  {
+    key: "the hartford",
+    match: /(?:the\s+)?hartford/i,
+    filingPhone: "+18002435860",
+    display: "The Hartford Home Claims (non-AARP)",
+    dossier: "docs/carriers/the-hartford.md",
+    sourceUrl: "https://www.thehartford.com/homeowners-insurance/claims",
+    ivrType: "adaptive",
+    requiresPolicyNumber: false,
+    notes: "Official 24/7 non-AARP homeowners claims line. AARP customers use a different claims number."
   }
 ];
 
@@ -69,6 +80,7 @@ export function knownCarriers() {
     display: c.display,
     filingPhone: c.filingPhone,
     dossier: c.dossier,
+    sourceUrl: c.sourceUrl || "",
     requiresPolicyNumber: Boolean(c.requiresPolicyNumber)
   }));
 }
