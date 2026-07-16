@@ -3178,23 +3178,30 @@ async function gmailAttachmentReview(input) {
 async function gmailDraft(input) {
   const to = required(input.to, "to");
   const subject = required(input.subject, "subject");
-  const body = required(input.body, "body");
   const cc = String(input.cc || "").trim();
   const bcc = String(input.bcc || "").trim();
   const threadId = String(input.threadId || "").trim();
+  const attachments = await loadEmailAttachments(input);
+  const resolvedMessage = await resolveGmailMessageBody(input, attachments);
+  const body = resolvedMessage.body;
   const reusable = await reusableGmailDraft(input, subject);
   if (reusable) {
+    const bodyMatches = normalizeEmailBody(reusable.snapshot.body) === normalizeEmailBody(body);
     return {
       mode: "existing_draft",
       draft: reusable.snapshot,
-      instruction: "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId so Gmail sends and removes the reviewed draft.",
+      bodyTemplate: resolvedMessage.template,
+      bodyMatches,
+      instruction: bodyMatches
+        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId so Gmail sends and removes the reviewed draft."
+        : "A Gmail draft already exists for this file and subject, but its body does not match the current approved carrier template. Do not send it and do not create a duplicate. Show Chance the mismatch and obtain approval before replacing the existing draft.",
       sendPayload: cleanObject({
         query: input.query || input.fileQuery || "",
         draftId: reusable.snapshot.id
-      })
+      }),
+      expectedBody: bodyMatches ? undefined : body
     };
   }
-  const attachments = await loadEmailAttachments(input);
   const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const draftBody = { message: cleanObject({ raw, threadId }) };
   if (input.execute !== true) {
@@ -3207,6 +3214,7 @@ async function gmailDraft(input) {
         bcc,
         subject,
         body,
+        bodyTemplate: resolvedMessage.template,
         threadId,
         attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
       }
@@ -3228,15 +3236,16 @@ async function gmailSend(input) {
 
   const to = required(input.to, "to");
   const subject = required(input.subject, "subject");
-  const body = required(input.body, "body");
   const cc = String(input.cc || "").trim();
   const bcc = String(input.bcc || "").trim();
   const threadId = String(input.threadId || "").trim();
+  const attachments = await loadEmailAttachments(input);
+  const resolvedMessage = await resolveGmailMessageBody(input, attachments);
+  const body = resolvedMessage.body;
   const reusable = await reusableGmailDraft(input, subject);
   if (reusable) {
     badRequest(`A verified Gmail draft already exists for this file and subject. Send the reviewed draft with gmail.send payload {draftId:'${reusable.snapshot.id}', query:'${input.query || input.fileQuery || ""}'}; do not rebuild the email or create another draft.`);
   }
-  const attachments = await loadEmailAttachments(input);
   const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const sendBody = cleanObject({ raw, threadId });
   const plan = {
@@ -3246,6 +3255,7 @@ async function gmailSend(input) {
     bcc,
     subject,
     body,
+    bodyTemplate: resolvedMessage.template,
     threadId,
     attemptId: String(input.attemptId || "initial"),
     attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
@@ -3277,6 +3287,56 @@ async function gmailSend(input) {
   const file = await optionalChanceFile(input.query || input.fileQuery);
   const memoryCloseout = closeoutGmailAction(input, file, "send_email", result.id, `Sent approved Gmail message with subject ${subject} and ${attachments.length} verified attachment(s).`);
   return { mode: "executed", message: compactGmailMessage(result), attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source)), memoryCloseout };
+}
+
+function normalizeEmailBody(value) {
+  return String(value || "").replace(/\r\n/g, "\n").trim();
+}
+
+function standardRepresentationPackage(attachments = []) {
+  const names = attachments.map((attachment) => String(attachment.filename || "").toLowerCase());
+  return {
+    isComplete: names.some((name) => /(?:^|[^a-z])(?:lor|letter[ _-]*of[ _-]*representation)(?:[^a-z]|$)/i.test(name)) &&
+      names.some((name) => /(?:fin[ _-]*535|tdi)/i.test(name)) &&
+      names.some((name) => /(?:^|[^a-z])w[ _-]*-?[ _-]*9(?:[^a-z]|$)/i.test(name))
+  };
+}
+
+function paymentRedirectionEmailBody(policyholder) {
+  return [
+    "Good afternoon,",
+    "",
+    `Attached please find an executed FIN535, an updated LOR, and W9 for the above referenced claim (policyholder: ${policyholder}). Please send payment to our office with Wave Public Adjusting LLC included as a payee.`,
+    "",
+    "Thank you,",
+    "",
+    "Chance Pearson",
+    "",
+    "972-573-1730",
+    "",
+    "Wave Public Adjusting LLC",
+    "",
+    "3500 Oak Lawn Ave #460C",
+    "",
+    "Dallas TX 75219",
+    "",
+    "TX Lic # 3351885"
+  ].join("\n");
+}
+
+async function resolveGmailMessageBody(input, attachments) {
+  const packageReview = standardRepresentationPackage(attachments);
+  const requestedTemplate = String(input.template || "").trim().toLowerCase();
+  if (requestedTemplate && requestedTemplate !== "payment_redirection") {
+    badRequest(`Unsupported Gmail template: ${requestedTemplate}`);
+  }
+  if (requestedTemplate === "payment_redirection" || packageReview.isComplete) {
+    const query = required(input.query || input.fileQuery, "query");
+    const file = await optionalChanceFile(query);
+    if (!file?.name) badRequest("A verified policyholder name is required for the payment-redirection email template.");
+    return { body: paymentRedirectionEmailBody(file.name), template: "payment_redirection" };
+  }
+  return { body: required(input.body, "body"), template: "custom" };
 }
 
 async function gmailSendExistingDraft(input, draftId) {
@@ -6455,7 +6515,8 @@ const OPENAPI = {
           cc: { type: "string", description: "Optional CC recipients." },
           bcc: { type: "string", description: "Optional BCC recipients." },
           subject: { type: "string", description: "Email subject. For insurance emails, use claim number only when applicable." },
-          body: { type: "string", description: "Plain text email body." },
+          body: { type: "string", description: "Plain text email body. When the verified attachments contain LOR + FIN535/TDI + W-9, the bridge replaces this with Richard's standard payment-redirection template instead of allowing improvised wording." },
+          template: { type: "string", enum: ["payment_redirection"], description: "Use payment_redirection for the standard LOR + FIN535/TDI + W-9 carrier packet. The bridge builds the approved body from the current JobNimbus policyholder and ignores improvised body text." },
           threadId: { type: "string", description: "Optional Gmail thread id to reply in an existing thread." },
           query: { type: "string", description: "Chance file identifier used for JobNimbus attachments, ownership validation, and the private action receipt." },
           fileQuery: { type: "string", description: "Alias for query." },
@@ -6466,7 +6527,8 @@ const OPENAPI = {
         },
         anyOf: [
           { required: ["draftId"] },
-          { required: ["to", "subject", "body"] }
+          { required: ["to", "subject", "body"] },
+          { required: ["to", "subject", "template", "query"] }
         ]
       },
       QuoHistoryRequest: {

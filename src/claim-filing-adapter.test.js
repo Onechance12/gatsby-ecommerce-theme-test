@@ -631,6 +631,8 @@ test("call completion review confirms the representation destination was capture
     ["Letter of Representation", "TDI/FIN535", "W-9"]
   );
   assert.equal(workflow.steps.find((step) => step.id === "lor_package").emailSubjectRule, "Claim number only");
+  assert.equal(workflow.steps.find((step) => step.id === "lor_package").emailTemplate, "payment_redirection");
+  assert.match(workflow.steps.find((step) => step.id === "lor_package").emailBodyRule, /included as a payee/i);
 });
 
 test("post-claim workflow blocks the LOR send until a destination is captured", () => {

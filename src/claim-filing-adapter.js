@@ -303,7 +303,9 @@ export function buildPostClaimWorkflow(analysis = {}) {
       status: destinationCaptured ? "approval_required" : "blocked",
       action: "Prepare the file-specific LOR package and carrier email for approval.",
       requiredDocuments: ["Letter of Representation", "TDI/FIN535", "W-9"],
-      emailSubjectRule: "Claim number only"
+      emailSubjectRule: "Claim number only",
+      emailTemplate: "payment_redirection",
+      emailBodyRule: "Use Richard's standard payment-redirection wording: request payment to the office with Wave Public Adjusting LLC included as a payee. Do not substitute generic correspondence-only language."
     },
     {
       id: "representation_send",

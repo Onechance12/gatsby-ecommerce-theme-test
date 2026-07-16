@@ -127,7 +127,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   );
   assert.deepEqual(chatgptSchema.components.schemas.GmailMessageRequest.anyOf, [
     { required: ["draftId"] },
-    { required: ["to", "subject", "body"] }
+    { required: ["to", "subject", "body"] },
+    { required: ["to", "subject", "template", "query"] }
   ]);
   for (const actionType of [
     "jobnimbus.process_update",
@@ -797,6 +798,29 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(gmailDryRunResponse.status, 200);
   const gmailDryRun = await gmailDryRunResponse.json();
   assert.match(gmailDryRun.approvalDigest, /^[a-f0-9]{64}$/);
+
+  const paymentTemplatePdf = Buffer.from("%PDF-1.4\n%%EOF").toString("base64");
+  const paymentRedirectionDraftResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/draft`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      to: "claims@example.test",
+      subject: "CLAIM-PAYMENT-TEMPLATE",
+      body: "Generic wording that must not survive.",
+      attachments: [
+        { source: "base64", filename: "Fixture_LOR.pdf", contentType: "application/pdf", contentBase64: paymentTemplatePdf },
+        { source: "base64", filename: "Fixture_TDI.pdf", contentType: "application/pdf", contentBase64: paymentTemplatePdf },
+        { source: "base64", filename: "Wave_W-9.pdf", contentType: "application/pdf", contentBase64: paymentTemplatePdf }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(paymentRedirectionDraftResponse.status, 200);
+  const paymentRedirectionDraft = await paymentRedirectionDraftResponse.json();
+  assert.equal(paymentRedirectionDraft.plan.bodyTemplate, "payment_redirection");
+  assert.match(paymentRedirectionDraft.plan.body, /Please send payment to our office with Wave Public Adjusting LLC included as a payee\./);
+  assert.doesNotMatch(paymentRedirectionDraft.plan.body, /Generic wording/);
 
   const gmailUnapprovedResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/send`, {
     method: "POST",
