@@ -358,6 +358,12 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     else if (url.pathname === "/activities") body = { activities: [{ jnid: "activity-1", primary: { id: chance.jnid }, note: "Exterior hail damage documented." }] };
     else if (url.pathname === "/tasks") body = { tasks: [{ jnid: "task-1", primary: { id: chance.jnid }, title: "File claim", is_completed: fixtureTaskCompleted }] };
     else if (url.pathname === "/files") body = { files: [
+      ...Array.from({ length: 120 }, (_, index) => ({
+        jnid: `file-photo-${index + 1}`,
+        primary: { id: chance.jnid },
+        filename: `inspection-photo-${index + 1}.jpg`,
+        content_type: "image/jpeg"
+      })),
       { jnid: "file-1", primary: { id: chance.jnid }, filename: "Carrier estimate.pdf", content_type: "application/pdf" },
       { jnid: "file-2", primary: { id: chance.jnid }, filename: "roof-photo.jpg", content_type: "image/jpeg" },
       { jnid: "file-other", primary: { id: other.jnid }, filename: "Other Owner - TDI.pdf", content_type: "application/pdf" },
@@ -408,7 +414,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(prepared.file.id, "contact-chance");
   assert.equal(prepared.readiness.ready, true);
   assert.equal(prepared.evidence.documentsReviewed, 1);
-  assert.equal(prepared.evidence.photoFilesExcluded, 1);
+  assert.equal(prepared.evidence.photoFilesExcluded, 121);
   assert.ok(relatedFilterRequests >= 3);
   assert.equal(prepared.callPlan.to, "+18444584300");
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
@@ -457,7 +463,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(coordinatorDryRun.conversation.mode, "status_update");
   assert.equal(coordinatorDryRun.evidence.complete, true);
   assert.equal(coordinatorDryRun.evidence.jobNimbus.operationalDocuments.length, 1);
-  assert.equal(coordinatorDryRun.evidence.jobNimbus.excludedPhotoLikeDocumentCount, 1);
+  assert.equal(coordinatorDryRun.evidence.jobNimbus.excludedPhotoLikeDocumentCount, 121);
   assert.equal(coordinatorDryRun.automaticFallbackText, false);
   assert.equal(coordinatorDryRun.automaticJobNimbusWriteback, false);
   assert.match(coordinatorDryRun.planDigest, /^[a-f0-9]{64}$/);

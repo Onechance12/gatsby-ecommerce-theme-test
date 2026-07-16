@@ -941,7 +941,7 @@ async function reviewFile(input) {
   const { contact, alternatives } = await findChanceContact(query);
   const activities = await listRelated("/activities", contact.jnid, 30);
   const tasks = await listRelated("/tasks", contact.jnid, 30);
-  const documents = await listRelated("/files", contact.jnid, 50);
+  const documents = await listRelated("/files", contact.jnid, 1000);
   return {
     file: compactContact(contact),
     rawContact: contact,
@@ -2183,7 +2183,7 @@ async function buildLiveClaimContext(query) {
   const [activities, tasks, documents] = await Promise.all([
     listRelated("/activities", contact.jnid, 100),
     listRelated("/tasks", contact.jnid, 100),
-    listRelated("/files", contact.jnid, 150)
+    listRelated("/files", contact.jnid, 1000)
   ]);
   const claimDocuments = documents.filter(isClaimEvidenceDocument);
   const claimScopeText = await extractClaimScopeEvidence(claimDocuments);
@@ -2477,7 +2477,7 @@ async function documentText(input) {
   const maxChars = clamp(Number(input.maxChars || 12000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
   const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
-  const documents = await listRelated("/files", contact.jnid, 100);
+  const documents = await listRelated("/files", contact.jnid, 1000);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
     return {
@@ -2507,7 +2507,7 @@ async function documentReview(input) {
   const maxChars = clamp(Number(input.maxChars || 20000), 1000, 50000);
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
   const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
-  const documents = await listRelated("/files", contact.jnid, 100);
+  const documents = await listRelated("/files", contact.jnid, 1000);
   const document = selectDocument(documents, documentQuery);
   if (!document) {
     return {
@@ -2541,7 +2541,7 @@ async function documentFileForChat(input) {
   const query = required(input.query, "query");
   const documentQuery = required(input.documentQuery || input.documentId, "documentQuery");
   const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
-  const documents = await listRelated("/files", contact.jnid, 100);
+  const documents = await listRelated("/files", contact.jnid, 1000);
   const document = selectDocumentForChat(documents, documentQuery);
   const downloaded = await downloadJobNimbusFile(document);
   const filename = safeMimeFilename(
@@ -3177,7 +3177,7 @@ async function buildChanceEvidencePacket(contact, input) {
   const [activities, tasks, documents] = await Promise.all([
     listRelated("/activities", contact.jnid, 60),
     listRelated("/tasks", contact.jnid, 60),
-    listRelated("/files", contact.jnid, 150)
+    listRelated("/files", contact.jnid, 1000)
   ]);
   const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
   const sourceStatus = { jobNimbus: { status: "fresh", at: new Date().toISOString() } };
@@ -4464,7 +4464,7 @@ async function loadEmailAttachments(input = {}) {
     if (source === "jobnimbus") {
       const query = required(spec.query || input.query || input.fileQuery, `attachments[${index}].query`);
       const { contact } = await findChanceContact(query);
-      const documents = await listRelated("/files", contact.jnid, 100);
+      const documents = await listRelated("/files", contact.jnid, 1000);
       const document = selectDocument(documents, String(spec.documentQuery || spec.documentId || "").trim());
       if (!document) badRequest(`No matching JobNimbus document found for attachment ${index + 1}.`);
       const downloaded = await downloadJobNimbusFile(document);
