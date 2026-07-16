@@ -303,6 +303,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     jnid: "contact-other",
     number: 9999,
     display_name: "Other Owner 9999",
+    status_name: "Submitted (Awaiting Two Key Confirmations)",
     owners: [{ id: "someone-else" }]
   };
   const hidden = {
@@ -715,6 +716,32 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const updateDryRun = await updateDryRunResponse.json();
   assert.equal(updateDryRun.updates.contact.body.cf_date_1, 1777291200);
 
+  const statusAliasDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      fields: { cf_string_2: "0833375173" },
+      status: "Submitted Awaiting Confirmation",
+      note: "Claim filed. Awaiting adjuster assignment.",
+      execute: false
+    })
+  });
+  assert.equal(statusAliasDryRunResponse.status, 200);
+  const statusAliasDryRun = await statusAliasDryRunResponse.json();
+  assert.equal(statusAliasDryRun.requestedStatus, "Submitted Awaiting Confirmation");
+  assert.equal(statusAliasDryRun.resolvedStatus, "Submitted (Awaiting Two Key Confirmations)");
+  assert.equal(statusAliasDryRun.updates.contact.body.status_name, "Submitted (Awaiting Two Key Confirmations)");
+
+  const invalidStatusDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", status: "Definitely Not A Real Workflow Stage", execute: false })
+  });
+  assert.equal(invalidStatusDryRunResponse.status, 400);
+  const invalidStatusDryRun = await invalidStatusDryRunResponse.json();
+  assert.match(invalidStatusDryRun.error, /approval dry run was blocked before execution/i);
+
   const calendarDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
@@ -963,6 +990,41 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(secondBatchResponse.status, 200);
   const secondBatch = await secondBatchResponse.json();
   assert.equal(secondBatch.approvalDigest, firstBatch.approvalDigest);
+
+  const claimMilestoneBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      operations: [
+        {
+          type: "jobnimbus.process_update",
+          payload: {
+            query: "2739",
+            fields: { cf_string_2: "0833375173" },
+            status: "Submitted Awaiting Confirmation",
+            note: "Claim filed. Awaiting adjuster assignment."
+          }
+        },
+        {
+          type: "gmail.create_draft",
+          payload: {
+            to: "carrier@example.test",
+            subject: "0833375173",
+            body: "Approved representation package body."
+          }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(claimMilestoneBatchResponse.status, 200);
+  const claimMilestoneBatch = await claimMilestoneBatchResponse.json();
+  assert.equal(claimMilestoneBatch.mode, "dry_run");
+  assert.equal(
+    claimMilestoneBatch.operations[0].plan.resolvedStatus,
+    "Submitted (Awaiting Two Key Confirmations)"
+  );
+  assert.match(claimMilestoneBatch.approvalDigest, /^[a-f0-9]{64}$/);
 
   const taskAndNoteBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",

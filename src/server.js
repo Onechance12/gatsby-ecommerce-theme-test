@@ -2648,10 +2648,16 @@ async function updateStatus(input) {
     badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute status updates.");
   }
   const query = required(input.query, "query");
-  const status = required(input.status || input.statusName || input.workflowStatus, "status");
-  const { contact } = await findChanceContact(query);
+  const requestedStatus = required(input.status || input.statusName || input.workflowStatus, "status");
+  const { contact, knownStatusNames } = await findChanceContact(query);
+  const status = resolveWorkflowStatusName(requestedStatus, knownStatusNames);
   const body = { status_name: status };
-  const plan = { endpoint: `/contacts/${contact.jnid}`, body };
+  const plan = {
+    endpoint: `/contacts/${contact.jnid}`,
+    body,
+    requestedStatus,
+    resolvedStatus: status
+  };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
   const file = compactContact(contact);
@@ -2665,12 +2671,13 @@ async function processUpdate(input) {
   }
   const query = required(input.query || input.job || input.client, "query");
   const fields = input.fields && typeof input.fields === "object" && !Array.isArray(input.fields) ? input.fields : {};
-  const status = String(input.status || input.statusName || input.workflowStatus || "").trim();
+  const requestedStatus = String(input.status || input.statusName || input.workflowStatus || "").trim();
   const note = String(input.note || input.internalNote || "").trim();
-  if (!Object.keys(fields).length && !status && !note) {
+  if (!Object.keys(fields).length && !requestedStatus && !note) {
     badRequest("At least one of fields, status, or note is required.");
   }
-  const { contact } = await findChanceContact(query);
+  const { contact, knownStatusNames } = await findChanceContact(query);
+  const status = requestedStatus ? resolveWorkflowStatusName(requestedStatus, knownStatusNames) : "";
   const file = compactContact(contact);
   const contactBody = normalizeContactFields({ ...fields, ...(status ? { status_name: status } : {}) });
   const noteBody = note ? {
@@ -2681,6 +2688,8 @@ async function processUpdate(input) {
   } : null;
   const plan = {
     file,
+    requestedStatus,
+    resolvedStatus: status,
     updates: cleanObject({
       contact: Object.keys(contactBody).length ? { endpoint: `/contacts/${contact.jnid}`, body: contactBody } : null,
       note: noteBody ? { endpoint: "/activities", body: noteBody } : null
@@ -3705,7 +3714,44 @@ async function findChanceContact(query) {
   if (!isInsuranceFile(contact) || !assignedTo(contact, CHANCE_OWNER_ID)) {
     badRequest(`Resolved record is not a Chance Pearson insurance file: ${needle}`);
   }
-  return { contact, alternatives: matches.slice(1, 6).map(({ contact: row }) => row) };
+  const knownStatusNames = [...new Set(contacts
+    .filter(isInsuranceFile)
+    .map((row) => String(row.status_name || "").trim())
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+  return { contact, alternatives: matches.slice(1, 6).map(({ contact: row }) => row), knownStatusNames };
+}
+
+function resolveWorkflowStatusName(requestedStatus, knownStatusNames = []) {
+  const requested = String(requestedStatus || "").trim();
+  if (!requested) badRequest("status is required");
+
+  const statuses = [...new Set((Array.isArray(knownStatusNames) ? knownStatusNames : [])
+    .map((status) => String(status || "").trim())
+    .filter(Boolean))];
+  const exact = statuses.find((status) => normalizeCompare(status) === normalizeCompare(requested));
+  if (exact) return exact;
+
+  const requestedTokens = workflowStatusTokens(requested);
+  const semanticMatches = statuses.filter((status) => {
+    const candidateTokens = workflowStatusTokens(status);
+    return requestedTokens.length >= 2 && requestedTokens.every((token) => candidateTokens.includes(token));
+  });
+  if (semanticMatches.length === 1) return semanticMatches[0];
+
+  const available = statuses.slice(0, 30).join("; ") || "none returned by the current JobNimbus file index";
+  if (semanticMatches.length > 1) {
+    badRequest(`Ambiguous JobNimbus status: ${requested}. Matching live statuses: ${semanticMatches.join("; ")}. Use the exact status name.`);
+  }
+  badRequest(`Invalid JobNimbus status: ${requested}. The approval dry run was blocked before execution. Live insurance-file statuses: ${available}`);
+}
+
+function workflowStatusTokens(value) {
+  return normalizeNameWords(value)
+    .replace(/\b2\b/g, "two")
+    .split(/\s+/)
+    .map((token) => token.replace(/(?:ation|ations)$/i, "ation"))
+    .filter((token) => token.length >= 3);
 }
 
 async function findDocumentReadContact(query, { documentQuery = "" } = {}) {
