@@ -2571,9 +2571,13 @@ async function updateContact(input) {
   const plan = { endpoint: `/contacts/${contact.jnid}`, fields: normalizedFields };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: normalizedFields });
-  const file = compactContact(contact);
+  const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
+  if (!recordMatchesFields(refreshedContact, normalizedFields)) {
+    conflictError("JobNimbus accepted the update request, but a fresh read did not confirm the requested fields. The bridge will not report this update as complete.");
+  }
+  const file = compactContact(refreshedContact);
   const memoryCloseout = closeoutJobNimbusAction(file, "update_contact", result, `Updated approved JobNimbus fields: ${Object.keys(normalizedFields).join(", ")}.`);
-  return { mode: "executed", file, result, memoryCloseout };
+  return { mode: "executed", verifiedByReadback: true, file, result, memoryCloseout };
 }
 
 async function updateStatus(input) {
@@ -2624,6 +2628,11 @@ async function processUpdate(input) {
   const results = {};
   if (Object.keys(contactBody).length) {
     results.contact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: contactBody });
+    const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
+    if (!recordMatchesFields(refreshedContact, contactBody)) {
+      conflictError("JobNimbus accepted the bundled update request, but a fresh read did not confirm the requested contact fields. The bridge will not report this update as complete.");
+    }
+    results.verifiedContact = compactContact(refreshedContact);
   }
   if (noteBody) {
     results.note = await jobNimbus("/activities", { method: "POST", body: noteBody });
@@ -2632,7 +2641,7 @@ async function processUpdate(input) {
   if (Object.keys(contactBody).length) parts.push(`fields ${Object.keys(contactBody).join(", ")}`);
   if (noteBody) parts.push("internal note");
   const memoryCloseout = closeoutJobNimbusAction(file, "process_update", results.note || results.contact, `Applied approved JobNimbus update: ${parts.join(" and ")}.`);
-  return { mode: "executed", file, results, memoryCloseout };
+  return { mode: "executed", verifiedByReadback: Boolean(results.verifiedContact), file: results.verifiedContact || file, results, memoryCloseout };
 }
 
 async function documentText(input) {
