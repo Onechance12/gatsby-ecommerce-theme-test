@@ -93,6 +93,15 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
   assert.equal(chatgptSchema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
   assert.equal(chatgptSchema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
+  assert.deepEqual(
+    chatgptSchema.components.schemas.DocumentReviewRequest.properties.documentPurpose.enum,
+    ["insurance_policy", "tdi_form", "estimate_scope", "carrier_claim_document", "appraisal_document", "representation_contract"]
+  );
+  for (const pathItem of Object.values(chatgptSchema.paths)) {
+    for (const operation of Object.values(pathItem)) {
+      if (operation.description) assert.ok(operation.description.length <= 300, `${operation.operationId} description exceeds 300 characters`);
+    }
+  }
   assert.equal(chatgptSchema.paths["/quo/numbers"], undefined);
   assert.equal(chatgptSchema.paths["/jobnimbus/process-update"], undefined);
   assert.equal(chatgptSchema.paths["/jobnimbus/create-task"], undefined);

@@ -6676,7 +6676,7 @@ const OPENAPI = {
       post: {
         operationId: "reviewJobNimbusDocument",
         summary: "Reliably review one JobNimbus document in a single call",
-        description: "Canonical read-only document workflow. Selects an exact file by documentQuery or one unique file by documentPurpose, extracts text, and automatically attaches the exact original through openaiFileResponse when extraction is empty, truncated, or unreliable. When attached, inspect every relevant page natively before reporting facts. Never ask the user to retrieve the file manually.",
+        description: "Canonical read-only document workflow. Selects one exact file by query or purpose, extracts text, and automatically attaches the original through openaiFileResponse when extraction is empty, truncated, or unreliable. Inspect attached pages natively; never ask the user to retrieve the file.",
         requestBody: jsonBody("DocumentReviewRequest"),
         responses: {
           "200": {
