@@ -129,6 +129,111 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(protectedBrainResponse.status, 401);
 });
 
+test("Retell configuration creates an editable draft before publishing", async (t) => {
+  const bridgePort = 18882;
+  const fakeRetellPort = 18883;
+  const requests = [];
+  let publishedBody = null;
+  const fakeRetell = createServer(async (req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${fakeRetellPort}`);
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString("utf8");
+    const body = rawBody ? JSON.parse(rawBody) : {};
+    requests.push({ method: req.method, path: url.pathname, version: url.searchParams.get("version"), body });
+
+    let status = 200;
+    let response;
+    if (req.method === "GET" && url.pathname === "/get-agent/fixture-coordinator-agent") {
+      response = {
+        agent_id: "fixture-coordinator-agent",
+        version: 7,
+        is_published: true,
+        response_engine: { type: "retell-llm", llm_id: "fixture-coordinator-llm", version: 4 }
+      };
+    } else if (req.method === "POST" && url.pathname === "/create-agent-version/fixture-coordinator-agent") {
+      assert.equal(body.base_version, 7);
+      status = 201;
+      response = {
+        agent_id: "fixture-coordinator-agent",
+        version: 8,
+        base_version: 7,
+        is_published: false,
+        response_engine: { type: "retell-llm", llm_id: "fixture-coordinator-llm", version: 5 }
+      };
+    } else if (req.method === "PATCH" && url.pathname === "/update-retell-llm/fixture-coordinator-llm") {
+      assert.equal(url.searchParams.get("version"), "5");
+      assert.match(body.general_prompt, /respond naturally in one short sentence/);
+      assert.deepEqual(body.general_tools.map((tool) => tool.name), ["end_call"]);
+      response = { llm_id: "fixture-coordinator-llm", version: 5, is_published: false };
+    } else if (req.method === "PATCH" && url.pathname === "/update-agent/fixture-coordinator-agent") {
+      assert.equal(url.searchParams.get("version"), "8");
+      assert.equal(body.response_engine.version, 5);
+      response = {
+        agent_id: "fixture-coordinator-agent",
+        version: 8,
+        is_published: false,
+        response_engine: body.response_engine
+      };
+    } else if (req.method === "POST" && url.pathname === "/publish-agent-version/fixture-coordinator-agent") {
+      publishedBody = body;
+      response = {};
+    } else {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(response));
+  });
+  await new Promise((resolve) => fakeRetell.listen(fakeRetellPort, "127.0.0.1", resolve));
+  t.after(() => fakeRetell.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-token",
+      RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
+      RETELL_API_KEY: "fixture-retell-key",
+      RETELL_AGENT_ID: "fixture-carrier-agent",
+      RETELL_HOMEOWNER_AGENT_ID: "fixture-coordinator-agent",
+      RETELL_CLIENT_COORDINATOR_AGENT_ID: "fixture-coordinator-agent",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const dryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/configure-client-coordinator`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ execute: false })
+  });
+  assert.equal(dryRunResponse.status, 200);
+  const dryRun = await dryRunResponse.json();
+  assert.equal(dryRun.mode, "dry_run");
+  assert.deepEqual(dryRun.toolNames, ["end_call"]);
+  assert.match(dryRun.exactConfiguration.generalPrompt, /respond naturally in one short sentence/);
+
+  const publishResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/configure-client-coordinator`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ execute: true, publish: true, configDigest: dryRun.configDigest })
+  });
+  assert.equal(publishResponse.status, 200);
+  const published = await publishResponse.json();
+  assert.equal(published.mode, "executed");
+  assert.equal(published.published, true);
+  assert.equal(published.draftAgentVersion, 8);
+  assert.equal(published.publishedAgentVersion, 8);
+  assert.equal(published.retellLlmVersion, 5);
+  assert.equal(publishedBody.version, 8);
+  assert.equal(requests.filter((request) => request.path.includes("create-agent-version")).length, 1);
+});
+
 test("prepare route reads fresh evidence and enforces Chance ownership", async (t) => {
   const bridgePort = 18880;
   const fakeApiPort = 18881;

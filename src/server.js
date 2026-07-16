@@ -72,6 +72,7 @@ const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
 const TWILIO_STATUS_CALLBACK_URL = process.env.TWILIO_STATUS_CALLBACK_URL || "";
 const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "";
 const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
+const RETELL_API_BASE_URL = stripTrailingSlash(process.env.RETELL_API_BASE_URL || "https://api.retellai.com");
 const RETELL_API_KEY = process.env.RETELL_API_KEY || "";
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
 const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
@@ -1816,6 +1817,29 @@ async function claimFilingWriteback(input) {
   };
 }
 
+async function ensureRetellDraftAgentVersion(agentId, agent) {
+  const baseVersion = Number(agent?.version);
+  if (!Number.isInteger(baseVersion) || baseVersion < 0) {
+    badRequest("Retell did not return a usable base agent version.");
+  }
+  if (agent.is_published !== true) return agent;
+
+  const draft = await retellApi("POST", `/create-agent-version/${encodeURIComponent(agentId)}`, {
+    base_version: baseVersion
+  });
+  const draftVersion = Number(draft?.version);
+  if (!Number.isInteger(draftVersion) || draftVersion < 0 || draft.is_published === true) {
+    badRequest("Retell did not create an editable draft agent version.");
+  }
+  return draft;
+}
+
+function versionedRetellEndpoint(endpoint, version) {
+  const parsed = Number(version);
+  if (!Number.isInteger(parsed) || parsed < 0) badRequest("A valid Retell draft version is required.");
+  return `${endpoint}?version=${encodeURIComponent(String(parsed))}`;
+}
+
 async function configureRetellAgent(input = {}) {
   if (!RETELL_API_KEY || !RETELL_AGENT_ID) badRequest("RETELL_API_KEY and RETELL_AGENT_ID are required.");
   const agent = await retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`);
@@ -1859,15 +1883,21 @@ async function configureRetellAgent(input = {}) {
   }
   assertApprovalDigest(input.configDigest, configDigest, "configDigest");
 
-  const llm = await retellApi("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, {
+  const draftAgent = await ensureRetellDraftAgentVersion(RETELL_AGENT_ID, agent);
+  const draftLlmId = String(draftAgent?.response_engine?.llm_id || "").trim();
+  const draftLlmVersion = Number(draftAgent?.response_engine?.version);
+  if (draftAgent?.response_engine?.type !== "retell-llm" || !draftLlmId || !Number.isInteger(draftLlmVersion)) {
+    badRequest("Retell created a carrier-agent draft without a usable Retell LLM draft.");
+  }
+  const llm = await retellApi("PATCH", versionedRetellEndpoint(`/update-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion), {
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
     begin_message: ""
   });
   const llmVersion = Number(llm.version);
   if (!Number.isInteger(llmVersion) || llmVersion < 0) badRequest("Retell updated the LLM but did not return a usable version.");
-  const updatedAgent = await retellApi("PATCH", `/update-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, {
-    response_engine: { type: "retell-llm", llm_id: llmId, version: llmVersion },
+  const updatedAgent = await retellApi("PATCH", versionedRetellEndpoint(`/update-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, draftAgent.version), {
+    response_engine: { type: "retell-llm", llm_id: draftLlmId, version: llmVersion },
     post_call_analysis_data: analysisSchema,
     post_call_analysis_model: "gpt-4.1-mini",
     timezone: OPERATIONS_TIME_ZONE
@@ -1884,6 +1914,7 @@ async function configureRetellAgent(input = {}) {
     mode: "executed",
     published: true,
     ...preview,
+    draftAgentVersion: Number(draftAgent.version),
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
     nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
@@ -1943,7 +1974,13 @@ async function configureClientCoordinatorAgent(input = {}) {
   }
   assertApprovalDigest(input.configDigest, configDigest, "configDigest");
 
-  const llm = await retellApi("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, {
+  const draftAgent = await ensureRetellDraftAgentVersion(RETELL_CLIENT_COORDINATOR_AGENT_ID, agent);
+  const draftLlmId = String(draftAgent?.response_engine?.llm_id || "").trim();
+  const draftLlmVersion = Number(draftAgent?.response_engine?.version);
+  if (draftAgent?.response_engine?.type !== "retell-llm" || !draftLlmId || !Number.isInteger(draftLlmVersion)) {
+    badRequest("Retell created a Client Coordinator draft without a usable Retell LLM draft.");
+  }
+  const llm = await retellApi("PATCH", versionedRetellEndpoint(`/update-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion), {
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
     begin_message: llmConfig.begin_message
@@ -1952,8 +1989,8 @@ async function configureClientCoordinatorAgent(input = {}) {
   if (!Number.isInteger(llmVersion) || llmVersion < 0) {
     badRequest("Retell updated the Client Coordinator LLM but did not return a usable version.");
   }
-  const updatedAgent = await retellApi("PATCH", `/update-agent/${encodeURIComponent(RETELL_CLIENT_COORDINATOR_AGENT_ID)}`, {
-    response_engine: { type: "retell-llm", llm_id: llmId, version: llmVersion },
+  const updatedAgent = await retellApi("PATCH", versionedRetellEndpoint(`/update-agent/${encodeURIComponent(RETELL_CLIENT_COORDINATOR_AGENT_ID)}`, draftAgent.version), {
+    response_engine: { type: "retell-llm", llm_id: draftLlmId, version: llmVersion },
     post_call_analysis_data: analysisSchema,
     post_call_analysis_model: "gpt-4.1-mini",
     timezone: OPERATIONS_TIME_ZONE
@@ -1972,6 +2009,7 @@ async function configureClientCoordinatorAgent(input = {}) {
     mode: "executed",
     published: true,
     ...preview,
+    draftAgentVersion: Number(draftAgent.version),
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
     nextStep: "Keep expanded modes disabled until Chance reviews one dry-run call plan. No call was placed by this configuration action."
@@ -2269,7 +2307,7 @@ async function latestCallbackContinuation(originalCallId) {
 
 async function retellApi(method, endpoint, body) {
   if (!RETELL_API_KEY) badRequest("RETELL_API_KEY is not configured.");
-  const response = await fetch(`https://api.retellai.com${endpoint}`, {
+  const response = await fetch(`${RETELL_API_BASE_URL}${endpoint}`, {
     method,
     headers: {
       authorization: `Bearer ${RETELL_API_KEY}`,
