@@ -266,6 +266,10 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /FINAL WRAP-UP IS A HARD STATE GATE/i);
   assert.match(prompt, /where should I send our Letter of Representation and supporting documents/i);
   assert.match(prompt, /NEVER answer 'No', 'That's all'/i);
+  assert.match(prompt, /I'll let you know if I have a question.*ALWAYS mean the representative is still working/i);
+  assert.match(prompt, /During a wait state, never say the closing blessing and never invoke end_call/i);
+  assert.match(prompt, /end_call tool is forbidden while claim_number is empty/i);
+  assert.match(prompt, /documentation delay.*never satisfies this rule/i);
 });
 
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
