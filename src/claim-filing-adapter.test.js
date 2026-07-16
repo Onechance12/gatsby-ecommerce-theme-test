@@ -5,6 +5,7 @@ import {
   callbackCandidateFromCall,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
+  buildPostClaimWorkflow,
   confirmedCallbackRequest,
   analyzeClaimCall,
   assertApprovalDigest,
@@ -554,6 +555,32 @@ test("call completion review confirms the representation destination was capture
   assert.equal(result.completionReview.documentSubmissionCaptured, true);
   assert.equal(result.completionReview.complete, true);
   assert.deepEqual(result.completionReview.gaps, []);
+
+  const workflow = buildPostClaimWorkflow(result);
+  assert.equal(workflow.applicable, true);
+  assert.equal(workflow.phase, "post_claim_filing_representation");
+  assert.match(workflow.primaryAction, /prepare the verified LOR/i);
+  assert.equal(workflow.steps.find((step) => step.id === "representation_destination").status, "complete");
+  assert.deepEqual(
+    workflow.steps.find((step) => step.id === "lor_package").requiredDocuments,
+    ["Letter of Representation", "TDI/FIN535", "W-9"]
+  );
+  assert.equal(workflow.steps.find((step) => step.id === "lor_package").emailSubjectRule, "Claim number only");
+});
+
+test("post-claim workflow blocks the LOR send until a destination is captured", () => {
+  const workflow = buildPostClaimWorkflow({
+    extracted: {
+      outcome: "claim_filed",
+      claimNumber: "43-TEST-999",
+      documentSubmission: ""
+    }
+  });
+  assert.equal(workflow.applicable, true);
+  assert.match(workflow.primaryAction, /obtain a verified representation-document destination/i);
+  assert.equal(workflow.steps.find((step) => step.id === "representation_destination").status, "blocked");
+  assert.equal(workflow.steps.find((step) => step.id === "lor_package").status, "blocked");
+  assert.equal(workflow.steps.find((step) => step.id === "representation_send").status, "blocked");
 });
 
 test("rejects calls outside the Chance bridge scope", () => {

@@ -10,6 +10,7 @@ import {
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
+  buildPostClaimWorkflow,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
   digest,
@@ -1755,6 +1756,7 @@ async function claimFilingResult(input) {
     };
   }
   const proposedCalendarEvent = buildInspectionCalendarProposal(analysis);
+  const workflow = buildPostClaimWorkflow(analysis);
   return {
     mode: "read_only",
     file: analysis.file,
@@ -1769,6 +1771,8 @@ async function claimFilingResult(input) {
       callSuccessful: analysis.call.callAnalysis?.call_successful ?? null
     },
     extracted: analysis.extracted,
+    completionReview: analysis.completionReview,
+    workflow,
     proposedCalendarEvent,
     proposedWriteback: analysis.writeback,
     fieldConfidence: analysis.proposal.fieldConfidence,
@@ -1777,7 +1781,9 @@ async function claimFilingResult(input) {
     approvalRequired: true,
     nextStep: proposedCalendarEvent?.ready
       ? "Review the result and exact appointment. JobNimbus writeback and calendar creation remain separate approval-gated actions."
-      : "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
+      : workflow.applicable
+        ? workflow.primaryAction
+        : "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
   };
 }
 

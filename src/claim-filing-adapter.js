@@ -268,6 +268,67 @@ export function analyzeClaimCall(call, file) {
   return { extracted, completionReview, proposal, writeback, writebackDigest };
 }
 
+export function buildPostClaimWorkflow(analysis = {}) {
+  const extracted = analysis.extracted || {};
+  const completedClaim = ["claim_filed", "existing_claim_confirmed"].includes(extracted.outcome);
+  if (!completedClaim || !extracted.claimNumber) {
+    return {
+      applicable: false,
+      primaryAction: "Resolve the incomplete carrier-call outcome before starting representation delivery.",
+      steps: []
+    };
+  }
+
+  const destinationCaptured = Boolean(extracted.documentSubmission);
+  const steps = [
+    {
+      id: "jobnimbus_claim_writeback",
+      status: "approval_required",
+      action: "Update the claim number, adjuster details, carrier result, and correct workflow status in JobNimbus using the reviewed call writeback."
+    },
+    {
+      id: "representation_destination",
+      status: destinationCaptured ? "complete" : "blocked",
+      action: destinationCaptured
+        ? `Use the verified carrier instruction: ${extracted.documentSubmission}`
+        : "Obtain the carrier or adjuster's verified email, portal, fax, or explicit instruction for sending representation documents."
+    },
+    {
+      id: "lor_package",
+      status: destinationCaptured ? "approval_required" : "blocked",
+      action: "Prepare the file-specific LOR package and carrier email for approval.",
+      requiredDocuments: ["Letter of Representation", "TDI/FIN535", "W-9"],
+      emailSubjectRule: "Claim number only"
+    },
+    {
+      id: "representation_send",
+      status: "blocked",
+      action: "After approval, send the exact LOR package and record the Gmail message/thread ID."
+    },
+    {
+      id: "two_key_confirmations",
+      status: "blocked",
+      action: "Confirm carrier claim/desk-adjuster handling and confirm representation/payment-direction processing before treating the filing phase as complete."
+    },
+    {
+      id: "jobnimbus_lor_closeout",
+      status: "blocked",
+      action: "After verified delivery, update JobNimbus with the concise LOR-package send result and next carrier follow-up."
+    }
+  ];
+
+  return {
+    applicable: true,
+    phase: "post_claim_filing_representation",
+    claimNumber: extracted.claimNumber,
+    documentSubmission: extracted.documentSubmission || "",
+    primaryAction: destinationCaptured
+      ? "Prepare the verified LOR, TDI/FIN535, and W-9 carrier package for Chance's approval, then send it using the claim number as the subject."
+      : "Obtain a verified representation-document destination, then prepare the LOR package for approval.",
+    steps
+  };
+}
+
 export function proposalToProcessUpdate(proposal) {
   const fields = { ...(proposal.proposedFields || {}) };
   const status = String(fields.status_name || "").trim();
