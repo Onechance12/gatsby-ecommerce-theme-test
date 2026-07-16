@@ -287,8 +287,12 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const fixturePdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "ascii");
   let fixtureTaskCompleted = false;
   let fixtureNoteCreated = false;
+  let relatedFilterRequests = 0;
   const fakeApi = createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeApiPort}`);
+    if (["/activities", "/tasks", "/files"].includes(url.pathname) && String(url.searchParams.get("filter") || "").includes("related.id")) {
+      relatedFilterRequests += 1;
+    }
     if (url.pathname === "/geocoder") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
@@ -399,6 +403,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(prepared.readiness.ready, true);
   assert.equal(prepared.evidence.documentsReviewed, 1);
   assert.equal(prepared.evidence.photoFilesExcluded, 1);
+  assert.ok(relatedFilterRequests >= 3);
   assert.equal(prepared.callPlan.to, "+18444584300");
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
 

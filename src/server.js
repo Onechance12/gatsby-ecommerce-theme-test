@@ -3464,7 +3464,8 @@ async function listResourcePages(endpoint, maxPages = 10) {
 }
 
 async function listRelated(endpoint, contactId, limit) {
-  const rows = await jobNimbus(`${endpoint}?size=1000&from=0&related=${encodeURIComponent(contactId)}`);
+  const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { "related.id": contactId } }] }));
+  const rows = await jobNimbus(`${endpoint}?size=1000&from=0&filter=${filter}`);
   const list = unwrapList(rows, endpoint.replace("/", ""));
   return list.filter((item) => referencesContact(item, contactId)).slice(0, limit);
 }
