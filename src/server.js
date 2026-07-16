@@ -38,6 +38,7 @@ import {
   busyIntervalsFromJobNimbusTasks
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
+import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -5159,7 +5160,7 @@ function recordMatchesFields(record, fields) {
 }
 
 function normalizeContactFields(fields) {
-  const body = { ...fields };
+  const body = canonicalizeContactFieldAliases(fields);
   for (const key of Object.keys(body)) {
     if (/^cf_date_\d+$/i.test(key)) body[key] = toUnixSeconds(body[key]);
   }
@@ -6192,7 +6193,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "File/client identifier." },
-          fields: { type: "object", additionalProperties: true, description: "Exact JobNimbus contact fields to update. Use for claim number, carrier, policy number, adjuster name, adjuster phone, adjuster email, date of loss, and known custom field keys." },
+          fields: { type: "object", additionalProperties: true, description: "Exact JobNimbus contact fields to update. For DOL, pass dateOfLoss, DOL, Date of Loss, or cf_date_1 with a YYYY-MM-DD value; the bridge normalizes it to JobNimbus cf_date_1. After changing DOL, read the file back and prepare any claim call again from fresh state." },
           execute: { type: "boolean", default: false, description: "When false, returns dry-run only. True requires bridge writes to be enabled." }
         },
         required: ["query", "fields"]
@@ -6217,7 +6218,7 @@ const OPENAPI = {
           fields: {
             type: "object",
             additionalProperties: true,
-            description: "Exact JobNimbus contact fields to update. Use known field keys for claim number, carrier, policy number, adjuster name/phone/email, date of loss, and custom fields."
+            description: "Exact JobNimbus contact fields to update. For DOL, pass dateOfLoss, DOL, Date of Loss, or cf_date_1 with a YYYY-MM-DD value; the bridge normalizes it to JobNimbus cf_date_1. After changing DOL, read the file back and prepare any claim call again from fresh state."
           },
           status: { type: "string", description: "Optional JobNimbus workflow/status name to set." },
           statusName: { type: "string", description: "Alias for status." },
@@ -6468,7 +6469,7 @@ const OPENAPI = {
           homeLivable: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           temporaryRepairs: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           contractorHired: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
-          overrides: { type: "object", additionalProperties: true, description: "Approved per-call overrides." }
+          overrides: { type: "object", additionalProperties: true, description: "Approved per-call overrides. If DOL must also be saved to JobNimbus, execute and verify that update first, then prepare the call from the refreshed file. A later DOL change intentionally invalidates an earlier plan digest." }
         },
         required: ["query"]
       },
@@ -6476,7 +6477,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Same Chance file identifier used to prepare the approved plan." },
-          planDigest: { type: "string", description: "Exact digest returned by prepareClaimFilingCall. Any changed file fact invalidates it." },
+          planDigest: { type: "string", description: "Exact digest returned by prepareClaimFilingCall after all approved JobNimbus field updates are complete. Any later file fact change, including DOL, invalidates it and requires a fresh preparation." },
           goal: { type: "string" },
           to: { type: "string" },
           carrierPhone: { type: "string" },
