@@ -3351,13 +3351,13 @@ async function findDocumentReadContact(query) {
   let matches = chanceMatches;
   let readScope = "chance_assigned";
   if (!matches.length) {
-    matches = ranked.filter(({ score }) => score >= 90);
+    matches = ranked.filter(({ score }) => score >= 85);
     readScope = "explicit_company_read";
   }
 
   if (!matches.length) {
     badRequest(
-      `No Chance Pearson file or exact company insurance-file match found for document review: ${needle}. Use the JobNimbus number, claim number, exact client name, or exact address.`
+      `No Chance Pearson file or exact, unambiguous company insurance-file match found for document review: ${needle}. Use the JobNimbus number, claim number, full client name, or exact address.`
     );
   }
   if (matches.length > 1 && matches[0].score === matches[1].score) {
@@ -3391,6 +3391,14 @@ function chanceMatchScore(contact, query) {
   if (claimValues.includes(exact)) return 95;
   const names = [contact.display_name, contact.name, [contact.first_name, contact.last_name].filter(Boolean).join(" ")].map(normalizeCompare).filter(Boolean);
   if (names.includes(exact)) return 90;
+  const nameTokens = normalizeNameWords(query).split(" ").filter((token) => token.length >= 2);
+  const wordNames = [contact.display_name, contact.name, [contact.first_name, contact.last_name].filter(Boolean).join(" ")]
+    .map(normalizeNameWords)
+    .filter(Boolean);
+  if (nameTokens.length >= 2 && wordNames.some((name) => {
+    const words = new Set(name.split(" ").filter(Boolean));
+    return nameTokens.every((token) => words.has(token));
+  })) return 85;
   const address = normalizeCompare([contact.address_line1, contact.city, contact.state_text, contact.zip].filter(Boolean).join(" "));
   if (address && address === exact) return 90;
   return 10;
@@ -3953,6 +3961,10 @@ function normalizePolicy(value) {
 
 function normalizeCompare(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeNameWords(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function extractAddress(text) {

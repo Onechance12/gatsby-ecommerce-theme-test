@@ -274,7 +274,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     ...chance,
     jnid: "contact-other",
     number: 9999,
-    display_name: "Other Owner",
+    display_name: "Other Owner 9999",
     owners: [{ id: "someone-else" }]
   };
   const fixturePdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "ascii");
