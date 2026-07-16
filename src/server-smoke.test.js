@@ -16,6 +16,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       RETELL_AGENT_ID: "",
       RETELL_FROM_NUMBER: "",
       ALLOW_RETELL_CALLS: "false",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
       BRIDGE_ALLOW_WRITES: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -30,6 +31,15 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.claimFiling.callbackPacketRestoration, "full_approved_packet");
   assert.equal(health.claimFiling.retryRequiresPriorCallId, true);
   assert.equal(health.claimFiling.callsAllowed, false);
+  assert.deepEqual(health.clientCoordinator.supportedModes, [
+    "appointment_confirmation",
+    "missing_document_request",
+    "status_update",
+    "client_check_in"
+  ]);
+  assert.equal(health.clientCoordinator.expandedModesAllowed, false);
+  assert.equal(health.clientCoordinator.freshEvidenceRequired, true);
+  assert.equal(health.clientCoordinator.automaticTextOrWriteback, false);
   assert.equal(health.brain.mode, "verified_company_context_with_private_action_receipts");
   assert.equal(health.brain.autonomousLearning, false);
   assert.equal(health.brain.externalActions, false);
@@ -50,6 +60,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/claim-filing/writeback"].post.operationId, "processApprovedClaimFilingWriteback");
   assert.equal(schema.paths["/scheduling/availability"].post.operationId, "reviewUnifiedSchedulingAvailability");
   assert.equal(schema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
+  assert.equal(schema.paths["/retell/configure-client-coordinator"].post.operationId, "configureApprovedClientCoordinatorAgent");
+  assert.equal(schema.paths["/retell/configure-client-coordinator"].post["x-openai-isConsequential"], true);
+  assert.equal(schema.paths["/retell/client-coordinator-call"].post.operationId, "placeApprovedClientCoordinatorCall");
+  assert.equal(schema.paths["/retell/client-coordinator-call"].post["x-openai-isConsequential"], true);
+  assert.equal(schema.paths["/retell/client-coordinator-call-result"].post.operationId, "reviewClientCoordinatorCall");
   assert.equal(schema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
   assert.equal(schema.paths["/retell/homeowner-call-result"].post.operationId, "reviewHomeownerAppointmentCall");
   assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
@@ -94,7 +109,9 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   ]) {
     assert.equal(consolidatedActionTypes.includes(actionType), true);
   }
-  assert.equal(chatgptSchema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
+  assert.equal(chatgptSchema.paths["/retell/client-coordinator-call"].post.operationId, "placeApprovedClientCoordinatorCall");
+  assert.equal(chatgptSchema.paths["/retell/client-coordinator-call-result"].post.operationId, "reviewClientCoordinatorCall");
+  assert.equal(chatgptSchema.paths["/retell/homeowner-call"], undefined);
   assert.equal(chatgptSchema.paths["/voice/outbound-call"], undefined);
 
   const protectedResponse = await fetch(`http://127.0.0.1:${port}/claim-filing/prepare`, {
@@ -198,6 +215,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       RETELL_FROM_NUMBER: "+12145550100",
       RETELL_API_KEY: "fixture-retell-key",
       ALLOW_RETELL_CALLS: "false",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
       BRIDGE_ALLOW_WRITES: "true",
       ALLOW_GMAIL_SEND: "true",
       QUO_API_KEY: "fixture-quo-key",
@@ -247,6 +265,46 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(chanceIndex.files[0].number, 2739);
   assert.equal(chanceIndex.files[0].missing.claimNumber, true);
   assert.equal(chanceIndex.files[0].missing.policyNumber, false);
+
+  const coordinatorDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/client-coordinator-call`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      mode: "status_update",
+      statusUpdate: "the claim file is being reviewed before the next carrier step.",
+      includeGmail: false,
+      includeQuo: false,
+      execute: false
+    })
+  });
+  assert.equal(coordinatorDryRunResponse.status, 200);
+  const coordinatorDryRun = await coordinatorDryRunResponse.json();
+  assert.equal(coordinatorDryRun.mode, "dry_run");
+  assert.equal(coordinatorDryRun.file.id, chance.jnid);
+  assert.equal(coordinatorDryRun.conversation.mode, "status_update");
+  assert.equal(coordinatorDryRun.evidence.complete, true);
+  assert.equal(coordinatorDryRun.evidence.jobNimbus.operationalDocuments.length, 1);
+  assert.equal(coordinatorDryRun.evidence.jobNimbus.excludedPhotoLikeDocumentCount, 1);
+  assert.equal(coordinatorDryRun.automaticFallbackText, false);
+  assert.equal(coordinatorDryRun.automaticJobNimbusWriteback, false);
+  assert.match(coordinatorDryRun.planDigest, /^[a-f0-9]{64}$/);
+
+  const coordinatorRepeatResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/client-coordinator-call`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      mode: "status_update",
+      statusUpdate: "the claim file is being reviewed before the next carrier step.",
+      includeGmail: false,
+      includeQuo: false,
+      execute: false
+    })
+  });
+  assert.equal(coordinatorRepeatResponse.status, 200);
+  const coordinatorRepeat = await coordinatorRepeatResponse.json();
+  assert.equal(coordinatorRepeat.planDigest, coordinatorDryRun.planDigest);
 
   const documentFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
     method: "POST",

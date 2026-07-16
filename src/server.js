@@ -20,9 +20,15 @@ import {
 } from "./claim-filing-adapter.js";
 import { renderBrain } from "./memory/brain.js";
 import { safeCloseoutAction } from "./memory/actionCloseout.js";
-import { latestActionReceipts } from "./memory/store.js";
+import { latestActionReceipts, listMemory } from "./memory/store.js";
 import { listQuoNumbers, readQuoHistory, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
+import {
+  buildClientCoordinatorConversation,
+  buildClientCoordinatorLlmConfig,
+  clientCoordinatorAnalysisSchema,
+  extractClientCoordinatorResult
+} from "./client-coordinator/agent.js";
 import {
   appointmentFitsAvailability,
   availabilityRange,
@@ -69,8 +75,10 @@ const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
 const RETELL_API_KEY = process.env.RETELL_API_KEY || "";
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
 const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
+const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR_AGENT_ID || RETELL_HOMEOWNER_AGENT_ID;
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
+const ALLOW_CLIENT_COORDINATOR_CALLS = process.env.ALLOW_CLIENT_COORDINATOR_CALLS === "true";
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
@@ -143,6 +151,9 @@ const routes = new Map([
   ["POST /claim-filing/callbacks", pendingClaimCallbacks],
   ["POST /claim-filing/writeback", claimFilingWriteback],
   ["POST /retell/configure-agent", configureRetellAgent],
+  ["POST /retell/configure-client-coordinator", configureClientCoordinatorAgent],
+  ["POST /retell/client-coordinator-call", retellClientCoordinatorCall],
+  ["POST /retell/client-coordinator-call-result", retellClientCoordinatorCallResult],
   ["POST /retell/homeowner-call", retellHomeownerCall],
   ["POST /retell/homeowner-call-result", retellHomeownerCallResult],
   ["POST /retell/inbound", retellInbound],
@@ -268,6 +279,17 @@ function health() {
       callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
       retryRequiresPriorCallId: true
     },
+    clientCoordinator: {
+      available: Boolean(RETELL_API_KEY && RETELL_CLIENT_COORDINATOR_AGENT_ID && RETELL_FROM_NUMBER),
+      engine: "retell",
+      supportedModes: ["appointment_confirmation", "missing_document_request", "status_update", "client_check_in"],
+      appointmentCallsAllowed: ALLOW_RETELL_CALLS,
+      expandedModesAllowed: ALLOW_CLIENT_COORDINATOR_CALLS,
+      ownerScope: "Chance Pearson",
+      freshEvidenceRequired: true,
+      approvalDigestRequired: true,
+      automaticTextOrWriteback: false
+    },
     schedulingAvailability: {
       jobNimbusCalendarConfigured: Boolean(API_KEY),
       googleCalendarConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
@@ -371,8 +393,8 @@ const CHATGPT_ACTION_PATHS = [
   "/claim-filing/result",
   "/claim-filing/callbacks",
   "/claim-filing/writeback",
-  "/retell/homeowner-call",
-  "/retell/homeowner-call-result"
+  "/retell/client-coordinator-call",
+  "/retell/client-coordinator-call-result"
 ];
 
 function chatgptOpenapi() {
@@ -1178,36 +1200,93 @@ async function placeClaimFilingCall(input) {
 }
 
 async function retellHomeownerCall(input) {
+  return retellClientCoordinatorCall({ ...input, mode: input.mode || "appointment_confirmation" });
+}
+
+async function retellClientCoordinatorCall(input = {}) {
   const { contact } = await findChanceContact(required(input.query, "query"));
   const file = compactContact(contact);
   const to = normalizePhone(file.phone);
-  const dateStart = required(input.dateStart, "dateStart");
-  const dateEnd = required(input.dateEnd, "dateEnd");
-  if (!explicitOffsetDateTime(dateStart) || !explicitOffsetDateTime(dateEnd)) {
-    badRequest("dateStart and dateEnd must be ISO datetimes with an explicit UTC offset.");
+  if (!/^\+\d{10,15}$/.test(to)) {
+    badRequest("The current Chance-owned JobNimbus file does not have a valid homeowner phone number.");
   }
-  if (Date.parse(dateEnd) <= Date.parse(dateStart)) badRequest("dateEnd must be after dateStart.");
-  const appointment = homeownerAppointmentLabels(dateStart, dateEnd);
-  const firstName = String(file.name || "there").trim().split(/\s+/)[0] || "there";
-  const accessRequirement = input.interiorAccessRequired === false
-    ? "No special access requirement was provided."
-    : "Interior access is required. Confirm that the homeowner or another adult can provide access.";
+  const mode = String(input.mode || "appointment_confirmation").trim().toLowerCase();
+  let appointment = { date: "", window: "" };
+  if (mode === "appointment_confirmation") {
+    const dateStart = required(input.dateStart, "dateStart");
+    const dateEnd = required(input.dateEnd, "dateEnd");
+    if (!explicitOffsetDateTime(dateStart) || !explicitOffsetDateTime(dateEnd)) {
+      badRequest("dateStart and dateEnd must be ISO datetimes with an explicit UTC offset.");
+    }
+    if (Date.parse(dateEnd) <= Date.parse(dateStart)) badRequest("dateEnd must be after dateStart.");
+    appointment = homeownerAppointmentLabels(dateStart, dateEnd);
+  }
+
+  const evidencePacket = await buildChanceEvidencePacket(contact, {
+    includeGmail: input.includeGmail !== false,
+    includeQuo: input.includeQuo !== false,
+    includeQuoTranscripts: input.includeQuoTranscripts === true,
+    communicationDays: input.communicationDays,
+    gmailLimit: input.gmailLimit,
+    gmailThreadLimit: input.gmailThreadLimit,
+    quoLimit: input.quoLimit
+  });
+  const evidence = compactClientCoordinatorEvidence(evidencePacket);
+  if (!evidencePacket.complete) {
+    return {
+      mode: "blocked_evidence",
+      approvalRequired: true,
+      file,
+      evidence,
+      reason: "A requested communication source is unavailable. Review the source error or explicitly prepare again with that source disabled before calling."
+    };
+  }
+
+  const reminderRules = clientCoordinatorReminderRules();
+  let conversation;
+  try {
+    conversation = buildClientCoordinatorConversation({
+      mode,
+      firstName: String(file.name || "there").trim().split(/\s+/)[0] || "there",
+      appointmentDate: appointment.date,
+      appointmentWindow: appointment.window,
+      interiorAccessRequired: input.interiorAccessRequired !== false,
+      documentNeeded: input.documentNeeded,
+      statusUpdate: input.statusUpdate,
+      checkInReason: input.checkInReason,
+      approvedContext: input.approvedContext,
+      reminderTopics: input.reminderTopics,
+      reminderRules
+    });
+  } catch (error) {
+    badRequest(error.message);
+  }
+
+  for (const topic of conversation.reminderTopics) {
+    if (!reminderRules[topic]) badRequest(`Verified Brain guidance is unavailable for reminder topic ${topic}.`);
+  }
+
+  const evidenceFingerprint = clientCoordinatorEvidenceFingerprint(evidence);
   const dynamicVariables = {
-    directionMode: "outbound_homeowner",
-    goal: "homeowner_appointment_confirmation",
-    objective: `Confirm ${file.name}'s availability and interior access for the scheduled carrier inspection.`,
-    homeownerFirstName: firstName,
+    directionMode: "outbound_client_coordinator",
+    goal: "client_coordinator",
+    homeownerFirstName: String(file.name || "there").trim().split(/\s+/)[0] || "there",
     insuredName: file.name,
     homeownerPhone: file.phone,
     homeownerEmail: file.email || "Missing",
     propertyAddress: file.address,
     carrier: file.carrier || "the insurance carrier",
     claimNumber: file.claimNumber || "Missing",
-    appointmentDate: appointment.date,
-    appointmentWindow: appointment.window,
-    appointmentAccessRequirement: accessRequirement,
-    homeownerOutreachOpening: `Hey ${firstName}, this is Chance's assistant. How are you today?`,
-    homeownerOutreachMessage: `Well ${firstName}, I wanted to call and let you know we got an adjuster appointment scheduled ${appointment.date}, between ${appointment.window}. Will you be available to meet Chance and the adjuster?`,
+    coordinatorMode: conversation.mode,
+    coordinatorOpening: conversation.opening,
+    coordinatorPurpose: conversation.purpose,
+    coordinatorFallbackText: conversation.fallbackText,
+    coordinatorApprovedContext: conversation.approvedContext,
+    coordinatorReminderTopics: conversation.reminderTopics.join(", ") || "None",
+    coordinatorReminderGuidance: conversation.reminderGuidance,
+    appointmentDate: appointment.date || "Not applicable",
+    appointmentWindow: appointment.window || "Not applicable",
+    appointmentAccessRequirement: conversation.accessRequirement,
     batchClaimCount: "0",
     batchClaims: "None"
   };
@@ -1216,14 +1295,23 @@ async function retellHomeownerCall(input) {
     contactId: file.id,
     fileNumber: String(file.number || ""),
     ownerId: CHANCE_OWNER_ID,
-    goal: "homeowner_appointment_confirmation"
+    goal: "client_coordinator",
+    coordinatorMode: conversation.mode,
+    evidenceFingerprint
   };
-  const planDigest = digest({ to, agentId: RETELL_HOMEOWNER_AGENT_ID, metadata, dynamicVariables });
+  const planDigest = digest({
+    version: 1,
+    to,
+    agentId: RETELL_CLIENT_COORDINATOR_AGENT_ID,
+    metadata,
+    dynamicVariables,
+    evidenceFingerprint
+  });
   metadata.planDigest = planDigest;
   const request = {
     from_number: RETELL_FROM_NUMBER,
     to_number: to,
-    override_agent_id: RETELL_HOMEOWNER_AGENT_ID,
+    override_agent_id: RETELL_CLIENT_COORDINATOR_AGENT_ID,
     metadata,
     retell_llm_dynamic_variables: dynamicVariables
   };
@@ -1232,16 +1320,25 @@ async function retellHomeownerCall(input) {
     return {
       mode: "dry_run",
       approvalRequired: true,
+      automaticFallbackText: false,
+      automaticJobNimbusWriteback: false,
       file,
       planDigest,
       appointment,
-      request: previewRetellRequest(request)
+      conversation,
+      evidence,
+      request: previewRetellRequest(request),
+      nextStep: "Show Chance the exact purpose, Brain reminders, context, and fallback text. Nothing is called or sent until the unchanged plan is approved."
     };
   }
+
   assertApprovalDigest(input.planDigest, planDigest);
   if (!ALLOW_RETELL_CALLS) badRequest("Retell calls are disabled.");
-  if (!RETELL_API_KEY || !RETELL_HOMEOWNER_AGENT_ID || !RETELL_FROM_NUMBER) {
-    badRequest("Retell is not fully configured.");
+  if (mode !== "appointment_confirmation" && !ALLOW_CLIENT_COORDINATOR_CALLS) {
+    badRequest("Expanded Client Coordinator calls are disabled until the dedicated prompt is reviewed, published, and ALLOW_CLIENT_COORDINATOR_CALLS=true.");
+  }
+  if (!RETELL_API_KEY || !RETELL_CLIENT_COORDINATOR_AGENT_ID || !RETELL_FROM_NUMBER) {
+    badRequest("The Retell Client Coordinator is not fully configured.");
   }
   const prior = await findRemoteClaimCallAttempt(planDigest, "");
   if (prior) {
@@ -1254,50 +1351,213 @@ async function retellHomeownerCall(input) {
       createdAt: prior.createdAt
     };
   }
+
   const result = await retellApi("POST", "/v2/create-phone-call", request);
   const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
     channel: "retell",
-    action: "place_homeowner_appointment_call",
+    action: "place_client_coordinator_call",
     status: result.call_status || "registered",
     subjectKey: file.id,
     fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
-    summary: "Placed approved Retell homeowner appointment confirmation call.",
+    summary: `Placed approved Retell Client Coordinator call for ${conversation.mode}.`,
     externalId: result.call_id,
     evidence: result.call_id ? [`retell:${result.call_id}`] : []
   });
   return {
     mode: "executed",
     file,
+    coordinatorMode: conversation.mode,
     planDigest,
     callId: result.call_id,
     callStatus: result.call_status,
-    nextStep: "Review the call result before sending any fallback text.",
+    nextStep: "Review the completed call before approving any fallback text, JobNimbus update, task, or human follow-up.",
     memoryCloseout
   };
 }
 
 async function retellHomeownerCallResult(input) {
+  return retellClientCoordinatorCallResult(input);
+}
+
+async function retellClientCoordinatorCallResult(input = {}) {
   const callId = required(input.callId, "callId");
   const call = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
-  if (call.metadata?.source !== "hcn-wave-jobnimbus-bridge" || call.metadata?.goal !== "homeowner_appointment_confirmation") {
-    badRequest("This is not a bridge homeowner appointment call.");
+  const validGoal = ["homeowner_appointment_confirmation", "client_coordinator"].includes(call.metadata?.goal);
+  if (call.metadata?.source !== "hcn-wave-jobnimbus-bridge" || !validGoal) {
+    badRequest("This is not a bridge Client Coordinator call.");
   }
+  const result = extractClientCoordinatorResult(call);
+  const fallbackText = String(call.retell_llm_dynamic_variables?.coordinatorFallbackText || "").trim();
   return {
     mode: "read_only",
-    call: {
-      callId: call.call_id,
-      status: call.call_status,
-      disconnectionReason: call.disconnection_reason || "",
-      durationMs: call.duration_ms || 0,
-      transcript: call.transcript || "",
-      summary: call.call_analysis?.call_summary || "",
-      successful: call.call_analysis?.call_successful ?? null
-    },
+    call: result,
     file: {
       id: call.metadata.contactId || "",
       number: call.metadata.fileNumber || ""
-    }
+    },
+    coordinatorMode: call.metadata.coordinatorMode || "appointment_confirmation",
+    proposedFollowUps: clientCoordinatorProposedFollowUps(result, fallbackText),
+    instruction: "These are review-only results. Do not send the fallback text or write JobNimbus until Chance approves the exact proposed action."
   };
+}
+
+function compactClientCoordinatorEvidence(packet = {}) {
+  const gmailMessages = (Array.isArray(packet.gmail?.messages) ? packet.gmail.messages : [])
+    .slice(0, 5)
+    .map((message) => ({
+      id: message.id || "",
+      threadId: message.threadId || "",
+      date: message.date || message.internalDate || "",
+      from: message.from || "",
+      to: message.to || "",
+      subject: message.subject || "",
+      snippet: String(message.snippet || message.text || "").slice(0, 800)
+    }));
+  const gmailThreads = (Array.isArray(packet.gmail?.threads) ? packet.gmail.threads : [])
+    .slice(0, 3)
+    .map((thread) => ({
+      id: thread.id || "",
+      messageCount: Number(thread.messageCount || 0),
+      messages: (Array.isArray(thread.messages) ? thread.messages : []).slice(-3).map((message) => ({
+        date: message.date || "",
+        from: message.from || "",
+        to: message.to || "",
+        subject: message.subject || "",
+        text: String(message.text || "").slice(0, 1200),
+        attachments: Array.isArray(message.attachments) ? message.attachments.slice(0, 8) : []
+      })),
+      assistantRead: thread.assistantRead || null
+    }));
+  const quoTimeline = (Array.isArray(packet.quo?.timeline) ? packet.quo.timeline : [])
+    .slice(0, 10)
+    .map((item) => ({
+      id: item.id || "",
+      type: item.type || "",
+      line: item.line || "",
+      at: item.at || item.atUtc || "",
+      direction: item.direction || "",
+      status: item.status || "",
+      text: String(item.text || "").slice(0, 1000),
+      durationSec: Number(item.durationSec || 0),
+      aiHandled: Boolean(item.aiHandled)
+    }));
+  const quoTranscripts = (Array.isArray(packet.quo?.transcripts) ? packet.quo.transcripts : [])
+    .slice(0, 3)
+    .map((transcript) => ({
+      callId: transcript.callId || "",
+      status: transcript.status || "",
+      duration: Number(transcript.duration || 0),
+      dialogue: (Array.isArray(transcript.dialogue) ? transcript.dialogue : []).slice(0, 80).map((segment) => ({
+        who: segment.who || "",
+        at: segment.at || 0,
+        text: String(segment.text || "").slice(0, 800)
+      }))
+    }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    complete: packet.complete === true,
+    file: packet.file || {},
+    sourceStatus: packet.sourceStatus || {},
+    jobNimbus: {
+      recentActivities: (packet.liveJobNimbus?.recentActivities || []).slice(0, 10),
+      openTasks: (packet.liveJobNimbus?.openTasks || []).slice(0, 10),
+      operationalDocuments: (packet.liveJobNimbus?.operationalDocuments || []).slice(0, 15),
+      excludedPhotoLikeDocumentCount: Number(packet.liveJobNimbus?.excludedPhotoLikeDocumentCount || 0),
+      assistantRead: packet.liveJobNimbus?.assistantRead || null
+    },
+    gmail: {
+      status: packet.gmail?.status || "not_requested",
+      error: packet.gmail?.error || "",
+      query: packet.gmail?.query || "",
+      messages: gmailMessages,
+      threads: gmailThreads
+    },
+    quo: {
+      status: packet.quo?.status || "not_requested",
+      error: packet.quo?.error || "",
+      phone: packet.quo?.phone || "",
+      timeline: quoTimeline,
+      transcripts: quoTranscripts,
+      authority: "Company-wide Quo communication is read-only evidence. This call cannot send from any employee's line."
+    },
+    actionReceipts: (Array.isArray(packet.actionReceipts) ? packet.actionReceipts : []).slice(0, 8),
+    factualSignals: packet.factualSignals || {}
+  };
+}
+
+function clientCoordinatorEvidenceFingerprint(evidence = {}) {
+  const sourceStatus = Object.fromEntries(
+    Object.entries(evidence.sourceStatus || {}).map(([source, value]) => [source, {
+      status: value?.status || "",
+      error: value?.error || ""
+    }])
+  );
+  return digest({
+    version: 1,
+    complete: evidence.complete === true,
+    file: evidence.file || {},
+    sourceStatus,
+    jobNimbus: evidence.jobNimbus || {},
+    gmail: evidence.gmail || {},
+    quo: evidence.quo || {},
+    actionReceipts: evidence.actionReceipts || [],
+    factualSignals: evidence.factualSignals || {}
+  });
+}
+
+function clientCoordinatorReminderRules() {
+  const records = listMemory(MEMORY_CONFIG, {
+    lane: "company",
+    status: "verified",
+    subjectKey: "client-communication-three-reminders"
+  });
+  const byDedupKey = new Map(records.map((record) => [record.dedupKey, record.content]));
+  return {
+    process_timing: byDedupKey.get("company:decision:three-client-reminders-process-time") || "",
+    titan_role: byDedupKey.get("company:decision:three-client-reminders-titan-role") || "",
+    part_b_scope: byDedupKey.get("company:decision:three-client-reminders-part-b") || ""
+  };
+}
+
+function clientCoordinatorProposedFollowUps(result, fallbackText) {
+  const structured = result.structured || {};
+  const proposals = [];
+  if (structured.optOutRequested) {
+    proposals.push({
+      type: "manual_contact_preference_review",
+      approvalRequired: true,
+      reason: "The client requested that automated calls stop. Do not call or send a fallback text until Chance reviews the contact preference."
+    });
+  } else if (["voicemail_or_automated", "no_answer", "disconnected"].includes(structured.contactOutcome) && fallbackText) {
+    proposals.push({
+      type: "quo_text",
+      exactText: fallbackText,
+      approvalRequired: true,
+      reason: "The approved call purpose was not completed. This text is a proposal only and was not sent."
+    });
+  }
+  if (structured.documentCommitment) {
+    proposals.push({
+      type: "verify_document_receipt",
+      approvalRequired: false,
+      detail: structured.documentCommitment,
+      reason: "Confirm the promised document actually arrives before updating the file."
+    });
+  }
+  if (structured.clientQuestions || structured.clientConcerns || structured.followUpNeeded || structured.writtenFollowUpRequested) {
+    proposals.push({
+      type: "human_follow_up_review",
+      approvalRequired: true,
+      preferredContactMethod: structured.preferredContactMethod || "unspecified",
+      clientQuestions: structured.clientQuestions || "",
+      clientConcerns: structured.clientConcerns || "",
+      followUpNeeded: structured.followUpNeeded || "",
+      writtenFollowUpRequested: structured.writtenFollowUpRequested === true,
+      reason: "Chance or Andrea should review the exact question or concern before any response is drafted or sent."
+    });
+  }
+  return proposals;
 }
 
 function homeownerAppointmentLabels(dateStart, dateEnd) {
@@ -1621,6 +1881,94 @@ async function configureRetellAgent(input = {}) {
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
     nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
+  };
+}
+
+async function configureClientCoordinatorAgent(input = {}) {
+  if (!RETELL_API_KEY || !RETELL_CLIENT_COORDINATOR_AGENT_ID) {
+    badRequest("RETELL_API_KEY and RETELL_CLIENT_COORDINATOR_AGENT_ID are required.");
+  }
+  const agent = await retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_CLIENT_COORDINATOR_AGENT_ID)}`);
+  const llmId = String(agent?.response_engine?.llm_id || "").trim();
+  if (agent?.response_engine?.type !== "retell-llm" || !llmId) {
+    badRequest("The configured Retell Client Coordinator does not use a Retell LLM response engine.");
+  }
+
+  const llmConfig = buildClientCoordinatorLlmConfig();
+  const analysisSchema = clientCoordinatorAnalysisSchema();
+  const configDigest = digest({
+    agentId: RETELL_CLIENT_COORDINATOR_AGENT_ID,
+    llmId,
+    generalPrompt: llmConfig.general_prompt,
+    generalTools: llmConfig.general_tools,
+    postCallAnalysisData: analysisSchema,
+    timeZone: OPERATIONS_TIME_ZONE
+  });
+  const preview = {
+    agentId: RETELL_CLIENT_COORDINATOR_AGENT_ID,
+    llmId,
+    currentAgentVersion: agent.version,
+    currentPublished: Boolean(agent.is_published),
+    supportedModes: ["appointment_confirmation", "missing_document_request", "status_update", "client_check_in"],
+    configDigest,
+    promptCharacters: llmConfig.general_prompt.length,
+    toolNames: llmConfig.general_tools.map((tool) => tool.name),
+    analysisFields: analysisSchema.map((field) => field.name),
+    exactConfiguration: {
+      generalPrompt: llmConfig.general_prompt,
+      generalTools: llmConfig.general_tools,
+      beginMessage: llmConfig.begin_message,
+      postCallAnalysisData: analysisSchema,
+      timeZone: OPERATIONS_TIME_ZONE
+    }
+  };
+
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      approvalRequired: true,
+      publishRequired: true,
+      ...preview,
+      nextStep: "Review the exact prompt, tools, extraction fields, and digest with Chance. Nothing is changed in Retell until the unchanged configuration is approved."
+    };
+  }
+  if (input.publish !== true) {
+    badRequest("publish=true is required with execute=true so the live Client Coordinator cannot drift from the reviewed prompt.");
+  }
+  assertApprovalDigest(input.configDigest, configDigest, "configDigest");
+
+  const llm = await retellApi("PATCH", `/update-retell-llm/${encodeURIComponent(llmId)}`, {
+    general_prompt: llmConfig.general_prompt,
+    general_tools: llmConfig.general_tools,
+    begin_message: llmConfig.begin_message
+  });
+  const llmVersion = Number(llm.version);
+  if (!Number.isInteger(llmVersion) || llmVersion < 0) {
+    badRequest("Retell updated the Client Coordinator LLM but did not return a usable version.");
+  }
+  const updatedAgent = await retellApi("PATCH", `/update-agent/${encodeURIComponent(RETELL_CLIENT_COORDINATOR_AGENT_ID)}`, {
+    response_engine: { type: "retell-llm", llm_id: llmId, version: llmVersion },
+    post_call_analysis_data: analysisSchema,
+    post_call_analysis_model: "gpt-4.1-mini",
+    timezone: OPERATIONS_TIME_ZONE
+  });
+  const version = Number(updatedAgent.version);
+  if (!Number.isInteger(version) || version < 0) {
+    badRequest("Retell updated the Client Coordinator draft but did not return a publishable version.");
+  }
+  await retellApi("POST", `/publish-agent-version/${encodeURIComponent(RETELL_CLIENT_COORDINATOR_AGENT_ID)}`, {
+    version,
+    version_title: "HCN Wave Client Coordinator",
+    version_description: "Approval-gated client coordination using fresh Chance evidence, verified Brain reminders, and review-only post-call follow-ups."
+  });
+
+  return {
+    mode: "executed",
+    published: true,
+    ...preview,
+    publishedAgentVersion: version,
+    retellLlmVersion: llmVersion,
+    nextStep: "Keep expanded modes disabled until Chance reviews one dry-run call plan. No call was placed by this configuration action."
   };
 }
 
@@ -5486,6 +5834,57 @@ const OPENAPI = {
           publish: { type: "boolean", default: false, description: "Must be true with execute=true. Publishes the updated draft so the live caller cannot drift from bridge code." }
         }
       },
+      RetellClientCoordinatorConfigurationRequest: {
+        type: "object",
+        properties: {
+          configDigest: { type: "string", description: "Exact digest returned by the Client Coordinator configuration dry run." },
+          execute: { type: "boolean", default: false, description: "False returns the full prompt/tools/schema for review. True changes Retell only when the digest matches." },
+          publish: { type: "boolean", default: false, description: "Must be true with execute=true so the reviewed draft is the published live version." }
+        }
+      },
+      RetellClientCoordinatorCallRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Exact Chance-owned JobNimbus file identifier." },
+          mode: {
+            type: "string",
+            enum: ["appointment_confirmation", "missing_document_request", "status_update", "client_check_in"],
+            default: "appointment_confirmation",
+            description: "One approved client-coordination purpose for this call."
+          },
+          dateStart: { type: "string", description: "Required only for appointment confirmation. ISO 8601 arrival-window start with an explicit UTC offset." },
+          dateEnd: { type: "string", description: "Required only for appointment confirmation. ISO 8601 arrival-window end with an explicit UTC offset." },
+          interiorAccessRequired: { type: "boolean", default: true },
+          documentNeeded: { type: "string", description: "Required only for missing_document_request. Name the exact document requested." },
+          statusUpdate: { type: "string", description: "Required only for status_update. Must contain only facts verified from the fresh evidence packet." },
+          checkInReason: { type: "string", description: "Optional concise reason for a client_check_in." },
+          approvedContext: { type: "string", maxLength: 1600, description: "Exact factual context Chance approves for directly related client questions. This is a ceiling, not a script." },
+          reminderTopics: {
+            type: "array",
+            maxItems: 3,
+            uniqueItems: true,
+            items: { type: "string", enum: ["process_timing", "titan_role", "part_b_scope"] },
+            description: "Optional verified Brain reminder topics approved for this specific call. Omit unless relevant."
+          },
+          includeGmail: { type: "boolean", default: true },
+          includeQuo: { type: "boolean", default: true, description: "Reads matching communication across all company Quo lines as evidence only." },
+          includeQuoTranscripts: { type: "boolean", default: false },
+          communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
+          gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
+          gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
+          quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 25 },
+          planDigest: { type: "string", description: "Exact digest returned by the unchanged dry run." },
+          execute: { type: "boolean", default: false, description: "False reviews fresh evidence and returns an exact plan. True places one call only after Chance approves the unchanged digest." }
+        },
+        required: ["query"]
+      },
+      RetellClientCoordinatorCallResultRequest: {
+        type: "object",
+        properties: {
+          callId: { type: "string", description: "Retell call id returned by placeApprovedClientCoordinatorCall." }
+        },
+        required: ["callId"]
+      },
       RetellHomeownerCallRequest: {
         type: "object",
         properties: {
@@ -5696,6 +6095,29 @@ const OPENAPI = {
         operationId: "configureApprovedRetellAgent",
         requestBody: jsonBody("RetellAgentConfigurationRequest"),
         responses: { "200": { description: "Dry-runs or, after exact digest approval, updates and publishes the Retell prompt, tools, timezone, and post-call extraction schema." } }
+      }
+    },
+    "/retell/configure-client-coordinator": {
+      post: {
+        operationId: "configureApprovedClientCoordinatorAgent",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("RetellClientCoordinatorConfigurationRequest"),
+        responses: { "200": { description: "Returns the exact Client Coordinator prompt, tools, and extraction schema or, after matching-digest approval, updates and publishes that Retell configuration. Never places a call." } }
+      }
+    },
+    "/retell/client-coordinator-call": {
+      post: {
+        operationId: "placeApprovedClientCoordinatorCall",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("RetellClientCoordinatorCallRequest"),
+        responses: { "200": { description: "Reviews fresh Chance-owned JobNimbus, Gmail, company-wide Quo, documents, tasks, and private receipts; returns an exact approval-gated plan or places one approved Client Coordinator call. It cannot send a fallback text or write JobNimbus." } }
+      }
+    },
+    "/retell/client-coordinator-call-result": {
+      post: {
+        operationId: "reviewClientCoordinatorCall",
+        requestBody: jsonBody("RetellClientCoordinatorCallResultRequest"),
+        responses: { "200": { description: "Returns transcript, structured client commitments, questions, opt-out status, and review-only follow-up proposals. It sends and writes nothing." } }
       }
     },
     "/retell/homeowner-call": {
