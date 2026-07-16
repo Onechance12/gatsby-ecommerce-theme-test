@@ -1987,7 +1987,7 @@ async function configureRetellAgent(input = {}) {
   if (!Number.isInteger(version) || version < 0) badRequest("Retell updated the draft but did not return a publishable agent version.");
   await retellApi("POST", `/publish-agent-version/${encodeURIComponent(RETELL_AGENT_ID)}`, {
     version,
-    version_title: "Unified appointment availability",
+    version_title: "Carrier filing safeguards and verified property facts",
     version_description: "Chance-scoped JobNimbus and Google Calendar scheduling authority with approval-gated calendar writeback."
   });
 
@@ -2388,6 +2388,11 @@ function claimPlanOptions(input, file) {
     stormTime: input.stormTime,
     occupancy: input.occupancy,
     damageDiscovered: input.damageDiscovered,
+    propertyStories: input.propertyStories,
+    roofAccessibility: input.roofAccessibility,
+    damagedRooms: input.damagedRooms,
+    damagedRoomCount: input.damagedRoomCount,
+    contractorPhone: input.contractorPhone,
     injuries: input.injuries,
     homeLivable: input.homeLivable,
     temporaryRepairs: input.temporaryRepairs,
@@ -6531,6 +6536,11 @@ const OPENAPI = {
           stormTime: { type: "string", description: "Optional Chance-approved or document-verified time. Omit vague guesses: the bridge automatically matches the confirmed JobNimbus DOL to nearby public NWS hail reports and adds a sourced approximate time when available." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
+          propertyStories: { type: "string", description: "Verified number of stories, for example 'One story'. Never guess." },
+          roofAccessibility: { type: "string", description: "Verified roof access/steepness answer. Never guess." },
+          damagedRooms: { type: "string", description: "Verified damaged interior rooms or areas." },
+          damagedRoomCount: { type: "string", description: "Verified count of damaged rooms/areas." },
+          contractorPhone: { type: "string", description: "Verified contractor phone number. Never guess." },
           injuries: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           homeLivable: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           temporaryRepairs: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
@@ -6550,6 +6560,11 @@ const OPENAPI = {
           stormTime: { type: "string", description: "Use the same explicit time override supplied during preparation, if any. Otherwise omit so the bridge repeats automatic sourced weather-time enrichment before digest validation." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
+          propertyStories: { type: "string" },
+          roofAccessibility: { type: "string" },
+          damagedRooms: { type: "string" },
+          damagedRoomCount: { type: "string" },
+          contractorPhone: { type: "string" },
           injuries: { type: "string" },
           homeLivable: { type: "string" },
           temporaryRepairs: { type: "string" },

@@ -11,7 +11,7 @@ import {
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-07-16.1";
+export const CLAIM_PLAN_VERSION = "2026-07-16.2";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export function buildClaimFilingPlan(input, options = {}) {
@@ -27,6 +27,11 @@ export function buildClaimFilingPlan(input, options = {}) {
     stormTime: options.stormTime,
     occupancy: options.occupancy,
     damageDiscovered: options.damageDiscovered,
+    propertyStories: options.propertyStories,
+    roofAccessibility: options.roofAccessibility,
+    damagedRooms: options.damagedRooms,
+    damagedRoomCount: options.damagedRoomCount,
+    contractorPhone: options.contractorPhone,
     injuries: options.injuries,
     homeLivable: options.homeLivable,
     temporaryRepairs: options.temporaryRepairs,

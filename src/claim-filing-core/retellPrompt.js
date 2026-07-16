@@ -238,6 +238,11 @@ export function renderRetellPrompt(packet) {
       "the public adjuster with Wave Public Adjusting; Titan Reconstruction is the contractor on the project.)",
     "- Owner occupied / who lives there? -> {{occupancy}}",
     "- How/when was the damage discovered? -> {{damageDiscovered}}",
+    "- How many stories is the home? -> {{propertyStories}}",
+    "- Is the roof safely accessible / steeper than an average staircase? -> {{roofAccessibility}}",
+    "- Which interior rooms or areas were damaged? -> {{damagedRooms}}",
+    "- How many rooms or interior areas were damaged? -> {{damagedRoomCount}}",
+    "- Contractor phone number, only if asked -> {{contractorPhone}}",
     "- Best contact for the claim going forward -> our office: (972) 573-1730, cpearson@wavepa.com. Give the " +
       "homeowner's phone only if they specifically need to reach the homeowner directly.",
     "When any fact above says 'Missing', or a rep asks for something not listed here, answer NATURALLY, briefly, and " +
@@ -431,7 +436,9 @@ export function renderRetellPrompt(packet) {
       "mid-sentence, either finish the remaining few words once or yield with 'sorry, go ahead' and wait. Never " +
       "loop the same phrase (e.g. repeating 'the property address is...') multiple times.",
     "- NEVER guess or answer 'yes'/'no' to a question whose answer is not in your file facts or the standard filing " +
-      "answers above. If the listed value is 'Missing', do not invent one — defer naturally and offer to follow up.",
+      "answers above. If the listed value is 'Missing', say only: 'I don't have that verified in front of me.' Then stop. " +
+      "Do not promise to follow up, retrieve it later, or contact the homeowner unless the representative explicitly " +
+      "creates a required follow-up action.",
     "- When verifying emails, spell them out slowly with the NATO phonetic alphabet (A as in Alpha, B as in Bravo) " +
       "only when asked, and don't repeat them excessively once confirmed.",
     "",

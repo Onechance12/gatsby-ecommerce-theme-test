@@ -56,7 +56,7 @@ goal per call.
 | `assessReadiness(packet, to, carrier)` | Carrier-aware readiness (missing policy is a warning unless `carrier.requiresPolicyNumber`). |
 | `existingClaimBlock(claimNumber, goal)` | Duplicate-new-claim guard for the adapter. |
 | `flattenFactsForDynamicVariables(packet)`, `PROMPT_PLACEHOLDERS` | Retell dynamic variables (defaults every placeholder). |
-| `buildRetellLlmFromPacket(packet, options)`, `renderRetellPrompt(packet)`, `postCallAnalysisSchema()` | Retell prompt, tools (`end_call` + `press_digit`), and the post-call analysis schema. |
+| `buildRetellLlmFromPacket(packet, options)`, `renderRetellPrompt(packet)`, `postCallAnalysisSchema()` | Retell prompt, tools (`request_guarded_end_call` + `press_digit`), and the post-call analysis schema. |
 | `extractCallResults(call)`, `inferOutcome(...)`, `transcript*` | Post-call extraction with **per-field source** (`retell-analysis` / `transcript-guess` / `none`). |
 | `buildWritebackProposal(file, ex)` | DRY-RUN JobNimbus proposal: `proposedFields`, `fieldConfidence`, `proposedNote`, `unverified`, `outcome`. |
 

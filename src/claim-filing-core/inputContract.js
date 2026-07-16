@@ -19,11 +19,15 @@
 //       notes: [{ body }],
 //       tasks: [{ title }]            // carried for the adapter; not used by packet math
 //     },
-//     captured: { stormTime, occupancy, damageDiscovered },   // inspection capture
+//     captured: { stormTime, occupancy, damageDiscovered, propertyStories,
+//                 roofAccessibility, damagedRooms, damagedRoomCount,
+//                 contractorPhone },   // inspection/file capture
 //     overrides: {                    // approved per-call answers/goal
 //       goal, carrierPhone,
 //       injuries, homeLivable, temporaryRepairs, contractorHired,
-//       occupancy, damageDiscovered, stormTime, damageOpening, damageDetails
+//       occupancy, damageDiscovered, stormTime, damageOpening, damageDetails,
+//       propertyStories, roofAccessibility, damagedRooms, damagedRoomCount,
+//       contractorPhone
 //     }
 //   }
 export function normalizeClaimFileInput(raw = {}) {
@@ -63,7 +67,12 @@ export function normalizeClaimFileInput(raw = {}) {
     captured: {
       stormTime: captured.stormTime || "",
       occupancy: captured.occupancy || "",
-      damageDiscovered: captured.damageDiscovered || ""
+      damageDiscovered: captured.damageDiscovered || "",
+      propertyStories: captured.propertyStories || "",
+      roofAccessibility: captured.roofAccessibility || "",
+      damagedRooms: captured.damagedRooms || "",
+      damagedRoomCount: captured.damagedRoomCount || "",
+      contractorPhone: captured.contractorPhone || ""
     },
     overrides: { ...overrides }
   };

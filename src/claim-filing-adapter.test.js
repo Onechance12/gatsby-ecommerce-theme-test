@@ -360,6 +360,29 @@ test("claim packet separates the short damage opening from detailed follow-up sc
   assert.match(renderRetellPrompt({}), /When a human representative first asks broadly what was damaged/);
 });
 
+test("verified property intake facts travel into Retell without global assumptions", () => {
+  const plan = buildClaimFilingPlan(fixture(), {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1",
+    propertyStories: "One story",
+    roofAccessibility: "Not verified",
+    damagedRooms: "Bathroom ceiling and adjoining walls",
+    damagedRoomCount: "One bathroom area",
+    contractorPhone: "Missing"
+  });
+
+  assert.equal(plan.callPlan.dynamicVariables.propertyStories, "One story");
+  assert.equal(plan.callPlan.dynamicVariables.roofAccessibility, "Not verified");
+  assert.equal(plan.callPlan.dynamicVariables.damagedRooms, "Bathroom ceiling and adjoining walls");
+  assert.equal(plan.callPlan.dynamicVariables.damagedRoomCount, "One bathroom area");
+  assert.equal(plan.callPlan.dynamicVariables.contractorPhone, "Missing");
+  const prompt = renderRetellPrompt({});
+  assert.match(prompt, /How many stories is the home\?/);
+  assert.match(prompt, /I don't have that verified in front of me/);
+  assert.doesNotMatch(prompt, /defer naturally and offer to follow up/);
+});
+
 test("approved per-call overrides replace stale verified carrier and DOL facts", () => {
   const input = fixture();
   input.file.carrier = "Allsate";

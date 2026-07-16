@@ -22,8 +22,10 @@ const ALLOWED_GOALS = new Set([
 //   input   — canonical claim-file input (inputContract.js) OR a raw shape that
 //             normalizeClaimFileInput can coerce.
 //   options — per-call knobs: goal, carrierPhone, stormTime, occupancy,
-//             damageDiscovered, injuries, homeLivable, temporaryRepairs,
-//             contractorHired. Options override the input.overrides/captured.
+//             damageDiscovered, propertyStories, roofAccessibility,
+//             damagedRooms, damagedRoomCount, contractorPhone, injuries,
+//             homeLivable, temporaryRepairs, contractorHired. Options override
+//             the input.overrides/captured.
 export function buildClaimCallPacket(input, options = {}) {
   const normalized = normalizeClaimFileInput(input);
   const file = normalized.file;
@@ -55,6 +57,11 @@ export function buildClaimCallPacket(input, options = {}) {
     contractorHired: standard.contractorHired,
     occupancy: overrides.occupancy || captured.occupancy || "Missing",
     damageDiscovered: overrides.damageDiscovered || captured.damageDiscovered || "Missing",
+    propertyStories: overrides.propertyStories || captured.propertyStories || "Missing",
+    roofAccessibility: overrides.roofAccessibility || captured.roofAccessibility || "Missing",
+    damagedRooms: overrides.damagedRooms || captured.damagedRooms || "Missing",
+    damagedRoomCount: overrides.damagedRoomCount || captured.damagedRoomCount || "Missing",
+    contractorPhone: overrides.contractorPhone || captured.contractorPhone || "Missing",
     carrierPhone: overrides.carrierPhone || "User will provide / caller should find claims phone if needed"
   };
 
