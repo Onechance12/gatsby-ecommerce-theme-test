@@ -33,6 +33,7 @@ import {
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
 const API_BASE = stripTrailingSlash(process.env.JOBNIMBUS_API_BASE_URL || "https://app.jobnimbus.com/api1");
+const JOBNIMBUS_FILE_BASE_URL = stripTrailingSlash(process.env.JOBNIMBUS_FILE_BASE_URL || "https://app.jobnimbus.com/files");
 const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const ALLOW_WRITES = process.env.BRIDGE_ALLOW_WRITES === "true";
@@ -50,6 +51,7 @@ const ARTIFACT_STORE_PATH = process.env.ARTIFACT_STORE_PATH || path.join(BRIDGE_
 const ARTIFACT_UPLOAD_DIR = process.env.ARTIFACT_UPLOAD_DIR || path.join(BRIDGE_DATA_DIR, "artifact-uploads");
 const ARTIFACT_FILE_DIR = process.env.ARTIFACT_FILE_DIR || path.join(BRIDGE_DATA_DIR, "artifacts");
 const MAX_ARTIFACT_BYTES = positiveIntegerEnv("MAX_ARTIFACT_BYTES", 5 * 1024 * 1024);
+const MAX_CHATGPT_FILE_BYTES = Math.min(positiveIntegerEnv("MAX_CHATGPT_FILE_BYTES", 8 * 1024 * 1024), 10 * 1024 * 1024);
 const ARTIFACT_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("ARTIFACT_TTL_HOURS", 72), 168));
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
@@ -125,6 +127,7 @@ const routes = new Map([
   ["POST /jobnimbus/assigned-counts", assignedCounts],
   ["POST /jobnimbus/document-text", documentText],
   ["POST /jobnimbus/document-review", documentReview],
+  ["POST /jobnimbus/document-file", documentFileForChat],
   ["POST /jobnimbus/upload-file", uploadJobNimbusFile],
   ["POST /jobnimbus/update-contact", updateContact],
   ["POST /jobnimbus/update-status", updateStatus],
@@ -227,6 +230,14 @@ function health() {
       failedSendRequiresFreshApproval: true
     },
     ocrMode: "poppler+tesseract",
+    chatgptDocumentReturn: {
+      available: true,
+      mode: "openaiFileResponse_inline",
+      maxBytes: MAX_CHATGPT_FILE_BYTES,
+      nativeConversationFile: true,
+      readOnly: true,
+      imagesAndVideoAllowed: false
+    },
     artifactMailbox: {
       available: Boolean(BRIDGE_TOKEN),
       authentication: "bearer_token_required",
@@ -350,6 +361,7 @@ const CHATGPT_ACTION_PATHS = [
   "/jobnimbus/search",
   "/jobnimbus/review-file",
   "/jobnimbus/document-review",
+  "/jobnimbus/document-file",
   "/jobnimbus/upload-file",
   "/jobnimbus/process-update",
   "/jobnimbus/create-task",
@@ -380,7 +392,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Curated 30-operation schema for the Chance Pearson HCN/Wave Custom GPT. Gmail and Quo live sends require Chance's explicit approval of the exact unchanged dry run."
+      description: "Curated 31-operation schema for the Chance Pearson HCN/Wave Custom GPT. Gmail and Quo live sends require Chance's explicit approval of the exact unchanged dry run."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
@@ -2118,6 +2130,42 @@ async function documentReview(input) {
   };
 }
 
+async function documentFileForChat(input) {
+  const query = required(input.query, "query");
+  const documentQuery = required(input.documentQuery || input.documentId, "documentQuery");
+  const { contact } = await findChanceContact(query);
+  const documents = await listRelated("/files", contact.jnid, 100);
+  const document = selectDocumentForChat(documents, documentQuery);
+  const downloaded = await downloadJobNimbusFile(document);
+  const filename = safeMimeFilename(
+    downloaded.filename || compactDocument(document).name || `jobnimbus-document-${document.jnid || document.id || "file"}`
+  );
+  const mimeType = chatgptDocumentMimeType(downloaded.contentType, filename);
+  const checked = validateEmailAttachment({
+    filename,
+    contentType: mimeType,
+    bytes: downloaded.bytes
+  });
+  if (checked.bytes.length > MAX_CHATGPT_FILE_BYTES) {
+    badRequest(
+      `Document ${checked.filename} is ${checked.bytes.length} bytes. The ChatGPT conversation-file limit for this bridge is ${MAX_CHATGPT_FILE_BYTES} bytes.`
+    );
+  }
+
+  return {
+    file: compactContact(contact),
+    document: compactDocument(document),
+    bytes: checked.bytes.length,
+    contentType: mimeType,
+    reviewInstruction: "The original JobNimbus document is now attached to this conversation. Inspect the actual file and every relevant page with ChatGPT's native file/PDF analysis. Do not infer its contents from the filename or from a failed bridge extraction.",
+    openaiFileResponse: [{
+      name: checked.filename,
+      mime_type: mimeType,
+      content: checked.bytes.toString("base64")
+    }]
+  };
+}
+
 async function createNote(input) {
   if (input.execute === true && !ALLOW_WRITES) {
     badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute notes.");
@@ -2912,6 +2960,33 @@ function selectDocument(documents, documentQuery) {
     || null;
 }
 
+function selectDocumentForChat(documents, documentQuery) {
+  if (!documents.length) badRequest("No documents are attached to this Chance file.");
+  const needle = String(documentQuery || "").trim().toLowerCase();
+  if (!needle) badRequest("documentQuery is required so the bridge never returns the wrong client document.");
+
+  const exactIdMatches = documents.filter((doc) => String(doc.jnid || doc.id || "").toLowerCase() === needle);
+  if (exactIdMatches.length === 1) return exactIdMatches[0];
+
+  const exactNameMatches = documents.filter((doc) => {
+    const name = String(doc.name || doc.filename || doc.file_name || "").trim().toLowerCase();
+    return name === needle;
+  });
+  if (exactNameMatches.length === 1) return exactNameMatches[0];
+
+  const partialMatches = documents.filter((doc) => documentMatches(doc, needle));
+  if (partialMatches.length === 1) return partialMatches[0];
+
+  const candidates = (partialMatches.length ? partialMatches : documents)
+    .map((doc) => `${doc.jnid || doc.id || "unknown-id"}: ${compactDocument(doc).name || "unnamed document"}`)
+    .slice(0, 12)
+    .join("; ");
+  if (partialMatches.length > 1 || exactNameMatches.length > 1) {
+    badRequest(`Document query is ambiguous. Retry with the exact JobNimbus document id. Matches: ${candidates}`);
+  }
+  badRequest(`No JobNimbus document matched ${documentQuery}. Available documents: ${candidates}`);
+}
+
 function documentMatches(doc, needle) {
   return [
     doc.jnid,
@@ -2928,7 +3003,7 @@ function documentMatches(doc, needle) {
 async function downloadJobNimbusFile(doc) {
   const id = doc.jnid || doc.id;
   if (!id) badRequest("Selected document does not have a JobNimbus file id.");
-  const response = await fetch(`https://app.jobnimbus.com/files/${encodeURIComponent(id)}`, {
+  const response = await fetch(`${JOBNIMBUS_FILE_BASE_URL}/${encodeURIComponent(id)}`, {
     headers: { authorization: `Bearer ${API_KEY}` }
   });
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -2943,6 +3018,48 @@ async function downloadJobNimbusFile(doc) {
     contentType: response.headers.get("content-type") || "",
     filename: doc.name || doc.filename || doc.file_name || ""
   };
+}
+
+function chatgptDocumentMimeType(contentType, filename) {
+  const normalized = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+  const extension = path.extname(String(filename || "")).toLowerCase();
+  const inferred = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".html": "text/html",
+    ".rtf": "application/rtf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  }[extension];
+  const mimeType = inferred || normalized;
+  if (!mimeType || mimeType === "application/octet-stream") {
+    badRequest(`Cannot safely determine a supported document type for ${filename}.`);
+  }
+  if (/^(image|video|audio)\//.test(mimeType)) {
+    badRequest("GPT Actions cannot return image, video, or audio files as conversation attachments. Use bridge OCR for those file types.");
+  }
+  const allowed = mimeType.startsWith("text/") || [
+    "application/pdf",
+    "application/json",
+    "application/xml",
+    "application/rtf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  ].includes(mimeType);
+  if (!allowed) badRequest(`Unsupported ChatGPT conversation document type: ${mimeType}.`);
+  return mimeType;
 }
 
 async function extractDocumentText(downloaded, doc, maxChars, options = {}) {
@@ -4966,6 +5083,41 @@ const OPENAPI = {
         },
         required: ["query"]
       },
+      DocumentFileRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Exact Chance file/client identifier, preferably JobNimbus number, claim number, or exact address." },
+          documentQuery: { type: "string", description: "Required exact document id/name or a unique partial filename. Ambiguous matches are rejected." },
+          documentId: { type: "string", description: "Alias for documentQuery." }
+        },
+        required: ["query", "documentQuery"]
+      },
+      ChatGPTFileReturn: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Filename visible in the ChatGPT conversation." },
+          mime_type: { type: "string", description: "Verified MIME type used by ChatGPT file tools." },
+          content: { type: "string", format: "byte", description: "Original JobNimbus document bytes encoded as base64." }
+        },
+        required: ["name", "mime_type", "content"]
+      },
+      DocumentFileResponse: {
+        type: "object",
+        properties: {
+          file: { type: "object", additionalProperties: true },
+          document: { type: "object", additionalProperties: true },
+          bytes: { type: "integer" },
+          contentType: { type: "string" },
+          reviewInstruction: { type: "string" },
+          openaiFileResponse: {
+            type: "array",
+            minItems: 1,
+            maxItems: 1,
+            items: { $ref: "#/components/schemas/ChatGPTFileReturn" }
+          }
+        },
+        required: ["file", "document", "bytes", "contentType", "reviewInstruction", "openaiFileResponse"]
+      },
       JobNimbusUploadFileRequest: {
         type: "object",
         properties: {
@@ -5690,6 +5842,24 @@ const OPENAPI = {
         operationId: "reviewJobNimbusDocument",
         requestBody: jsonBody("DocumentReviewRequest"),
         responses: { "200": { description: "No-API document review with extracted text preview, likely fields, conflicts, and suggested uses." } }
+      }
+    },
+    "/jobnimbus/document-file": {
+      post: {
+        operationId: "attachJobNimbusDocumentToChat",
+        summary: "Return one exact JobNimbus document as a ChatGPT conversation file",
+        description: "Read-only fallback for scanned or visually complex documents. Returns the original verified file through openaiFileResponse so ChatGPT can inspect the actual pages with native file/PDF analysis.",
+        requestBody: jsonBody("DocumentFileRequest"),
+        responses: {
+          "200": {
+            description: "Original JobNimbus document attached to the ChatGPT conversation.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/DocumentFileResponse" }
+              }
+            }
+          }
+        }
       }
     },
     "/jobnimbus/upload-file": {

@@ -35,6 +35,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.brain.externalActions, false);
   assert.equal(health.outboundSafety.automaticEmailOrTextSending, false);
   assert.equal(health.outboundSafety.explicitChanceApprovalRequired, true);
+  assert.equal(health.chatgptDocumentReturn.nativeConversationFile, true);
+  assert.equal(health.chatgptDocumentReturn.readOnly, true);
   assert.equal(health.voice.streamPath, "/voice/twilio-stream");
   assert.equal(health.voice.streamUrl, undefined);
 
@@ -58,17 +60,19 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/gmail/send"].post["x-openai-isConsequential"], true);
   assert.equal(schema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(schema.paths["/gmail/attachment-review"].post.operationId, "reviewGmailAttachment");
+  assert.equal(schema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
 
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 30);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 31);
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/gmail/send"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/quo/send"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
+  assert.equal(chatgptSchema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
   assert.equal(chatgptSchema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
   assert.equal(chatgptSchema.paths["/voice/outbound-call"], undefined);
 
@@ -116,8 +120,14 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     display_name: "Other Owner",
     owners: [{ id: "someone-else" }]
   };
+  const fixturePdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "ascii");
   const fakeApi = createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeApiPort}`);
+    if (url.pathname === "/file-content/file-1") {
+      res.writeHead(200, { "content-type": "application/pdf" });
+      res.end(fixturePdf);
+      return;
+    }
     let body = {};
     if (url.pathname === "/contacts") body = { contacts: [chance, other] };
     else if (url.pathname === "/contacts/contact-chance") body = chance;
@@ -141,6 +151,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       ...process.env,
       PORT: String(bridgePort),
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_FILE_BASE_URL: `http://127.0.0.1:${fakeApiPort}/file-content`,
       JOBNIMBUS_API_KEY: "fixture-key",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-token",
       RETELL_AGENT_ID: "fixture-agent",
@@ -196,6 +207,21 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(chanceIndex.files[0].number, 2739);
   assert.equal(chanceIndex.files[0].missing.claimNumber, true);
   assert.equal(chanceIndex.files[0].missing.policyNumber, false);
+
+  const documentFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", documentQuery: "Carrier estimate.pdf" })
+  });
+  assert.equal(documentFileResponse.status, 200);
+  const documentFile = await documentFileResponse.json();
+  assert.equal(documentFile.file.id, chance.jnid);
+  assert.equal(documentFile.document.id, "file-1");
+  assert.equal(documentFile.openaiFileResponse.length, 1);
+  assert.equal(documentFile.openaiFileResponse[0].name, "Carrier estimate.pdf");
+  assert.equal(documentFile.openaiFileResponse[0].mime_type, "application/pdf");
+  assert.deepEqual(Buffer.from(documentFile.openaiFileResponse[0].content, "base64"), fixturePdf);
+  assert.match(documentFile.reviewInstruction, /actual file/i);
 
   const updateDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/process-update`, {
     method: "POST",

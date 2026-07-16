@@ -4,6 +4,9 @@ Small authenticated bridge that lets a ChatGPT Custom GPT Action read and, when 
 It also supports Gmail search/thread/attachment review, verified PDF attachments,
 Quo messages/calls/transcripts, durable private action receipts, and a unified
 Chance-only review/approval transaction.
+Scanned or visually complex JobNimbus documents can be returned as native
+ChatGPT conversation files so the GPT inspects the original pages instead of
+guessing from a filename or relying only on server-side OCR.
 It includes a handoff inbox so another ChatGPT chat with Gmail/Quo access can pass findings into this JobNimbus bridge.
 It also includes an authenticated, non-executing patch mailbox so Claude and
 Codex can exchange short-lived `.patch`/`.diff` packages when an agent's Git
@@ -64,6 +67,7 @@ ALLOW_QUO_SEND=false
 HANDOFF_STORE_PATH=/var/data/bridge/handoffs.json
 HANDOFF_UPLOAD_DIR=/var/data/bridge/handoff-uploads
 MAX_JSON_BODY_BYTES=12582912
+MAX_CHATGPT_FILE_BYTES=8388608
 ARTIFACT_STORE_PATH=/var/data/bridge/artifacts.json
 ARTIFACT_UPLOAD_DIR=/var/data/bridge/artifact-uploads
 ARTIFACT_FILE_DIR=/var/data/bridge/artifacts
@@ -93,10 +97,18 @@ the same approved batch twice.
 ## Custom ChatGPT
 
 A normal ChatGPT experience can use this service through a Custom GPT Action.
-Import `https://jobnimbus-chatgpt-bridge.onrender.com/openapi.json`, configure
+Import `https://jobnimbus-chatgpt-bridge.onrender.com/openapi-chatgpt.json`, configure
 HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
 and start a new chat after schema changes. Arbitrary standard chats do not gain
 the bridge automatically; the Action must be installed on that GPT.
+
+For document review, call `reviewJobNimbusDocument` first. If text extraction is
+missing, incomplete, or contradicted by the page layout, call
+`attachJobNimbusDocumentToChat` with the exact Chance file and document. The
+bridge returns the original file through `openaiFileResponse`; inspect that file
+and all relevant pages with ChatGPT's native document tools before reaching a
+conclusion. The attachment route is read-only, rejects ambiguous document names,
+and caps returned files at 8 MB.
 
 ## Handoff Inbox
 
