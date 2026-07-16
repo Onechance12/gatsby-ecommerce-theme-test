@@ -18,7 +18,7 @@ export function buildClientCoordinatorConversation(input = {}) {
   }
 
   const firstName = clean(input.firstName) || "there";
-  const opening = `Hi ${firstName}, this is Chance's AI assistant. How are you today?`;
+  const opening = `Hey ${firstName}, this is Chance's AI assistant. How are you doing today?`;
   const reminderTopics = normalizeReminderTopics(input.reminderTopics);
   const reminderGuidance = reminderTopics
     .map((topic) => clean(input.reminderRules?.[topic]))
@@ -36,19 +36,19 @@ export function buildClientCoordinatorConversation(input = {}) {
     accessRequirement = input.interiorAccessRequired === false
       ? "Interior access is not required for this appointment."
       : "Interior access is required. Confirm that the homeowner or another adult can provide access.";
-    purpose = `Well ${firstName}, I wanted to call and let you know we have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to meet Chance and the adjuster?`;
+    purpose = `So I'm calling because we have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available to meet Chance and the adjuster?`;
     fallbackText = `Hi ${firstName}, this is Chance's assistant. We have an adjuster appointment scheduled ${date}, between ${window}. Will you or another adult be available${input.interiorAccessRequired === false ? "" : " to provide interior access"}?`;
   } else if (mode === "missing_document_request") {
     const documentNeeded = requireText(input.documentNeeded, "documentNeeded");
-    purpose = `Well ${firstName}, I wanted to check in because we still need ${documentNeeded}. Do you have a copy you can text or email to us?`;
+    purpose = `So I'm calling because we still need ${documentNeeded}. Do you have a copy you can text or email to us?`;
     fallbackText = `Hi ${firstName}, this is Chance's assistant. Could you please send us ${documentNeeded} when you get a chance? You can text or email it to us.`;
   } else if (mode === "status_update") {
     const statusUpdate = requireText(input.statusUpdate, "statusUpdate");
-    purpose = `Well ${firstName}, I wanted to give you a quick update: ${statusUpdate}`;
+    purpose = `So I'm calling to give you a quick update: ${statusUpdate}`;
     fallbackText = `Hi ${firstName}, this is Chance's assistant. Quick update: ${statusUpdate}`;
   } else {
     const checkInReason = clean(input.checkInReason) || "I wanted to check in, see how you are doing, and find out whether you have any questions for us.";
-    purpose = `Well ${firstName}, ${checkInReason}`;
+    purpose = `So I'm calling because ${checkInReason}`;
     fallbackText = `Hi ${firstName}, this is Chance's assistant. I tried to reach you for a quick check-in. No rush; we can follow up by text or phone.`;
   }
 
@@ -85,7 +85,7 @@ export function renderClientCoordinatorPrompt() {
     "You are Chance Pearson's AI client-coordination assistant for existing property-claim clients. You are not Chance, Andrea, the homeowner, an insurance adjuster, or an attorney. Never impersonate Andrea. If asked, clearly confirm that you are an AI assistant.",
     "This call has exactly one approved purpose. Do not broaden it, negotiate coverage, give legal or policy advice, discuss settlement strategy, promise approval, promise payment, or make a coverage determination. Never claim to have checked JobNimbus, Gmail, Quo, or a document during the live call.",
     "PRIVACY: Do not reveal the property, carrier, claim, policy, damage, or appointment details until the intended client is reasonably confirmed. If someone else answers, ask only for {{homeownerFirstName}}. If it is a wrong number, apologize, use end_call, and disclose nothing else.",
-    "OPENING: Wait for a person to say hello. Then say exactly: {{coordinatorOpening}} Briefly and naturally respond to their answer. Do not overdo small talk. Then say exactly: {{coordinatorPurpose}}",
+    "OPENING: Wait for a person to say hello. Then say exactly: {{coordinatorOpening}} Listen to the answer and respond naturally in one short sentence. For a positive answer, say something like 'I'm glad to hear that.' For a difficult answer, acknowledge it with something like 'I'm sorry to hear that.' Do not sound scripted, overdo small talk, or skip their answer. Then say exactly: {{coordinatorPurpose}}",
     "APPROVED PURPOSE: {{coordinatorMode}}. Complete only that purpose. Access rule: {{appointmentAccessRequirement}}",
     "APPROVED CONTEXT: {{coordinatorApprovedContext}} This context is a ceiling, not a script. Use it only to answer a directly related question. If the answer is not in the approved context, say you do not want to give the wrong answer and that Chance or Andrea will follow up.",
     "THREE CLIENT REMINDERS: Only the following reminder topics are approved for this call: {{coordinatorReminderTopics}}. Internal guidance: {{coordinatorReminderGuidance}} Use a reminder conversationally only when it fits the client's question or concern. Never recite all reminders mechanically. Never blame an individual carrier representative or guarantee an outcome.",

@@ -17,7 +17,8 @@ test("appointment mode creates one conversational purpose and fallback text", ()
     interiorAccessRequired: true
   });
 
-  assert.match(plan.opening, /Chance's AI assistant/);
+  assert.equal(plan.opening, "Hey Rosa, this is Chance's AI assistant. How are you doing today?");
+  assert.match(plan.purpose, /^So I'm calling because/);
   assert.match(plan.purpose, /adjuster appointment scheduled Friday, July 17/);
   assert.match(plan.purpose, /Will you or another adult be available/);
   assert.match(plan.fallbackText, /provide interior access/);
@@ -58,6 +59,7 @@ test("client coordinator prompt cannot send, write, impersonate, or promise", ()
   assert.match(config.general_prompt, /cannot send a text or email, update JobNimbus/);
   assert.match(config.general_prompt, /promise approval/);
   assert.match(config.general_prompt, /Do not leave a voicemail/);
+  assert.match(config.general_prompt, /respond naturally in one short sentence/);
   assert.deepEqual(config.general_tools.map((tool) => tool.name), ["end_call"]);
 });
 
