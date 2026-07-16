@@ -34,6 +34,8 @@ test("spokenPolicyNumber strips mortgage control and loan references", () => {
 
 test("normalizeDateOfLoss converts JobNimbus epoch seconds before the voice call", () => {
   assert.equal(normalizeDateOfLoss(1777136400), "04/25/2026");
+  assert.equal(normalizeDateOfLoss(1777161600), "04/26/2026");
+  assert.equal(normalizeDateOfLoss("2026-04-26"), "04/26/2026");
   assert.equal(normalizeDateOfLoss("4/25/2026"), "04/25/2026");
 });
 

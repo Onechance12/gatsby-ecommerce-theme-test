@@ -106,8 +106,18 @@ export function normalizeDateOfLoss(value) {
   const raw = String(value).trim();
   let date;
 
-  if (/^\d{10}$/.test(raw)) date = new Date(Number(raw) * 1000);
-  else if (/^\d{13}$/.test(raw)) date = new Date(Number(raw));
+  const isoDate = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDate) return `${isoDate[2]}/${isoDate[3]}/${isoDate[1]}`;
+
+  let dateOnlyEpoch = false;
+  if (/^\d{10}$/.test(raw)) {
+    date = new Date(Number(raw) * 1000);
+    dateOnlyEpoch = true;
+  }
+  else if (/^\d{13}$/.test(raw)) {
+    date = new Date(Number(raw));
+    dateOnlyEpoch = true;
+  }
   else {
     const matched = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
     if (matched) {
@@ -119,7 +129,9 @@ export function normalizeDateOfLoss(value) {
 
   if (Number.isNaN(date.getTime())) return raw;
   return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Chicago",
+    // JobNimbus custom date fields are date-only values stored at UTC midnight.
+    // Rendering those epochs in Central time shifts the calendar date backward.
+    timeZone: dateOnlyEpoch ? "UTC" : "America/Chicago",
     month: "2-digit",
     day: "2-digit",
     year: "numeric"

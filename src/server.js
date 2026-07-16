@@ -2434,7 +2434,8 @@ function isoDateFromClaimValue(value) {
   if (match) return `${match[3]}-${match[1].padStart(2, "0")}-${match[2].padStart(2, "0")}`;
   if (/^\d{10,13}$/.test(text)) {
     const millis = text.length === 10 ? Number(text) * 1000 : Number(text);
-    return new Date(millis).toLocaleDateString("en-CA", { timeZone: OPERATIONS_TIME_ZONE });
+    // JobNimbus DOL is a date-only custom field encoded at UTC midnight.
+    return new Date(millis).toISOString().slice(0, 10);
   }
   return "";
 }
