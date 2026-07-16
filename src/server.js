@@ -3537,7 +3537,7 @@ function stableApprovalPlans(plans) {
 }
 
 async function findChanceContact(query) {
-  const needle = String(query || "").trim();
+  const needle = normalizeContactLookupQuery(query);
   if (!needle) badRequest("query is required");
   const lower = needle.toLowerCase();
   const contacts = await listContacts({ maxPages: 25 });
@@ -3563,7 +3563,7 @@ async function findChanceContact(query) {
 }
 
 async function findDocumentReadContact(query, { documentQuery = "" } = {}) {
-  const needle = String(query || "").trim();
+  const needle = normalizeContactLookupQuery(query);
   if (!needle) badRequest("query is required");
   const lower = needle.toLowerCase();
   const contacts = await listContacts({ maxPages: 25 });
@@ -4309,6 +4309,14 @@ function stripDiacritics(value) {
 
 function normalizeCompare(value) {
   return stripDiacritics(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeContactLookupQuery(value) {
+  const text = String(value || "").trim();
+  const labeledNumber = text.match(/^(?:jobnimbus|job|file)(?:\s*(?:number|no\.?|#))?\s*#?\s*(\d+)$/i);
+  if (labeledNumber) return labeledNumber[1];
+  const hashNumber = text.match(/^#\s*(\d+)$/);
+  return hashNumber ? hashNumber[1] : text;
 }
 
 function normalizeNameWords(value) {

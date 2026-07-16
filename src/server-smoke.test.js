@@ -515,6 +515,14 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.match(prepared.packet.scriptInstruction, /Do not invent or rewrite an opening script/);
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
 
+  const labeledPreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "JobNimbus #2739" })
+  });
+  assert.equal(labeledPreparedResponse.status, 200);
+  assert.equal((await labeledPreparedResponse.json()).file.id, "contact-chance");
+
   const brainResponse = await fetch(`http://127.0.0.1:${bridgePort}/brain/context`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
