@@ -1266,10 +1266,14 @@ async function retellClientCoordinatorCall(input = {}) {
     if (!reminderRules[topic]) badRequest(`Verified Brain guidance is unavailable for reminder topic ${topic}.`);
   }
 
+  const legacyAppointmentMode = conversation.mode === "appointment_confirmation";
   const evidenceFingerprint = clientCoordinatorEvidenceFingerprint(evidence);
   const dynamicVariables = {
-    directionMode: "outbound_client_coordinator",
-    goal: "client_coordinator",
+    directionMode: legacyAppointmentMode ? "outbound_homeowner" : "outbound_client_coordinator",
+    goal: legacyAppointmentMode ? "homeowner_appointment_confirmation" : "client_coordinator",
+    objective: legacyAppointmentMode
+      ? `Confirm ${file.name}'s availability and access for the scheduled carrier inspection.`
+      : conversation.purpose,
     homeownerFirstName: String(file.name || "there").trim().split(/\s+/)[0] || "there",
     insuredName: file.name,
     homeownerPhone: file.phone,
@@ -1287,6 +1291,8 @@ async function retellClientCoordinatorCall(input = {}) {
     appointmentDate: appointment.date || "Not applicable",
     appointmentWindow: appointment.window || "Not applicable",
     appointmentAccessRequirement: conversation.accessRequirement,
+    homeownerOutreachOpening: conversation.opening,
+    homeownerOutreachMessage: conversation.purpose,
     batchClaimCount: "0",
     batchClaims: "None"
   };
@@ -1295,7 +1301,7 @@ async function retellClientCoordinatorCall(input = {}) {
     contactId: file.id,
     fileNumber: String(file.number || ""),
     ownerId: CHANCE_OWNER_ID,
-    goal: "client_coordinator",
+    goal: legacyAppointmentMode ? "homeowner_appointment_confirmation" : "client_coordinator",
     coordinatorMode: conversation.mode,
     evidenceFingerprint
   };

@@ -306,6 +306,30 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const coordinatorRepeat = await coordinatorRepeatResponse.json();
   assert.equal(coordinatorRepeat.planDigest, coordinatorDryRun.planDigest);
 
+  const appointmentCompatibilityResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/client-coordinator-call`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      mode: "appointment_confirmation",
+      dateStart: "2026-07-17T14:00:00-05:00",
+      dateEnd: "2026-07-17T16:00:00-05:00",
+      includeGmail: false,
+      includeQuo: false,
+      execute: false
+    })
+  });
+  assert.equal(appointmentCompatibilityResponse.status, 200);
+  const appointmentCompatibility = await appointmentCompatibilityResponse.json();
+  assert.equal(
+    appointmentCompatibility.request.retell_llm_dynamic_variables.goal,
+    "homeowner_appointment_confirmation"
+  );
+  assert.match(
+    appointmentCompatibility.request.retell_llm_dynamic_variables.homeownerOutreachMessage,
+    /adjuster appointment scheduled/
+  );
+
   const documentFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
