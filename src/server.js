@@ -24,6 +24,7 @@ import { safeCloseoutAction } from "./memory/actionCloseout.js";
 import { latestActionReceipts, listMemory } from "./memory/store.js";
 import { listQuoNumbers, readQuoHistory, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
+import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import {
   buildClientCoordinatorAgentSettings,
   buildClientCoordinatorConversation,
@@ -161,6 +162,7 @@ const routes = new Map([
   ["POST /claim-filing/callbacks", pendingClaimCallbacks],
   ["POST /claim-filing/writeback", claimFilingWriteback],
   ["POST /retell/configure-agent", configureRetellAgent],
+  ["POST /retell/guarded-end-call", guardedRetellEndCall],
   ["POST /retell/configure-client-coordinator", configureClientCoordinatorAgent],
   ["POST /retell/client-coordinator-call", retellClientCoordinatorCall],
   ["POST /retell/client-coordinator-call-result", retellClientCoordinatorCallResult],
@@ -1924,7 +1926,10 @@ async function configureRetellAgent(input = {}) {
     badRequest("The configured Retell agent does not use a Retell LLM response engine.");
   }
 
-  const llmConfig = buildRetellLlmFromPacket(retellConfigurationPacket()).toLlmRequestBody();
+  const llmConfig = buildRetellLlmFromPacket(retellConfigurationPacket(), {
+    guardedEndCallUrl: `${PUBLIC_BASE_URL}/retell/guarded-end-call`,
+    guardedEndCallAuthorization: BRIDGE_TOKEN ? `Bearer ${BRIDGE_TOKEN}` : ""
+  }).toLlmRequestBody();
   const analysisSchema = postCallAnalysisSchema();
   const configDigest = digest({
     agentId: RETELL_AGENT_ID,
@@ -1994,6 +1999,58 @@ async function configureRetellAgent(input = {}) {
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
     nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
+  };
+}
+
+async function guardedRetellEndCall(input = {}) {
+  const suppliedCall = input.call && typeof input.call === "object" ? input.call : {};
+  const args = input.args && typeof input.args === "object" ? input.args : input;
+  const callId = required(suppliedCall.call_id || input.call_id || args.call_id, "call.call_id");
+  const liveCall = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+
+  if (String(liveCall.call_status || "") !== "ongoing") {
+    return {
+      allowed: false,
+      code: "call_not_ongoing",
+      message: `The call is already ${liveCall.call_status || "not ongoing"}; no stop request was sent.`
+    };
+  }
+  if (RETELL_AGENT_ID && String(liveCall.agent_id || suppliedCall.agent_id || "") !== RETELL_AGENT_ID) {
+    return {
+      allowed: false,
+      code: "wrong_agent",
+      message: "This call does not belong to the approved carrier claim-filing agent."
+    };
+  }
+
+  const reviewCall = {
+    ...liveCall,
+    ...suppliedCall,
+    metadata: { ...(liveCall.metadata || {}), ...(suppliedCall.metadata || {}) },
+    retell_llm_dynamic_variables: {
+      ...(liveCall.retell_llm_dynamic_variables || {}),
+      ...(suppliedCall.retell_llm_dynamic_variables || {})
+    },
+    transcript_object: suppliedCall.transcript_object?.length
+      ? suppliedCall.transcript_object
+      : liveCall.transcript_object,
+    transcript: suppliedCall.transcript || liveCall.transcript
+  };
+  const decision = evaluateGuardedEndCall({ call: reviewCall, args });
+  if (!decision.allowed) {
+    return {
+      ...decision,
+      callId,
+      instruction: "Do not say a closing line. Remain connected and continue the call according to this reason."
+    };
+  }
+
+  await retellApi("POST", `/v2/stop-call/${encodeURIComponent(callId)}`);
+  return {
+    ...decision,
+    callId,
+    stopped: true,
+    message: "The bridge verified completion and ended the call. Do not speak again."
   };
 }
 

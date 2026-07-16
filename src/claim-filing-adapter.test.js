@@ -239,7 +239,12 @@ test("voice prompt contains no speakable pacing label", () => {
 
 test("IVR controls listen to the full menu without waiting for a repeat", () => {
   const config = buildRetellLlmFromPacket({});
+  const guardedEnd = config.generalTools.find((tool) => tool.name === "request_guarded_end_call");
   const pressDigit = config.generalTools.find((tool) => tool.name === "press_digit");
+  assert.equal(guardedEnd.type, "custom");
+  assert.match(guardedEnd.url, /\/retell\/guarded-end-call$/);
+  assert.equal(guardedEnd.speak_after_execution, true);
+  assert.equal(config.generalTools.some((tool) => tool.type === "end_call"), false);
   assert.equal(pressDigit.delay_ms, 250);
   assert.equal(pressDigit.speak_after_execution, false);
   assert.match(config.generalPrompt, /wait about 0\.75 to 1 second/i);
@@ -267,8 +272,8 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /where should I send our Letter of Representation and supporting documents/i);
   assert.match(prompt, /NEVER answer 'No', 'That's all'/i);
   assert.match(prompt, /I'll let you know if I have a question.*ALWAYS mean the representative is still working/i);
-  assert.match(prompt, /During a wait state, never say the closing blessing and never invoke end_call/i);
-  assert.match(prompt, /end_call tool is forbidden while claim_number is empty/i);
+  assert.match(prompt, /During a wait state, never say the closing blessing and never invoke request_guarded_end_call/i);
+  assert.match(prompt, /request_guarded_end_call is forbidden while claim_number is empty/i);
   assert.match(prompt, /documentation delay.*never satisfies this rule/i);
 });
 

@@ -11,10 +11,34 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
   const beginMessage = options.beginMessage || "";
   const generalTools = [
     {
-      type: "end_call",
-      name: "end_call",
-      description: "End the call once the objective is complete, a stop rule is triggered, or a human asks to end the call.",
-      speak_after_execution: false
+      type: "custom",
+      name: "request_guarded_end_call",
+      description:
+        "Request permission to end the call. This is the only tool that may end a carrier claim call. The bridge " +
+        "independently verifies the live transcript, claim/reference number, required closing questions, wait state, " +
+        "and representative wrap-up. If denied, remain connected and follow the returned instruction.",
+      url: options.guardedEndCallUrl || "https://jobnimbus-chatgpt-bridge.onrender.com/retell/guarded-end-call",
+      method: "POST",
+      headers: options.guardedEndCallAuthorization ? { authorization: options.guardedEndCallAuthorization } : undefined,
+      speak_during_execution: false,
+      // Retell must run the LLM again after a denial so it can follow the
+      // bridge instruction and remain connected. Successful requests stop the
+      // call server-side before another utterance can be produced.
+      speak_after_execution: true,
+      timeout_ms: 10000,
+      parameters: {
+        type: "object",
+        properties: {
+          goal: { type: "string", description: "The active call goal from dynamic variables." },
+          reason: { type: "string", enum: ["objective_complete", "callback_confirmed", "no_number_yet", "voicemail", "automated_system", "wrong_number", "human_requested_end", "safety_stop"] },
+          outcome: { type: "string", enum: ["claim_filed", "existing_claim_confirmed", "callback_requested", "blocked_missing_information", "carrier_unreachable", "no_result"] },
+          claim_number: { type: "string", description: "Exact claim/reference number spoken by the carrier, or empty if none." },
+          callback_confirmed: { type: "boolean" },
+          document_submission_requested: { type: "boolean", description: "True only after asking where to send the LOR and supporting documents." },
+          next_step_requested: { type: "boolean", description: "True only after asking for the carrier next step or timeframe." }
+        },
+        required: ["goal", "reason", "outcome", "claim_number", "callback_confirmed", "document_submission_requested", "next_step_requested"]
+      }
     },
     {
       type: "press_digit",
@@ -82,7 +106,7 @@ export function renderRetellPrompt(packet) {
       "Then say exactly: {{homeownerOutreachMessage}} Confirm whether the homeowner or another adult can provide access. " +
       "Access requirement: {{appointmentAccessRequirement}} If unavailable, collect alternative availability but do not " +
       "promise a new appointment. Do not discuss coverage, deductible, policy changes, or claim strategy. If voicemail or " +
-      "an automated system answers, do not leave a message; use end_call. Do not repeat yourself or fill silence. Close " +
+      "an automated system answers, do not leave a message; use request_guarded_end_call. Do not repeat yourself or fill silence. Close " +
       "naturally after confirming availability and access.",
     "HIGHEST-PRIORITY CALL-OPENING RULE: The first audio on an outbound carrier call is normally a recorded greeting, " +
       "monitoring notice, or IVR. Your first response to that audio must contain NO spoken words. Never start the human " +
@@ -339,17 +363,17 @@ export function renderRetellPrompt(packet) {
     "- WAIT-STATE OVERRIDE: phrases such as 'just give me one second', 'one moment', 'bear with me', 'I'm documenting', " +
       "'I'll let you know if I have a question', or 'I'll be right back' ALWAYS mean the representative is still working. " +
       "They are not a wrap-up, even if the same sentence includes words like 'that's it'. During a wait state, never say " +
-      "the closing blessing and never invoke end_call. Say only 'Ok' when needed, then remain silent until the representative returns.",
+      "the closing blessing and never invoke request_guarded_end_call. Say only 'Ok' when needed, then remain silent until the representative returns.",
     "- Never say 'LLC' — just say 'Wave Public Adjusting'.",
     "- CARRIER TRANSFERS: If a representative offers to transfer the call, accept it and say only 'Yes, please' or " +
       "'Go ahead.' Then remain silent while the transfer completes. Do not say the final blessing, do not thank them as " +
-      "though the call is complete, and never call end_call. A transfer is not a completed objective. Wait for the new " +
+      "though the call is complete, and never call request_guarded_end_call. A transfer is not a completed objective. Wait for the new " +
       "department to greet you, then continue the same claim filing from the verified file facts.",
     "- Prioritize gathering: Claim Number, Adjuster Name, Adjuster Phone, Adjuster Email, Upload Instructions, and Next Steps.",
     "- Do not ask 'What else do you need?' after individual answers. Ask whether the representative needs anything else " +
       "only once at final wrap-up, after the claim/reference number and required closing details have been captured.",
     "- ***THE ONE REQUIRED OUTCOME: a CLAIM NUMBER or REFERENCE NUMBER. Do not end the call until you have it.***",
-    "- END_CALL FAIL-CLOSED RULE: for a new claim, the end_call tool is forbidden while claim_number is empty unless the " +
+    "- GUARDED END FAIL-CLOSED RULE: for a new claim, request_guarded_end_call is forbidden while claim_number is empty unless the " +
       "representative explicitly states that no claim/reference number exists yet and explains when it will be issued. A " +
       "silence, hold request, documentation delay, 'I'll let you know', or the representative saying they have no current " +
       "question never satisfies this rule.",
@@ -370,8 +394,8 @@ export function renderRetellPrompt(packet) {
       "the claim or reference number for this filing?' Once you have that number (or the rep clearly states no " +
       "number exists yet and explains when one will be issued), say your closing line 'Thank you for all of your " +
       "help. Have a blessed day.' — then WAIT for the rep to say goodbye or acknowledge back before you use " +
-      "end_call. Do NOT hang up the instant you finish talking; give them a moment to respond, like a human would. " +
-      "Only call end_call after the rep has said goodbye / wrapped up. Never trigger the closing line or end_call " +
+      "request_guarded_end_call. Do NOT hang up the instant you finish talking; give them a moment to respond, like a human would. " +
+      "Only call request_guarded_end_call after the rep has said goodbye / wrapped up. Never trigger the closing line or request_guarded_end_call " +
       "just because the rep thanked you if you still don't have the claim/reference number.",
     "",
     "Number & spelling handling (very important — this is where calls go wrong):",
