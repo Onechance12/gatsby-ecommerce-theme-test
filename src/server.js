@@ -3325,12 +3325,29 @@ async function quoSend(input = {}) {
     status: result.message.status || "accepted",
     subjectKey: file.id,
     fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
-    summary: "Sent approved Quo text from Chance's configured line.",
+    summary: "Submitted approved Quo text from Chance's configured line; final carrier delivery must be verified from Quo history.",
     externalId: result.message.id || "",
     followUps: input.followUps || [],
     evidence: result.message.id ? [`quo:${result.message.id}`] : []
   });
-  return { ...result, file, memoryCloseout };
+  const deliveryStatus = String(result.message.status || "accepted").toLowerCase();
+  const deliveryConfirmed = deliveryStatus === "delivered";
+  const deliveryFailed = deliveryStatus === "failed" || deliveryStatus === "undelivered";
+  return {
+    ...result,
+    file,
+    delivery: {
+      status: deliveryStatus,
+      confirmed: deliveryConfirmed,
+      failed: deliveryFailed,
+      instruction: deliveryConfirmed
+        ? "Quo reports the message delivered."
+        : deliveryFailed
+          ? "Quo reports a delivery failure. Do not retry automatically; use the failure detail in Quo and switch channels when appropriate."
+          : "Quo accepted the message but carrier delivery is not confirmed. Do not describe it as delivered; recheck reviewQuoHistory for the final status."
+    },
+    memoryCloseout
+  };
 }
 
 async function reviewChanceFiles(input = {}) {
@@ -7084,7 +7101,7 @@ const OPENAPI = {
         operationId: "sendApprovedQuoText",
         "x-openai-isConsequential": true,
         requestBody: jsonBody("QuoSendRequest"),
-        responses: { "200": { description: "Two-step Quo send. Dry run returns the exact text/recipient digest; live send requires Chance approval, execute:true, ALLOW_QUO_SEND=true, and the unchanged digest." } }
+        responses: { "200": { description: "Two-step Quo send. Dry run returns the exact text/recipient digest; live send requires Chance approval, execute:true, ALLOW_QUO_SEND=true, and the unchanged digest. A live response distinguishes Quo API acceptance from confirmed carrier delivery. Never report success as delivered unless delivery.confirmed is true; use reviewQuoHistory to recheck queued or sent messages." } }
       }
     }
   }

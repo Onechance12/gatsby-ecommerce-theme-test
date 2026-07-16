@@ -348,6 +348,26 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       res.end(JSON.stringify({ access_token: "fixture-google-token", expires_in: 3600 }));
       return;
     }
+    if (url.pathname === "/phone-numbers" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "PN-fixture", name: "Chance", number: "+19725550100" }] }));
+      return;
+    }
+    if (url.pathname === "/messages" && req.method === "POST") {
+      res.writeHead(202, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        data: {
+          id: "AC-fixture-message",
+          phoneNumberId: "PN-fixture",
+          from: "+19725550100",
+          to: ["+12145551212"],
+          direction: "outgoing",
+          status: "queued",
+          createdAt: "2026-07-16T12:00:00Z"
+        }
+      }));
+      return;
+    }
     if (url.pathname === "/gmail/v1/users/me/drafts/draft-1" && req.method === "GET") {
       if (!fixtureGmailDraftExists) {
         res.writeHead(404, { "content-type": "application/json" });
@@ -488,6 +508,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
       GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "+19725550100",
       ALLOW_QUO_SEND: "true"
     },
@@ -890,6 +911,23 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     })
   });
   assert.equal(quoChangedResponse.status, 409);
+
+  const quoExecutedResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({
+      query: "2739",
+      content: "Approved homeowner text.",
+      approvalDigest: quoDryRun.approvalDigest,
+      execute: true
+    })
+  });
+  assert.equal(quoExecutedResponse.status, 200);
+  const quoExecuted = await quoExecutedResponse.json();
+  assert.equal(quoExecuted.delivery.status, "queued");
+  assert.equal(quoExecuted.delivery.confirmed, false);
+  assert.equal(quoExecuted.delivery.failed, false);
+  assert.match(quoExecuted.delivery.instruction, /not confirmed/i);
 
   const batchPayload = {
     operations: [{
