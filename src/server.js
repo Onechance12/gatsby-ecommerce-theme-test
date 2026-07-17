@@ -337,6 +337,7 @@ function health() {
       supportedGoals: CARRIER_FOLLOW_UP_GOALS,
       supportedDestinations: CARRIER_DESTINATION_TYPES,
       callsAllowed: ALLOW_RETELL_CALLS && ALLOW_CARRIER_FOLLOWUP_CALLS,
+      extensionsSupported: true,
       ownerScope: "Chance Pearson",
       freshEvidenceRequired: true,
       approvalDigestRequired: true,
@@ -1589,6 +1590,7 @@ async function retellCarrierFollowUpCall(input = {}) {
   if (!/^\+\d{10,15}$/.test(to)) {
     badRequest("A verified destination phone number is required. The bridge will not use a desk-adjuster number for a field inspector or guess a carrier number.");
   }
+  const destinationExtension = normalizeCarrierExtension(input.extension);
   if (!file.claimNumber && !file.policyNumber) {
     badRequest("The current file has neither a claim number nor a policy number. Verify an identifier before preparing a carrier follow-up call.");
   }
@@ -1633,6 +1635,7 @@ async function retellCarrierFollowUpCall(input = {}) {
     goal: "carrier_follow_up",
     callGoal: conversation.goal,
     destinationType: conversation.destinationType,
+    destinationExtension: destinationExtension || "None",
     carrierFollowUpOpening: conversation.opening,
     carrier: file.carrier || "Unknown",
     insuredName: file.name || "Unknown",
@@ -1690,7 +1693,8 @@ async function retellCarrierFollowUpCall(input = {}) {
       destination: {
         type: conversation.destinationType,
         name: conversation.contactName,
-        phone: to
+        phone: to,
+        extension: destinationExtension
       },
       conversation,
       evidence,
@@ -6650,6 +6654,16 @@ function normalizePhone(value) {
   return text;
 }
 
+function normalizeCarrierExtension(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (!digits || digits.length > 10) {
+    badRequest("extension must contain 1 to 10 verified digits");
+  }
+  return digits;
+}
+
 function sendOpenAI(socket, payload) {
   if (socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify(payload));
@@ -7340,6 +7354,7 @@ const OPENAPI = {
           destinationType: { type: "string", enum: ["carrier_general_line", "desk_adjuster", "field_inspector", "scheduler", "independent_adjusting_company"], default: "carrier_general_line" },
           to: { type: "string", description: "Verified destination phone. Required unless destinationType is desk_adjuster and the current file has a verified desk-adjuster phone." },
           carrierPhone: { type: "string", description: "Alias for a verified carrier general-line phone." },
+          extension: { type: "string", description: "Optional verified extension, kept separate from the E.164 destination. The agent waits for the IVR prompt and enters it one digit at a time." },
           contactName: { type: "string", description: "Verified direct contact name for a conversational named-contact opening." },
           fieldInspectorName: { type: "string", description: "Verified current field inspector. Never substitute the desk adjuster." },
           fieldInspectorCompany: { type: "string" },

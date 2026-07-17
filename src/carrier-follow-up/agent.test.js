@@ -25,6 +25,9 @@ test("prompt keeps desk adjuster and field inspector separate and blocks writes 
   assert.match(prompt, /cannot update JobNimbus/i);
   assert.match(prompt, /scheduling authority is \{\{schedulingAuthority\}\}/i);
   assert.match(prompt, /Give me a second while I pull up that information/i);
+  assert.match(prompt, /destination extension is \{\{destinationExtension\}\}/i);
+  assert.match(prompt, /enter the extension one digit at a time/i);
+  assert.match(prompt, /Press pound only if the IVR specifically requests it/i);
 });
 
 test("analysis schema extracts distinct carrier roles and operational results", () => {

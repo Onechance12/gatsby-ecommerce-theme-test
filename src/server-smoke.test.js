@@ -45,6 +45,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.clientCoordinator.automaticTextOrWriteback, false);
   assert.equal(health.carrierFollowUp.freshEvidenceRequired, true);
   assert.equal(health.carrierFollowUp.approvalDigestRequired, true);
+  assert.equal(health.carrierFollowUp.extensionsSupported, true);
   assert.equal(health.carrierFollowUp.automaticScheduling, false);
   assert.equal(health.carrierFollowUp.automaticJobNimbusWriteback, false);
   assert.equal(health.brain.mode, "verified_company_context_with_live_client_snapshots_and_action_receipts");
@@ -108,6 +109,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
   assert.equal(chatgptSchema.paths["/retell/carrier-follow-up-call"].post.operationId, "placeApprovedCarrierFollowUpCall");
   assert.equal(chatgptSchema.paths["/retell/carrier-follow-up-call-result"].post.operationId, "reviewCarrierFollowUpCall");
+  assert.match(
+    chatgptSchema.components.schemas.RetellCarrierFollowUpCallRequest.properties.extension.description,
+    /kept separate from the E\.164 destination/i
+  );
   assert.deepEqual(
     chatgptSchema.components.schemas.DocumentReviewRequest.properties.documentPurpose.enum,
     ["insurance_policy", "tdi_form", "estimate_scope", "carrier_claim_document", "appraisal_document", "representation_contract"]
