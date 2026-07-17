@@ -458,7 +458,6 @@ function oauthAuthorize(res, url) {
   googleUrl.searchParams.set("scope", GOOGLE_OAUTH_SCOPES.join(" "));
   googleUrl.searchParams.set("access_type", "offline");
   googleUrl.searchParams.set("prompt", "consent");
-  googleUrl.searchParams.set("include_granted_scopes", "true");
   googleUrl.searchParams.set("state", brokerState);
   res.writeHead(302, { location: googleUrl.toString(), "cache-control": "no-store" });
   res.end();
