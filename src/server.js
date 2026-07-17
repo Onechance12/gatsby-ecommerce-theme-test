@@ -590,6 +590,22 @@ const CHATGPT_ACTION_PATHS = [
 ];
 
 function chatgptOpenapi() {
+  const googleOAuth = {
+    type: "oauth2",
+    flows: {
+      authorizationCode: {
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+        tokenUrl: "https://oauth2.googleapis.com/token",
+        scopes: {
+          openid: "Verify the signed-in employee identity.",
+          email: "Verify the signed-in employee email address.",
+          profile: "Read the signed-in employee display name.",
+          "https://www.googleapis.com/auth/gmail.modify": "Search, draft, send, and manage the signed-in employee Gmail account through approval-gated bridge actions.",
+          "https://www.googleapis.com/auth/calendar.readonly": "Read the signed-in employee calendar for availability checks."
+        }
+      }
+    }
+  };
   return {
     ...OPENAPI,
     info: {
@@ -598,6 +614,11 @@ function chatgptOpenapi() {
       description: "Consolidated 27-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
+    security: [{ googleOAuth: [] }],
+    components: {
+      ...OPENAPI.components,
+      securitySchemes: { googleOAuth }
+    },
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
   };
 }

@@ -103,6 +103,13 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
+  assert.deepEqual(chatgptSchema.security, [{ googleOAuth: [] }]);
+  assert.equal(chatgptSchema.components.securitySchemes.googleOAuth.type, "oauth2");
+  assert.equal(
+    chatgptSchema.components.securitySchemes.googleOAuth.flows.authorizationCode.authorizationUrl,
+    "https://accounts.google.com/o/oauth2/v2/auth"
+  );
+  assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
   assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 27);
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
