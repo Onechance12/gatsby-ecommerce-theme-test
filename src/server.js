@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -75,6 +75,16 @@ const GOOGLE_TOKENINFO_URL = process.env.GOOGLE_TOKENINFO_URL || "https://www.go
 const GOOGLE_USERINFO_URL = process.env.GOOGLE_USERINFO_URL || "https://openidconnect.googleapis.com/v1/userinfo";
 const GOOGLE_OAUTH_ALLOWED_DOMAIN = process.env.GOOGLE_OAUTH_ALLOWED_DOMAIN || "wavepa.com";
 const ALLOW_GOOGLE_USER_AUTH = process.env.ALLOW_GOOGLE_USER_AUTH === "true";
+const GPT_OAUTH_CLIENT_ID = process.env.GPT_OAUTH_CLIENT_ID || "wave-jobnimbus-gpt";
+const GPT_OAUTH_CLIENT_SECRET = process.env.GPT_OAUTH_CLIENT_SECRET || "";
+const OAUTH_SESSION_SECRET = process.env.OAUTH_SESSION_SECRET || "";
+const GOOGLE_OAUTH_SCOPES = [
+  "openid",
+  "email",
+  "profile",
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/calendar.readonly"
+];
 const WAVE_AUTH_USERS = parseWaveUsers(process.env.WAVE_AUTH_USERS_JSON, [{
   email: process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com",
   name: "Chance Pearson",
@@ -148,6 +158,7 @@ const claimScopeTextCache = new Map();
 const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText };
 const REQUEST_CONTEXT = new AsyncLocalStorage();
 const GOOGLE_IDENTITY_CACHE = new Map();
+const USED_OAUTH_CODES = new Map();
 
 const routes = new Map([
   ["GET /health", health],
@@ -223,6 +234,9 @@ const routes = new Map([
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
+    if (req.method === "GET" && url.pathname === "/oauth/authorize") return oauthAuthorize(res, url);
+    if (req.method === "GET" && url.pathname === "/oauth/google/callback") return oauthGoogleCallback(res, url);
+    if (req.method === "POST" && url.pathname === "/oauth/token") return oauthToken(req, res);
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
     if (url.pathname.startsWith("/artifacts/") && (!BRIDGE_TOKEN || !authorized(req))) {
@@ -288,13 +302,15 @@ function health() {
     jobNimbusConfigured: Boolean(API_KEY),
     gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
     userOAuth: {
-      available: Boolean(ALLOW_GOOGLE_USER_AUTH && GOOGLE_CLIENT_ID),
-      provider: "google",
+      available: oauthBrokerConfigured(),
+      provider: "google_via_bridge",
       allowedWorkspaceDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
       approvedUserCount: WAVE_AUTH_USERS.size,
       sharedBridgeTokenFallback: Boolean(BRIDGE_TOKEN),
       perUserGmail: true,
-      roleEnforcement: true
+      roleEnforcement: true,
+      authorizationUrl: `${PUBLIC_BASE_URL}/oauth/authorize`,
+      tokenUrl: `${PUBLIC_BASE_URL}/oauth/token`
     },
     gmailSendAllowed: ALLOW_GMAIL_SEND,
     quoConfigured: Boolean(QUO_API_KEY),
@@ -402,6 +418,177 @@ function health() {
       doesNotAuthorizeActions: true,
       persistentRootConfigured: Boolean(process.env.MEMORY_ROOT)
     }
+  };
+}
+
+function oauthBrokerConfigured() {
+  return Boolean(
+    ALLOW_GOOGLE_USER_AUTH
+    && GOOGLE_CLIENT_ID
+    && GOOGLE_CLIENT_SECRET
+    && GPT_OAUTH_CLIENT_ID
+    && GPT_OAUTH_CLIENT_SECRET
+    && OAUTH_SESSION_SECRET
+  );
+}
+
+function oauthAuthorize(res, url) {
+  if (!oauthBrokerConfigured()) return sendOAuthError(res, 503, "temporarily_unavailable", "Employee OAuth is not fully configured.");
+  const clientId = url.searchParams.get("client_id") || "";
+  const redirectUri = url.searchParams.get("redirect_uri") || "";
+  const responseType = url.searchParams.get("response_type") || "";
+  const state = url.searchParams.get("state") || "";
+  if (!secureEqual(clientId, GPT_OAUTH_CLIENT_ID)) return sendOAuthError(res, 401, "invalid_client", "Unknown OAuth client.");
+  if (responseType !== "code") return sendOAuthError(res, 400, "unsupported_response_type", "Only authorization code is supported.");
+  if (!approvedChatGptRedirect(redirectUri)) return sendOAuthError(res, 400, "invalid_request", "Unapproved OAuth redirect URI.");
+  if (!state) return sendOAuthError(res, 400, "invalid_request", "OAuth state is required.");
+
+  const brokerState = sealOAuthPayload({
+    kind: "authorize_state",
+    exp: Date.now() + 10 * 60 * 1000,
+    redirectUri,
+    clientState: state,
+    codeChallenge: url.searchParams.get("code_challenge") || "",
+    codeChallengeMethod: url.searchParams.get("code_challenge_method") || ""
+  });
+  const googleUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  googleUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
+  googleUrl.searchParams.set("redirect_uri", `${PUBLIC_BASE_URL}/oauth/google/callback`);
+  googleUrl.searchParams.set("response_type", "code");
+  googleUrl.searchParams.set("scope", GOOGLE_OAUTH_SCOPES.join(" "));
+  googleUrl.searchParams.set("access_type", "offline");
+  googleUrl.searchParams.set("prompt", "consent");
+  googleUrl.searchParams.set("include_granted_scopes", "true");
+  googleUrl.searchParams.set("state", brokerState);
+  res.writeHead(302, { location: googleUrl.toString(), "cache-control": "no-store" });
+  res.end();
+}
+
+async function oauthGoogleCallback(res, url) {
+  try {
+    if (!oauthBrokerConfigured()) throw oauthError("temporarily_unavailable", "Employee OAuth is not fully configured.", 503);
+    const state = openOAuthPayload(required(url.searchParams.get("state"), "state"));
+    if (state.kind !== "authorize_state" || Number(state.exp || 0) <= Date.now()) {
+      throw oauthError("invalid_request", "OAuth state is invalid or expired.");
+    }
+    if (url.searchParams.get("error")) {
+      return redirectOAuthError(res, state.redirectUri, state.clientState, url.searchParams.get("error"));
+    }
+    const code = required(url.searchParams.get("code"), "code");
+    const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: `${PUBLIC_BASE_URL}/oauth/google/callback`,
+        grant_type: "authorization_code"
+      })
+    });
+    const tokens = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || !tokens.access_token) throw oauthError("access_denied", "Google sign-in could not be completed.", 401);
+    const identity = await authenticateGoogleAccessToken({
+      token: tokens.access_token,
+      clientId: GOOGLE_CLIENT_ID,
+      tokenInfoUrl: GOOGLE_TOKENINFO_URL,
+      userInfoUrl: GOOGLE_USERINFO_URL,
+      allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+      users: WAVE_AUTH_USERS
+    });
+    if (!tokens.refresh_token) throw oauthError("access_denied", "Google did not return offline access. Reconnect and approve the requested access.", 401);
+
+    const brokerCode = sealOAuthPayload({
+      kind: "authorization_code",
+      jti: randomUUID(),
+      exp: Date.now() + 5 * 60 * 1000,
+      redirectUri: state.redirectUri,
+      codeChallenge: state.codeChallenge,
+      codeChallengeMethod: state.codeChallengeMethod,
+      googleAccessToken: tokens.access_token,
+      googleRefreshToken: tokens.refresh_token,
+      googleExpiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000,
+      identity: oauthIdentityPayload(identity)
+    });
+    const destination = new URL(state.redirectUri);
+    destination.searchParams.set("code", brokerCode);
+    destination.searchParams.set("state", state.clientState);
+    res.writeHead(302, { location: destination.toString(), "cache-control": "no-store" });
+    res.end();
+  } catch (error) {
+    sendOAuthError(res, error.statusCode || 400, error.oauthCode || "invalid_request", error.message || "OAuth callback failed.");
+  }
+}
+
+async function oauthToken(req, res) {
+  try {
+    if (!oauthBrokerConfigured()) throw oauthError("temporarily_unavailable", "Employee OAuth is not fully configured.", 503);
+    const form = await readForm(req);
+    const credentials = oauthClientCredentials(req, form);
+    if (!secureEqual(credentials.clientId, GPT_OAUTH_CLIENT_ID) || !secureEqual(credentials.clientSecret, GPT_OAUTH_CLIENT_SECRET)) {
+      throw oauthError("invalid_client", "Invalid OAuth client credentials.", 401);
+    }
+
+    if (form.grant_type === "authorization_code") {
+      const payload = openOAuthPayload(required(form.code, "code"));
+      if (payload.kind !== "authorization_code" || Number(payload.exp || 0) <= Date.now()) throw oauthError("invalid_grant", "Authorization code is invalid or expired.");
+      if (USED_OAUTH_CODES.has(payload.jti)) throw oauthError("invalid_grant", "Authorization code has already been used.");
+      if (payload.redirectUri !== form.redirect_uri) throw oauthError("invalid_grant", "Redirect URI does not match.");
+      verifyPkce(payload, form.code_verifier || "");
+      USED_OAUTH_CODES.set(payload.jti, Date.now() + 10 * 60 * 1000);
+      cleanupUsedOAuthCodes();
+      return send(res, 200, issueBrokerTokens(payload));
+    }
+
+    if (form.grant_type === "refresh_token") {
+      const refresh = openOAuthPayload(required(form.refresh_token, "refresh_token"));
+      if (refresh.kind !== "refresh_token" || Number(refresh.exp || 0) <= Date.now()) throw oauthError("invalid_grant", "Refresh token is invalid or expired.");
+      const googleResponse = await fetch(GOOGLE_TOKEN_URL, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: new URLSearchParams({
+          refresh_token: refresh.googleRefreshToken,
+          client_id: GOOGLE_CLIENT_ID,
+          client_secret: GOOGLE_CLIENT_SECRET,
+          grant_type: "refresh_token"
+        })
+      });
+      const google = await googleResponse.json().catch(() => ({}));
+      if (!googleResponse.ok || !google.access_token) throw oauthError("invalid_grant", "Google access could not be refreshed.", 401);
+      return send(res, 200, issueBrokerTokens({
+        ...refresh,
+        googleAccessToken: google.access_token,
+        googleExpiresAt: Date.now() + Number(google.expires_in || 3600) * 1000
+      }, form.refresh_token));
+    }
+
+    throw oauthError("unsupported_grant_type", "Unsupported OAuth grant type.");
+  } catch (error) {
+    sendOAuthError(res, error.statusCode || 400, error.oauthCode || "invalid_request", error.message || "OAuth token exchange failed.");
+  }
+}
+
+function issueBrokerTokens(payload, existingRefreshToken = "") {
+  const identity = approvedIdentityFromPayload(payload.identity);
+  const accessExpiresIn = Math.max(60, Math.min(3600, Math.floor((Number(payload.googleExpiresAt || 0) - Date.now()) / 1000)));
+  const accessToken = sealOAuthPayload({
+    kind: "access_token",
+    exp: Date.now() + accessExpiresIn * 1000,
+    googleAccessToken: payload.googleAccessToken,
+    identity: oauthIdentityPayload(identity)
+  });
+  const refreshToken = existingRefreshToken || sealOAuthPayload({
+    kind: "refresh_token",
+    exp: Date.now() + 90 * 24 * 60 * 60 * 1000,
+    googleRefreshToken: payload.googleRefreshToken,
+    identity: oauthIdentityPayload(identity)
+  });
+  return {
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: accessExpiresIn,
+    refresh_token: refreshToken,
+    scope: GOOGLE_OAUTH_SCOPES.join(" ")
   };
 }
 
@@ -594,8 +781,8 @@ function chatgptOpenapi() {
     type: "oauth2",
     flows: {
       authorizationCode: {
-        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
-        tokenUrl: "https://oauth2.googleapis.com/token",
+        authorizationUrl: `${PUBLIC_BASE_URL}/oauth/authorize`,
+        tokenUrl: `${PUBLIC_BASE_URL}/oauth/token`,
         scopes: {
           openid: "Verify the signed-in employee identity.",
           email: "Verify the signed-in employee email address.",
@@ -6353,6 +6540,21 @@ async function authenticateRequest(req) {
   }
   if (!ALLOW_GOOGLE_USER_AUTH) return null;
 
+  if (OAUTH_SESSION_SECRET) {
+    try {
+      const broker = openOAuthPayload(token);
+      if (broker.kind === "access_token" && Number(broker.exp || 0) > Date.now() && broker.googleAccessToken) {
+        return {
+          ...approvedIdentityFromPayload(broker.identity),
+          type: "google_oauth",
+          googleAccessToken: broker.googleAccessToken
+        };
+      }
+    } catch {
+      // The bearer may be a direct Google token used by a trusted non-GPT client.
+    }
+  }
+
   const cacheKey = createHash("sha256").update(token).digest("hex");
   const cached = GOOGLE_IDENTITY_CACHE.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return { ...cached.identity, googleAccessToken: token };
@@ -6374,6 +6576,122 @@ async function authenticateRequest(req) {
     }
   }
   return identity;
+}
+
+function oauthIdentityPayload(identity) {
+  return {
+    subject: String(identity.subject || ""),
+    email: String(identity.email || "").toLowerCase(),
+    name: String(identity.name || ""),
+    hostedDomain: String(identity.hostedDomain || "").toLowerCase()
+  };
+}
+
+function approvedIdentityFromPayload(payload = {}) {
+  const email = String(payload.email || "").toLowerCase();
+  const user = WAVE_AUTH_USERS.get(email);
+  if (!user || user.enabled === false) throw oauthError("access_denied", "This Google account is not approved for the Wave Ops bridge.", 403);
+  if (String(payload.hostedDomain || "").toLowerCase() !== GOOGLE_OAUTH_ALLOWED_DOMAIN.toLowerCase()) {
+    throw oauthError("access_denied", "Google account is outside the approved Workspace domain.", 403);
+  }
+  return {
+    type: "google_oauth",
+    subject: String(payload.subject || ""),
+    email,
+    name: user.name || payload.name || email,
+    role: user.role,
+    hostedDomain: String(payload.hostedDomain || "").toLowerCase(),
+    scopes: GOOGLE_OAUTH_SCOPES,
+    googleAccessToken: "",
+    jobNimbusOwnerId: user.jobNimbusOwnerId,
+    jobNimbusScope: user.jobNimbusScope,
+    quoLineId: user.quoLineId,
+    enabled: true
+  };
+}
+
+function sealOAuthPayload(payload) {
+  if (!OAUTH_SESSION_SECRET) throw oauthError("temporarily_unavailable", "OAuth session encryption is not configured.", 503);
+  const key = createHash("sha256").update(OAUTH_SESSION_SECRET).digest();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [iv, tag, encrypted].map((part) => part.toString("base64url")).join(".");
+}
+
+function openOAuthPayload(value) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 3 || !OAUTH_SESSION_SECRET) throw oauthError("invalid_grant", "OAuth token is invalid.");
+  try {
+    const [iv, tag, encrypted] = parts.map((part) => Buffer.from(part, "base64url"));
+    const key = createHash("sha256").update(OAUTH_SESSION_SECRET).digest();
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    return JSON.parse(Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8"));
+  } catch {
+    throw oauthError("invalid_grant", "OAuth token is invalid.");
+  }
+}
+
+function approvedChatGptRedirect(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && ["chat.openai.com", "chatgpt.com"].includes(url.hostname)
+      && /^\/aip\/[^/]+\/oauth\/callback\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function oauthClientCredentials(req, form) {
+  const header = String(req.headers.authorization || "");
+  const match = header.match(/^Basic\s+(.+)$/i);
+  if (match) {
+    const [clientId = "", clientSecret = ""] = Buffer.from(match[1], "base64").toString("utf8").split(":", 2);
+    return { clientId, clientSecret };
+  }
+  return { clientId: String(form.client_id || ""), clientSecret: String(form.client_secret || "") };
+}
+
+function verifyPkce(payload, verifier) {
+  if (!payload.codeChallenge) return;
+  if (!verifier) throw oauthError("invalid_grant", "PKCE code verifier is required.");
+  const calculated = payload.codeChallengeMethod === "S256"
+    ? createHash("sha256").update(verifier).digest("base64url")
+    : verifier;
+  if (!secureEqual(calculated, payload.codeChallenge)) throw oauthError("invalid_grant", "PKCE verification failed.");
+}
+
+function secureEqual(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function cleanupUsedOAuthCodes() {
+  const now = Date.now();
+  for (const [key, expiresAt] of USED_OAUTH_CODES) if (expiresAt <= now) USED_OAUTH_CODES.delete(key);
+}
+
+function oauthError(code, message, statusCode = 400) {
+  const error = new Error(message);
+  error.oauthCode = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
+function sendOAuthError(res, status, error, description) {
+  return send(res, status, { error, error_description: description });
+}
+
+function redirectOAuthError(res, redirectUri, state, error) {
+  const destination = new URL(redirectUri);
+  destination.searchParams.set("error", error || "access_denied");
+  if (state) destination.searchParams.set("state", state);
+  res.writeHead(302, { location: destination.toString(), "cache-control": "no-store" });
+  res.end();
 }
 
 function bearerToken(req) {
@@ -6832,6 +7150,21 @@ async function readJson(req) {
   }
   if (!raw.trim()) return {};
   try { return JSON.parse(raw); } catch { badRequest("Request body must be valid JSON."); }
+}
+
+async function readForm(req) {
+  let raw = "";
+  let bytes = 0;
+  for await (const chunk of req) {
+    bytes += chunk.length;
+    if (bytes > 64 * 1024) {
+      const error = new Error("OAuth form body is too large.");
+      error.statusCode = 413;
+      throw error;
+    }
+    raw += chunk;
+  }
+  return Object.fromEntries(new URLSearchParams(raw));
 }
 
 function required(value, name) {

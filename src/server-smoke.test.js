@@ -107,7 +107,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.components.securitySchemes.googleOAuth.type, "oauth2");
   assert.equal(
     chatgptSchema.components.securitySchemes.googleOAuth.flows.authorizationCode.authorizationUrl,
-    "https://accounts.google.com/o/oauth2/v2/auth"
+    "https://jobnimbus-chatgpt-bridge.onrender.com/oauth/authorize"
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
   assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 27);
@@ -216,6 +216,13 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
         hd: "wavepa.com",
         name: "Andrea Ramirez"
       };
+    } else if (url.pathname === "/token") {
+      response = {
+        access_token: "andrea-access-token",
+        refresh_token: "andrea-refresh-token",
+        expires_in: 3600,
+        token_type: "Bearer"
+      };
     } else if (url.pathname === "/gmail/v1/users/me/messages") {
       gmailTokens.push(req.headers.authorization);
       response = { messages: [], resultSizeEstimate: 0 };
@@ -237,13 +244,18 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
       PORT: String(bridgePort),
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
       GOOGLE_CLIENT_ID: "fixture-google-client",
-      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_CLIENT_SECRET: "fixture-google-secret",
       GOOGLE_REFRESH_TOKEN: "",
       GOOGLE_TOKENINFO_URL: `http://127.0.0.1:${fakeGooglePort}/tokeninfo`,
       GOOGLE_USERINFO_URL: `http://127.0.0.1:${fakeGooglePort}/userinfo`,
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeGooglePort}/token`,
       GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
+      PUBLIC_BASE_URL: `http://127.0.0.1:${bridgePort}`,
       ALLOW_GOOGLE_USER_AUTH: "true",
       GOOGLE_OAUTH_ALLOWED_DOMAIN: "wavepa.com",
+      GPT_OAUTH_CLIENT_ID: "fixture-gpt-client",
+      GPT_OAUTH_CLIENT_SECRET: "fixture-gpt-secret",
+      OAUTH_SESSION_SECRET: "fixture-session-encryption-secret",
       WAVE_AUTH_USERS_JSON: JSON.stringify({
         "andrea@wavepa.com": { name: "Andrea Ramirez", role: "client_coordinator" }
       }),
@@ -278,6 +290,57 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     body: "{}"
   });
   assert.equal(forbiddenResponse.status, 403);
+
+  const callbackUri = "https://chatgpt.com/aip/g-fixture/oauth/callback";
+  const authorizeResponse = await fetch(
+    `http://127.0.0.1:${bridgePort}/oauth/authorize?${new URLSearchParams({
+      client_id: "fixture-gpt-client",
+      redirect_uri: callbackUri,
+      response_type: "code",
+      state: "chatgpt-state"
+    })}`,
+    { redirect: "manual" }
+  );
+  assert.equal(authorizeResponse.status, 302);
+  const googleAuthorize = new URL(authorizeResponse.headers.get("location"));
+  assert.equal(googleAuthorize.hostname, "accounts.google.com");
+  assert.equal(googleAuthorize.searchParams.get("client_id"), "fixture-google-client");
+
+  const callbackResponse = await fetch(
+    `http://127.0.0.1:${bridgePort}/oauth/google/callback?${new URLSearchParams({
+      code: "fixture-google-code",
+      state: googleAuthorize.searchParams.get("state")
+    })}`,
+    { redirect: "manual" }
+  );
+  assert.equal(callbackResponse.status, 302);
+  const chatGptCallback = new URL(callbackResponse.headers.get("location"));
+  assert.equal(chatGptCallback.origin + chatGptCallback.pathname, callbackUri);
+  assert.equal(chatGptCallback.searchParams.get("state"), "chatgpt-state");
+
+  const tokenResponse = await fetch(`http://127.0.0.1:${bridgePort}/oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: "fixture-gpt-client",
+      client_secret: "fixture-gpt-secret",
+      redirect_uri: callbackUri,
+      code: chatGptCallback.searchParams.get("code")
+    })
+  });
+  assert.equal(tokenResponse.status, 200);
+  const brokerTokens = await tokenResponse.json();
+  assert.equal(brokerTokens.token_type, "Bearer");
+  assert.ok(brokerTokens.access_token);
+  assert.ok(brokerTokens.refresh_token);
+
+  const brokerIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
+    headers: { authorization: `Bearer ${brokerTokens.access_token}` }
+  });
+  assert.equal(brokerIdentityResponse.status, 200);
+  const brokerIdentity = await brokerIdentityResponse.json();
+  assert.equal(brokerIdentity.identity.email, "andrea@wavepa.com");
 });
 
 test("Retell configuration creates an editable draft before publishing", async (t) => {

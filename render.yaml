@@ -42,6 +42,12 @@ services:
         value: cpearson@wavepa.com
       - key: WAVE_AUTH_USERS_JSON
         sync: false
+      - key: GPT_OAUTH_CLIENT_ID
+        value: wave-jobnimbus-gpt
+      - key: GPT_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: OAUTH_SESSION_SECRET
+        sync: false
       - key: GMAIL_USER
         value: me
       - key: ALLOW_GMAIL_SEND
