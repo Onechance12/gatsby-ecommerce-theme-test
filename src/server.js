@@ -184,6 +184,7 @@ const routes = new Map([
   ["POST /brain/context", brainContext],
   ["POST /memory/file-actions", memoryFileActions],
   ["POST /memory/persistence-check", memoryPersistenceCheck],
+  ["POST /ops/start-session", startThresherOperationalSession],
   ["POST /ops/review-chance-files", reviewChanceFiles],
   ["POST /ops/action-batch", processActionBatch],
   ["POST /scheduling/availability", schedulingAvailability],
@@ -749,6 +750,7 @@ const CHATGPT_ACTION_PATHS = [
   "/auth/whoami",
   "/brain/context",
   "/memory/file-actions",
+  "/ops/start-session",
   "/ops/review-chance-files",
   "/ops/action-batch",
   "/scheduling/availability",
@@ -797,7 +799,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 27-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
+      description: "Consolidated 28-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     security: [{ googleOAuth: [] }],
@@ -4294,6 +4296,111 @@ async function reviewChanceFiles(input = {}) {
       "Do not treat memory or an old task as proof that work is still needed. Do not execute without approval."
     ]
   };
+}
+
+async function startThresherOperationalSession(input = {}) {
+  const identity = authWhoAmI();
+  const index = await reviewChanceFiles({
+    indexOnly: true,
+    activeOnly: true,
+    maxPages: input.maxPages,
+    maxPerSection: input.maxPerSection
+  });
+  const ranked = index.files
+    .map((file) => ({ ...file, priority: operationalPriority(file) }))
+    .sort((a, b) => b.priority.score - a.priority.score || fileSort(a, b));
+  const selected = ranked[0];
+  if (!selected) {
+    return {
+      identity,
+      generatedAt: new Date().toISOString(),
+      total: 0,
+      selected: null,
+      review: null,
+      assistantDirective: [
+        "No active Chance-assigned JobNimbus files were found.",
+        "Do not invent an approval queue. Report the empty result."
+      ]
+    };
+  }
+  const query = String(selected.number || selected.id || selected.name || "").trim();
+  const review = await reviewChanceFiles({
+    query,
+    limit: 1,
+    activeOnly: true,
+    includeGmail: true,
+    includeQuo: true,
+    includeQuoTranscripts: input.includeQuoTranscripts === true,
+    communicationDays: input.communicationDays,
+    gmailLimit: input.gmailLimit,
+    gmailThreadLimit: input.gmailThreadLimit,
+    quoLimit: input.quoLimit,
+    maxPerSection: input.maxPerSection
+  });
+  return {
+    identity,
+    generatedAt: new Date().toISOString(),
+    total: index.total,
+    rankedCandidates: ranked.slice(0, 10),
+    selected,
+    review,
+    assistantDirective: [
+      "The bridge completed identity verification, stale-aware prioritization, and the exact-file deep review in one action.",
+      "Begin with the employee name and Thresher Operational Session heading, then state verified role and scope.",
+      "Analyze the selected file's fresh JobNimbus, Gmail, Quo, task, calendar, document, and memory evidence now.",
+      "Give one primary next action and an exact approval queue. Do not stop with a promise to review later.",
+      "Nothing in this response authorizes a write, send, call, task, event, upload, or status change."
+    ]
+  };
+}
+
+function operationalPriority(file = {}) {
+  const status = String(file.status || "").toLowerCase();
+  const missing = file.missing || {};
+  const rawUpdated = file.dateUpdated;
+  const numericUpdated = Number(rawUpdated);
+  const updated = Number.isFinite(numericUpdated) && numericUpdated > 0
+    ? numericUpdated * (numericUpdated < 1e12 ? 1000 : 1)
+    : Date.parse(String(rawUpdated || ""));
+  const staleDays = Number.isFinite(updated)
+    ? Math.max(0, Math.floor((Date.now() - updated) / 86400000))
+    : 365;
+  let score = Math.min(staleDays, 120);
+  const reasons = [`${staleDays} day(s) since the recorded update`];
+
+  if (status.includes("ready for pa review")) {
+    score += 160;
+    reasons.push("Ready for PA Review requires claim investigation or filing");
+  } else if (status.includes("ready for appraisal")) {
+    score += 150;
+    reasons.push("Ready for Appraisal should not sit without submission");
+  } else if (status.includes("submitted") && status.includes("confirmation")) {
+    score += 130;
+    reasons.push("Submitted file still needs the two key confirmations");
+  } else if (status.includes("hot") || status.includes("final negotiation")) {
+    score += 120;
+    reasons.push("Hot final negotiation is settlement-priority work");
+  } else if (status.includes("negotiat")) {
+    score += 80;
+    reasons.push("Active negotiation requires continued carrier progress");
+  } else if (status.includes("submitted for appraisal")) {
+    score += 70;
+    reasons.push("Submitted appraisal requires milestone monitoring");
+  }
+
+  if (missing.claimNumber && status.includes("ready for pa review")) {
+    score += 45;
+    reasons.push("Claim number is missing");
+  }
+  if (missing.adjuster && status.includes("confirmation")) {
+    score += 40;
+    reasons.push("Adjuster confirmation is missing");
+  }
+  if (missing.policyNumber || missing.dateOfLoss) {
+    score += 20;
+    reasons.push("Core claim data is incomplete");
+  }
+  return { score, staleDays, reasons };
 }
 
 function compactChanceIndexContact(contact) {
@@ -8010,6 +8117,18 @@ const OPENAPI = {
         properties: {
           maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25, description: "Maximum verified records to render in each brain section." }
         }
+      },
+      OperationalSessionRequest: {
+        type: "object",
+        properties: {
+          maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
+          maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25 },
+          includeQuoTranscripts: { type: "boolean", default: false },
+          communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
+          gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
+          gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
+          quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 25 }
+        }
       }
     }
   },
@@ -8233,6 +8352,13 @@ const OPENAPI = {
         operationId: "readWaveJobNimbusBrain",
         requestBody: jsonBody("BrainContextRequest"),
         responses: { "200": { description: "Read-only company operating context. Never writes memory, exposes client memory, or executes an action." } }
+      }
+    },
+    "/ops/start-session": {
+      post: {
+        operationId: "startThresherOperationalSession",
+        requestBody: jsonBody("OperationalSessionRequest"),
+        responses: { "200": { description: "Authenticates the employee, ranks the active Chance file index with stale-file priority, and completes the selected file's JobNimbus, Gmail, Quo, task, calendar, document, and memory review in one read-only action." } }
       }
     },
     "/memory/file-actions": {

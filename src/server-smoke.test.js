@@ -110,11 +110,12 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "https://jobnimbus-chatgpt-bridge.onrender.com/oauth/authorize"
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 27);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 28);
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
+  assert.equal(chatgptSchema.paths["/ops/start-session"].post.operationId, "startThresherOperationalSession");
   assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
   assert.equal(chatgptSchema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
