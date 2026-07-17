@@ -43,6 +43,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.clientCoordinator.expandedModesAllowed, false);
   assert.equal(health.clientCoordinator.freshEvidenceRequired, true);
   assert.equal(health.clientCoordinator.automaticTextOrWriteback, false);
+  assert.equal(health.carrierFollowUp.freshEvidenceRequired, true);
+  assert.equal(health.carrierFollowUp.approvalDigestRequired, true);
+  assert.equal(health.carrierFollowUp.automaticScheduling, false);
+  assert.equal(health.carrierFollowUp.automaticJobNimbusWriteback, false);
   assert.equal(health.brain.mode, "verified_company_context_with_live_client_snapshots_and_action_receipts");
   assert.equal(health.brain.clientSnapshots, true);
   assert.equal(health.brain.automaticRefreshOnReview, true);
@@ -73,6 +77,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/retell/client-coordinator-call"].post.operationId, "placeApprovedClientCoordinatorCall");
   assert.equal(schema.paths["/retell/client-coordinator-call"].post["x-openai-isConsequential"], true);
   assert.equal(schema.paths["/retell/client-coordinator-call-result"].post.operationId, "reviewClientCoordinatorCall");
+  assert.equal(schema.paths["/retell/configure-carrier-follow-up"].post.operationId, "configureApprovedCarrierFollowUpAgent");
+  assert.equal(schema.paths["/retell/carrier-follow-up-call"].post.operationId, "placeApprovedCarrierFollowUpCall");
+  assert.equal(schema.paths["/retell/carrier-follow-up-call"].post["x-openai-isConsequential"], true);
+  assert.equal(schema.paths["/retell/carrier-follow-up-call-result"].post.operationId, "reviewCarrierFollowUpCall");
   assert.equal(schema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
   assert.equal(schema.paths["/retell/homeowner-call-result"].post.operationId, "reviewHomeownerAppointmentCall");
   assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
@@ -90,7 +98,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 23);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 26);
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
@@ -98,6 +106,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
   assert.equal(chatgptSchema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
   assert.equal(chatgptSchema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
+  assert.equal(chatgptSchema.paths["/retell/carrier-follow-up-call"].post.operationId, "placeApprovedCarrierFollowUpCall");
+  assert.equal(chatgptSchema.paths["/retell/carrier-follow-up-call-result"].post.operationId, "reviewCarrierFollowUpCall");
   assert.deepEqual(
     chatgptSchema.components.schemas.DocumentReviewRequest.properties.documentPurpose.enum,
     ["insurance_policy", "tdi_form", "estimate_scope", "carrier_claim_document", "appraisal_document", "representation_contract"]

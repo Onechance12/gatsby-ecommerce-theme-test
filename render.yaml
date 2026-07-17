@@ -90,12 +90,16 @@ services:
         sync: false
       - key: RETELL_CLIENT_COORDINATOR_AGENT_ID
         sync: false
+      - key: RETELL_CARRIER_FOLLOWUP_AGENT_ID
+        sync: false
       - key: RETELL_FROM_NUMBER
         sync: false
       - key: ALLOW_RETELL_CALLS
         value: "true"
       - key: ALLOW_CLIENT_COORDINATOR_CALLS
         value: "false"
+      - key: ALLOW_CARRIER_FOLLOWUP_CALLS
+        value: "true"
       - key: RETELL_CALLBACK_TTL_HOURS
         value: "72"
       - key: CHANCE_JOBNIMBUS_OWNER_ID

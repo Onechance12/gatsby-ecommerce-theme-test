@@ -34,6 +34,15 @@ import {
   extractClientCoordinatorResult
 } from "./client-coordinator/agent.js";
 import {
+  CARRIER_DESTINATION_TYPES,
+  CARRIER_FOLLOW_UP_GOALS,
+  buildCarrierFollowUpAgentSettings,
+  buildCarrierFollowUpConversation,
+  buildCarrierFollowUpLlmConfig,
+  carrierFollowUpAnalysisSchema,
+  extractCarrierFollowUpResult
+} from "./carrier-follow-up/agent.js";
+import {
   appointmentFitsAvailability,
   availabilityRange,
   buildUnifiedAvailability,
@@ -87,9 +96,11 @@ const RETELL_API_KEY = process.env.RETELL_API_KEY || "";
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
 const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
 const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR_AGENT_ID || RETELL_HOMEOWNER_AGENT_ID;
+const RETELL_CARRIER_FOLLOWUP_AGENT_ID = process.env.RETELL_CARRIER_FOLLOWUP_AGENT_ID || "agent_66fb8a49fc6ab5a777eb9f0474";
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
 const ALLOW_CLIENT_COORDINATOR_CALLS = process.env.ALLOW_CLIENT_COORDINATOR_CALLS === "true";
+const ALLOW_CARRIER_FOLLOWUP_CALLS = process.env.ALLOW_CARRIER_FOLLOWUP_CALLS === "true";
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
@@ -169,6 +180,9 @@ const routes = new Map([
   ["POST /retell/configure-client-coordinator", configureClientCoordinatorAgent],
   ["POST /retell/client-coordinator-call", retellClientCoordinatorCall],
   ["POST /retell/client-coordinator-call-result", retellClientCoordinatorCallResult],
+  ["POST /retell/configure-carrier-follow-up", configureCarrierFollowUpAgent],
+  ["POST /retell/carrier-follow-up-call", retellCarrierFollowUpCall],
+  ["POST /retell/carrier-follow-up-call-result", retellCarrierFollowUpCallResult],
   ["POST /retell/homeowner-call", retellHomeownerCall],
   ["POST /retell/homeowner-call-result", retellHomeownerCallResult],
   ["POST /retell/inbound", retellInbound],
@@ -314,6 +328,18 @@ function health() {
       freshEvidenceRequired: true,
       approvalDigestRequired: true,
       automaticTextOrWriteback: false
+    },
+    carrierFollowUp: {
+      available: Boolean(RETELL_API_KEY && RETELL_CARRIER_FOLLOWUP_AGENT_ID && RETELL_FROM_NUMBER),
+      engine: "retell",
+      supportedGoals: CARRIER_FOLLOW_UP_GOALS,
+      supportedDestinations: CARRIER_DESTINATION_TYPES,
+      callsAllowed: ALLOW_RETELL_CALLS && ALLOW_CARRIER_FOLLOWUP_CALLS,
+      ownerScope: "Chance Pearson",
+      freshEvidenceRequired: true,
+      approvalDigestRequired: true,
+      automaticScheduling: false,
+      automaticJobNimbusWriteback: false
     },
     schedulingAvailability: {
       jobNimbusCalendarConfigured: Boolean(API_KEY),
@@ -503,7 +529,10 @@ const CHATGPT_ACTION_PATHS = [
   "/claim-filing/writeback",
   "/retell/configure-agent",
   "/retell/client-coordinator-call",
-  "/retell/client-coordinator-call-result"
+  "/retell/client-coordinator-call-result",
+  "/retell/configure-carrier-follow-up",
+  "/retell/carrier-follow-up-call",
+  "/retell/carrier-follow-up-call-result"
 ];
 
 function chatgptOpenapi() {
@@ -512,7 +541,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 23-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. Exact-file external IDs are available through readChanceFileActionReceipts. All JobNimbus writes, Gmail drafts/sends, Quo sends, and Retell configuration changes are exact and approval-gated."
+      description: "Consolidated 26-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. Exact-file external IDs are available through readChanceFileActionReceipts. All JobNimbus writes, Gmail drafts/sends, Quo sends, Retell calls, and Retell configuration changes are exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
@@ -1549,6 +1578,219 @@ async function retellClientCoordinatorCallResult(input = {}) {
   };
 }
 
+async function retellCarrierFollowUpCall(input = {}) {
+  const { contact } = await findChanceContact(required(input.query, "query"));
+  const file = compactContact(contact);
+  const destinationType = String(input.destinationType || "carrier_general_line").trim().toLowerCase();
+  const fallbackPhone = destinationType === "desk_adjuster" ? file.adjusterPhone : "";
+  const to = normalizePhone(input.to || input.carrierPhone || fallbackPhone);
+  if (!/^\+\d{10,15}$/.test(to)) {
+    badRequest("A verified destination phone number is required. The bridge will not use a desk-adjuster number for a field inspector or guess a carrier number.");
+  }
+  if (!file.claimNumber && !file.policyNumber) {
+    badRequest("The current file has neither a claim number nor a policy number. Verify an identifier before preparing a carrier follow-up call.");
+  }
+
+  let conversation;
+  try {
+    conversation = buildCarrierFollowUpConversation({
+      goal: input.goal,
+      destinationType,
+      contactName: input.contactName || (destinationType === "desk_adjuster" ? file.adjusterName : ""),
+      approvedQuestions: input.approvedQuestions,
+      schedulingAuthority: input.schedulingAuthority === true,
+      approvedSchedulingOptions: input.approvedSchedulingOptions
+    });
+  } catch (error) {
+    badRequest(error.message);
+  }
+
+  const evidencePacket = await buildChanceEvidencePacket(contact, {
+    includeGmail: input.includeGmail !== false,
+    includeQuo: input.includeQuo !== false,
+    includeQuoTranscripts: input.includeQuoTranscripts === true,
+    communicationDays: input.communicationDays,
+    gmailLimit: input.gmailLimit,
+    gmailThreadLimit: input.gmailThreadLimit,
+    quoLimit: input.quoLimit
+  });
+  const evidence = compactClientCoordinatorEvidence(evidencePacket);
+  if (!evidencePacket.complete) {
+    return {
+      mode: "blocked_evidence",
+      approvalRequired: true,
+      file,
+      evidence,
+      reason: "A requested evidence source is unavailable. Review the source error or explicitly prepare again with that source disabled before calling."
+    };
+  }
+
+  const evidenceFingerprint = clientCoordinatorEvidenceFingerprint(evidence);
+  const dynamicVariables = {
+    directionMode: "outbound_carrier_follow_up",
+    goal: "carrier_follow_up",
+    callGoal: conversation.goal,
+    destinationType: conversation.destinationType,
+    carrierFollowUpOpening: conversation.opening,
+    carrier: file.carrier || "Unknown",
+    insuredName: file.name || "Unknown",
+    propertyAddress: file.address || "Unknown",
+    policyNumber: file.policyNumber || "Missing",
+    claimNumber: file.claimNumber || "Missing",
+    dateOfLoss: file.dateOfLoss || "Missing",
+    jobNumber: String(file.number || "Missing"),
+    deskAdjuster: [file.adjusterName, file.adjusterPhone, file.adjusterEmail].filter(Boolean).join(" | ") || "Unknown",
+    fieldInspector: String(input.fieldInspectorName || "Unknown").trim(),
+    inspectorCompany: String(input.fieldInspectorCompany || "Unknown").trim(),
+    appointmentDateTime: String(input.appointmentDateTime || "Not supplied").trim(),
+    appointmentWindow: String(input.appointmentWindow || "Not supplied").trim(),
+    interiorAccess: String(input.interiorAccess || "Unknown").trim(),
+    documentsSent: String(input.documentsSent || "Unknown").trim(),
+    documentDestination: String(input.documentDestination || "Unknown").trim(),
+    approvedQuestions: conversation.approvedQuestions.map((question, index) => `${index + 1}. ${question}`).join("\n"),
+    schedulingAuthority: conversation.schedulingAuthority,
+    approvedSchedulingOptions: conversation.approvedSchedulingOptions.join(" | ") || "None"
+  };
+  const metadata = {
+    source: "hcn-wave-jobnimbus-bridge",
+    contactId: file.id,
+    fileNumber: String(file.number || ""),
+    ownerId: CHANCE_OWNER_ID,
+    goal: "carrier_follow_up",
+    carrierFollowUpGoal: conversation.goal,
+    destinationType: conversation.destinationType,
+    evidenceFingerprint
+  };
+  const planDigest = digest({
+    version: 1,
+    to,
+    agentId: RETELL_CARRIER_FOLLOWUP_AGENT_ID,
+    metadata,
+    dynamicVariables,
+    evidenceFingerprint
+  });
+  metadata.planDigest = planDigest;
+  const request = {
+    from_number: RETELL_FROM_NUMBER,
+    to_number: to,
+    override_agent_id: RETELL_CARRIER_FOLLOWUP_AGENT_ID,
+    metadata,
+    retell_llm_dynamic_variables: dynamicVariables
+  };
+
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      approvalRequired: true,
+      automaticScheduling: false,
+      automaticJobNimbusWriteback: false,
+      file,
+      destination: {
+        type: conversation.destinationType,
+        name: conversation.contactName,
+        phone: to
+      },
+      conversation,
+      evidence,
+      planDigest,
+      request: previewRetellRequest(request),
+      nextStep: "Show Chance the destination, exact questions, scheduling authority, fresh evidence, and digest. Nothing is called until the unchanged plan is approved."
+    };
+  }
+
+  assertApprovalDigest(input.planDigest, planDigest);
+  if (!ALLOW_RETELL_CALLS || !ALLOW_CARRIER_FOLLOWUP_CALLS) {
+    badRequest("Carrier follow-up calls are disabled. ALLOW_RETELL_CALLS and ALLOW_CARRIER_FOLLOWUP_CALLS must both be true.");
+  }
+  if (!RETELL_API_KEY || !RETELL_CARRIER_FOLLOWUP_AGENT_ID || !RETELL_FROM_NUMBER) {
+    badRequest("The Retell Carrier Follow-Up agent is not fully configured.");
+  }
+  const prior = await findRemoteClaimCallAttempt(planDigest, "");
+  if (prior) {
+    return {
+      mode: "duplicate_prevented",
+      file,
+      planDigest,
+      callId: prior.callId,
+      callStatus: prior.callStatus,
+      createdAt: prior.createdAt,
+      note: "This exact approved carrier follow-up plan already created a Retell call. No second call was placed."
+    };
+  }
+
+  const result = await retellApi("POST", "/v2/create-phone-call", request);
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
+    channel: "retell",
+    action: "place_carrier_follow_up_call",
+    status: result.call_status || "registered",
+    subjectKey: file.id,
+    fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
+    summary: `Placed approved Retell carrier follow-up call for ${conversation.goal}.`,
+    externalId: result.call_id,
+    evidence: result.call_id ? [`retell:${result.call_id}`] : []
+  });
+  return {
+    mode: "executed",
+    file,
+    carrierFollowUpGoal: conversation.goal,
+    planDigest,
+    callId: result.call_id,
+    callStatus: result.call_status,
+    nextStep: "After the call ends, review its transcript and structured result before approving any JobNimbus field, task, note, calendar, text, or email action.",
+    memoryCloseout
+  };
+}
+
+async function retellCarrierFollowUpCallResult(input = {}) {
+  const callId = required(input.callId, "callId");
+  const call = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+  if (call.metadata?.source !== "hcn-wave-jobnimbus-bridge" || call.metadata?.goal !== "carrier_follow_up") {
+    badRequest("This is not a bridge Carrier Follow-Up call.");
+  }
+  const result = extractCarrierFollowUpResult(call);
+  const data = result.structured || {};
+  const proposedContactFields = cleanObject({
+    claimNumber: data.claim_number,
+    adjusterName: data.desk_adjuster_name,
+    adjusterPhone: data.desk_adjuster_phone,
+    adjusterEmail: data.desk_adjuster_email
+  });
+  const proposedInspectionTask = cleanObject({
+    fieldInspectorName: data.field_inspector_name,
+    fieldInspectorCompany: data.field_inspector_company,
+    fieldInspectorPhone: data.field_inspector_phone,
+    fieldInspectorEmail: data.field_inspector_email,
+    carrierArrivalWindow: data.appointment_window,
+    dayOfEta: data.estimated_arrival_time,
+    accessRequirements: data.access_requirements
+  });
+  return {
+    mode: "read_only",
+    call: result,
+    file: {
+      id: call.metadata.contactId || "",
+      number: call.metadata.fileNumber || ""
+    },
+    carrierFollowUpGoal: call.metadata.carrierFollowUpGoal || "",
+    reviewOnlyProposals: {
+      contactFields: proposedContactFields,
+      inspectionTask: proposedInspectionTask,
+      documents: cleanObject({
+        received: data.documents_received,
+        submissionDestination: data.document_submission,
+        representationRecognized: data.representation_recognized === true
+      }),
+      followUp: cleanObject({
+        carrierNextStep: data.carrier_next_step,
+        timeframe: data.follow_up_timeframe,
+        blocker: data.blocking_reason,
+        proposedAppointmentChange: data.proposed_change
+      })
+    },
+    instruction: "Review the transcript against every extracted value. Desk-adjuster fields and inspection-task fields are deliberately separate. Nothing was written, scheduled, sent, or changed; each exact action requires Chance's separate approval."
+  };
+}
+
 function compactClientCoordinatorEvidence(packet = {}) {
   const gmailMessages = (Array.isArray(packet.gmail?.messages) ? packet.gmail.messages : [])
     .slice(0, 5)
@@ -2222,6 +2464,110 @@ async function configureClientCoordinatorAgent(input = {}) {
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
     nextStep: "Keep expanded modes disabled until Chance reviews one dry-run call plan. No call was placed by this configuration action."
+  };
+}
+
+async function configureCarrierFollowUpAgent(input = {}) {
+  if (!RETELL_API_KEY || !RETELL_CARRIER_FOLLOWUP_AGENT_ID) {
+    badRequest("RETELL_API_KEY and RETELL_CARRIER_FOLLOWUP_AGENT_ID are required.");
+  }
+  const agent = await retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_CARRIER_FOLLOWUP_AGENT_ID)}`);
+  const llmId = String(agent?.response_engine?.llm_id || "").trim();
+  if (agent?.response_engine?.type !== "retell-llm" || !llmId) {
+    badRequest("The configured Retell Carrier Follow-Up agent does not use a Retell LLM response engine.");
+  }
+
+  const llmConfig = buildCarrierFollowUpLlmConfig();
+  const agentSettings = buildCarrierFollowUpAgentSettings();
+  const analysisSchema = carrierFollowUpAnalysisSchema();
+  const configDigest = digest({
+    agentId: RETELL_CARRIER_FOLLOWUP_AGENT_ID,
+    llmId,
+    generalPrompt: llmConfig.general_prompt,
+    generalTools: llmConfig.general_tools,
+    beginMessage: llmConfig.begin_message,
+    startSpeaker: llmConfig.start_speaker,
+    agentSettings,
+    postCallAnalysisData: analysisSchema,
+    timeZone: OPERATIONS_TIME_ZONE
+  });
+  const preview = {
+    agentId: RETELL_CARRIER_FOLLOWUP_AGENT_ID,
+    llmId,
+    currentAgentVersion: agent.version,
+    currentPublished: Boolean(agent.is_published),
+    supportedGoals: CARRIER_FOLLOW_UP_GOALS,
+    supportedDestinations: CARRIER_DESTINATION_TYPES,
+    configDigest,
+    promptCharacters: llmConfig.general_prompt.length,
+    toolNames: llmConfig.general_tools.map((tool) => tool.name),
+    analysisFields: analysisSchema.map((field) => field.name),
+    exactConfiguration: {
+      generalPrompt: llmConfig.general_prompt,
+      generalTools: llmConfig.general_tools,
+      beginMessage: llmConfig.begin_message,
+      startSpeaker: llmConfig.start_speaker,
+      agentSettings,
+      postCallAnalysisData: analysisSchema,
+      timeZone: OPERATIONS_TIME_ZONE
+    }
+  };
+
+  if (input.execute !== true) {
+    return {
+      mode: "dry_run",
+      approvalRequired: true,
+      publishRequired: true,
+      ...preview,
+      nextStep: "Review the exact prompt, tools, extraction fields, and digest. Nothing is changed in Retell and no call is placed."
+    };
+  }
+  if (input.publish !== true) {
+    badRequest("publish=true is required with execute=true so the live Carrier Follow-Up agent cannot drift from the reviewed prompt.");
+  }
+  assertApprovalDigest(input.configDigest, configDigest, "configDigest");
+
+  const draftAgent = await ensureRetellDraftAgentVersion(RETELL_CARRIER_FOLLOWUP_AGENT_ID, agent);
+  const draftLlmId = String(draftAgent?.response_engine?.llm_id || "").trim();
+  const draftLlmVersion = Number(draftAgent?.response_engine?.version);
+  if (draftAgent?.response_engine?.type !== "retell-llm" || !draftLlmId || !Number.isInteger(draftLlmVersion)) {
+    badRequest("Retell created a Carrier Follow-Up draft without a usable Retell LLM draft.");
+  }
+  const llm = await retellApi("PATCH", versionedRetellEndpoint(`/update-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion), {
+    general_prompt: llmConfig.general_prompt,
+    general_tools: llmConfig.general_tools,
+    begin_message: llmConfig.begin_message,
+    start_speaker: llmConfig.start_speaker
+  });
+  const llmVersion = Number(llm.version);
+  if (!Number.isInteger(llmVersion) || llmVersion < 0) {
+    badRequest("Retell updated the Carrier Follow-Up LLM but did not return a usable version.");
+  }
+  const updatedAgent = await retellApi("PATCH", versionedRetellEndpoint(`/update-agent/${encodeURIComponent(RETELL_CARRIER_FOLLOWUP_AGENT_ID)}`, draftAgent.version), {
+    response_engine: { type: "retell-llm", llm_id: draftLlmId, version: llmVersion },
+    ...agentSettings,
+    post_call_analysis_data: analysisSchema,
+    post_call_analysis_model: "gpt-4.1-mini",
+    timezone: OPERATIONS_TIME_ZONE
+  });
+  const version = Number(updatedAgent.version);
+  if (!Number.isInteger(version) || version < 0) {
+    badRequest("Retell updated the Carrier Follow-Up draft but did not return a publishable version.");
+  }
+  await retellApi("POST", `/publish-agent-version/${encodeURIComponent(RETELL_CARRIER_FOLLOWUP_AGENT_ID)}`, {
+    version,
+    version_title: "HCN Wave Carrier Follow-Up",
+    version_description: "Approval-gated carrier, adjuster, inspector, appointment, and document follow-up with review-only results."
+  });
+
+  return {
+    mode: "executed",
+    published: true,
+    ...preview,
+    draftAgentVersion: Number(draftAgent.version),
+    publishedAgentVersion: version,
+    retellLlmVersion: llmVersion,
+    nextStep: "Prepare a dry-run carrier follow-up plan for one Chance file. No call was placed by this configuration action."
   };
 }
 
@@ -6976,6 +7322,52 @@ const OPENAPI = {
         },
         required: ["callId"]
       },
+      RetellCarrierFollowUpConfigurationRequest: {
+        type: "object",
+        properties: {
+          configDigest: { type: "string", description: "Exact digest returned by the Carrier Follow-Up configuration dry run." },
+          execute: { type: "boolean", default: false, description: "False returns the exact configuration. True changes Retell only when the digest matches." },
+          publish: { type: "boolean", default: false, description: "Must be true with execute=true so the reviewed version becomes live." }
+        }
+      },
+      RetellCarrierFollowUpCallRequest: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Exact Chance-owned JobNimbus file identifier." },
+          goal: { type: "string", enum: ["adjuster_assignment", "claim_status", "appointment_confirmation", "inspector_eta", "document_receipt", "document_destination", "generic_information"], default: "adjuster_assignment" },
+          destinationType: { type: "string", enum: ["carrier_general_line", "desk_adjuster", "field_inspector", "scheduler", "independent_adjusting_company"], default: "carrier_general_line" },
+          to: { type: "string", description: "Verified destination phone. Required unless destinationType is desk_adjuster and the current file has a verified desk-adjuster phone." },
+          carrierPhone: { type: "string", description: "Alias for a verified carrier general-line phone." },
+          contactName: { type: "string", description: "Verified direct contact name for a conversational named-contact opening." },
+          fieldInspectorName: { type: "string", description: "Verified current field inspector. Never substitute the desk adjuster." },
+          fieldInspectorCompany: { type: "string" },
+          appointmentDateTime: { type: "string", description: "Verified existing appointment date. This does not grant scheduling authority." },
+          appointmentWindow: { type: "string", description: "Verified carrier arrival window." },
+          interiorAccess: { type: "string", description: "Verified access requirement." },
+          documentsSent: { type: "string", description: "Only documents verified as actually sent or uploaded." },
+          documentDestination: { type: "string", description: "Known destination to confirm, if any." },
+          approvedQuestions: { type: "array", maxItems: 10, items: { type: "string" }, description: "Additional exact questions approved for this call." },
+          schedulingAuthority: { type: "boolean", default: false, description: "False means information gathering only. True must be explicitly approved and limits scheduling to approvedSchedulingOptions." },
+          approvedSchedulingOptions: { type: "array", maxItems: 8, items: { type: "string" } },
+          includeGmail: { type: "boolean", default: true },
+          includeQuo: { type: "boolean", default: true },
+          includeQuoTranscripts: { type: "boolean", default: false },
+          communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
+          gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
+          gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
+          quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 25 },
+          planDigest: { type: "string", description: "Exact digest returned by the unchanged dry run." },
+          execute: { type: "boolean", default: false, description: "False returns an exact plan. True places one call only after Chance approves the unchanged plan." }
+        },
+        required: ["query"]
+      },
+      RetellCarrierFollowUpCallResultRequest: {
+        type: "object",
+        properties: {
+          callId: { type: "string", description: "Retell call id returned by placeApprovedCarrierFollowUpCall." }
+        },
+        required: ["callId"]
+      },
       RetellHomeownerCallRequest: {
         type: "object",
         properties: {
@@ -7209,6 +7601,29 @@ const OPENAPI = {
         operationId: "reviewClientCoordinatorCall",
         requestBody: jsonBody("RetellClientCoordinatorCallResultRequest"),
         responses: { "200": { description: "Returns transcript, structured client commitments, questions, opt-out status, and review-only follow-up proposals. It sends and writes nothing." } }
+      }
+    },
+    "/retell/configure-carrier-follow-up": {
+      post: {
+        operationId: "configureApprovedCarrierFollowUpAgent",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("RetellCarrierFollowUpConfigurationRequest"),
+        responses: { "200": { description: "Returns or publishes the exact dedicated carrier follow-up prompt, DTMF tool, call settings, and structured extraction schema. It never places a call." } }
+      }
+    },
+    "/retell/carrier-follow-up-call": {
+      post: {
+        operationId: "placeApprovedCarrierFollowUpCall",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("RetellCarrierFollowUpCallRequest"),
+        responses: { "200": { description: "Reviews fresh Chance-owned JobNimbus, Gmail, company-wide Quo, documents, tasks, and receipts; returns an exact approval plan or places one approved information-gathering call. It cannot write, send, negotiate, or silently schedule." } }
+      }
+    },
+    "/retell/carrier-follow-up-call-result": {
+      post: {
+        operationId: "reviewCarrierFollowUpCall",
+        requestBody: jsonBody("RetellCarrierFollowUpCallResultRequest"),
+        responses: { "200": { description: "Returns the transcript, separate desk-adjuster and field-inspector facts, appointment/document results, and review-only proposals. It writes and schedules nothing." } }
       }
     },
     "/retell/homeowner-call": {
