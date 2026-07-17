@@ -22,6 +22,7 @@ import {
 import { renderBrain } from "./memory/brain.js";
 import { safeCloseoutAction } from "./memory/actionCloseout.js";
 import { latestActionReceipts, listMemory } from "./memory/store.js";
+import { readFileSnapshot, refreshFileSnapshot, summarizeFileSnapshot } from "./memory/fileSnapshot.js";
 import { listQuoNumbers, readQuoHistory, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
@@ -325,10 +326,14 @@ function health() {
     },
     brain: {
       available: true,
-      mode: "verified_company_context_with_private_action_receipts",
+      mode: "verified_company_context_with_live_client_snapshots_and_action_receipts",
       autonomousLearning: false,
       externalActions: false,
       clientMemoryExposed: "exact_Chance_file_only",
+      clientSnapshots: true,
+      automaticRefreshOnReview: true,
+      liveSourcesWin: true,
+      doesNotAuthorizeActions: true,
       persistentRootConfigured: Boolean(process.env.MEMORY_ROOT)
     }
   };
@@ -348,12 +353,36 @@ function brainContext(input = {}) {
   };
 }
 
+function reviewBrainContext(subjectKey = "", maxPerSection = 25) {
+  const scoped = Boolean(subjectKey);
+  return {
+    scope: scoped ? "company_and_exact_file" : "company_only",
+    subjectKey: scoped ? subjectKey : "",
+    authority: "Verified company rules guide review. Client snapshots provide continuity only. Live evidence wins and explicit approval is required for every action.",
+    execution: "none",
+    context: renderBrain(MEMORY_CONFIG, {
+      maxPerSection: clamp(Number(maxPerSection || 25), 1, 25),
+      clientLane: scoped ? "subject" : "none",
+      subjectKey: scoped ? subjectKey : "",
+      includeEpisodes: scoped
+    })
+  };
+}
+
+function clientMemoryEnvelope(snapshot) {
+  return {
+    snapshot: summarizeFileSnapshot(snapshot),
+    authority: "Private read-through continuity only. Fresh source evidence wins. This snapshot never authorizes a write, send, call, task, event, upload, or status change."
+  };
+}
+
 async function memoryFileActions(input = {}) {
   const query = required(input.query, "query");
   const limit = clamp(Number(input.limit || 20), 1, 100);
   const { contact } = await findChanceContact(query);
   const file = compactContact(contact);
   const receipts = latestActionReceipts(MEMORY_CONFIG, limit, { subjectKey: file.id });
+  const clientSnapshot = summarizeFileSnapshot(readFileSnapshot(MEMORY_CONFIG, file.id));
   const claimCallLedger = (await readClaimCallLedger())
     .filter((row) => row.contactId === file.id || String(row.fileNumber || "") === String(file.number || ""))
     .slice(-limit)
@@ -362,6 +391,10 @@ async function memoryFileActions(input = {}) {
     generatedAt: new Date().toISOString(),
     file,
     subjectKey: file.id,
+    clientMemory: {
+      snapshot: clientSnapshot,
+      authority: "Continuity only. Live evidence wins and explicit approval is still required for every action."
+    },
     references: buildFileReferenceRegistry(file, receipts, claimCallLedger),
     receipts,
     claimCalls: claimCallLedger.map((row) => cleanObject({
@@ -1001,14 +1034,47 @@ async function reviewFile(input) {
   const activities = await listRelated("/activities", contact.jnid, 30);
   const tasks = await listRelated("/tasks", contact.jnid, 30);
   const documents = await listRelated("/files", contact.jnid, 1000);
+  const file = compactContact(contact);
+  const sortedActivities = [...activities].sort((a, b) => Number(b.date_created || 0) - Number(a.date_created || 0));
+  const openTasks = tasks.filter((task) => !task.is_completed).sort((a, b) => Number(a.date_start || a.date_end || 0) - Number(b.date_start || b.date_end || 0));
+  const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
+  const actionReceipts = latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id });
+  const sourceStatus = {
+    jobNimbus: { status: "fresh", at: new Date().toISOString() },
+    gmail: { status: "not_requested", at: new Date().toISOString() },
+    quo: { status: "not_requested", at: new Date().toISOString() }
+  };
+  const liveJobNimbus = {
+    recentActivities: sortedActivities.map(compactActivity),
+    openTasks: openTasks.map(compactTask),
+    operationalDocuments: operationalDocuments.slice(0, 60).map(compactDocument),
+    excludedPhotoLikeDocumentCount: documents.length - operationalDocuments.length,
+    assistantRead: buildAssistantRead(contact, activities, tasks, operationalDocuments)
+  };
+  const snapshot = refreshFileSnapshot(MEMORY_CONFIG, {
+    subjectKey: file.id,
+    file,
+    liveJobNimbus,
+    gmail: { status: "not_requested", messages: [], threads: [] },
+    quo: { status: "not_requested", timeline: [], transcripts: [] },
+    actionReceipts,
+    sourceStatus,
+    factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, {}, {})
+  });
   return {
-    file: compactContact(contact),
+    file,
     rawContact: contact,
-    recentActivities: activities.map(compactActivity),
-    openTasks: tasks.filter((task) => !task.is_completed).map(compactTask),
+    recentActivities: liveJobNimbus.recentActivities,
+    openTasks: liveJobNimbus.openTasks,
     documents: documents.map(compactDocument),
+    operationalDocuments: liveJobNimbus.operationalDocuments,
+    excludedPhotoLikeDocumentCount: liveJobNimbus.excludedPhotoLikeDocumentCount,
     alternatives: alternatives.map(compactContact),
-    assistantRead: buildAssistantRead(contact, activities, tasks, documents)
+    assistantRead: liveJobNimbus.assistantRead,
+    actionReceipts,
+    sourceStatus,
+    clientMemory: clientMemoryEnvelope(snapshot),
+    brain: reviewBrainContext(file.id, input.maxPerSection)
   };
 }
 
@@ -1881,7 +1947,7 @@ async function claimFilingWriteback(input) {
   record.writebackAt = new Date().toISOString();
   if (!ledger.includes(record)) ledger.push(record);
   await writeClaimCallLedger(ledger.slice(-500));
-  const memoryCloseout = closeoutJobNimbusAction(
+  const memoryCloseout = await closeoutJobNimbusAction(
     analysis.file,
     "claim_call_writeback",
     results.note || results.contact,
@@ -2641,7 +2707,7 @@ async function updateContact(input) {
     conflictError("JobNimbus accepted the update request, but a fresh read did not confirm the requested fields. The bridge will not report this update as complete.");
   }
   const file = compactContact(refreshedContact);
-  const memoryCloseout = closeoutJobNimbusAction(file, "update_contact", result, `Updated approved JobNimbus fields: ${Object.keys(normalizedFields).join(", ")}.`);
+  const memoryCloseout = await closeoutJobNimbusAction(file, "update_contact", result, `Updated approved JobNimbus fields: ${Object.keys(normalizedFields).join(", ")}.`);
   return { mode: "executed", verifiedByReadback: true, file, result, memoryCloseout };
 }
 
@@ -2662,9 +2728,13 @@ async function updateStatus(input) {
   };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
-  const file = compactContact(contact);
-  const memoryCloseout = closeoutJobNimbusAction(file, "update_status", result, `Moved JobNimbus file to ${status}.`);
-  return { mode: "executed", file, result, memoryCloseout };
+  const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
+  if (!recordMatchesFields(refreshedContact, body)) {
+    conflictError("JobNimbus accepted the status update request, but a fresh read did not confirm the requested status. The bridge will not report this update as complete.");
+  }
+  const file = compactContact(refreshedContact);
+  const memoryCloseout = await closeoutJobNimbusAction(file, "update_status", result, `Moved JobNimbus file to ${status}.`);
+  return { mode: "executed", verifiedByReadback: true, file, result, memoryCloseout };
 }
 
 async function processUpdate(input) {
@@ -2714,7 +2784,7 @@ async function processUpdate(input) {
   const parts = [];
   if (Object.keys(contactBody).length) parts.push(`fields ${Object.keys(contactBody).join(", ")}`);
   if (noteBody) parts.push("internal note");
-  const memoryCloseout = closeoutJobNimbusAction(file, "process_update", results.note || results.contact, `Applied approved JobNimbus update: ${parts.join(" and ")}.`);
+  const memoryCloseout = await closeoutJobNimbusAction(results.verifiedContact || file, "process_update", results.note || results.contact, `Applied approved JobNimbus update: ${parts.join(" and ")}.`);
   return { mode: "executed", verifiedByReadback: Boolean(results.verifiedContact), file: results.verifiedContact || file, results, memoryCloseout };
 }
 
@@ -2882,7 +2952,7 @@ async function createNote(input) {
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/activities", body } };
   const result = await jobNimbus("/activities", { method: "POST", body });
   const file = compactContact(contact);
-  const memoryCloseout = closeoutJobNimbusAction(file, "create_note", result, "Created approved JobNimbus internal note.");
+  const memoryCloseout = await closeoutJobNimbusAction(file, "create_note", result, "Created approved JobNimbus internal note.");
   return { mode: "executed", file, result, memoryCloseout };
 }
 
@@ -2916,7 +2986,7 @@ async function createTask(input) {
   }
   const result = await jobNimbus("/tasks", { method: "POST", body });
   const file = compactContact(contact);
-  const memoryCloseout = closeoutJobNimbusAction(file, "create_task", result, `Created approved JobNimbus task: ${title}.`);
+  const memoryCloseout = await closeoutJobNimbusAction(file, "create_task", result, `Created approved JobNimbus task: ${title}.`);
   return { mode: "executed", file, result, memoryCloseout };
 }
 
@@ -2942,11 +3012,12 @@ async function uploadJobNimbusFile(input) {
   });
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await uploadBytesToJobNimbus(plan, content);
+  const memoryCloseout = await closeoutJobNimbusAction(compactContact(contact), "upload_file", result, `Uploaded verified JobNimbus document ${filename} (${content.length} bytes).`);
   return {
     mode: "executed",
     file: compactContact(contact),
     result,
-    memoryCloseout: closeoutJobNimbusAction(compactContact(contact), "upload_file", result, `Uploaded verified JobNimbus document ${filename} (${content.length} bytes).`)
+    memoryCloseout
   };
 }
 
@@ -3015,15 +3086,21 @@ async function updateTask(input) {
     result = task;
     reconciledAfterApiError = true;
   }
-  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
-    channel: "jobnimbus",
-    action: "update_task",
-    subjectKey: String(input.subjectKey || ""),
-    fileLabel: String(input.fileLabel || input.query || ""),
-    summary: `Updated approved JobNimbus task ${taskId}.`,
-    externalId: resultId(result) || taskId,
-    evidence: [`jobnimbus:task:${taskId}`]
-  });
+  const taskSubjectKey = String(input.subjectKey || result?.primary?.id || result?.related?.[0]?.id || "").trim();
+  const taskFile = input.query
+    ? compactContact((await findChanceContact(input.query)).contact)
+    : taskSubjectKey ? { id: taskSubjectKey, name: String(input.fileLabel || "") } : null;
+  const memoryCloseout = taskFile
+    ? await closeoutJobNimbusAction(taskFile, "update_task", result, `Updated approved JobNimbus task ${taskId}.`)
+    : safeCloseoutAction(MEMORY_CONFIG, {
+      channel: "jobnimbus",
+      action: "update_task",
+      subjectKey: taskSubjectKey,
+      fileLabel: String(input.fileLabel || input.query || ""),
+      summary: `Updated approved JobNimbus task ${taskId}.`,
+      externalId: resultId(result) || taskId,
+      evidence: [`jobnimbus:task:${taskId}`]
+    });
   return { mode: "executed", taskId, result, reconciledAfterApiError, memoryCloseout };
 }
 
@@ -3058,7 +3135,7 @@ async function createCalendarEvent(input) {
   }
   const result = await jobNimbus("/activities", { method: "POST", body });
   const file = compactContact(contact);
-  const memoryCloseout = closeoutJobNimbusAction(file, "create_calendar_event", result, `Created approved JobNimbus calendar event: ${title}.`);
+  const memoryCloseout = await closeoutJobNimbusAction(file, "create_calendar_event", result, `Created approved JobNimbus calendar event: ${title}.`);
   return { mode: "executed", file, result, memoryCloseout };
 }
 
@@ -3081,7 +3158,7 @@ async function updateCalendarEvent(input) {
   }
   const result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
   const memoryCloseout = file
-    ? closeoutJobNimbusAction(file, "update_calendar_event", result, `Updated approved JobNimbus calendar event ${eventId}.`)
+    ? await closeoutJobNimbusAction(file, "update_calendar_event", result, `Updated approved JobNimbus calendar event ${eventId}.`)
     : safeCloseoutAction(MEMORY_CONFIG, {
       channel: "jobnimbus",
       action: "update_calendar_event",
@@ -3153,11 +3230,12 @@ async function gmailAttachmentReview(input) {
     if (input.execute === true) {
       if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true to upload Gmail attachments.");
       const result = await uploadBytesToJobNimbus(plan, attachment.bytes);
+      const memoryCloseout = await closeoutJobNimbusAction(file, "upload_gmail_attachment", result, `Uploaded verified Gmail attachment ${attachment.filename} to JobNimbus.`);
       upload = {
         mode: "executed",
         file,
         result,
-        memoryCloseout: closeoutJobNimbusAction(file, "upload_gmail_attachment", result, `Uploaded verified Gmail attachment ${attachment.filename} to JobNimbus.`)
+        memoryCloseout
       };
     } else {
       upload = { mode: "dry_run", file, plan };
@@ -3573,8 +3651,10 @@ async function reviewChanceFiles(input = {}) {
       mode: "index",
       total,
       files: contacts.map(compactChanceIndexContact),
+      brain: reviewBrainContext("", input.maxPerSection),
       assistantDirective: [
         "This is a lightweight, fresh JobNimbus index for prioritization only.",
+        "The company brain is included, but rich client snapshots are intentionally not overwritten by this lightweight index.",
         "Choose the highest-priority candidate using current status, missing claim facts, and last update.",
         "Then call this endpoint again with that exact file as query, limit 1, and Gmail/Quo enabled before proposing any action.",
         "Do not execute or infer completed work from this index."
@@ -3584,6 +3664,7 @@ async function reviewChanceFiles(input = {}) {
   const selected = input.query ? contacts : contacts.slice((page - 1) * limit, page * limit);
   const packets = [];
   for (const contact of selected) packets.push(await buildChanceEvidencePacket(contact, input));
+  const exactSubjectKey = input.query && packets.length === 1 ? packets[0].file.id : "";
   return {
     generatedAt: new Date().toISOString(),
     owner: { id: CHANCE_OWNER_ID, name: "Chance Pearson" },
@@ -3594,9 +3675,11 @@ async function reviewChanceFiles(input = {}) {
     pageCount: Math.ceil(total / limit),
     complete: packets.every((packet) => packet.complete),
     packets,
+    brain: reviewBrainContext(exactSubjectKey, input.maxPerSection),
     assistantDirective: [
-      "These are fresh evidence packets, not automatic decisions.",
+      "These are fresh evidence packets joined with durable client continuity, not automatic decisions.",
       "Compare current JobNimbus fields, activities, tasks, operational documents, Gmail, Quo, and prior action receipts.",
+      "The snapshot has been refreshed by this review. Use it to remember prior context, but let live evidence win.",
       "For each file, choose one primary next action, draft its exact content, and show Chance what requires approval.",
       "Do not treat memory or an old task as proof that work is still needed. Do not execute without approval."
     ]
@@ -3672,7 +3755,7 @@ async function buildChanceEvidencePacket(contact, input) {
   const sortedActivities = [...activities].sort((a, b) => Number(b.date_created || 0) - Number(a.date_created || 0));
   const openTasks = tasks.filter((task) => !task.is_completed).sort((a, b) => Number(a.date_start || a.date_end || 0) - Number(b.date_start || b.date_end || 0));
   const requestedSourcesComplete = [gmail.status, quo.status].every((status) => !["unavailable", "error"].includes(status));
-  return {
+  const packet = {
     complete: requestedSourcesComplete,
     file,
     liveJobNimbus: {
@@ -3688,6 +3771,20 @@ async function buildChanceEvidencePacket(contact, input) {
     actionReceipts: latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id }),
     sourceStatus,
     factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, gmail, quo)
+  };
+  const snapshot = refreshFileSnapshot(MEMORY_CONFIG, {
+    subjectKey: file.id,
+    file: packet.file,
+    liveJobNimbus: packet.liveJobNimbus,
+    gmail: packet.gmail,
+    quo: packet.quo,
+    actionReceipts: packet.actionReceipts,
+    sourceStatus: packet.sourceStatus,
+    factualSignals: packet.factualSignals
+  });
+  return {
+    ...packet,
+    clientMemory: clientMemoryEnvelope(snapshot)
   };
 }
 
@@ -5717,7 +5814,8 @@ function summarizeOperationResult(result) {
     fileId: result?.file?.id || "",
     fileNumber: result?.file?.number || "",
     externalId: resultId(result?.message || result?.draft || result?.result || result?.results || result),
-    memoryReceiptId: result?.memoryCloseout?.receipt?.id || ""
+    memoryReceiptId: result?.memoryCloseout?.receipt?.id || "",
+    clientSnapshotRefreshed: result?.memoryCloseout?.clientMemoryRefresh?.refreshed === true
   });
 }
 
@@ -5729,9 +5827,9 @@ function resultId(result) {
   );
 }
 
-function closeoutJobNimbusAction(file, action, result, summary) {
+async function closeoutJobNimbusAction(file, action, result, summary) {
   const externalId = resultId(result);
-  return safeCloseoutAction(MEMORY_CONFIG, {
+  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
     channel: "jobnimbus",
     action,
     subjectKey: file.id,
@@ -5740,6 +5838,29 @@ function closeoutJobNimbusAction(file, action, result, summary) {
     externalId,
     evidence: externalId ? [`jobnimbus:${externalId}`] : []
   });
+  const clientMemoryRefresh = await safeRefreshClientSnapshot(file.id);
+  return { ...memoryCloseout, clientMemoryRefresh };
+}
+
+async function safeRefreshClientSnapshot(subjectKey) {
+  const id = String(subjectKey || "").trim();
+  if (!id) return { refreshed: false, reason: "missing_subject_key" };
+  try {
+    const contact = await jobNimbus(`/contacts/${encodeURIComponent(id)}`);
+    const packet = await buildChanceEvidencePacket(contact, { includeGmail: false, includeQuo: false });
+    return {
+      refreshed: true,
+      at: packet.clientMemory?.snapshot?.refreshedAt || new Date().toISOString(),
+      snapshot: packet.clientMemory?.snapshot || null,
+      authority: "The snapshot refresh records current file state but does not authorize another action."
+    };
+  } catch (error) {
+    return {
+      refreshed: false,
+      error: redactSensitiveText(error.message || String(error)),
+      authority: "The approved action succeeded, but snapshot refresh failed. Re-run an exact-file review before the next decision."
+    };
+  }
 }
 
 async function optionalChanceFile(query) {
@@ -7212,7 +7333,7 @@ const OPENAPI = {
       post: {
         operationId: "readChanceFileActionReceipts",
         requestBody: jsonBody("MemoryFileActionsRequest"),
-        responses: { "200": { description: "Private, exact-file action receipts, Retell claim-call ledger entries, and a normalized external reference registry. Use this before asking Chance for a prior Retell call id, Quo message id, Gmail message/draft id, or JobNimbus action id. Past receipts are proof only, never approval for future work." } }
+        responses: { "200": { description: "Private exact-file client snapshot, action receipts, Retell ledger, and external IDs. Use for continuity and prior IDs. Live evidence wins; snapshots and receipts never approve future work." } }
       }
     },
     "/memory/persistence-check": {
@@ -7226,7 +7347,7 @@ const OPENAPI = {
       post: {
         operationId: "reviewChanceFilesForApproval",
         requestBody: jsonBody("ChanceReviewRequest"),
-        responses: { "200": { description: "Fresh, paginated Chance-only evidence packets combining JobNimbus, operational documents, Gmail, Quo, and private execution receipts. Returns evidence for assistant judgment, not automatic decisions." } }
+        responses: { "200": { description: "Loads company rules, gathers fresh Chance-only JobNimbus/Gmail/Quo evidence, refreshes each private client snapshot, and returns approval-ready context. It never authorizes or executes actions." } }
       }
     },
     "/ops/action-batch": {
@@ -7248,7 +7369,7 @@ const OPENAPI = {
       post: {
         operationId: "reviewJobNimbusFile",
         requestBody: jsonBody("ReviewFileRequest"),
-        responses: { "200": { description: "File review" } }
+        responses: { "200": { description: "Fresh exact-file JobNimbus review that refreshes the private client snapshot and returns company plus file-scoped brain context. Read-only; no action is authorized." } }
       }
     },
     "/jobnimbus/assigned-files": {

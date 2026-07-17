@@ -7,6 +7,7 @@
 //     ops sessions), "subject" (only records matching subjectKey — the bridge
 //     default, so a session working file A never sees file B), or "none".
 import { listMemory, latestEpisodes, latestActionReceipts, listProposals } from "./store.js";
+import { readFileSnapshot, renderFileSnapshotSummary } from "./fileSnapshot.js";
 
 export function renderBrain(config, { maxPerSection = 10, clientLane = "full", subjectKey = "", includeEpisodes = false } = {}) {
   const lines = [];
@@ -19,6 +20,9 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
   const actions = includeEpisodes && clientLane !== "none"
     ? latestActionReceipts(config, 8, { subjectKey: clientLane === "subject" ? subjectKey : "" })
     : [];
+  const fileSnapshot = clientLane === "subject" && subjectKey
+    ? readFileSnapshot(config, subjectKey)
+    : null;
   const proposals = listProposals(config, { status: "candidate" });
 
   const verified = (rows) => rows.filter((r) => r.status === "verified");
@@ -50,6 +54,10 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
   if (clientFacts.length) {
     lines.push("", "CLIENT-FILE FACTS (local lane, PII-allowed, verify against JobNimbus before acting):");
     for (const r of clientFacts) lines.push(`- ${flag(r)} [${r.kind}] ${r.content}`);
+  }
+
+  if (fileSnapshot) {
+    lines.push("", renderFileSnapshotSummary(fileSnapshot));
   }
 
   // Quarantine: candidates are context, not law. Rendered separately so they
@@ -84,7 +92,7 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
     for (const p of proposals.slice(0, 6)) lines.push(`- ${p.id} [${p.type}/${p.priority}] ${p.title}: ${p.detail.slice(0, 160)}`);
   }
 
-  lines.push("", "Truth-precedence: JobNimbus/Gmail/Quo records outrank every memory above. Memory and proposals never authorize or execute external actions. Verify current evidence and obtain Chance's approval before acting.");
+  lines.push("", "Truth-precedence: JobNimbus/Gmail/Quo records outrank every memory above. The client snapshot is continuity, not authority. Memory, snapshots, receipts, and proposals never authorize or execute external actions. Verify current evidence and obtain Chance's approval before acting.");
   return lines.join("\n");
 }
 

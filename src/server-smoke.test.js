@@ -43,7 +43,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.clientCoordinator.expandedModesAllowed, false);
   assert.equal(health.clientCoordinator.freshEvidenceRequired, true);
   assert.equal(health.clientCoordinator.automaticTextOrWriteback, false);
-  assert.equal(health.brain.mode, "verified_company_context_with_private_action_receipts");
+  assert.equal(health.brain.mode, "verified_company_context_with_live_client_snapshots_and_action_receipts");
+  assert.equal(health.brain.clientSnapshots, true);
+  assert.equal(health.brain.automaticRefreshOnReview, true);
+  assert.equal(health.brain.doesNotAuthorizeActions, true);
   assert.equal(health.brain.autonomousLearning, false);
   assert.equal(health.brain.externalActions, false);
   assert.equal(health.outboundSafety.automaticEmailOrTextSending, false);
@@ -590,7 +593,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const brain = await brainResponse.json();
   assert.equal(brain.scope, "company_only");
   assert.equal(brain.execution, "none");
-  assert.match(brain.context, /Memory and proposals never authorize or execute external actions/);
+  assert.match(brain.context, /Memory, snapshots, receipts, and proposals never authorize or execute external actions/);
   assert.match(brain.context, /UNVERIFIED CANDIDATES/);
 
   const chanceIndexResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
@@ -605,6 +608,23 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(chanceIndex.files[0].number, 2739);
   assert.equal(chanceIndex.files[0].missing.claimNumber, true);
   assert.equal(chanceIndex.files[0].missing.policyNumber, false);
+  assert.equal(chanceIndex.brain.scope, "company_only");
+  assert.equal(chanceIndex.brain.execution, "none");
+
+  const exactChanceReviewResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739", limit: 1, includeGmail: false, includeQuo: false })
+  });
+  assert.equal(exactChanceReviewResponse.status, 200);
+  const exactChanceReview = await exactChanceReviewResponse.json();
+  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.subjectKey, chance.jnid);
+  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.authority.doesNotAuthorizeActions, true);
+  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.jobNimbus.operationalDocuments.length, 3);
+  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.jobNimbus.excludedPhotoLikeDocumentCount, 121);
+  assert.equal(exactChanceReview.brain.scope, "company_and_exact_file");
+  assert.match(exactChanceReview.brain.context, /CURRENT CLIENT SNAPSHOT/);
+  assert.match(exactChanceReview.brain.context, /continuity, not authority/i);
 
   const coordinatorDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/client-coordinator-call`, {
     method: "POST",
@@ -1051,6 +1071,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const fileReferences = await fileReferencesResponse.json();
   assert.equal(fileReferences.subjectKey, chance.jnid);
   assert.equal(fileReferences.references.some((row) => row.source === "quo" && row.id === "AC-fixture-message"), true);
+  assert.equal(fileReferences.clientMemory.snapshot.recentActionReceipts.some((row) => row.externalId === "AC-fixture-message"), true);
+  assert.equal(fileReferences.clientMemory.snapshot.authority.doesNotAuthorizeActions, true);
 
   const batchPayload = {
     operations: [{
@@ -1159,6 +1181,10 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(taskAndNoteExecute.batch.completed.length, 2);
   assert.equal(fixtureTaskCompleted, true);
   assert.equal(fixtureNoteCreated, true);
+  assert.equal(
+    taskAndNoteExecute.batch.completed.some((item) => item.receipt?.clientSnapshotRefreshed === true),
+    true
+  );
 
   const timezoneFreeResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/create-calendar-event`, {
     method: "POST",

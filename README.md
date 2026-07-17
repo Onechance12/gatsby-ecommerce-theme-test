@@ -2,8 +2,8 @@
 
 Small authenticated bridge that lets a ChatGPT Custom GPT Action read and, when explicitly enabled, update JobNimbus.
 It also supports Gmail search/thread/attachment review, verified PDF attachments,
-Quo messages/calls/transcripts, durable private action receipts, and a unified
-Chance-only review/approval transaction.
+Quo messages/calls/transcripts, durable private action receipts, private
+per-client evidence snapshots, and a unified Chance-only review/approval transaction.
 Scanned or visually complex JobNimbus documents can be returned as native
 ChatGPT conversation files so the GPT inspects the original pages instead of
 guessing from a filename or relying only on server-side OCR.
@@ -33,6 +33,9 @@ transport is unavailable.
 - Changing one character, recipient, subject, or attachment invalidates the
   approval digest. Duplicate approved action batches are blocked by a persistent ledger.
 - JobNimbus write actions resolve only Chance Pearson-owned insurance files.
+- Client snapshots are private continuity caches, not operating authority. A
+  snapshot never authorizes a write, send, call, task, event, upload, or status
+  change, and fresh JobNimbus/Gmail/Quo evidence always wins.
 - The handoff inbox allows public handoff creation so browser agents can submit Gmail/Quo findings. Listing/completing handoffs still requires the bridge bearer token.
 - Artifact endpoints always require the bridge bearer token. They never apply,
   execute, commit, push, or deploy an uploaded patch.
@@ -87,8 +90,11 @@ OUTBOUND_SEND_STORE_PATH=/var/data/bridge/outbound-sends.json
 
 `POST /ops/review-chance-files` gathers fresh JobNimbus fields, recent activity,
 open tasks, non-photo operational documents, Gmail evidence, Quo evidence, and
-private action receipts. It deliberately returns evidence rather than pretending
-that fixed rules can replace assistant judgment.
+private action receipts. Every full file review also loads the verified company
+Brain and refreshes that exact client's durable snapshot. A later partial review
+preserves the last successful Gmail/Quo evidence instead of erasing it. The
+endpoint deliberately returns evidence rather than pretending that fixed rules
+can replace assistant judgment.
 
 `POST /ops/action-batch` then provides the two-step execution flow:
 
@@ -96,8 +102,9 @@ that fixed rules can replace assistant judgment.
 2. After Chance approves, repeat the unchanged operations with `execute:true`
    and the returned `approvalDigest`.
 
-The bridge records successful actions on the persistent disk and refuses to run
-the same approved batch twice.
+The bridge records successful actions on the persistent disk, appends their
+receipts to the exact client snapshot, refreshes JobNimbus state after approved
+JobNimbus writes, and refuses to run the same approved batch twice.
 
 ## Custom ChatGPT
 
@@ -107,7 +114,7 @@ HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
 and start a new chat after schema changes. Arbitrary standard chats do not gain
 the bridge automatically; the Action must be installed on that GPT.
 
-The GPT-facing schema is intentionally consolidated to 22 high-level operations.
+The GPT-facing schema is intentionally consolidated to 23 high-level operations.
 Detailed bridge routes remain available to the server and local agents, while
 routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
 texts are prepared and executed through `processApprovedWaveActionBatch`.

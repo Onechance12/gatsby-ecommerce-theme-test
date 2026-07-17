@@ -1,12 +1,22 @@
 import { recordActionReceipt, recordEpisode, saveMemory } from "./store.js";
+import { appendActionReceiptToFileSnapshot } from "./fileSnapshot.js";
 
 // Successful actions become private receipts. Routine sends/writes do not
 // flood the session handoff log, and reusable lessons stay unverified until
 // Chance explicitly promotes them.
 export function closeoutAction(config, input = {}) {
   const saved = recordActionReceipt(config, input);
+  let snapshotUpdate;
+  try {
+    snapshotUpdate = appendActionReceiptToFileSnapshot(config, saved.receipt);
+  } catch (error) {
+    snapshotUpdate = {
+      updated: false,
+      error: config?.redact ? config.redact(error.message || String(error)) : String(error.message || error)
+    };
+  }
   if (saved.deduped) {
-    return { receipt: saved.receipt, deduped: true, episode: null, candidates: [] };
+    return { receipt: saved.receipt, deduped: true, episode: null, candidates: [], snapshotUpdate };
   }
 
   const receipt = saved.receipt;
@@ -41,7 +51,7 @@ export function closeoutAction(config, input = {}) {
     candidates.push(savedLesson.record);
   }
 
-  return { receipt, deduped: false, episode, candidates };
+  return { receipt, deduped: false, episode, candidates, snapshotUpdate };
 }
 
 // A successful external action must never appear failed because recording its
