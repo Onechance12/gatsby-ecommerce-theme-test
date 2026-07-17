@@ -20,6 +20,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       RETELL_FROM_NUMBER: "",
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_GOOGLE_USER_AUTH: "false",
       BRIDGE_ALLOW_WRITES: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -48,6 +49,9 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.carrierFollowUp.extensionsSupported, true);
   assert.equal(health.carrierFollowUp.automaticScheduling, false);
   assert.equal(health.carrierFollowUp.automaticJobNimbusWriteback, false);
+  assert.equal(health.userOAuth.available, false);
+  assert.equal(health.userOAuth.perUserGmail, true);
+  assert.equal(health.userOAuth.roleEnforcement, true);
   assert.equal(health.brain.mode, "verified_company_context_with_live_client_snapshots_and_action_receipts");
   assert.equal(health.brain.clientSnapshots, true);
   assert.equal(health.brain.automaticRefreshOnReview, true);
@@ -99,7 +103,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 26);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 27);
+  assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
@@ -170,12 +175,102 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   });
   assert.equal(protectedResponse.status, 401);
 
+  const protectedIdentityResponse = await fetch(`http://127.0.0.1:${port}/auth/whoami`);
+  assert.equal(protectedIdentityResponse.status, 401);
+
   const protectedBrainResponse = await fetch(`http://127.0.0.1:${port}/brain/context`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}"
   });
   assert.equal(protectedBrainResponse.status, 401);
+});
+
+test("employee Google OAuth keeps Gmail identity isolated and enforces the employee role", async (t) => {
+  const bridgePort = 18890;
+  const fakeGooglePort = 18891;
+  const gmailTokens = [];
+  const fakeGoogle = createServer((req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
+    let response;
+    if (url.pathname === "/tokeninfo") {
+      assert.equal(url.searchParams.get("access_token"), "andrea-access-token");
+      response = {
+        audience: "fixture-google-client",
+        expires_in: 3600,
+        scope: "openid email https://www.googleapis.com/auth/gmail.readonly"
+      };
+    } else if (url.pathname === "/userinfo") {
+      assert.equal(req.headers.authorization, "Bearer andrea-access-token");
+      response = {
+        sub: "google-andrea-1",
+        email: "andrea@wavepa.com",
+        email_verified: true,
+        hd: "wavepa.com",
+        name: "Andrea Ramirez"
+      };
+    } else if (url.pathname === "/gmail/v1/users/me/messages") {
+      gmailTokens.push(req.headers.authorization);
+      response = { messages: [], resultSizeEstimate: 0 };
+    } else {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(response));
+  });
+  await new Promise((resolve) => fakeGoogle.listen(fakeGooglePort, "127.0.0.1", resolve));
+  t.after(() => fakeGoogle.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      GOOGLE_CLIENT_ID: "fixture-google-client",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      GOOGLE_TOKENINFO_URL: `http://127.0.0.1:${fakeGooglePort}/tokeninfo`,
+      GOOGLE_USERINFO_URL: `http://127.0.0.1:${fakeGooglePort}/userinfo`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
+      ALLOW_GOOGLE_USER_AUTH: "true",
+      GOOGLE_OAUTH_ALLOWED_DOMAIN: "wavepa.com",
+      WAVE_AUTH_USERS_JSON: JSON.stringify({
+        "andrea@wavepa.com": { name: "Andrea Ramirez", role: "client_coordinator" }
+      }),
+      JOBNIMBUS_API_KEY: "",
+      RETELL_API_KEY: "",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = { authorization: "Bearer andrea-access-token" };
+
+  const identityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, { headers });
+  assert.equal(identityResponse.status, 200);
+  const identity = await identityResponse.json();
+  assert.equal(identity.identity.email, "andrea@wavepa.com");
+  assert.equal(identity.identity.role, "client_coordinator");
+  assert.equal(identity.gmailMode, "signed_in_employee_mailbox");
+
+  const gmailResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ query: "newer_than:1d", limit: 1 })
+  });
+  assert.equal(gmailResponse.status, 200);
+  assert.deepEqual(gmailTokens, ["Bearer andrea-access-token"]);
+
+  const forbiddenResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/call`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: "{}"
+  });
+  assert.equal(forbiddenResponse.status, 403);
 });
 
 test("Retell configuration creates an editable draft before publishing", async (t) => {

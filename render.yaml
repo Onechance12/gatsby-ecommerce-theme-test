@@ -34,6 +34,14 @@ services:
         sync: false
       - key: GOOGLE_REFRESH_TOKEN
         sync: false
+      - key: ALLOW_GOOGLE_USER_AUTH
+        value: "true"
+      - key: GOOGLE_OAUTH_ALLOWED_DOMAIN
+        value: wavepa.com
+      - key: CHANCE_GOOGLE_EMAIL
+        value: cpearson@wavepa.com
+      - key: WAVE_AUTH_USERS_JSON
+        sync: false
       - key: GMAIL_USER
         value: me
       - key: ALLOW_GMAIL_SEND

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -51,6 +52,12 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { createLorPdf } from "./documents/lor.js";
+import {
+  authenticateGoogleAccessToken,
+  parseWaveUsers,
+  publicIdentity,
+  routeAllowed
+} from "./auth/google-user.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -64,6 +71,17 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GOOGLE_TOKEN_URL = process.env.GOOGLE_TOKEN_URL || "https://oauth2.googleapis.com/token";
+const GOOGLE_TOKENINFO_URL = process.env.GOOGLE_TOKENINFO_URL || "https://www.googleapis.com/oauth2/v2/tokeninfo";
+const GOOGLE_USERINFO_URL = process.env.GOOGLE_USERINFO_URL || "https://openidconnect.googleapis.com/v1/userinfo";
+const GOOGLE_OAUTH_ALLOWED_DOMAIN = process.env.GOOGLE_OAUTH_ALLOWED_DOMAIN || "wavepa.com";
+const ALLOW_GOOGLE_USER_AUTH = process.env.ALLOW_GOOGLE_USER_AUTH === "true";
+const WAVE_AUTH_USERS = parseWaveUsers(process.env.WAVE_AUTH_USERS_JSON, [{
+  email: process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com",
+  name: "Chance Pearson",
+  role: "chance",
+  jobNimbusOwnerId: process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941",
+  jobNimbusScope: "assigned"
+}]);
 const GMAIL_API_BASE_URL = stripTrailingSlash(process.env.GMAIL_API_BASE_URL || "https://gmail.googleapis.com");
 const GMAIL_USER = process.env.GMAIL_USER || "me";
 const STANDARD_W9_GMAIL_MESSAGE_ID = process.env.STANDARD_W9_GMAIL_MESSAGE_ID || "19e88b6a5da1ac61";
@@ -128,9 +146,12 @@ const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sag
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
 const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText };
+const REQUEST_CONTEXT = new AsyncLocalStorage();
+const GOOGLE_IDENTITY_CACHE = new Map();
 
 const routes = new Map([
   ["GET /health", health],
+  ["GET /auth/whoami", authWhoAmI],
   ["GET /openapi.json", openapi],
   ["GET /openapi-chatgpt.json", chatgptOpenapi],
   ["GET /privacy", privacy],
@@ -210,9 +231,16 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/retell/inbound" && !retellInboundAuthorized(url)) {
       return send(res, 401, { error: "Unauthorized inbound webhook" });
     }
-    if (url.pathname !== "/retell/inbound" && !isPublicRoute(req.method, url.pathname) && !authorized(req)) return send(res, 401, { error: "Unauthorized" });
+    let identity = null;
+    if (url.pathname !== "/retell/inbound" && !isPublicRoute(req.method, url.pathname)) {
+      identity = await authenticateRequest(req);
+      if (!identity) return send(res, 401, { error: "Unauthorized" });
+      if (!routeAllowed(identity, req.method, url.pathname)) {
+        return send(res, 403, { error: "This Wave Ops role is not permitted to use that action." });
+      }
+    }
     const body = req.method === "GET" ? {} : await readJson(req);
-    const result = await handler(body);
+    const result = await REQUEST_CONTEXT.run({ identity }, () => handler(body));
     if (result?.html) sendHtml(res, 200, result.html);
     else if (typeof result === "string") sendText(res, 200, result);
     else send(res, 200, result);
@@ -259,6 +287,15 @@ function health() {
     service: "jobnimbus-chatgpt-bridge",
     jobNimbusConfigured: Boolean(API_KEY),
     gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+    userOAuth: {
+      available: Boolean(ALLOW_GOOGLE_USER_AUTH && GOOGLE_CLIENT_ID),
+      provider: "google",
+      allowedWorkspaceDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+      approvedUserCount: WAVE_AUTH_USERS.size,
+      sharedBridgeTokenFallback: Boolean(BRIDGE_TOKEN),
+      perUserGmail: true,
+      roleEnforcement: true
+    },
     gmailSendAllowed: ALLOW_GMAIL_SEND,
     quoConfigured: Boolean(QUO_API_KEY),
     quoSendAllowed: ALLOW_QUO_SEND,
@@ -365,6 +402,19 @@ function health() {
       doesNotAuthorizeActions: true,
       persistentRootConfigured: Boolean(process.env.MEMORY_ROOT)
     }
+  };
+}
+
+function authWhoAmI() {
+  const identity = currentRequestIdentity();
+  if (!identity) badRequest("No authenticated employee identity is available for this request.");
+  return {
+    authenticated: true,
+    identity: publicIdentity(identity),
+    gmailMode: identity.type === "google_oauth" ? "signed_in_employee_mailbox" : "legacy_chance_mailbox",
+    instruction: identity.type === "google_oauth"
+      ? "The bridge will use this signed-in employee's Google token for Gmail and enforce this employee's Wave Ops role."
+      : "This task is using the temporary shared bridge-token fallback and Chance's legacy Gmail connection."
   };
 }
 
@@ -510,6 +560,7 @@ function openapi() {
 }
 
 const CHATGPT_ACTION_PATHS = [
+  "/auth/whoami",
   "/brain/context",
   "/memory/file-actions",
   "/ops/review-chance-files",
@@ -544,7 +595,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 26-operation workflow schema for the Chance Pearson HCN/Wave Custom GPT. Exact-file external IDs are available through readChanceFileActionReceipts. All JobNimbus writes, Gmail drafts/sends, Quo sends, Retell calls, and Retell configuration changes are exact and approval-gated."
+      description: "Consolidated 27-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     paths: Object.fromEntries(CHATGPT_ACTION_PATHS.map((routePath) => [routePath, OPENAPI.paths[routePath]]))
@@ -1232,7 +1283,7 @@ async function loadChanceJobNimbusBusy(range) {
 }
 
 async function loadGoogleCalendarBusy(range) {
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+  if (!googleAccessConfiguredForRequest()) {
     throw new Error("Google Calendar OAuth is not configured.");
   }
   const token = await getGoogleAccessToken();
@@ -4064,7 +4115,7 @@ async function buildChanceEvidencePacket(contact, input) {
 
   let gmail = { status: "not_requested", query: "", messages: [], threads: [] };
   if (input.includeGmail !== false) {
-    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+    if (!googleAccessConfiguredForRequest()) {
       gmail = { status: "unavailable", error: "Gmail is not configured.", messages: [], threads: [] };
     } else {
       try {
@@ -5315,8 +5366,8 @@ async function jobNimbusFileApi(endpoint, options = {}) {
 }
 
 async function gmailApi(endpoint, options = {}) {
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
-    badRequest("Gmail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in Render.");
+  if (!googleAccessConfiguredForRequest()) {
+    badRequest("Gmail is not configured for the signed-in employee or the legacy Chance connection.");
   }
   const token = await getGoogleAccessToken();
   const response = await fetch(`${GMAIL_API_BASE_URL}${endpoint}`, {
@@ -5339,6 +5390,8 @@ async function gmailApi(endpoint, options = {}) {
 }
 
 async function getGoogleAccessToken() {
+  const userToken = requestGoogleAccessToken();
+  if (userToken) return userToken;
   const response = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -6257,6 +6310,68 @@ function redactSensitiveText(value) {
 function authorized(req) {
   if (!BRIDGE_TOKEN) return false;
   return req.headers.authorization === `Bearer ${BRIDGE_TOKEN}`;
+}
+
+async function authenticateRequest(req) {
+  const token = bearerToken(req);
+  if (!token) return null;
+  if (BRIDGE_TOKEN && token === BRIDGE_TOKEN) {
+    return {
+      type: "bridge_token",
+      subject: "legacy-chance-bridge",
+      email: process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com",
+      name: "Chance Pearson",
+      role: "chance",
+      hostedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+      scopes: [],
+      googleAccessToken: "",
+      jobNimbusOwnerId: CHANCE_OWNER_ID,
+      jobNimbusScope: "assigned",
+      quoLineId: ""
+    };
+  }
+  if (!ALLOW_GOOGLE_USER_AUTH) return null;
+
+  const cacheKey = createHash("sha256").update(token).digest("hex");
+  const cached = GOOGLE_IDENTITY_CACHE.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return { ...cached.identity, googleAccessToken: token };
+  const identity = await authenticateGoogleAccessToken({
+    token,
+    clientId: GOOGLE_CLIENT_ID,
+    tokenInfoUrl: GOOGLE_TOKENINFO_URL,
+    userInfoUrl: GOOGLE_USERINFO_URL,
+    allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+    users: WAVE_AUTH_USERS
+  });
+  GOOGLE_IDENTITY_CACHE.set(cacheKey, {
+    identity: { ...identity, googleAccessToken: "" },
+    expiresAt: Date.now() + 5 * 60 * 1000
+  });
+  if (GOOGLE_IDENTITY_CACHE.size > 200) {
+    for (const [key, row] of GOOGLE_IDENTITY_CACHE) {
+      if (row.expiresAt <= Date.now()) GOOGLE_IDENTITY_CACHE.delete(key);
+    }
+  }
+  return identity;
+}
+
+function bearerToken(req) {
+  const header = String(req.headers.authorization || "").trim();
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+function currentRequestIdentity() {
+  return REQUEST_CONTEXT.getStore()?.identity || null;
+}
+
+function requestGoogleAccessToken() {
+  const identity = currentRequestIdentity();
+  return identity?.type === "google_oauth" ? String(identity.googleAccessToken || "") : "";
+}
+
+function googleAccessConfiguredForRequest() {
+  return Boolean(requestGoogleAccessToken() || (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN));
 }
 
 function isPublicRoute(method, pathname) {
@@ -7547,6 +7662,12 @@ const OPENAPI = {
   },
   paths: {
     "/health": { get: { operationId: "health", responses: { "200": { description: "OK" } } } },
+    "/auth/whoami": {
+      get: {
+        operationId: "readSignedInWaveIdentity",
+        responses: { "200": { description: "Returns the authenticated employee, Wave role, JobNimbus scope, Gmail mode, and whether a Quo line is configured. Returns no Google token or secret." } }
+      }
+    },
     "/privacy": { get: { operationId: "privacy", responses: { "200": { description: "Privacy policy" } } } },
     "/scheduling/availability": {
       post: {
