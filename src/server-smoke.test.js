@@ -110,8 +110,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "https://jobnimbus-chatgpt-bridge.onrender.com/oauth/authorize"
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 28);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 29);
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
+  assert.equal(chatgptSchema.paths["/auth/quo-line"].post.operationId, "linkAuthenticatedQuoLine");
+  assert.equal(chatgptSchema.paths["/auth/quo-line"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
@@ -198,7 +200,10 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   const bridgePort = 18890;
   const fakeGooglePort = 18891;
   const gmailTokens = [];
-  const fakeGoogle = createServer((req, res) => {
+  const authMemoryRoot = await mkdtemp(path.join(tmpdir(), "wave-auth-"));
+  t.after(() => rm(authMemoryRoot, { recursive: true, force: true }));
+  let verificationSmsBody = "";
+  const fakeGoogle = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
     let response;
     if (url.pathname === "/tokeninfo") {
@@ -227,6 +232,17 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     } else if (url.pathname === "/gmail/v1/users/me/messages") {
       gmailTokens.push(req.headers.authorization);
       response = { messages: [], resultSizeEstimate: 0 };
+    } else if (url.pathname === "/v1/phone-numbers") {
+      assert.equal(req.headers.authorization, "fixture-quo-key");
+      response = { data: [{ id: "PN-andrea", name: "Andrea Ramirez", number: "+19725550200" }] };
+    } else if (url.pathname.endsWith("/Messages.json")) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      assert.equal(form.get("To"), "+19725550200");
+      assert.equal(form.get("From"), "+19725550999");
+      verificationSmsBody = form.get("Body") || "";
+      response = { sid: "SM-verification" };
     } else {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
@@ -257,9 +273,17 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
       GPT_OAUTH_CLIENT_ID: "fixture-gpt-client",
       GPT_OAUTH_CLIENT_SECRET: "fixture-gpt-secret",
       OAUTH_SESSION_SECRET: "fixture-session-encryption-secret",
+      MEMORY_ROOT: authMemoryRoot,
       WAVE_AUTH_USERS_JSON: JSON.stringify({
         "andrea@wavepa.com": { name: "Andrea Ramirez", role: "client_coordinator" }
       }),
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/v1`,
+      TWILIO_ACCOUNT_SID: "AC-fixture",
+      TWILIO_AUTH_TOKEN: "fixture-twilio-token",
+      TWILIO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
+      TWILIO_FROM_NUMBER: "+19725550999",
+      QUO_VERIFICATION_FROM_NUMBER: "+19725550999",
       JOBNIMBUS_API_KEY: "",
       RETELL_API_KEY: "",
       BRIDGE_ALLOW_WRITES: "false"
@@ -277,6 +301,35 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   assert.equal(identity.identity.role, "client_coordinator");
   assert.equal(identity.identity.quoLineConfigured, false);
   assert.equal(identity.gmailMode, "signed_in_employee_mailbox");
+
+  const startQuoLinkResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/quo-line`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ mode: "start", phone: "+19725550200" })
+  });
+  assert.equal(startQuoLinkResponse.status, 200);
+  const startQuoLink = await startQuoLinkResponse.json();
+  assert.equal(startQuoLink.verification.sent, true);
+  assert.equal(startQuoLink.verification.from, "***-***-0999");
+  const verificationCode = verificationSmsBody.match(/\b(\d{6})\b/)?.[1];
+  assert.match(verificationCode || "", /^\d{6}$/);
+
+  const verifyQuoLinkResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/quo-line`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ mode: "verify", code: verificationCode })
+  });
+  assert.equal(verifyQuoLinkResponse.status, 200);
+  const verifiedQuoLink = await verifyQuoLinkResponse.json();
+  assert.equal(verifiedQuoLink.linked, true);
+  assert.equal(verifiedQuoLink.line.number, "+19725550200");
+
+  const linkedIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, { headers });
+  assert.equal(linkedIdentityResponse.status, 200);
+  const linkedIdentity = await linkedIdentityResponse.json();
+  assert.equal(linkedIdentity.identity.quoLineConfigured, true);
+  assert.equal(linkedIdentity.identity.quoLine.number, "+19725550200");
+  assert.equal(linkedIdentity.identity.quoLine.source, "verified_sms_link");
 
   const gmailResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
     method: "POST",

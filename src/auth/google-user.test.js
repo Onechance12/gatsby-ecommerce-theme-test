@@ -60,6 +60,7 @@ test("coordinator routes are read-focused while Chance retains full access", () 
   const coordinator = { type: "google_oauth", role: "client_coordinator" };
   const chance = { type: "google_oauth", role: "chance" };
   assert.equal(routeAllowed(coordinator, "POST", "/gmail/search"), true);
+  assert.equal(routeAllowed(coordinator, "POST", "/auth/quo-line"), true);
   assert.equal(routeAllowed(coordinator, "POST", "/claim-filing/call"), false);
   assert.equal(routeAllowed(coordinator, "POST", "/quo/send"), false);
   assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), true);

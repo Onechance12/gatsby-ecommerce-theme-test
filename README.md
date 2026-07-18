@@ -22,14 +22,19 @@ transport is unavailable.
   `execute:true`, and the exact digest returned by the unchanged dry run.
 - A live Quo send requires `BRIDGE_ALLOW_WRITES=true`, `ALLOW_QUO_SEND=true`,
   `execute:true`, and the exact digest returned by the unchanged dry run.
+- An employee can link a company Quo line without exposing API credentials.
+  The signed-in employee requests a six-digit SMS code through
+  `linkAuthenticatedQuoLine`, verifies it in the GPT, and the bridge stores the
+  employee-to-line mapping on Render's persistent disk. Actual texts remain
+  exact-draft and approval-gated.
 - The consolidated Custom GPT schema exposes one consequential action batch for
   JobNimbus writes, Gmail drafts/sends, and Quo sends. The assistant must show
   the exact dry run and wait for Chance's approval; review, memory closeout,
   document, and sweep endpoints never send messages.
 - Quo review scans matching communication across every available company team
   line, including Andrea's line, and labels the source line. That access is
-  evidence-only. Outbound texts use Chance's configured line and remain
-  approval-gated.
+  evidence-only. Outbound texts use the authenticated employee's configured or
+  SMS-verified line and remain approval-gated.
 - Changing one character, recipient, subject, or attachment invalidates the
   approval digest. Duplicate approved action batches are blocked by a persistent ledger.
 - JobNimbus write actions resolve only Chance Pearson-owned insurance files.

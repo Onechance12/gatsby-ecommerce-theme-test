@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -116,6 +116,8 @@ const VOICE_STREAM_PATH = "/voice/twilio-stream";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
+const TWILIO_API_BASE_URL = stripTrailingSlash(process.env.TWILIO_API_BASE_URL || "https://api.twilio.com");
+const QUO_VERIFICATION_FROM_NUMBER = process.env.QUO_VERIFICATION_FROM_NUMBER || TWILIO_FROM_NUMBER;
 const TWILIO_STATUS_CALLBACK_URL = process.env.TWILIO_STATUS_CALLBACK_URL || "";
 const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "";
 const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
@@ -136,6 +138,8 @@ const CHANCE_GOOGLE_EMAIL = String(process.env.CHANCE_GOOGLE_EMAIL || "cpearson@
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
+const QUO_LINE_LINK_STORE_PATH = process.env.QUO_LINE_LINK_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-links.json");
+const QUO_LINE_CHALLENGE_STORE_PATH = process.env.QUO_LINE_CHALLENGE_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-challenges.json");
 const QUO_API_KEY = process.env.QUO_API_KEY || "";
 const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
@@ -160,10 +164,12 @@ const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText 
 const REQUEST_CONTEXT = new AsyncLocalStorage();
 const GOOGLE_IDENTITY_CACHE = new Map();
 const USED_OAUTH_CODES = new Map();
+let quoLineMutationQueue = Promise.resolve();
 
 const routes = new Map([
   ["GET /health", health],
   ["GET /auth/whoami", authWhoAmI],
+  ["POST /auth/quo-line", quoLineLink],
   ["GET /openapi.json", openapi],
   ["GET /openapi-chatgpt.json", chatgptOpenapi],
   ["GET /privacy", privacy],
@@ -317,6 +323,14 @@ function health() {
     gmailSendAllowed: ALLOW_GMAIL_SEND,
     quoConfigured: Boolean(QUO_API_KEY),
     quoSendAllowed: ALLOW_QUO_SEND,
+    quoLineVerification: {
+      available: Boolean(QUO_API_KEY && TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && QUO_VERIFICATION_FROM_NUMBER),
+      method: "google_identity_plus_sms_otp",
+      codeTtlMinutes: 10,
+      maxAttempts: 5,
+      persistentLinks: true,
+      actualMessagesRemainApprovalGated: true
+    },
     writesAllowed: ALLOW_WRITES,
     outboundSafety: {
       automaticEmailOrTextSending: false,
@@ -593,11 +607,17 @@ function issueBrokerTokens(payload, existingRefreshToken = "") {
   };
 }
 
-function authWhoAmI() {
+async function authWhoAmI() {
   const identity = currentRequestIdentity();
   if (!identity) badRequest("No authenticated employee identity is available for this request.");
   const publicEmployee = publicIdentity(identity);
-  publicEmployee.quoLineConfigured = Boolean(authorizedQuoFrom(identity));
+  const quoLine = await authorizedQuoLine(identity);
+  publicEmployee.quoLineConfigured = Boolean(quoLine.number);
+  publicEmployee.quoLine = quoLine.number ? {
+    number: quoLine.number,
+    name: quoLine.name,
+    source: quoLine.source
+  } : null;
   return {
     authenticated: true,
     identity: publicEmployee,
@@ -751,6 +771,7 @@ function openapi() {
 
 const CHATGPT_ACTION_PATHS = [
   "/auth/whoami",
+  "/auth/quo-line",
   "/brain/context",
   "/memory/file-actions",
   "/ops/start-session",
@@ -802,7 +823,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 28-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
+      description: "Consolidated 29-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     security: [{ googleOAuth: [] }],
@@ -4178,7 +4199,8 @@ async function quoSend(input = {}) {
   const file = compactContact(contact);
   const to = String(input.to || file.phone || "").trim();
   const content = required(input.content || input.message || input.text, "content");
-  const from = authorizedQuoFrom();
+  const authorizedLine = await authorizedQuoLine();
+  const from = authorizedLine.number;
   if (!from) badRequest("No Quo sending line is configured for the authenticated employee.");
   const preview = await sendQuoText(quoConfig(), {
     from,
@@ -4247,16 +4269,296 @@ async function quoSend(input = {}) {
   };
 }
 
-function authorizedQuoFrom(identity = currentRequestIdentity()) {
-  if (!identity) return "";
-  const employeeLine = String(identity.quoLineId || "").trim();
-  if (employeeLine) return employeeLine;
+async function quoLineLink(input = {}) {
+  const identity = currentRequestIdentity();
+  if (!identity || identity.type !== "google_oauth") {
+    badRequest("Quo line verification requires the employee to sign in with their own Wave Google account.");
+  }
+  const mode = String(input.mode || "status").trim().toLowerCase();
+  if (!new Set(["status", "start", "verify"]).has(mode)) {
+    badRequest("mode must be status, start, or verify");
+  }
 
+  if (mode === "status") {
+    const line = await authorizedQuoLine(identity);
+    return {
+      mode,
+      linked: Boolean(line.number),
+      employee: { email: identity.email, name: identity.name },
+      line: line.number ? { number: line.number, name: line.name, source: line.source } : null,
+      instruction: line.number
+        ? "This employee's approved Quo sends are locked to the linked line. Every message still requires an exact dry run and approval."
+        : "Provide the employee's Quo business number with mode=start to receive a six-digit verification code."
+    };
+  }
+
+  if (mode === "start") return startQuoLineVerification(identity, input);
+  return verifyQuoLineCode(identity, input);
+}
+
+async function startQuoLineVerification(identity, input) {
+  const number = normalizePhone(input.phone || input.number || "");
+  if (!/^\+1\d{10}$/.test(number)) badRequest("A valid US Quo business number is required.");
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !normalizePhone(QUO_VERIFICATION_FROM_NUMBER)) {
+    badRequest("Quo line verification SMS is not configured.");
+  }
+  const verificationFrom = normalizePhone(QUO_VERIFICATION_FROM_NUMBER);
+  if (verificationFrom === number) badRequest("The verification sender must be different from the Quo line being linked.");
+
+  const companyLines = await listQuoNumbers(quoConfig());
+  const line = companyLines.find((row) => normalizePhone(row.number) === number);
+  if (!line) badRequest("That number is not available in the company Quo account.");
+
+  return mutateQuoLineStores(async () => {
+    const now = Date.now();
+    const links = await readQuoLineLinks();
+    assertQuoLineAvailable(identity, line, links);
+    const current = links.find((row) => row.email === String(identity.email || "").toLowerCase());
+    if (current?.number === number) {
+      return {
+        mode: "start",
+        linked: true,
+        employee: { email: identity.email, name: identity.name },
+        line: { number, name: line.name || "" },
+        instruction: "This Quo line is already verified for the signed-in employee."
+      };
+    }
+
+    const challenges = (await readQuoLineChallenges()).filter((row) => Number(row.expiresAt || 0) > now - 24 * 60 * 60 * 1000);
+    const employeeChallenges = challenges.filter((row) => row.email === identity.email && Number(row.createdAt || 0) > now - 60 * 60 * 1000);
+    if (employeeChallenges.length >= 5) {
+      const error = new Error("Too many Quo verification codes were requested. Try again later.");
+      error.statusCode = 429;
+      throw error;
+    }
+    const latest = employeeChallenges.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
+    if (latest && now - Number(latest.createdAt || 0) < 60 * 1000) {
+      const error = new Error("Wait at least 60 seconds before requesting another verification code.");
+      error.statusCode = 429;
+      throw error;
+    }
+
+    const code = String(randomInt(0, 1000000)).padStart(6, "0");
+    const challenge = {
+      id: randomUUID(),
+      email: String(identity.email || "").toLowerCase(),
+      subject: String(identity.subject || ""),
+      employeeName: String(identity.name || ""),
+      lineId: String(line.id || ""),
+      lineName: String(line.name || ""),
+      number,
+      codeHash: quoVerificationCodeHash(identity, number, code),
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + 10 * 60 * 1000,
+      verifiedAt: 0
+    };
+    const delivery = await sendTwilioVerificationSms({
+      to: number,
+      from: verificationFrom,
+      body: `Wave Ops verification code: ${code}. It expires in 10 minutes. Do not share this code.`
+    });
+    challenges.push(challenge);
+    await writeQuoLineChallenges(challenges);
+    return {
+      mode: "start",
+      linked: false,
+      challengeId: challenge.id,
+      employee: { email: identity.email, name: identity.name },
+      line: { number, name: line.name || "" },
+      verification: {
+        sent: true,
+        from: maskPhone(verificationFrom),
+        to: maskPhone(number),
+        expiresAt: new Date(challenge.expiresAt).toISOString(),
+        messageId: String(delivery.sid || "")
+      },
+      instruction: "Ask the employee for the six-digit code received in Quo, then call this action with mode=verify and the code. Never ask for or expose API credentials."
+    };
+  });
+}
+
+async function verifyQuoLineCode(identity, input) {
+  const code = String(input.code || "").trim();
+  if (!/^\d{6}$/.test(code)) badRequest("A six-digit verification code is required.");
+  return mutateQuoLineStores(async () => {
+    const now = Date.now();
+    const challenges = await readQuoLineChallenges();
+    const challenge = challenges
+      .filter((row) => row.email === identity.email && !row.verifiedAt)
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0];
+    if (!challenge) badRequest("No pending Quo verification challenge was found for this employee.");
+    if (Number(challenge.expiresAt || 0) <= now) badRequest("The Quo verification code has expired. Request a new code.");
+    if (Number(challenge.attempts || 0) >= 5) badRequest("The Quo verification code is locked after too many failed attempts. Request a new code.");
+
+    challenge.attempts = Number(challenge.attempts || 0) + 1;
+    const expected = quoVerificationCodeHash(identity, challenge.number, code);
+    if (!secureEqual(expected, challenge.codeHash)) {
+      await writeQuoLineChallenges(challenges);
+      badRequest("The Quo verification code is incorrect.");
+    }
+
+    const companyLines = await listQuoNumbers(quoConfig());
+    const line = companyLines.find((row) => row.id === challenge.lineId && normalizePhone(row.number) === challenge.number);
+    if (!line) badRequest("The Quo line is no longer available to the company API.");
+    const links = await readQuoLineLinks();
+    assertQuoLineAvailable(identity, line, links);
+    const email = String(identity.email || "").toLowerCase();
+    const updatedLinks = links.filter((row) => row.email !== email);
+    updatedLinks.push({
+      email,
+      subject: String(identity.subject || ""),
+      employeeName: String(identity.name || ""),
+      lineId: String(line.id || ""),
+      lineName: String(line.name || ""),
+      number: normalizePhone(line.number),
+      verifiedAt: new Date(now).toISOString(),
+      verificationMethod: "twilio_sms_otp"
+    });
+    challenge.verifiedAt = now;
+    await writeQuoLineLinks(updatedLinks);
+    await writeQuoLineChallenges(challenges);
+    return {
+      mode: "verify",
+      linked: true,
+      employee: { email: identity.email, name: identity.name },
+      line: { number: normalizePhone(line.number), name: line.name || "", source: "verified_sms_link" },
+      instruction: "The employee's approved Quo sends are now locked to this line. Every actual message still requires an exact dry run and approval."
+    };
+  });
+}
+
+function assertQuoLineAvailable(identity, line, links) {
+  const email = String(identity.email || "").toLowerCase();
+  const number = normalizePhone(line.number);
+  const claimed = links.find((row) => normalizePhone(row.number) === number && row.email !== email);
+  if (claimed) {
+    const error = new Error("That Quo line is already linked to another employee.");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (number === normalizePhone(QUO_DEFAULT_FROM_NUMBER) && email !== CHANCE_GOOGLE_EMAIL) {
+    const error = new Error("That Quo line is reserved for another employee.");
+    error.statusCode = 409;
+    throw error;
+  }
+  for (const user of WAVE_AUTH_USERS.values()) {
+    const configured = normalizePhone(user.quoLineId || "");
+    const configuredId = String(user.quoLineId || "").trim();
+    if ((configured === number || configuredId === String(line.id || "")) && user.email !== email) {
+      const error = new Error("That Quo line is reserved for another employee.");
+      error.statusCode = 409;
+      throw error;
+    }
+  }
+}
+
+function quoVerificationCodeHash(identity, number, code) {
+  const secret = OAUTH_SESSION_SECRET || TWILIO_AUTH_TOKEN;
+  return createHash("sha256")
+    .update([secret, identity.email, identity.subject, normalizePhone(number), code].join("|"))
+    .digest("hex");
+}
+
+function mutateQuoLineStores(operation) {
+  const run = quoLineMutationQueue.then(operation);
+  quoLineMutationQueue = run.catch(() => {});
+  return run;
+}
+
+async function readQuoLineLinks() {
+  const rows = await readJsonFile(QUO_LINE_LINK_STORE_PATH, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function writeQuoLineLinks(rows) {
+  await writePrivateJsonFile(QUO_LINE_LINK_STORE_PATH, rows.slice(-200));
+}
+
+async function readQuoLineChallenges() {
+  const rows = await readJsonFile(QUO_LINE_CHALLENGE_STORE_PATH, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function writeQuoLineChallenges(rows) {
+  await writePrivateJsonFile(QUO_LINE_CHALLENGE_STORE_PATH, rows.slice(-500));
+}
+
+async function writePrivateJsonFile(filePath, value) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await rename(temporary, filePath);
+}
+
+async function sendTwilioVerificationSms({ to, from, body: content }) {
+  const url = `${TWILIO_API_BASE_URL}/2010-04-01/Accounts/${encodeURIComponent(TWILIO_ACCOUNT_SID)}/Messages.json`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64")}`,
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({ To: to, From: from, Body: content })
+  });
+  const text = await response.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!response.ok) {
+    const error = new Error(json.message || `Twilio verification SMS failed with HTTP ${response.status}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return json;
+}
+
+function maskPhone(value) {
+  const phone = normalizePhone(value);
+  return phone ? `***-***-${phone.slice(-4)}` : "";
+}
+
+async function authorizedQuoLine(identity = currentRequestIdentity()) {
+  if (!identity) return { number: "", name: "", id: "", source: "none" };
+  const employeeLine = String(identity.quoLineId || "").trim();
+  if (employeeLine) {
+    const configuredPhone = normalizePhone(employeeLine);
+    if (/^\+1\d{10}$/.test(configuredPhone)) {
+      return {
+        number: configuredPhone,
+        name: String(identity.name || ""),
+        id: "",
+        source: "configured_employee"
+      };
+    }
+    const companyLines = await listQuoNumbers(quoConfig());
+    const configuredLine = companyLines.find((row) => row.id === employeeLine);
+    if (!configuredLine) return { number: "", name: "", id: "", source: "invalid_configured_employee" };
+    return {
+      number: normalizePhone(configuredLine.number),
+      name: String(configuredLine.name || identity.name || ""),
+      id: String(configuredLine.id || ""),
+      source: "configured_employee"
+    };
+  }
+
+  const links = await readQuoLineLinks();
   const email = String(identity.email || "").trim().toLowerCase();
+  const linked = links.find((row) => row.email === email);
+  if (linked?.number) {
+    return {
+      number: normalizePhone(linked.number),
+      name: String(linked.lineName || ""),
+      id: String(linked.lineId || ""),
+      source: "verified_sms_link"
+    };
+  }
+
   const isChance = identity.role === "chance" && (
     identity.type === "bridge_token" || email === CHANCE_GOOGLE_EMAIL
   );
-  return isChance ? QUO_DEFAULT_FROM_NUMBER : "";
+  return isChance
+    ? { number: normalizePhone(QUO_DEFAULT_FROM_NUMBER), name: "Chance Pearson", id: "", source: "chance_default" }
+    : { number: "", name: "", id: "", source: "none" };
 }
 
 async function reviewChanceFiles(input = {}) {
@@ -4316,7 +4618,7 @@ async function reviewChanceFiles(input = {}) {
 }
 
 async function startThresherOperationalSession(input = {}) {
-  const identity = authWhoAmI();
+  const identity = await authWhoAmI();
   const index = await reviewChanceFiles({
     indexOnly: true,
     activeOnly: true,
@@ -7708,6 +8010,16 @@ const OPENAPI = {
           includeTranscripts: { type: "boolean", default: false, description: "Try to include transcripts for up to the three most recent recorded calls." }
         }
       },
+      QuoLineLinkRequest: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["status", "start", "verify"], default: "status", description: "Use status to inspect the current link, start to text a code to a company Quo number, or verify to submit the six-digit code." },
+          phone: { type: "string", description: "Employee's company Quo business number. Required for mode=start." },
+          number: { type: "string", description: "Alias for phone." },
+          code: { type: "string", pattern: "^[0-9]{6}$", description: "Six-digit code received in Quo. Required for mode=verify." }
+        },
+        required: ["mode"]
+      },
       QuoTranscriptRequest: {
         type: "object",
         properties: { callId: { type: "string" } },
@@ -7718,7 +8030,6 @@ const OPENAPI = {
         properties: {
           query: { type: "string", description: "Exact Chance file identifier. Required for ownership validation and private receipt." },
           to: { type: "string", description: "Destination override. Defaults to the current JobNimbus file phone." },
-          from: { type: "string", description: "Optional configured Quo line override." },
           content: { type: "string", maxLength: 1600, description: "Exact text Chance will approve." },
           message: { type: "string", maxLength: 1600, description: "Alias for content." },
           text: { type: "string", maxLength: 1600, description: "Alias for content. Accepted for compatibility with assistants that label an SMS body as text." },
@@ -8155,6 +8466,15 @@ const OPENAPI = {
       get: {
         operationId: "readSignedInWaveIdentity",
         responses: { "200": { description: "Returns the authenticated employee, Wave role, JobNimbus scope, Gmail mode, and whether a Quo line is configured. Returns no Google token or secret." } }
+      }
+    },
+    "/auth/quo-line": {
+      post: {
+        operationId: "linkAuthenticatedQuoLine",
+        description: "Checks, starts, or verifies an employee's Quo line link. Start sends a short-lived SMS code only to a company Quo number; verify persists the authenticated employee-to-line mapping.",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("QuoLineLinkRequest"),
+        responses: { "200": { description: "Quo line status, verification-code delivery receipt, or completed employee line link." } }
       }
     },
     "/privacy": { get: { operationId: "privacy", responses: { "200": { description: "Privacy policy" } } } },

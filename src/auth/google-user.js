@@ -4,6 +4,7 @@ export const WAVE_ROLE_POLICIES = {
   client_coordinator: {
     allowedRoutes: [
       "GET /auth/whoami",
+      "POST /auth/quo-line",
       "POST /brain/context",
       "POST /memory/file-actions",
       "POST /jobnimbus/search",
@@ -22,6 +23,7 @@ export const WAVE_ROLE_POLICIES = {
   manager: {
     allowedRoutes: [
       "GET /auth/whoami",
+      "POST /auth/quo-line",
       "POST /brain/context",
       "POST /memory/file-actions",
       "POST /jobnimbus/search",

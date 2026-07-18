@@ -90,6 +90,8 @@ services:
         sync: false
       - key: TWILIO_FROM_NUMBER
         sync: false
+      - key: QUO_VERIFICATION_FROM_NUMBER
+        sync: false
       - key: TWILIO_VERIFIED_TEST_NUMBER
         sync: false
       - key: TWILIO_STATUS_CALLBACK_URL
@@ -124,3 +126,7 @@ services:
         value: /var/data/bridge/action-batches.json
       - key: OUTBOUND_SEND_STORE_PATH
         value: /var/data/bridge/outbound-sends.json
+      - key: QUO_LINE_LINK_STORE_PATH
+        value: /var/data/bridge/quo-line-links.json
+      - key: QUO_LINE_CHALLENGE_STORE_PATH
+        value: /var/data/bridge/quo-line-challenges.json
