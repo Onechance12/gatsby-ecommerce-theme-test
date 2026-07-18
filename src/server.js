@@ -52,6 +52,7 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { createLorPdf } from "./documents/lor.js";
+import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
 import {
   authenticateGoogleAccessToken,
   parseWaveUsers,
@@ -4631,6 +4632,9 @@ async function reviewChanceFiles(input = {}) {
 
 async function startThresherOperationalSession(input = {}) {
   const identity = await authWhoAmI();
+  if (input.focus === "today_inspections") {
+    return startTodaysInspectionReview(input, identity);
+  }
   const index = await reviewChanceFiles({
     indexOnly: true,
     activeOnly: true,
@@ -4681,6 +4685,71 @@ async function startThresherOperationalSession(input = {}) {
       "Analyze the selected file's fresh JobNimbus, Gmail, Quo, task, calendar, document, and memory evidence now.",
       "Give one primary next action and an exact approval queue. Do not stop with a promise to review later.",
       "Nothing in this response authorizes a write, send, call, task, event, upload, or status change."
+    ]
+  };
+}
+
+async function startTodaysInspectionReview(input, identity) {
+  const contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
+    .filter(isInsuranceFile)
+    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter(isOpenActive);
+  const taskRows = [];
+
+  for (let offset = 0; offset < contacts.length; offset += 8) {
+    const batch = contacts.slice(offset, offset + 8);
+    const taskGroups = await Promise.all(batch.map(async (contact) => {
+      const tasks = await listRelated("/tasks", contact.jnid, 60);
+      return tasks.map((task) => ({ contact, task }));
+    }));
+    taskRows.push(...taskGroups.flat());
+  }
+
+  const matches = selectTodaysInspectionTasks(taskRows);
+  const files = [];
+  const seen = new Set();
+  for (const match of matches) {
+    const id = String(match.contact.jnid || match.contact.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const file = compactContact(match.contact);
+    const review = await reviewChanceFiles({
+      query: String(file.number || file.id || file.name),
+      limit: 1,
+      activeOnly: true,
+      includeGmail: true,
+      includeQuo: true,
+      includeQuoTranscripts: input.includeQuoTranscripts !== false,
+      communicationDays: input.communicationDays,
+      gmailLimit: input.gmailLimit,
+      gmailThreadLimit: input.gmailThreadLimit,
+      quoLimit: input.quoLimit,
+      maxPerSection: input.maxPerSection
+    });
+    files.push({
+      file,
+      inspectionTask: compactTask(match.task),
+      review
+    });
+  }
+
+  return {
+    identity,
+    generatedAt: new Date().toISOString(),
+    focus: "today_inspections",
+    localDate: localDateKey(new Date()),
+    count: files.length,
+    files,
+    assistantDirective: files.length ? [
+      "The bridge resolved today's inspections from active Chance-assigned JobNimbus inspection tasks before consulting calendar occupancy.",
+      "Review every returned exact file using its fresh JobNimbus, Gmail, company-wide Quo, task, document, and client-memory evidence.",
+      "State the exact appointment time, confirmation evidence, access/reschedule risk, remaining inspection scope, language needs, and what Chance should do before leaving.",
+      "Calendar busy blocks are supporting conflict evidence only; never use them as the source of client identity.",
+      "Do not execute any write, send, call, upload, task completion, or status change without exact approval."
+    ] : [
+      "No active Chance-assigned JobNimbus inspection task due today was found.",
+      "Do not infer client identity from a merged calendar busy block.",
+      "Report the empty task result, then ask for a homeowner name, address, or JobNimbus number only if the user believes an inspection is missing."
     ]
   };
 }
@@ -8561,6 +8630,12 @@ const OPENAPI = {
       OperationalSessionRequest: {
         type: "object",
         properties: {
+          focus: {
+            type: "string",
+            enum: ["priority", "today_inspections"],
+            default: "priority",
+            description: "Use today_inspections whenever the user asks about today's inspection(s), appointments, or what to know before leaving. This resolves exact files from active JobNimbus inspection tasks first. Use priority only for the general backlog."
+          },
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           includeQuoTranscripts: { type: "boolean", default: false },
@@ -8807,7 +8882,7 @@ const OPENAPI = {
       post: {
         operationId: "startThresherOperationalSession",
         requestBody: jsonBody("OperationalSessionRequest"),
-        responses: { "200": { description: "Authenticates the employee, ranks the active Chance file index with stale-file priority, and completes the selected file's JobNimbus, Gmail, Quo, task, calendar, document, and memory review in one read-only action." } }
+        responses: { "200": { description: "Read-only operational router. For focus=today_inspections, resolves exact files from active Chance-assigned JobNimbus inspection tasks due today and deep-reviews each one; calendar occupancy is never used to guess client identity. For focus=priority, ranks the active Chance backlog and deep-reviews the selected file." } }
       }
     },
     "/memory/file-actions": {
