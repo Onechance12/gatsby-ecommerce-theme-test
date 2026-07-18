@@ -132,6 +132,7 @@ const ALLOW_CARRIER_FOLLOWUP_CALLS = process.env.ALLOW_CARRIER_FOLLOWUP_CALLS
   ? process.env.ALLOW_CARRIER_FOLLOWUP_CALLS === "true"
   : ALLOW_RETELL_CALLS;
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
+const CHANCE_GOOGLE_EMAIL = String(process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com").trim().toLowerCase();
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
@@ -595,9 +596,11 @@ function issueBrokerTokens(payload, existingRefreshToken = "") {
 function authWhoAmI() {
   const identity = currentRequestIdentity();
   if (!identity) badRequest("No authenticated employee identity is available for this request.");
+  const publicEmployee = publicIdentity(identity);
+  publicEmployee.quoLineConfigured = Boolean(authorizedQuoFrom(identity));
   return {
     authenticated: true,
-    identity: publicIdentity(identity),
+    identity: publicEmployee,
     gmailMode: identity.type === "google_oauth" ? "signed_in_employee_mailbox" : "legacy_chance_mailbox",
     instruction: identity.type === "google_oauth"
       ? "The bridge will use this signed-in employee's Google token for Gmail and enforce this employee's Wave Ops role."
@@ -4175,8 +4178,10 @@ async function quoSend(input = {}) {
   const file = compactContact(contact);
   const to = String(input.to || file.phone || "").trim();
   const content = required(input.content || input.message || input.text, "content");
+  const from = authorizedQuoFrom();
+  if (!from) badRequest("No Quo sending line is configured for the authenticated employee.");
   const preview = await sendQuoText(quoConfig(), {
-    from: input.from,
+    from,
     to,
     content,
     userId: input.userId,
@@ -4240,6 +4245,18 @@ async function quoSend(input = {}) {
     },
     memoryCloseout
   };
+}
+
+function authorizedQuoFrom(identity = currentRequestIdentity()) {
+  if (!identity) return "";
+  const employeeLine = String(identity.quoLineId || "").trim();
+  if (employeeLine) return employeeLine;
+
+  const email = String(identity.email || "").trim().toLowerCase();
+  const isChance = identity.role === "chance" && (
+    identity.type === "bridge_token" || email === CHANCE_GOOGLE_EMAIL
+  );
+  return isChance ? QUO_DEFAULT_FROM_NUMBER : "";
 }
 
 async function reviewChanceFiles(input = {}) {

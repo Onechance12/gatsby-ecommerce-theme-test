@@ -275,6 +275,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   const identity = await identityResponse.json();
   assert.equal(identity.identity.email, "andrea@wavepa.com");
   assert.equal(identity.identity.role, "client_coordinator");
+  assert.equal(identity.identity.quoLineConfigured, false);
   assert.equal(identity.gmailMode, "signed_in_employee_mailbox");
 
   const gmailResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
@@ -738,6 +739,14 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
 
+  const chanceIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
+    headers: { authorization: "Bearer fixture-token" }
+  });
+  assert.equal(chanceIdentityResponse.status, 200);
+  const chanceIdentity = await chanceIdentityResponse.json();
+  assert.equal(chanceIdentity.identity.email, "cpearson@wavepa.com");
+  assert.equal(chanceIdentity.identity.quoLineConfigured, true);
+
   const preparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
@@ -1195,6 +1204,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   });
   assert.equal(quoDryRunResponse.status, 200);
   const quoDryRun = await quoDryRunResponse.json();
+  assert.equal(quoDryRun.plan.from, "+19725550100");
   assert.match(quoDryRun.approvalDigest, /^[a-f0-9]{64}$/);
 
   const quoTextAliasDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/send`, {
