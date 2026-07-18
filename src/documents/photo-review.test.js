@@ -14,6 +14,7 @@ test("photo catalog prioritizes a repeated camera-roll upload batch", () => {
 
   assert.equal(isPhotoMetadata(documents[0]), true);
   assert.equal(isPhotoMetadata(documents[3]), false);
+  assert.equal(isPhotoMetadata({ filename: "TDI.pdf", content_type: "application/pdf", record_type_name: "Photo" }), false);
   const catalog = buildPhotoCandidateCatalog(documents);
   assert.equal(catalog.photoCount, 3);
   assert.equal(catalog.candidateBatches[0].batchKey, "2026-07-18 17:55:46Z.jpeg");

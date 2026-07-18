@@ -7,6 +7,7 @@ export function isPhotoMetadata(document) {
   const name = photoName(document);
   const contentType = String(document?.content_type || document?.contentType || document?.mime_type || "").toLowerCase();
   const type = String(document?.record_type_name || document?.type || "").toLowerCase();
+  if (contentType.includes("pdf") || /\.pdf$/i.test(name)) return false;
   return contentType.startsWith("image/") || PHOTO_EXTENSION.test(name) || type === "photo";
 }
 
