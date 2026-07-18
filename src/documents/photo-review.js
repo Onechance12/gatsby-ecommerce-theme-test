@@ -29,7 +29,7 @@ export function buildPhotoCandidateCatalog(documents, { limit = 12 } = {}) {
     reason: MEASUREMENT_HINT.test(batchKey)
       ? "filename_contains_measurement_hint"
       : (items.length > 1 ? "multiple_images_uploaded_as_one_batch" : "recent_photo"),
-    photos: items
+    photos: items.sort((a, b) => a.id.localeCompare(b.id))
   })).sort((a, b) => {
     if (a.likelyMeasurementBatch !== b.likelyMeasurementBatch) return a.likelyMeasurementBatch ? -1 : 1;
     return b.batchKey.localeCompare(a.batchKey);

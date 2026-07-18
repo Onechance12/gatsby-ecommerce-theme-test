@@ -20,6 +20,7 @@ test("photo catalog prioritizes a repeated camera-roll upload batch", () => {
   assert.equal(catalog.candidateBatches[0].batchKey, "2026-07-18 17:55:46Z.jpeg");
   assert.equal(catalog.candidateBatches[0].count, 2);
   assert.equal(catalog.candidateBatches[0].likelyMeasurementBatch, true);
+  assert.deepEqual(catalog.candidateBatches[0].photos.map((photo) => photo.id), ["photo-1", "photo-2"]);
 });
 
 test("selected photos render as a bounded PDF", async () => {

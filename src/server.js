@@ -3568,8 +3568,10 @@ async function photoReview(input) {
   }
 
   let selected = requestedIds.length
-    ? photos.filter((photo) => requestedIds.includes(String(photo.jnid || photo.id || "")))
-    : photos.filter((photo) => String(photo.name || photo.filename || photo.file_name || "") === batchKey);
+    ? requestedIds.map((id) => photos.find((photo) => String(photo.jnid || photo.id || "") === id)).filter(Boolean)
+    : photos
+      .filter((photo) => String(photo.name || photo.filename || photo.file_name || "") === batchKey)
+      .sort((a, b) => String(a.jnid || a.id || "").localeCompare(String(b.jnid || b.id || "")));
   if (requestedIds.length && selected.length !== requestedIds.length) {
     badRequest("One or more requested photoIds do not belong to this exact JobNimbus file.");
   }
