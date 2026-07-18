@@ -97,6 +97,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(schema.paths["/gmail/attachment-review"].post.operationId, "reviewGmailAttachment");
   assert.equal(schema.paths["/jobnimbus/document-file"].post.operationId, "attachJobNimbusDocumentToChat");
+  assert.equal(schema.paths["/jobnimbus/photo-review"].post.operationId, "reviewJobNimbusPhotos");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
   assert.equal(schema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
 
@@ -110,11 +111,12 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "https://jobnimbus-chatgpt-bridge.onrender.com/oauth/authorize"
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 29);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 30);
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post.operationId, "linkAuthenticatedQuoLine");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
+  assert.equal(chatgptSchema.paths["/jobnimbus/photo-review"].post.operationId, "reviewJobNimbusPhotos");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(chatgptSchema.paths["/ops/start-session"].post.operationId, "startThresherOperationalSession");

@@ -52,6 +52,7 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { createLorPdf } from "./documents/lor.js";
+import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } from "./documents/photo-review.js";
 import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
 import {
   authenticateGoogleAccessToken,
@@ -206,6 +207,7 @@ const routes = new Map([
   ["POST /jobnimbus/document-text", documentText],
   ["POST /jobnimbus/document-review", documentReview],
   ["POST /jobnimbus/document-file", documentFileForChat],
+  ["POST /jobnimbus/photo-review", photoReview],
   ["POST /weather/dol-research", dateOfLossResearch],
   ["POST /jobnimbus/upload-file", uploadJobNimbusFile],
   ["POST /jobnimbus/update-contact", updateContact],
@@ -794,6 +796,7 @@ const CHATGPT_ACTION_PATHS = [
   "/jobnimbus/search",
   "/jobnimbus/document-review",
   "/jobnimbus/document-file",
+  "/jobnimbus/photo-review",
   "/weather/dol-research",
   "/jobnimbus/upload-file",
   "/gmail/search",
@@ -3537,6 +3540,93 @@ async function documentFileForChat(input) {
     contentType: prepared.contentType,
     reviewInstruction: "The original JobNimbus document is now attached to this conversation. Inspect the actual file and every relevant page with ChatGPT's native file/PDF analysis. Do not infer its contents from the filename or from a failed bridge extraction.",
     openaiFileResponse: prepared.openaiFileResponse
+  };
+}
+
+async function photoReview(input) {
+  const query = required(input.query, "query");
+  const mode = String(input.mode || "catalog").trim().toLowerCase();
+  if (!new Set(["catalog", "attach_batch"]).has(mode)) {
+    badRequest("mode must be catalog or attach_batch");
+  }
+
+  const { contact, readScope } = await findDocumentReadContact(query);
+  const documents = await listRelated("/files", contact.jnid, 1000);
+  const catalog = buildPhotoCandidateCatalog(documents, { limit: input.catalogLimit });
+  const file = compactContact(contact);
+  if (mode === "catalog") {
+    return { mode, file, readScope, ...catalog };
+  }
+
+  const photos = documents.filter(isPhotoMetadata);
+  const requestedIds = Array.isArray(input.photoIds)
+    ? [...new Set(input.photoIds.map((value) => String(value || "").trim()).filter(Boolean))]
+    : [];
+  const batchKey = String(input.batchKey || "").trim();
+  if (!requestedIds.length && !batchKey) {
+    badRequest("attach_batch requires one exact batchKey from catalog mode or one to six exact photoIds");
+  }
+
+  let selected = requestedIds.length
+    ? photos.filter((photo) => requestedIds.includes(String(photo.jnid || photo.id || "")))
+    : photos.filter((photo) => String(photo.name || photo.filename || photo.file_name || "") === batchKey);
+  if (requestedIds.length && selected.length !== requestedIds.length) {
+    badRequest("One or more requested photoIds do not belong to this exact JobNimbus file.");
+  }
+  if (!selected.length) badRequest("No JobNimbus photos matched the requested batch or ids.");
+
+  const offset = Math.max(0, Number(input.offset) || 0);
+  const limit = clamp(Number(input.limit || 6), 1, 6);
+  const page = selected.slice(offset, offset + limit);
+  if (!page.length) badRequest(`No photos remain at offset ${offset}. The selected batch contains ${selected.length}.`);
+
+  const downloaded = [];
+  const unsupportedPhotoIds = [];
+  for (const photo of page) {
+    const item = await downloadJobNimbusFile(photo);
+    const filename = item.filename || compactDocument(photo).name;
+    const contentType = String(item.contentType || "").toLowerCase();
+    if (!contentType.includes("jpeg") && !contentType.includes("jpg") && !contentType.includes("png") && !/\.(?:jpe?g|png)$/i.test(filename)) {
+      unsupportedPhotoIds.push(String(photo.jnid || photo.id || ""));
+      continue;
+    }
+    downloaded.push({
+      bytes: item.bytes,
+      label: `${String(photo.jnid || photo.id || "")}: ${filename}`
+    });
+  }
+
+  const rendered = await createPhotoReviewPdf(downloaded, {
+    title: `${file.number || file.name} JobNimbus photo review`
+  });
+  if (rendered.bytes.length > MAX_CHATGPT_FILE_BYTES) {
+    badRequest(
+      `The selected photo PDF is ${rendered.bytes.length} bytes, above the ${MAX_CHATGPT_FILE_BYTES}-byte ChatGPT limit. Retry with fewer exact photoIds or a smaller limit.`
+    );
+  }
+
+  const safeNumber = String(file.number || file.id || "file").replace(/[^a-z0-9_-]+/gi, "-");
+  const filename = `jobnimbus-${safeNumber}-photos-${offset + 1}-${offset + page.length}.pdf`;
+  return {
+    mode,
+    file,
+    readScope,
+    selection: {
+      batchKey: batchKey || "",
+      requestedPhotoIds: requestedIds,
+      offset,
+      returnedCount: rendered.rendered,
+      totalSelectedCount: selected.length,
+      hasMore: offset + page.length < selected.length,
+      nextOffset: offset + page.length < selected.length ? offset + page.length : null,
+      unsupportedPhotoIds
+    },
+    reviewInstruction: "The selected JobNimbus photos are attached as one image per PDF page. Inspect the actual pages visually. Treat visible measurement overlays as verified only when every digit and unit is legible; never infer an unreadable dimension. Do not treat ordinary inspection photos as measurement evidence.",
+    openaiFileResponse: [{
+      name: filename,
+      mime_type: "application/pdf",
+      content: rendered.bytes.toString("base64")
+    }]
   };
 }
 
@@ -7991,6 +8081,49 @@ const OPENAPI = {
         },
         required: ["file", "readScope", "document", "bytes", "contentType", "reviewInstruction", "openaiFileResponse"]
       },
+      PhotoReviewRequest: {
+        type: "object",
+        description: "Read-only two-step photo workflow. Catalog mode returns small candidate batches without image bytes. Attach mode converts only one exact batch or up to six exact photo ids into a PDF for native visual review.",
+        properties: {
+          query: { type: "string", description: "Exact JobNimbus number, client name, claim number, or address. Chance-assigned files are preferred; exact company-file reads remain read-only." },
+          mode: { type: "string", enum: ["catalog", "attach_batch"], default: "catalog" },
+          catalogLimit: { type: "integer", minimum: 1, maximum: 25, default: 12, description: "Maximum candidate batches returned in catalog mode." },
+          batchKey: { type: "string", description: "Exact batchKey returned by catalog mode. Required for attach_batch unless photoIds are supplied." },
+          photoIds: {
+            type: "array",
+            minItems: 1,
+            maxItems: 6,
+            uniqueItems: true,
+            items: { type: "string" },
+            description: "One to six exact JobNimbus photo ids from catalog mode. Use when a batch needs narrower review."
+          },
+          offset: { type: "integer", minimum: 0, default: 0, description: "Batch offset for reviewing the next group without loading the entire photo set." },
+          limit: { type: "integer", minimum: 1, maximum: 6, default: 6, description: "Maximum photos converted into the returned review PDF." }
+        },
+        required: ["query"]
+      },
+      PhotoReviewResponse: {
+        type: "object",
+        properties: {
+          mode: { type: "string" },
+          file: { type: "object", additionalProperties: true },
+          readScope: { type: "string" },
+          photoCount: { type: "integer" },
+          batchCount: { type: "integer" },
+          candidateBatches: { type: "array", items: { type: "object", additionalProperties: true } },
+          omittedBatchCount: { type: "integer" },
+          instruction: { type: "string" },
+          selection: { type: "object", additionalProperties: true },
+          reviewInstruction: { type: "string" },
+          openaiFileResponse: {
+            type: "array",
+            minItems: 1,
+            maxItems: 1,
+            items: { $ref: "#/components/schemas/ChatGPTFileReturn" }
+          }
+        },
+        required: ["mode", "file", "readScope"]
+      },
       DateOfLossResearchRequest: {
         type: "object",
         properties: {
@@ -8984,6 +9117,20 @@ const OPENAPI = {
                 schema: { $ref: "#/components/schemas/DocumentFileResponse" }
               }
             }
+          }
+        }
+      }
+    },
+    "/jobnimbus/photo-review": {
+      post: {
+        operationId: "reviewJobNimbusPhotos",
+        summary: "Find and visually review selected JobNimbus photo batches",
+        description: "Read-only, bounded photo workflow. Call catalog first to identify likely measurement uploads without returning the full job-site photo set. Then call attach_batch with one exact batchKey or up to six photoIds; the bridge returns those images as a PDF for native visual inspection.",
+        requestBody: jsonBody("PhotoReviewRequest"),
+        responses: {
+          "200": {
+            description: "Candidate metadata or a bounded PDF containing only the explicitly selected photos.",
+            content: { "application/json": { schema: { $ref: "#/components/schemas/PhotoReviewResponse" } } }
           }
         }
       }
