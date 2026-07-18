@@ -274,6 +274,8 @@ are explicitly approved.
 
 ## Gmail OAuth
 
+First-use employee enrollment can be enabled with `AUTO_ENROLL_WAVE_USERS=true`. A new employee must sign in with a verified `@wavepa.com` Google account that exactly matches an active JobNimbus user. The employee initially receives onboarding-only access, verifies a company-owned Quo line by SMS code, and then receives full company operational access. Missing JobNimbus or Quo verification fails closed. Explicit `WAVE_AUTH_USERS_JSON` entries remain available for role overrides and disabling access.
+
 Create a Google OAuth client with Gmail API enabled, then run:
 
 ```bash

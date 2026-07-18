@@ -232,6 +232,11 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     } else if (url.pathname === "/gmail/v1/users/me/messages") {
       gmailTokens.push(req.headers.authorization);
       response = { messages: [], resultSizeEstimate: 0 };
+    } else if (url.pathname === "/account/users") {
+      assert.equal(req.headers.authorization, "Bearer fixture-jobnimbus-key");
+      response = {
+        users: [{ jnid: "andrea-owner-id", email: "andrea@wavepa.com", display_name: "Andrea Ramirez", is_active: true }]
+      };
     } else if (url.pathname === "/v1/phone-numbers") {
       assert.equal(req.headers.authorization, "fixture-quo-key");
       response = { data: [{ id: "PN-andrea", name: "Andrea Ramirez", number: "+19725550200" }] };
@@ -274,9 +279,9 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
       GPT_OAUTH_CLIENT_SECRET: "fixture-gpt-secret",
       OAUTH_SESSION_SECRET: "fixture-session-encryption-secret",
       MEMORY_ROOT: authMemoryRoot,
-      WAVE_AUTH_USERS_JSON: JSON.stringify({
-        "andrea@wavepa.com": { name: "Andrea Ramirez", role: "client_coordinator" }
-      }),
+      WAVE_AUTH_USERS_JSON: "{}",
+      AUTO_ENROLL_WAVE_USERS: "true",
+      AUTO_ENROLLED_USER_STORE_PATH: path.join(authMemoryRoot, "auto-enrolled-users.json"),
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/v1`,
       TWILIO_ACCOUNT_SID: "AC-fixture",
@@ -284,7 +289,8 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
       TWILIO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
       TWILIO_FROM_NUMBER: "+19725550999",
       QUO_VERIFICATION_FROM_NUMBER: "+19725550999",
-      JOBNIMBUS_API_KEY: "",
+      JOBNIMBUS_API_KEY: "fixture-jobnimbus-key",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
       RETELL_API_KEY: "",
       BRIDGE_ALLOW_WRITES: "false"
     },
@@ -298,7 +304,8 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   assert.equal(identityResponse.status, 200);
   const identity = await identityResponse.json();
   assert.equal(identity.identity.email, "andrea@wavepa.com");
-  assert.equal(identity.identity.role, "client_coordinator");
+  assert.equal(identity.identity.role, "onboarding");
+  assert.equal(identity.identity.jobNimbusOwnerId, "andrea-owner-id");
   assert.equal(identity.identity.quoLineConfigured, false);
   assert.equal(identity.gmailMode, "signed_in_employee_mailbox");
 
@@ -327,6 +334,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   const linkedIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, { headers });
   assert.equal(linkedIdentityResponse.status, 200);
   const linkedIdentity = await linkedIdentityResponse.json();
+  assert.equal(linkedIdentity.identity.role, "employee");
   assert.equal(linkedIdentity.identity.quoLineConfigured, true);
   assert.equal(linkedIdentity.identity.quoLine.number, "+19725550200");
   assert.equal(linkedIdentity.identity.quoLine.source, "verified_sms_link");
@@ -339,12 +347,12 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   assert.equal(gmailResponse.status, 200);
   assert.deepEqual(gmailTokens, ["Bearer andrea-access-token"]);
 
-  const forbiddenResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/call`, {
+  const fullAccessResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/call`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: "{}"
   });
-  assert.equal(forbiddenResponse.status, 403);
+  assert.equal(fullAccessResponse.status, 400);
 
   const callbackUri = "https://chatgpt.com/aip/g-fixture/oauth/callback";
   const authorizeResponse = await fetch(

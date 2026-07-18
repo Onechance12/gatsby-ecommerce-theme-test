@@ -56,14 +56,36 @@ test("unapproved employee and non-Workspace account are rejected", async () => {
   }), /outside the approved Workspace domain/i);
 });
 
+test("verified Workspace employee can be resolved for first-use onboarding", async () => {
+  const autoUsers = parseWaveUsers("");
+  const identity = await authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: autoUsers,
+    resolveUser: async ({ email, name }) => {
+      const user = { email, name, role: "onboarding", enabled: true, jobNimbusOwnerId: "owner-1", jobNimbusScope: "company", quoLineId: "" };
+      autoUsers.set(email, user);
+      return user;
+    },
+    fetchImpl: fixtureFetch({ email: "newemployee@wavepa.com", roleDomain: "wavepa.com" })
+  });
+  assert.equal(identity.role, "onboarding");
+  assert.equal(identity.jobNimbusOwnerId, "owner-1");
+  assert.equal(routeAllowed(identity, "POST", "/auth/quo-line"), true);
+  assert.equal(routeAllowed(identity, "POST", "/jobnimbus/search"), false);
+});
+
 test("coordinator routes are read-focused while Chance retains full access", () => {
   const coordinator = { type: "google_oauth", role: "client_coordinator" };
   const chance = { type: "google_oauth", role: "chance" };
+  const employee = { type: "google_oauth", role: "employee" };
   assert.equal(routeAllowed(coordinator, "POST", "/gmail/search"), true);
   assert.equal(routeAllowed(coordinator, "POST", "/auth/quo-line"), true);
   assert.equal(routeAllowed(coordinator, "POST", "/claim-filing/call"), false);
   assert.equal(routeAllowed(coordinator, "POST", "/quo/send"), false);
   assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), true);
+  assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), true);
 });
 
 function fixtureFetch({ audience = clientId, email, roleDomain }) {

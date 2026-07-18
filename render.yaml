@@ -38,6 +38,8 @@ services:
         value: "true"
       - key: GOOGLE_OAUTH_ALLOWED_DOMAIN
         value: wavepa.com
+      - key: AUTO_ENROLL_WAVE_USERS
+        value: "true"
       - key: CHANCE_GOOGLE_EMAIL
         value: cpearson@wavepa.com
       - key: WAVE_AUTH_USERS_JSON
@@ -130,3 +132,5 @@ services:
         value: /var/data/bridge/quo-line-links.json
       - key: QUO_LINE_CHALLENGE_STORE_PATH
         value: /var/data/bridge/quo-line-challenges.json
+      - key: AUTO_ENROLLED_USER_STORE_PATH
+        value: /var/data/bridge/auto-enrolled-users.json

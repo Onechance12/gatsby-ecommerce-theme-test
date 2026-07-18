@@ -1,6 +1,13 @@
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
   administrator: { allRoutes: true },
+  employee: { allRoutes: true },
+  onboarding: {
+    allowedRoutes: [
+      "GET /auth/whoami",
+      "POST /auth/quo-line"
+    ]
+  },
   client_coordinator: {
     allowedRoutes: [
       "GET /auth/whoami",
@@ -71,6 +78,7 @@ export async function authenticateGoogleAccessToken({
   userInfoUrl = "https://openidconnect.googleapis.com/v1/userinfo",
   allowedDomain,
   users,
+  resolveUser,
   fetchImpl = fetch
 }) {
   const accessToken = String(token || "").trim();
@@ -100,7 +108,10 @@ export async function authenticateGoogleAccessToken({
     throw authError("Google account is outside the approved Workspace domain", 403);
   }
 
-  const user = users instanceof Map ? users.get(email) : null;
+  let user = users instanceof Map ? users.get(email) : null;
+  if (!user && typeof resolveUser === "function") {
+    user = await resolveUser({ email, name: String(profile.name || email).trim(), subject, hostedDomain });
+  }
   if (!user || user.enabled === false) throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   const role = String(user.role || "").trim().toLowerCase();
   if (!WAVE_ROLE_POLICIES[role]) throw authError("This employee has an unsupported Wave Ops role", 403);

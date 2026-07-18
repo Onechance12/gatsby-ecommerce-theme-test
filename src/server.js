@@ -75,6 +75,7 @@ const GOOGLE_TOKENINFO_URL = process.env.GOOGLE_TOKENINFO_URL || "https://www.go
 const GOOGLE_USERINFO_URL = process.env.GOOGLE_USERINFO_URL || "https://openidconnect.googleapis.com/v1/userinfo";
 const GOOGLE_OAUTH_ALLOWED_DOMAIN = process.env.GOOGLE_OAUTH_ALLOWED_DOMAIN || "wavepa.com";
 const ALLOW_GOOGLE_USER_AUTH = process.env.ALLOW_GOOGLE_USER_AUTH === "true";
+const AUTO_ENROLL_WAVE_USERS = process.env.AUTO_ENROLL_WAVE_USERS === "true";
 const GPT_OAUTH_CLIENT_ID = process.env.GPT_OAUTH_CLIENT_ID || "wave-jobnimbus-gpt";
 const GPT_OAUTH_CLIENT_SECRET = process.env.GPT_OAUTH_CLIENT_SECRET || "";
 const OAUTH_SESSION_SECRET = process.env.OAUTH_SESSION_SECRET || "";
@@ -140,6 +141,7 @@ const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
 const QUO_LINE_LINK_STORE_PATH = process.env.QUO_LINE_LINK_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-links.json");
 const QUO_LINE_CHALLENGE_STORE_PATH = process.env.QUO_LINE_CHALLENGE_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-challenges.json");
+const AUTO_ENROLLED_USER_STORE_PATH = process.env.AUTO_ENROLLED_USER_STORE_PATH || path.join(BRIDGE_DATA_DIR, "auto-enrolled-users.json");
 const QUO_API_KEY = process.env.QUO_API_KEY || "";
 const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
@@ -163,6 +165,7 @@ const claimScopeTextCache = new Map();
 const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText };
 const REQUEST_CONTEXT = new AsyncLocalStorage();
 const GOOGLE_IDENTITY_CACHE = new Map();
+const JOBNIMBUS_USER_CACHE = new Map();
 const USED_OAUTH_CODES = new Map();
 let quoLineMutationQueue = Promise.resolve();
 
@@ -239,6 +242,8 @@ const routes = new Map([
   ["POST /quo/send", quoSend]
 ]);
 
+await hydrateAutoEnrolledWaveUsers();
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
@@ -314,6 +319,12 @@ function health() {
       provider: "google_via_bridge",
       allowedWorkspaceDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
       approvedUserCount: WAVE_AUTH_USERS.size,
+      automaticEmployeeEnrollment: {
+        enabled: AUTO_ENROLL_WAVE_USERS,
+        requirements: ["verified_wavepa_google", "active_jobnimbus_user", "verified_company_quo_line"],
+        accessBeforeQuoVerification: "onboarding_only",
+        accessAfterVerification: "full_company_operations"
+      },
       sharedBridgeTokenFallback: Boolean(BRIDGE_TOKEN),
       perUserGmail: true,
       roleEnforcement: true,
@@ -509,7 +520,8 @@ async function oauthGoogleCallback(res, url) {
       tokenInfoUrl: GOOGLE_TOKENINFO_URL,
       userInfoUrl: GOOGLE_USERINFO_URL,
       allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
-      users: WAVE_AUTH_USERS
+      users: WAVE_AUTH_USERS,
+      resolveUser: resolveFirstUseWaveUser
     });
     if (!tokens.refresh_token) throw oauthError("access_denied", "Google did not return offline access. Reconnect and approve the requested access.", 401);
 
@@ -6969,11 +6981,11 @@ async function authenticateRequest(req) {
     try {
       const broker = openOAuthPayload(token);
       if (broker.kind === "access_token" && Number(broker.exp || 0) > Date.now() && broker.googleAccessToken) {
-        return {
+        return effectiveEmployeeIdentity({
           ...approvedIdentityFromPayload(broker.identity),
           type: "google_oauth",
           googleAccessToken: broker.googleAccessToken
-        };
+        });
       }
     } catch {
       // The bearer may be a direct Google token used by a trusted non-GPT client.
@@ -6982,14 +6994,17 @@ async function authenticateRequest(req) {
 
   const cacheKey = createHash("sha256").update(token).digest("hex");
   const cached = GOOGLE_IDENTITY_CACHE.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return { ...cached.identity, googleAccessToken: token };
+  if (cached && cached.expiresAt > Date.now()) {
+    return effectiveEmployeeIdentity({ ...cached.identity, googleAccessToken: token });
+  }
   const identity = await authenticateGoogleAccessToken({
     token,
     clientId: GOOGLE_CLIENT_ID,
     tokenInfoUrl: GOOGLE_TOKENINFO_URL,
     userInfoUrl: GOOGLE_USERINFO_URL,
     allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
-    users: WAVE_AUTH_USERS
+    users: WAVE_AUTH_USERS,
+    resolveUser: resolveFirstUseWaveUser
   });
   GOOGLE_IDENTITY_CACHE.set(cacheKey, {
     identity: { ...identity, googleAccessToken: "" },
@@ -7000,7 +7015,7 @@ async function authenticateRequest(req) {
       if (row.expiresAt <= Date.now()) GOOGLE_IDENTITY_CACHE.delete(key);
     }
   }
-  return identity;
+  return effectiveEmployeeIdentity(identity);
 }
 
 function oauthIdentityPayload(identity) {
@@ -7032,6 +7047,103 @@ function approvedIdentityFromPayload(payload = {}) {
     jobNimbusScope: user.jobNimbusScope,
     quoLineId: user.quoLineId,
     enabled: true
+  };
+}
+
+async function hydrateAutoEnrolledWaveUsers() {
+  if (!AUTO_ENROLL_WAVE_USERS) return;
+  const rows = await readJsonFile(AUTO_ENROLLED_USER_STORE_PATH, []);
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const email = String(row?.email || "").trim().toLowerCase();
+    if (!email || WAVE_AUTH_USERS.has(email) || row?.enabled === false) continue;
+    WAVE_AUTH_USERS.set(email, {
+      email,
+      name: String(row.name || email).trim(),
+      role: "onboarding",
+      enabled: true,
+      jobNimbusOwnerId: String(row.jobNimbusOwnerId || "").trim(),
+      jobNimbusScope: "company",
+      quoLineId: ""
+    });
+  }
+}
+
+async function resolveFirstUseWaveUser({ email, name }) {
+  if (!AUTO_ENROLL_WAVE_USERS) return null;
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const domain = normalizedEmail.split("@")[1] || "";
+  if (!normalizedEmail || domain !== GOOGLE_OAUTH_ALLOWED_DOMAIN.toLowerCase()) return null;
+
+  const jobNimbusUser = await findActiveJobNimbusUser(normalizedEmail);
+  if (!jobNimbusUser) {
+    const error = new Error("No active JobNimbus employee account matched this Wave email address.");
+    error.statusCode = 403;
+    throw error;
+  }
+  const user = {
+    email: normalizedEmail,
+    name: String(jobNimbusUser.name || name || normalizedEmail).trim(),
+    role: "onboarding",
+    enabled: true,
+    jobNimbusOwnerId: String(jobNimbusUser.id || "").trim(),
+    jobNimbusScope: "company",
+    quoLineId: ""
+  };
+  WAVE_AUTH_USERS.set(normalizedEmail, user);
+  await persistAutoEnrolledWaveUsers();
+  return user;
+}
+
+async function findActiveJobNimbusUser(email) {
+  const key = String(email || "").trim().toLowerCase();
+  const cached = JOBNIMBUS_USER_CACHE.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
+
+  let payload;
+  try {
+    payload = await jobNimbus("/account/users?size=1000&from=0");
+  } catch (error) {
+    const wrapped = new Error("JobNimbus employee verification is unavailable; access was not granted.");
+    wrapped.statusCode = Number(error?.statusCode) || 503;
+    throw wrapped;
+  }
+  const rows = unwrapList(payload, "users");
+  const match = rows.find((row) => {
+    const candidateEmail = String(row.email || row.email_address || row.username || row.login || "").trim().toLowerCase();
+    const inactive = row.is_active === false || row.active === false || row.enabled === false || row.is_disabled === true || row.is_archived === true || row.deleted === true;
+    return candidateEmail === key && !inactive;
+  });
+  const user = match ? {
+    id: String(match.jnid || match.id || match.user_id || "").trim(),
+    name: String(match.display_name || match.name || [match.first_name, match.last_name].filter(Boolean).join(" ") || key).trim()
+  } : null;
+  if (user && !user.id) return null;
+  JOBNIMBUS_USER_CACHE.set(key, { user, expiresAt: Date.now() + 10 * 60 * 1000 });
+  return user;
+}
+
+async function persistAutoEnrolledWaveUsers() {
+  if (!AUTO_ENROLL_WAVE_USERS) return;
+  const rows = [...WAVE_AUTH_USERS.values()]
+    .filter((user) => user.role === "onboarding")
+    .map((user) => ({
+      email: user.email,
+      name: user.name,
+      enabled: user.enabled !== false,
+      jobNimbusOwnerId: user.jobNimbusOwnerId,
+      jobNimbusScope: "company"
+    }));
+  await writePrivateJsonFile(AUTO_ENROLLED_USER_STORE_PATH, rows);
+}
+
+async function effectiveEmployeeIdentity(identity) {
+  if (!identity || identity.role !== "onboarding") return identity;
+  const line = await authorizedQuoLine(identity);
+  if (!line.number) return identity;
+  return {
+    ...identity,
+    role: "employee",
+    jobNimbusScope: "company"
   };
 }
 
