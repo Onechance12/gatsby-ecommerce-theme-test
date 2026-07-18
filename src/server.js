@@ -4719,17 +4719,24 @@ async function startTodaysInspectionReview(input, identity) {
       activeOnly: true,
       includeGmail: true,
       includeQuo: true,
-      includeQuoTranscripts: input.includeQuoTranscripts !== false,
+      // The inspection router must stay small enough for a single GPT action.
+      // Timeline metadata is sufficient for confirmation and access checks;
+      // exact call transcripts can be pulled separately when needed.
+      includeQuoTranscripts: false,
       communicationDays: input.communicationDays,
       gmailLimit: input.gmailLimit,
       gmailThreadLimit: input.gmailThreadLimit,
       quoLimit: input.quoLimit,
       maxPerSection: input.maxPerSection
     });
+    const packet = Array.isArray(review.packets) ? review.packets[0] : null;
     files.push({
       file,
       inspectionTask: compactTask(match.task),
-      review
+      review: packet ? compactClientCoordinatorEvidence(packet) : {
+        complete: false,
+        error: "The exact-file evidence packet was unavailable."
+      }
     });
   }
 
