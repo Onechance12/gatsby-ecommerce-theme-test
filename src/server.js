@@ -24,7 +24,7 @@ import { renderBrain } from "./memory/brain.js";
 import { safeCloseoutAction } from "./memory/actionCloseout.js";
 import { latestActionReceipts, listMemory } from "./memory/store.js";
 import { readFileSnapshot, refreshFileSnapshot, summarizeFileSnapshot } from "./memory/fileSnapshot.js";
-import { listQuoNumbers, readQuoHistory, readQuoTranscript, sendQuoText } from "./quo/client.js";
+import { listQuoNumbers, readQuoHistory, readQuoInbox, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import {
@@ -54,6 +54,7 @@ import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { createLorPdf } from "./documents/lor.js";
 import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } from "./documents/photo-review.js";
 import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
+import { buildCommunicationRecoveryQueue } from "./operations/communication-recovery.js";
 import {
   authenticateGoogleAccessToken,
   parseWaveUsers,
@@ -4727,6 +4728,9 @@ async function startThresherOperationalSession(input = {}) {
   if (input.focus === "today_inspections") {
     return startTodaysInspectionReview(input, identity);
   }
+  if (input.focus === "communications") {
+    return startCommunicationRecoveryReview(input, identity);
+  }
   const index = await reviewChanceFiles({
     indexOnly: true,
     activeOnly: true,
@@ -4779,6 +4783,96 @@ async function startThresherOperationalSession(input = {}) {
       "Nothing in this response authorizes a write, send, call, task, event, upload, or status change."
     ]
   };
+}
+
+async function startCommunicationRecoveryReview(input, identity) {
+  const days = clamp(Number(input.communicationDays || 30), 1, 90);
+  const contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
+    .filter(isInsuranceFile)
+    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter(isOpenActive);
+  const files = contacts.map(compactContact);
+  const gmailQuery = `newer_than:${days}d {appointment inspection schedule scheduling reschedule adjuster reinspection appraiser appraisal arrival}`;
+  const [gmailResult, quoResult] = await Promise.allSettled([
+    loadGmailRecoveryItems(gmailQuery, clamp(Number(input.gmailLimit || 25), 1, 25)),
+    readQuoInbox(quoConfig(), {
+      days,
+      maxResults: clamp(Number(input.quoLimit || 50), 1, 50),
+      transcriptLimit: input.includeQuoTranscripts === false ? 0 : clamp(Number(input.quoTranscriptLimit || 12), 0, 25)
+    })
+  ]);
+  const gmailItems = gmailResult.status === "fulfilled" ? gmailResult.value : [];
+  const quoItems = quoResult.status === "fulfilled" ? quoResult.value.items : [];
+  const recovery = buildCommunicationRecoveryQueue([...gmailItems, ...quoItems], files);
+
+  return {
+    identity,
+    generatedAt: new Date().toISOString(),
+    focus: "communications",
+    days,
+    activeFileCount: files.length,
+    sources: {
+      gmail: communicationSourceStatus(gmailResult, gmailItems.length),
+      quo: communicationSourceStatus(quoResult, quoItems.length)
+    },
+    recovery,
+    assistantDirective: [
+      "This is an inbox-first, read-only communication recovery sweep. It scanned Gmail scheduling mail and incoming calls/texts across every available Quo team line before matching them to active Chance files.",
+      "Review appointment_scheduling and callback_required items first. Unknown numbers and unmatched messages must remain visible for manual identification; never silently discard them.",
+      "A proposed match is evidence, not proof. Verify the exact file using claim number, insured, address, policy, or a fresh transcript before proposing a JobNimbus change.",
+      "Report any source marked unavailable or partial. Do not claim the communication sweep is complete when Gmail or Quo failed.",
+      "Nothing in this response authorizes a text, email, call, note, task, calendar event, upload, or status change."
+    ]
+  };
+}
+
+async function loadGmailRecoveryItems(query, limit) {
+  const search = await gmailSearch({ query, limit });
+  const threadIds = [...new Set(search.messages.map((message) => message.threadId).filter(Boolean))].slice(0, limit);
+  const items = [];
+  for (const threadId of threadIds) {
+    const thread = await gmailThread({ threadId });
+    for (const message of thread.messages) {
+      if (!message.id || items.some((item) => item.id === message.id)) continue;
+      const recovered = {
+        id: message.id,
+        threadId,
+        channel: "gmail",
+        type: "email",
+        direction: gmailDirection(message),
+        at: message.date || "",
+        atUtc: gmailTimestamp(message),
+        from: message.from || "",
+        to: message.to || "",
+        cc: message.cc || "",
+        subject: message.subject || "",
+        snippet: message.snippet || "",
+        text: String(message.plainText || message.htmlText || message.snippet || "").slice(0, 12000),
+        attachments: message.attachments || []
+      };
+      if (recovered.direction === "incoming") items.push(recovered);
+    }
+  }
+  return items.sort((a, b) => String(b.atUtc).localeCompare(String(a.atUtc)));
+}
+
+function gmailDirection(message) {
+  const from = String(message.from || "").toLowerCase();
+  const identityEmail = String(currentRequestIdentity()?.email || CHANCE_GOOGLE_EMAIL).toLowerCase();
+  return identityEmail && from.includes(identityEmail) ? "outgoing" : "incoming";
+}
+
+function gmailTimestamp(message) {
+  const numeric = Number(message.internalDate || 0);
+  if (Number.isFinite(numeric) && numeric > 0) return new Date(numeric).toISOString();
+  const parsed = Date.parse(String(message.date || ""));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
+}
+
+function communicationSourceStatus(result, count) {
+  return result.status === "fulfilled"
+    ? { status: "fresh", count }
+    : { status: "unavailable", count: 0, error: redactSensitiveText(result.reason?.message || "Unknown source error") };
 }
 
 async function startTodaysInspectionReview(input, identity) {
@@ -8774,9 +8868,9 @@ const OPENAPI = {
         properties: {
           focus: {
             type: "string",
-            enum: ["priority", "today_inspections"],
+            enum: ["priority", "today_inspections", "communications"],
             default: "priority",
-            description: "Use today_inspections whenever the user asks about today's inspection(s), appointments, or what to know before leaving. This resolves exact files from active JobNimbus inspection tasks first. Use priority only for the general backlog."
+            description: "Use communications whenever the user asks about missed calls, voicemails, texts, emails, callbacks, or appointments that still need scheduling. It scans inbound Gmail and every Quo team line first, then matches communications to files. Use today_inspections for today's known JobNimbus inspection tasks. Use priority only for the general backlog."
           },
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25 },
@@ -8784,7 +8878,8 @@ const OPENAPI = {
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
           gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
-          quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 25 }
+          quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 25 },
+          quoTranscriptLimit: { type: "integer", minimum: 0, maximum: 25, default: 12, description: "Maximum recent incoming Quo calls to hydrate with transcripts during a communication recovery sweep." }
         }
       }
     }
@@ -9024,7 +9119,7 @@ const OPENAPI = {
       post: {
         operationId: "startThresherOperationalSession",
         requestBody: jsonBody("OperationalSessionRequest"),
-        responses: { "200": { description: "Read-only operational router. For focus=today_inspections, resolves exact files from active Chance-assigned JobNimbus inspection tasks due today and deep-reviews each one; calendar occupancy is never used to guess client identity. For focus=priority, ranks the active Chance backlog and deep-reviews the selected file." } }
+        responses: { "200": { description: "Read-only operational router. focus=communications scans inbound Gmail plus every Quo team line first and matches scheduling/callback evidence to active Chance files while preserving unmatched unknown-number items. focus=today_inspections resolves exact files from active JobNimbus inspection tasks due today. focus=priority ranks the active backlog and deep-reviews one file." } }
       }
     },
     "/memory/file-actions": {

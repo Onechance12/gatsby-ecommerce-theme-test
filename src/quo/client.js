@@ -69,6 +69,86 @@ export async function readQuoTranscript(config, callId, options = {}) {
   }
 }
 
+export async function readQuoInbox(config, input = {}) {
+  requireConfigured(config);
+  const days = clamp(Number(input.days || 14), 1, 90);
+  const maxResults = clamp(Number(input.maxResults || 50), 1, 50);
+  const transcriptLimit = clamp(Number(input.transcriptLimit || 12), 0, 25);
+  const createdAfter = new Date(Date.now() - days * 86400000).toISOString();
+  const numbers = await listQuoNumbers(config);
+  const itemsById = new Map();
+
+  for (const line of numbers) {
+    for (const kind of ["messages", "calls"]) {
+      try {
+        const endpoint = `/${kind}?phoneNumberId=${encodeURIComponent(line.id)}&maxResults=${maxResults}`;
+        const payload = await request(config, "GET", endpoint);
+        for (const row of Array.isArray(payload.data) ? payload.data : []) {
+          const atUtc = String(row.createdAt || row.startedAt || "");
+          if (atUtc && atUtc < createdAfter) continue;
+          if (String(row.direction || "").toLowerCase() !== "incoming") continue;
+          const id = String(row.id || `${line.id}:${atUtc}:${kind}`);
+          if (itemsById.has(id)) continue;
+          const participant = otherPartyNumber(row, line.number);
+          const status = String(row.status || "").toLowerCase();
+          const voicemail = voicemailText(row);
+          itemsById.set(id, kind === "messages" ? {
+            id,
+            channel: "quo",
+            type: "text",
+            direction: "incoming",
+            status,
+            participant,
+            line: line.name || line.number,
+            lineNumber: line.number,
+            at: toCentral(atUtc),
+            atUtc,
+            text: String(row.text || row.content || "").replace(/\s+/g, " ").trim(),
+            conversationId: String(row.conversationId || "")
+          } : {
+            id,
+            channel: "quo",
+            type: voicemail ? "voicemail" : ["missed", "no-answer", "abandoned"].includes(status) ? "missed_call" : "call",
+            direction: "incoming",
+            status,
+            participant,
+            line: line.name || line.number,
+            lineNumber: line.number,
+            at: toCentral(atUtc),
+            atUtc,
+            durationSec: Number(row.duration || 0),
+            conversationId: String(row.conversationId || ""),
+            voicemail
+          });
+        }
+      } catch (error) {
+        if (!/Quo API (400|403|404)/.test(error.message)) throw error;
+      }
+    }
+  }
+
+  const items = [...itemsById.values()].sort((a, b) => String(b.atUtc).localeCompare(String(a.atUtc)));
+  const transcriptCandidates = items
+    .filter((item) => item.type === "call" || item.type === "missed_call" || item.type === "voicemail")
+    .slice(0, transcriptLimit);
+  for (const item of transcriptCandidates) {
+    const transcript = await readQuoTranscript(config, item.id, { allowMissing: true });
+    if (!transcript) continue;
+    item.transcriptStatus = transcript.status;
+    item.transcript = transcript.dialogue.map((segment) => segment.text).filter(Boolean).join(" ");
+    if (item.voicemail) item.type = "voicemail";
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    createdAfter,
+    days,
+    lineCount: numbers.length,
+    count: items.length,
+    items
+  };
+}
+
 export async function sendQuoText(config, input = {}) {
   requireConfigured(config);
   const from = toE164(input.from || config.defaultFrom || "");
@@ -222,4 +302,20 @@ function toCentral(isoUtc) {
 
 function clamp(value, min, max) {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : min;
+}
+
+function otherPartyNumber(row, ownNumber) {
+  const own = toE164(ownNumber);
+  const candidates = [];
+  for (const value of [row.participant, row.from, row.to, ...(Array.isArray(row.participants) ? row.participants : [])]) {
+    const raw = value && typeof value === "object" ? value.phoneNumber || value.number || value.phone : value;
+    const phone = toE164(raw || "");
+    if (phone && phone !== own) candidates.push(phone);
+  }
+  return candidates[0] || "";
+}
+
+function voicemailText(row) {
+  const voicemail = row.voicemail && typeof row.voicemail === "object" ? row.voicemail : {};
+  return String(voicemail.transcript || row.voicemailTranscript || "").replace(/\s+/g, " ").trim();
 }

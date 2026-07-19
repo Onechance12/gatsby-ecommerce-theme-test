@@ -122,11 +122,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/ops/start-session"].post.operationId, "startThresherOperationalSession");
   assert.deepEqual(
     chatgptSchema.components.schemas.OperationalSessionRequest.properties.focus.enum,
-    ["priority", "today_inspections"]
+    ["priority", "today_inspections", "communications"]
   );
   assert.match(
     chatgptSchema.components.schemas.OperationalSessionRequest.properties.focus.description,
-    /JobNimbus inspection tasks first/i
+    /scans inbound Gmail and every Quo team line first/i
   );
   assert.equal(chatgptSchema.paths["/ops/action-batch"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
