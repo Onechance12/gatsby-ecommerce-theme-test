@@ -197,13 +197,24 @@ async function listConversationActivity(config, { kind, phoneNumberId, participa
 }
 
 async function listRecentConversations(config, numbers, updatedAfter, maxResults) {
-  const query = new URLSearchParams({
-    updatedAfter,
-    maxResults: String(Math.min(maxResults, 100))
-  });
-  for (const line of numbers) query.append("phoneNumbers[]", line.id);
-  const payload = await request(config, "GET", `/conversations?${query}`);
-  return (Array.isArray(payload.data) ? payload.data : [])
+  const byId = new Map();
+  let pageToken = "";
+  for (let page = 0; page < 5; page += 1) {
+    const query = new URLSearchParams({
+      updatedAfter,
+      maxResults: "100"
+    });
+    for (const line of numbers) query.append("phoneNumbers[]", line.id);
+    if (pageToken) query.set("pageToken", pageToken);
+    const payload = await request(config, "GET", `/conversations?${query}`);
+    for (const row of Array.isArray(payload.data) ? payload.data : []) {
+      const id = String(row.id || `${row.phoneNumberId}:${(row.participants || []).join(",")}`);
+      if (!byId.has(id)) byId.set(id, row);
+    }
+    pageToken = String(payload.nextPageToken || "");
+    if (!pageToken) break;
+  }
+  return [...byId.values()]
     .filter((row) => !row.deletedAt)
     .sort((a, b) => String(b.lastActivityAt || b.updatedAt || "").localeCompare(String(a.lastActivityAt || a.updatedAt || "")))
     .slice(0, maxResults);

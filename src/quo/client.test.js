@@ -175,6 +175,55 @@ test("Quo inbox follows activity pagination so recent messages are not stranded"
   }
 });
 
+test("Quo inbox follows conversation pagination before selecting recent activity", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.endsWith("/phone-numbers")) {
+      return jsonResponse(200, { data: [{ id: "PN_chance", name: "Chance Pearson", number: "+19725731730" }] });
+    }
+    if (value.includes("/conversations?") && !value.includes("pageToken=")) {
+      return jsonResponse(200, { data: [{
+        id: "CN_old",
+        phoneNumberId: "PN_chance",
+        participants: ["+12145550110"],
+        lastActivityAt: "2026-07-01T12:00:00Z"
+      }], nextPageToken: "conversation-page-2" });
+    }
+    if (value.includes("/conversations?") && value.includes("pageToken=conversation-page-2")) {
+      return jsonResponse(200, { data: [{
+        id: "CN_latest",
+        phoneNumberId: "PN_chance",
+        participants: ["+12145550199"],
+        lastActivityAt: new Date().toISOString()
+      }], nextPageToken: null });
+    }
+    if (value.includes("/messages?") && value.includes("%2B12145550199")) {
+      return jsonResponse(200, { data: [{
+        id: "MSG_latest",
+        createdAt: new Date().toISOString(),
+        direction: "incoming",
+        from: "+12145550199",
+        to: ["+19725731730"],
+        text: "Morning ETA update."
+      }] });
+    }
+    if (value.includes("/calls?")) return jsonResponse(200, { data: [] });
+    return jsonResponse(200, { data: [] });
+  };
+  try {
+    const result = await readQuoInbox({ apiKey: "fixture", baseUrl: "https://api.quo.test/v1" }, {
+      maxResults: 1,
+      transcriptLimit: 0
+    });
+    assert.equal(result.conversationCount, 1);
+    assert.equal(result.count, 1);
+    assert.equal(result.items[0].participant, "+12145550199");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Quo live send resolves the configured number to its PN line id", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
