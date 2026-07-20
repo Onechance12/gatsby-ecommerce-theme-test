@@ -28,6 +28,21 @@ test("prompt keeps desk adjuster and field inspector separate and blocks writes 
   assert.match(prompt, /destination extension is \{\{destinationExtension\}\}/i);
   assert.match(prompt, /enter the extension one digit at a time/i);
   assert.match(prompt, /Press pound only if the IVR specifically requests it/i);
+  assert.match(prompt, /C Pearson at Wave P A dot com/i);
+  assert.match(prompt, /Never pronounce 'PA' as a word/i);
+  assert.match(prompt, /active JobNimbus calendar tasks and Google Calendar/i);
+  assert.match(prompt, /never use Brain memory as calendar availability/i);
+});
+
+test("appointment scheduling uses the dedicated goal and requires approved scheduling authority at execution", () => {
+  const call = buildCarrierFollowUpConversation({
+    goal: "appointment_scheduling",
+    destinationType: "scheduler",
+    schedulingAuthority: true,
+    approvedSchedulingOptions: ["Tue, Jul 21, 1:00 PM-3:00 PM Central"]
+  });
+  assert.equal(call.schedulingAuthority, "ALLOWED");
+  assert.match(call.approvedQuestions.join(" "), /merged JobNimbus and Google Calendar availability/i);
 });
 
 test("analysis schema extracts distinct carrier roles and operational results", () => {

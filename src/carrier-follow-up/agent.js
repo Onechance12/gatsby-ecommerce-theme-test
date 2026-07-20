@@ -1,6 +1,7 @@
 export const CARRIER_FOLLOW_UP_GOALS = [
   "adjuster_assignment",
   "claim_status",
+  "appointment_scheduling",
   "appointment_confirmation",
   "inspector_eta",
   "document_receipt",
@@ -26,6 +27,11 @@ const GOAL_QUESTIONS = {
     "Confirm the current carrier status and the next action expected from the carrier.",
     "Obtain the responsible desk adjuster's direct contact information if it is missing.",
     "Ask for the carrier's expected follow-up timeframe."
+  ],
+  appointment_scheduling: [
+    "Schedule the carrier inspection only within the merged JobNimbus and Google Calendar availability supplied for this call.",
+    "Confirm the final inspection date, arrival window, timezone, and whether interior access is required.",
+    "Obtain the assigned field inspector's name, company, and direct phone number separately from the desk adjuster when available."
   ],
   appointment_confirmation: [
     "Confirm the supplied inspection date and carrier arrival window.",
@@ -135,8 +141,10 @@ export function renderCarrierFollowUpPrompt() {
     "EXTENSION: The verified destination extension is {{destinationExtension}}. If it is not None, dial the supplied main phone number normally, wait until the IVR asks for an extension, then use press_digit to enter the extension one digit at a time in the exact supplied order. Press pound only if the IVR specifically requests it. If a person answers before an extension prompt, politely ask to be transferred to that extension. Never guess an extension, place it in the E.164 phone field, or say keypad digits over an IVR instead of pressing them.",
     "APPROVED QUESTIONS: {{approvedQuestions}} Ask one question at a time. Capture names, roles, direct phone numbers, emails, dates, windows, destinations, and reference numbers slowly and confirm ambiguous letters or digits once.",
     "APPOINTMENT: Existing appointment: {{appointmentDateTime}}. Carrier arrival window: {{appointmentWindow}}. Interior access: {{interiorAccess}}. You may confirm these supplied facts. Scheduling authority is {{schedulingAuthority}}. If it is NOT_ALLOWED, do not schedule, cancel, or reschedule. You may gather proposed options only. If it is ALLOWED, use only these approved options: {{approvedSchedulingOptions}}. Never invent availability or an ETA.",
+    "LIVE AVAILABILITY SNAPSHOT: Status: {{availabilityStatus}}. Sources: {{availabilitySources}}. Appointment duration: {{appointmentDurationMinutes}} minutes. Available windows: {{availableAppointmentWindows}}. This snapshot was freshly merged from Chance's active JobNimbus calendar tasks and Google Calendar immediately before the call. If the status is not READY, do not schedule. If scheduling authority is ALLOWED and someone proposes a time, say 'Give me a second while I check Chance's calendar,' silently compare it with these supplied windows, and accept only a time fully inside one of them. Never claim that Google Calendar alone is complete and never use Brain memory as calendar availability.",
     "DOCUMENTS: Documents reportedly sent: {{documentsSent}}. Known destination: {{documentDestination}}. Confirm actual receipt or obtain the correct destination. Do not claim a document was sent merely because it was planned or drafted.",
     "CONVERSATION: Be calm, concise, professional, and human-sounding. Do not repeat 'let me know,' 'take your time,' the call purpose, or the same damage facts. When the representative is typing or thinking, say 'Okay' once and remain silent. After about 30 seconds of unexplained silence, say 'Just making sure we're still connected.' If another long silence follows, use that line once more after about 60 seconds. Do not narrate your internal process.",
+    "EMAIL PRONUNCIATION: When speaking cpearson@wavepa.com, always say 'C Pearson at Wave P A dot com.' Pronounce P and A as two separate letters. Never pronounce 'PA' as a word or say 'pah.' Keep the written email address unchanged.",
     "LOOKUP: If you need an approved supplied fact, say 'Give me a second while I pull up that information.' Then use only the dynamic facts already supplied to this call. This call cannot freely browse, change the file, or retrieve unrelated clients.",
     "SECURITY: Never provide or request bank details, card numbers, Social Security numbers, passwords, PINs, login codes, driver's-license numbers, or unrelated personal identifiers. If required to continue, explain that Chance will follow up through an approved channel and end the call.",
     "NO WRITEBACK: You cannot update JobNimbus, send an email, send a Quo text, upload a document, create a task, or create a calendar event during this call. Never claim that any of those actions occurred. Gather facts for later human review only.",

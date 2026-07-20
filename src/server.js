@@ -1885,6 +1885,11 @@ async function retellClientCoordinatorCallResult(input = {}) {
 async function retellCarrierFollowUpCall(input = {}) {
   const { contact } = await findChanceContact(required(input.query, "query"));
   const file = compactContact(contact);
+  const requestedGoal = String(input.goal || "adjuster_assignment").trim().toLowerCase();
+  const schedulingAuthorized = input.schedulingAuthority === true;
+  if (requestedGoal === "appointment_scheduling" && !schedulingAuthorized) {
+    badRequest("appointment_scheduling requires schedulingAuthority=true so the exact merged availability is reviewed before the call.");
+  }
   const destinationType = String(input.destinationType || "carrier_general_line").trim().toLowerCase();
   const fallbackPhone = destinationType === "desk_adjuster" ? file.adjusterPhone : "";
   const to = normalizePhone(input.to || input.carrierPhone || fallbackPhone);
@@ -1896,15 +1901,34 @@ async function retellCarrierFollowUpCall(input = {}) {
     badRequest("The current file has neither a claim number nor a policy number. Verify an identifier before preparing a carrier follow-up call.");
   }
 
+  let schedulingAvailability = null;
+  let approvedSchedulingOptions = input.approvedSchedulingOptions;
+  if (schedulingAuthorized) {
+    schedulingAvailability = await collectUnifiedSchedulingAvailability();
+    if (schedulingAvailability.status !== "READY") {
+      return {
+        mode: "blocked_availability",
+        approvalRequired: true,
+        file,
+        schedulingAvailability,
+        reason: schedulingAvailability.reason,
+        nextStep: "Do not place a scheduling call until both JobNimbus and Google Calendar availability are available."
+      };
+    }
+    approvedSchedulingOptions = schedulingAvailability.availableWindows
+      .slice(0, 8)
+      .map((window) => window.label);
+  }
+
   let conversation;
   try {
     conversation = buildCarrierFollowUpConversation({
-      goal: input.goal,
+      goal: requestedGoal,
       destinationType,
       contactName: input.contactName || (destinationType === "desk_adjuster" ? file.adjusterName : ""),
       approvedQuestions: input.approvedQuestions,
       schedulingAuthority: input.schedulingAuthority === true,
-      approvedSchedulingOptions: input.approvedSchedulingOptions
+      approvedSchedulingOptions
     });
   } catch (error) {
     badRequest(error.message);
@@ -1957,6 +1981,19 @@ async function retellCarrierFollowUpCall(input = {}) {
     schedulingAuthority: conversation.schedulingAuthority,
     approvedSchedulingOptions: conversation.approvedSchedulingOptions.join(" | ") || "None"
   };
+  if (schedulingAvailability) {
+    dynamicVariables.availabilityStatus = schedulingAvailability.status;
+    dynamicVariables.availabilitySources = "JobNimbus calendar and Google Calendar";
+    dynamicVariables.appointmentDurationMinutes = String(schedulingAvailability.settings.durationMinutes);
+    dynamicVariables.availableAppointmentWindows = schedulingAvailability.voiceWindows;
+    dynamicVariables.availabilityWindowsJson = JSON.stringify(schedulingAvailability.availableWindows || []);
+  } else {
+    dynamicVariables.availabilityStatus = "NOT_REQUESTED";
+    dynamicVariables.availabilitySources = "Not checked for this call";
+    dynamicVariables.appointmentDurationMinutes = String(SCHEDULING_APPOINTMENT_MINUTES);
+    dynamicVariables.availableAppointmentWindows = "None. Do not schedule an appointment.";
+    dynamicVariables.availabilityWindowsJson = "[]";
+  }
   const metadata = {
     source: "hcn-wave-jobnimbus-bridge",
     contactId: file.id,
@@ -1999,6 +2036,7 @@ async function retellCarrierFollowUpCall(input = {}) {
       },
       conversation,
       evidence,
+      schedulingAvailability,
       planDigest,
       request: previewRetellRequest(request),
       nextStep: "Show Chance the destination, exact questions, scheduling authority, fresh evidence, and digest. Nothing is called until the unchanged plan is approved."
@@ -8670,7 +8708,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Exact Chance-owned JobNimbus file identifier." },
-          goal: { type: "string", enum: ["adjuster_assignment", "claim_status", "appointment_confirmation", "inspector_eta", "document_receipt", "document_destination", "generic_information"], default: "adjuster_assignment" },
+          goal: { type: "string", enum: ["adjuster_assignment", "claim_status", "appointment_scheduling", "appointment_confirmation", "inspector_eta", "document_receipt", "document_destination", "generic_information"], default: "adjuster_assignment" },
           destinationType: { type: "string", enum: ["carrier_general_line", "desk_adjuster", "field_inspector", "scheduler", "independent_adjusting_company"], default: "carrier_general_line" },
           to: { type: "string", description: "Verified destination phone. Required unless destinationType is desk_adjuster and the current file has a verified desk-adjuster phone." },
           carrierPhone: { type: "string", description: "Alias for a verified carrier general-line phone." },
