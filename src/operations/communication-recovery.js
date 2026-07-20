@@ -1,4 +1,5 @@
 const SCHEDULING_PATTERN = /\b(?:appointment|inspection|inspect(?:or|ion)?|schedule|scheduling|reschedule|arrival|eta|meet(?:ing)?|availability|access|reinspection|apprais(?:al|er))\b/i;
+const ETA_UPDATE_PATTERN = /\b(?:adjuster|inspector|appraiser)\b.{0,100}\b(?:arriv(?:e|al|ing)|eta|show(?:ing)? up|be (?:here|there)|(?:at|around) \d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/i;
 const CALLBACK_PATTERN = /\b(?:call(?:ed|ing)?|call back|callback|return (?:my|the) call|trying to (?:reach|contact)|voicemail|missed call|left (?:a )?message)\b/i;
 const CLAIM_PATTERN = /\b(?:claim|policy|loss|carrier|adjuster|insurance|scope|estimate|payment|check|letter of representation|\blor\b)\b/i;
 
@@ -13,7 +14,7 @@ export function buildCommunicationRecoveryQueue(items = [], files = []) {
     total: queue.length,
     matched: queue.filter((item) => item.match).length,
     unmatched: queue.filter((item) => !item.match).length,
-    appointmentCandidates: queue.filter((item) => item.classification === "appointment_scheduling").length,
+    appointmentCandidates: queue.filter((item) => ["appointment_eta_update", "appointment_scheduling"].includes(item.classification)).length,
     callbackCandidates: queue.filter((item) => item.classification === "callback_required").length,
     queue
   };
@@ -46,7 +47,7 @@ function recoverItem(item, files, surnameCounts) {
       reasons: candidate.reasons,
       file: candidate.file.source
     })),
-    reviewRequired: !decisive || classification === "appointment_scheduling" || classification === "callback_required"
+    reviewRequired: !decisive || ["appointment_eta_update", "appointment_scheduling", "callback_required"].includes(classification)
   };
 }
 
@@ -71,6 +72,7 @@ function scoreFile(text, item, file, surnameCounts) {
 }
 
 function classify(item, text) {
+  if (ETA_UPDATE_PATTERN.test(text)) return "appointment_eta_update";
   if (SCHEDULING_PATTERN.test(text)) return "appointment_scheduling";
   if (CALLBACK_PATTERN.test(text) || item.type === "missed_call" || item.type === "voicemail") return "callback_required";
   if (CLAIM_PATTERN.test(text)) return "claim_follow_up";
@@ -78,7 +80,8 @@ function classify(item, text) {
 }
 
 function communicationPriority(item, classification, matchScore) {
-  let priority = classification === "appointment_scheduling" ? 100
+  let priority = classification === "appointment_eta_update" ? 130
+    : classification === "appointment_scheduling" ? 100
     : classification === "callback_required" ? 80
       : classification === "claim_follow_up" ? 55
         : 30;

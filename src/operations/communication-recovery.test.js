@@ -66,3 +66,29 @@ test("matches scheduling email by insured and property address", () => {
   assert.equal(result.queue[0].match.file.number, "2742");
   assert.equal(result.queue[0].classification, "appointment_scheduling");
 });
+
+test("promotes a same-day inspector ETA above ordinary scheduling traffic", () => {
+  const result = buildCommunicationRecoveryQueue([{
+    id: "quo-eta",
+    channel: "quo",
+    type: "text",
+    participant: "+14694380475",
+    atUtc: "2026-07-20T13:28:04Z",
+    text: "Adjuster said he would be here at 10am"
+  }, {
+    id: "gmail-scheduling",
+    channel: "gmail",
+    type: "email",
+    atUtc: "2026-07-20T13:30:00Z",
+    subject: "Please schedule an inspection"
+  }], [{
+    id: "patricia-id",
+    number: "2765",
+    name: "Patricia Shelby",
+    phone: "469-438-0475"
+  }]);
+
+  assert.equal(result.queue[0].id, "quo-eta");
+  assert.equal(result.queue[0].classification, "appointment_eta_update");
+  assert.equal(result.appointmentCandidates, 2);
+});
