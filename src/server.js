@@ -2235,11 +2235,24 @@ function clientCoordinatorEvidenceFingerprint(evidence = {}) {
     file: evidence.file || {},
     sourceStatus,
     jobNimbus: evidence.jobNimbus || {},
-    gmail: evidence.gmail || {},
+    // Gmail attachment resource IDs can rotate between otherwise identical
+    // reads. They are transport tokens, not evidence, so exclude them while
+    // retaining attachment names, MIME types, sizes, and message metadata.
+    gmail: stripVolatileAttachmentIds(evidence.gmail || {}),
     quo: evidence.quo || {},
     actionReceipts: evidence.actionReceipts || [],
     factualSignals: evidence.factualSignals || {}
   });
+}
+
+function stripVolatileAttachmentIds(value) {
+  if (Array.isArray(value)) return value.map(stripVolatileAttachmentIds);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "attachmentId")
+      .map(([key, entry]) => [key, stripVolatileAttachmentIds(entry)])
+  );
 }
 
 function clientCoordinatorReminderRules() {
