@@ -83,7 +83,10 @@ export function buildUnifiedAvailability(options = {}) {
     };
   }
 
-  const earliest = Math.max(now.getTime() + minLeadHours * 60 * 60_000, dateMs(range.timeMin));
+  // Keep approval digests stable between dry-run and execution. Without
+  // rounding, the first availability window changes every millisecond.
+  const leadTime = now.getTime() + minLeadHours * 60 * 60_000;
+  const earliest = Math.max(roundUpToMinutes(leadTime, 15), dateMs(range.timeMin));
   const latest = dateMs(range.timeMax);
   const availableWindows = [];
   for (let dateKey = range.firstDate; dateKey <= range.lastDate; dateKey = addDays(dateKey, 1)) {
@@ -231,6 +234,11 @@ function positiveInteger(value, fallback) {
 function nonNegativeInteger(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+}
+
+function roundUpToMinutes(value, minutes) {
+  const interval = minutes * 60_000;
+  return Math.ceil(value / interval) * interval;
 }
 
 function validClock(value) {
