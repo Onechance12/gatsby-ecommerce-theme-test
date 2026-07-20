@@ -75,7 +75,7 @@ services:
       - key: SCHEDULING_WORKDAY_START
         value: "08:00"
       - key: SCHEDULING_WORKDAY_END
-        value: "17:00"
+        value: "18:00"
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_REALTIME_MODEL

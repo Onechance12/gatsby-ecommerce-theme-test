@@ -32,6 +32,8 @@ test("prompt keeps desk adjuster and field inspector separate and blocks writes 
   assert.match(prompt, /Never pronounce 'PA' as a word/i);
   assert.match(prompt, /active JobNimbus calendar tasks and Google Calendar/i);
   assert.match(prompt, /never use Brain memory as calendar availability/i);
+  assert.match(prompt, /Never schedule on Sunday/i);
+  assert.match(prompt, /ends after 6:00 PM Central/i);
 });
 
 test("appointment scheduling uses the dedicated goal and requires approved scheduling authority at execution", () => {

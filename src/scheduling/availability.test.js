@@ -74,3 +74,25 @@ test("uses only active Chance-owned time-specific JobNimbus calendar items", () 
   });
   assert.deepEqual(busy.map((row) => row.sourceId), ["keep"]);
 });
+
+test("allows Saturdays but never offers Sundays or time after 6 PM Central", () => {
+  const now = new Date("2026-07-17T13:00:00.000Z");
+  const range = availabilityRange({ now, horizonDays: 3 });
+  const availability = buildUnifiedAvailability({
+    now,
+    range,
+    durationMinutes: 120,
+    bufferMinutes: 0,
+    minLeadHours: 0,
+    workdayStart: "08:00",
+    workdayEnd: "18:00",
+    sources: [
+      { name: "jobnimbus", status: "ready" },
+      { name: "google_calendar", status: "ready" }
+    ]
+  });
+
+  assert.equal(availability.availableWindows.some((window) => window.start.startsWith("2026-07-18")), true);
+  assert.equal(availability.availableWindows.some((window) => window.start.startsWith("2026-07-19")), false);
+  assert.equal(availability.availableWindows.every((window) => new Date(window.end).getUTCHours() <= 23), true);
+});

@@ -52,7 +52,7 @@ export function buildUnifiedAvailability(options = {}) {
   const bufferMinutes = nonNegativeInteger(options.bufferMinutes, 60);
   const minLeadHours = nonNegativeInteger(options.minLeadHours, 24);
   const workdayStart = validClock(options.workdayStart) || "08:00";
-  const workdayEnd = validClock(options.workdayEnd) || "17:00";
+  const workdayEnd = validClock(options.workdayEnd) || "18:00";
   const now = validDate(options.now) || new Date();
   const sources = normalizeSources(options.sources);
   const failedSources = sources.filter((source) => source.status !== "ready");
@@ -67,7 +67,7 @@ export function buildUnifiedAvailability(options = {}) {
     minLeadHours,
     workdayStart,
     workdayEnd,
-    weekdaysOnly: true
+    sundaysExcluded: true
   };
 
   if (failedSources.length) {
@@ -87,7 +87,7 @@ export function buildUnifiedAvailability(options = {}) {
   const latest = dateMs(range.timeMax);
   const availableWindows = [];
   for (let dateKey = range.firstDate; dateKey <= range.lastDate; dateKey = addDays(dateKey, 1)) {
-    if (isWeekend(dateKey)) continue;
+    if (isSunday(dateKey)) continue;
     const dayStart = Math.max(zonedDateTimeToDate(dateKey, workdayStart, timeZone).getTime(), earliest);
     const dayEnd = Math.min(zonedDateTimeToDate(dateKey, workdayEnd, timeZone).getTime(), latest);
     if (dayEnd - dayStart < durationMinutes * 60_000) continue;
@@ -249,10 +249,10 @@ function addDays(dateKey, amount) {
   return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }
 
-function isWeekend(dateKey) {
+function isSunday(dateKey) {
   const [year, month, day] = dateKey.split("-").map(Number);
   const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-  return weekday === 0 || weekday === 6;
+  return weekday === 0;
 }
 
 function zonedDateTimeToDate(dateKey, clock, timeZone) {
