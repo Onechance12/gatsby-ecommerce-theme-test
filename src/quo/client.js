@@ -76,12 +76,26 @@ export async function readQuoInbox(config, input = {}) {
   const transcriptLimit = clamp(Number(input.transcriptLimit || 12), 0, 25);
   const createdAfter = new Date(Date.now() - days * 86400000).toISOString();
   const numbers = await listQuoNumbers(config);
+  const lineById = new Map(numbers.map((line) => [line.id, line]));
   const itemsById = new Map();
+  const failures = [];
+  const conversations = await listRecentConversations(config, numbers, createdAfter, maxResults);
 
-  for (const line of numbers) {
+  for (const conversation of conversations) {
+    const line = lineById.get(String(conversation.phoneNumberId || ""));
+    const participant = (Array.isArray(conversation.participants) ? conversation.participants : [])
+      .map(toE164)
+      .find(Boolean);
+    if (!line?.id || !participant) continue;
     for (const kind of ["messages", "calls"]) {
       try {
-        const endpoint = `/${kind}?phoneNumberId=${encodeURIComponent(line.id)}&maxResults=${maxResults}`;
+        const query = new URLSearchParams({
+          phoneNumberId: line.id,
+          createdAfter,
+          maxResults: String(Math.min(maxResults, 25))
+        });
+        query.append("participants[]", participant);
+        const endpoint = `/${kind}?${query}`;
         const payload = await request(config, "GET", endpoint);
         for (const row of Array.isArray(payload.data) ? payload.data : []) {
           const atUtc = String(row.createdAt || row.startedAt || "");
@@ -89,7 +103,7 @@ export async function readQuoInbox(config, input = {}) {
           if (String(row.direction || "").toLowerCase() !== "incoming") continue;
           const id = String(row.id || `${line.id}:${atUtc}:${kind}`);
           if (itemsById.has(id)) continue;
-          const participant = otherPartyNumber(row, line.number);
+          const otherParty = otherPartyNumber(row, line.number) || participant;
           const status = String(row.status || "").toLowerCase();
           const voicemail = voicemailText(row);
           itemsById.set(id, kind === "messages" ? {
@@ -98,7 +112,7 @@ export async function readQuoInbox(config, input = {}) {
             type: "text",
             direction: "incoming",
             status,
-            participant,
+            participant: otherParty,
             line: line.name || line.number,
             lineNumber: line.number,
             at: toCentral(atUtc),
@@ -111,7 +125,7 @@ export async function readQuoInbox(config, input = {}) {
             type: voicemail ? "voicemail" : ["missed", "no-answer", "abandoned"].includes(status) ? "missed_call" : "call",
             direction: "incoming",
             status,
-            participant,
+            participant: otherParty,
             line: line.name || line.number,
             lineNumber: line.number,
             at: toCentral(atUtc),
@@ -123,6 +137,12 @@ export async function readQuoInbox(config, input = {}) {
         }
       } catch (error) {
         if (!/Quo API (400|403|404)/.test(error.message)) throw error;
+        failures.push({
+          conversationId: String(conversation.id || ""),
+          lineId: line.id,
+          kind,
+          error: String(error.message || "Quo request failed").slice(0, 240)
+        });
       }
     }
   }
@@ -144,9 +164,25 @@ export async function readQuoInbox(config, input = {}) {
     createdAfter,
     days,
     lineCount: numbers.length,
+    conversationCount: conversations.length,
     count: items.length,
+    partial: failures.length > 0,
+    failures,
     items
   };
+}
+
+async function listRecentConversations(config, numbers, updatedAfter, maxResults) {
+  const query = new URLSearchParams({
+    updatedAfter,
+    maxResults: String(Math.min(maxResults, 100))
+  });
+  for (const line of numbers) query.append("phoneNumbers[]", line.id);
+  const payload = await request(config, "GET", `/conversations?${query}`);
+  return (Array.isArray(payload.data) ? payload.data : [])
+    .filter((row) => !row.deletedAt)
+    .sort((a, b) => String(b.lastActivityAt || b.updatedAt || "").localeCompare(String(a.lastActivityAt || a.updatedAt || "")))
+    .slice(0, maxResults);
 }
 
 export async function sendQuoText(config, input = {}) {

@@ -198,6 +198,7 @@ const routes = new Map([
   ["POST /memory/file-actions", memoryFileActions],
   ["POST /memory/persistence-check", memoryPersistenceCheck],
   ["POST /ops/start-session", startThresherOperationalSession],
+  ["POST /ops/recover-scheduling-communications", recoverSchedulingCommunications],
   ["POST /ops/review-chance-files", reviewChanceFiles],
   ["POST /ops/action-batch", processActionBatch],
   ["POST /scheduling/availability", schedulingAvailability],
@@ -791,6 +792,7 @@ const CHATGPT_ACTION_PATHS = [
   "/brain/context",
   "/memory/file-actions",
   "/ops/start-session",
+  "/ops/recover-scheduling-communications",
   "/ops/review-chance-files",
   "/ops/action-batch",
   "/scheduling/availability",
@@ -810,7 +812,6 @@ const CHATGPT_ACTION_PATHS = [
   "/claim-filing/result",
   "/claim-filing/callbacks",
   "/claim-filing/writeback",
-  "/retell/configure-agent",
   "/retell/client-coordinator-call",
   "/retell/client-coordinator-call-result",
   "/retell/configure-carrier-follow-up",
@@ -4823,6 +4824,11 @@ async function startThresherOperationalSession(input = {}) {
   };
 }
 
+async function recoverSchedulingCommunications(input = {}) {
+  const identity = await authWhoAmI();
+  return startCommunicationRecoveryReview(input, identity);
+}
+
 async function startCommunicationRecoveryReview(input, identity) {
   const days = clamp(Number(input.communicationDays || 30), 1, 90);
   const contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
@@ -4851,7 +4857,7 @@ async function startCommunicationRecoveryReview(input, identity) {
     activeFileCount: files.length,
     sources: {
       gmail: communicationSourceStatus(gmailResult, gmailItems.length),
-      quo: communicationSourceStatus(quoResult, quoItems.length)
+      quo: communicationSourceStatus(quoResult, quoItems.length, quoResult.status === "fulfilled" ? quoResult.value : null)
     },
     recovery,
     assistantDirective: [
@@ -4907,9 +4913,11 @@ function gmailTimestamp(message) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
 }
 
-function communicationSourceStatus(result, count) {
+function communicationSourceStatus(result, count, detail = null) {
   return result.status === "fulfilled"
-    ? { status: "fresh", count }
+    ? detail?.partial
+      ? { status: "partial", count, failureCount: detail.failures?.length || 0 }
+      : { status: "fresh", count }
     : { status: "unavailable", count: 0, error: redactSensitiveText(result.reason?.message || "Unknown source error") };
 }
 
@@ -9158,6 +9166,14 @@ const OPENAPI = {
         operationId: "startThresherOperationalSession",
         requestBody: jsonBody("OperationalSessionRequest"),
         responses: { "200": { description: "Read-only operational router. focus=communications scans inbound Gmail plus every Quo team line first and matches scheduling/callback evidence to active Chance files while preserving unmatched unknown-number items. focus=today_inspections resolves exact files from active JobNimbus inspection tasks due today. focus=priority ranks the active backlog and deep-reviews one file." } }
+      }
+    },
+    "/ops/recover-scheduling-communications": {
+      post: {
+        operationId: "recoverSchedulingCommunications",
+        description: "Use for missed calls, voicemails, texts, scheduling emails, callbacks, adjuster appointments, reinspections, inspector ETAs, or homeowner notices. Always scans Gmail and company-wide Quo first and never executes outbound actions.",
+        requestBody: jsonBody("OperationalSessionRequest"),
+        responses: { "200": { description: "Read-only scheduling and callback recovery sweep across incoming Gmail and all available Quo team lines, matched to active Chance files with unmatched communications preserved." } }
       }
     },
     "/memory/file-actions": {

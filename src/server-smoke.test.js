@@ -117,9 +117,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
   assert.equal(chatgptSchema.paths["/jobnimbus/photo-review"].post.operationId, "reviewJobNimbusPhotos");
-  assert.equal(chatgptSchema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
+  assert.equal(chatgptSchema.paths["/retell/configure-agent"], undefined);
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(chatgptSchema.paths["/ops/start-session"].post.operationId, "startThresherOperationalSession");
+  assert.equal(chatgptSchema.paths["/ops/recover-scheduling-communications"].post.operationId, "recoverSchedulingCommunications");
   assert.deepEqual(
     chatgptSchema.components.schemas.OperationalSessionRequest.properties.focus.enum,
     ["priority", "today_inspections", "communications"]
