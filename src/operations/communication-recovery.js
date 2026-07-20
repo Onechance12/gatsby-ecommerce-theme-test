@@ -6,8 +6,9 @@ const CLAIM_PATTERN = /\b(?:claim|policy|loss|carrier|adjuster|insurance|scope|e
 export function buildCommunicationRecoveryQueue(items = [], files = []) {
   const preparedFiles = files.map(prepareFile);
   const surnameCounts = countBy(preparedFiles, (file) => file.lastName);
+  const newestAt = Math.max(0, ...items.map((item) => Date.parse(String(item.atUtc || item.at || ""))).filter(Number.isFinite));
   const queue = items
-    .map((item) => recoverItem(item, preparedFiles, surnameCounts))
+    .map((item) => recoverItem(item, preparedFiles, surnameCounts, newestAt))
     .sort((a, b) => b.priority - a.priority || String(b.atUtc).localeCompare(String(a.atUtc)));
 
   return {
@@ -20,7 +21,7 @@ export function buildCommunicationRecoveryQueue(items = [], files = []) {
   };
 }
 
-function recoverItem(item, files, surnameCounts) {
+function recoverItem(item, files, surnameCounts, newestAt) {
   const text = communicationText(item);
   const scored = files
     .map((file) => scoreFile(text, item, file, surnameCounts))
@@ -30,7 +31,7 @@ function recoverItem(item, files, surnameCounts) {
   const runnerUp = scored[1];
   const decisive = best && best.score >= 50 && (!runnerUp || best.score - runnerUp.score >= 15);
   const classification = classify(item, text);
-  const priority = communicationPriority(item, classification, decisive ? best.score : 0);
+  const priority = communicationPriority(item, classification, decisive ? best.score : 0, newestAt);
 
   return {
     ...item,
@@ -79,7 +80,7 @@ function classify(item, text) {
   return "general_inbound";
 }
 
-function communicationPriority(item, classification, matchScore) {
+function communicationPriority(item, classification, matchScore, newestAt) {
   let priority = classification === "appointment_eta_update" ? 130
     : classification === "appointment_scheduling" ? 100
     : classification === "callback_required" ? 80
@@ -89,6 +90,10 @@ function communicationPriority(item, classification, matchScore) {
   if (item.type === "missed_call") priority += 10;
   if (!matchScore) priority += 8;
   if (matchScore >= 90) priority += 5;
+  const at = Date.parse(String(item.atUtc || item.at || ""));
+  const ageHours = Number.isFinite(at) && newestAt > 0 ? Math.max(0, (newestAt - at) / 3600000) : Infinity;
+  if (ageHours <= 24) priority += 20;
+  else if (ageHours <= 72) priority += 10;
   return priority;
 }
 

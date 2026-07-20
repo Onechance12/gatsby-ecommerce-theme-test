@@ -81,6 +81,13 @@ test("promotes a same-day inspector ETA above ordinary scheduling traffic", () =
     type: "email",
     atUtc: "2026-07-20T13:30:00Z",
     subject: "Please schedule an inspection"
+  }, {
+    id: "old-unmatched-eta",
+    channel: "quo",
+    type: "text",
+    participant: "+12145559999",
+    atUtc: "2026-06-30T15:51:00Z",
+    text: "The adjuster is coming Thursday at 11 am."
   }], [{
     id: "patricia-id",
     number: "2765",
@@ -90,5 +97,5 @@ test("promotes a same-day inspector ETA above ordinary scheduling traffic", () =
 
   assert.equal(result.queue[0].id, "quo-eta");
   assert.equal(result.queue[0].classification, "appointment_eta_update");
-  assert.equal(result.appointmentCandidates, 2);
+  assert.equal(result.appointmentCandidates, 3);
 });
