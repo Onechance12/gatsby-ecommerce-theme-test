@@ -140,6 +140,41 @@ test("Quo inbox reports partial results instead of silently hiding line failures
   }
 });
 
+test("Quo inbox follows activity pagination so recent messages are not stranded", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.endsWith("/phone-numbers")) {
+      return jsonResponse(200, { data: [{ id: "PN_chance", name: "Chance Pearson", number: "+19725731730" }] });
+    }
+    if (value.includes("/conversations?")) {
+      return jsonResponse(200, { data: [{ id: "CN_long", phoneNumberId: "PN_chance", participants: ["+12145550199"] }] });
+    }
+    if (value.includes("/messages?") && !value.includes("pageToken=")) {
+      return jsonResponse(200, { data: [], nextPageToken: "page-2" });
+    }
+    if (value.includes("/messages?") && value.includes("pageToken=page-2")) {
+      return jsonResponse(200, { data: [{
+        id: "MSG_latest",
+        createdAt: new Date().toISOString(),
+        direction: "incoming",
+        from: "+12145550199",
+        to: ["+19725731730"],
+        text: "The inspector changed the ETA to 10 AM."
+      }], nextPageToken: null });
+    }
+    if (value.includes("/calls?")) return jsonResponse(200, { data: [], nextPageToken: null });
+    return jsonResponse(404, { message: "not found" });
+  };
+  try {
+    const result = await readQuoInbox({ apiKey: "fixture", baseUrl: "https://api.quo.test/v1" }, { transcriptLimit: 0 });
+    assert.equal(result.count, 1);
+    assert.equal(result.items[0].text, "The inspector changed the ETA to 10 AM.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Quo live send resolves the configured number to its PN line id", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];

@@ -89,15 +89,13 @@ export async function readQuoInbox(config, input = {}) {
     if (!line?.id || !participant) continue;
     for (const kind of ["messages", "calls"]) {
       try {
-        const query = new URLSearchParams({
+        const rows = await listConversationActivity(config, {
+          kind,
           phoneNumberId: line.id,
-          createdAfter,
-          maxResults: String(Math.min(maxResults, 25))
+          participant,
+          createdAfter
         });
-        query.append("participants[]", participant);
-        const endpoint = `/${kind}?${query}`;
-        const payload = await request(config, "GET", endpoint);
-        for (const row of Array.isArray(payload.data) ? payload.data : []) {
+        for (const row of rows) {
           const atUtc = String(row.createdAt || row.startedAt || "");
           if (atUtc && atUtc < createdAfter) continue;
           if (String(row.direction || "").toLowerCase() !== "incoming") continue;
@@ -177,6 +175,25 @@ function transcriptPriority(item) {
   if (item.type === "voicemail" || item.voicemail) return 3;
   if (Number(item.durationSec || 0) > 0 || item.status === "completed") return 2;
   return 0;
+}
+
+async function listConversationActivity(config, { kind, phoneNumberId, participant, createdAfter }) {
+  const rows = [];
+  let pageToken = "";
+  for (let page = 0; page < 5; page += 1) {
+    const query = new URLSearchParams({
+      phoneNumberId,
+      createdAfter,
+      maxResults: "100"
+    });
+    query.append("participants[]", participant);
+    if (pageToken) query.set("pageToken", pageToken);
+    const payload = await request(config, "GET", `/${kind}?${query}`);
+    rows.push(...(Array.isArray(payload.data) ? payload.data : []));
+    pageToken = String(payload.nextPageToken || "");
+    if (!pageToken) break;
+  }
+  return rows;
 }
 
 async function listRecentConversations(config, numbers, updatedAfter, maxResults) {
