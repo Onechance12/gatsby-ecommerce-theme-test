@@ -2234,24 +2234,28 @@ function clientCoordinatorEvidenceFingerprint(evidence = {}) {
     complete: evidence.complete === true,
     file: evidence.file || {},
     sourceStatus,
-    jobNimbus: evidence.jobNimbus || {},
-    // Gmail attachment resource IDs can rotate between otherwise identical
-    // reads. They are transport tokens, not evidence, so exclude them while
-    // retaining attachment names, MIME types, sizes, and message metadata.
-    gmail: stripVolatileAttachmentIds(evidence.gmail || {}),
-    quo: evidence.quo || {},
-    actionReceipts: evidence.actionReceipts || [],
-    factualSignals: evidence.factualSignals || {}
+    // Canonicalize unordered API arrays and volatile transport metadata while
+    // preserving the actual evidence content protected by the digest.
+    gmail: canonicalEvidenceValue(evidence.gmail || {}),
+    quo: canonicalEvidenceValue(evidence.quo || {}),
+    actionReceipts: canonicalEvidenceValue(evidence.actionReceipts || []),
+    factualSignals: canonicalEvidenceValue(evidence.factualSignals || {}),
+    jobNimbus: canonicalEvidenceValue(evidence.jobNimbus || {})
   });
 }
 
-function stripVolatileAttachmentIds(value) {
-  if (Array.isArray(value)) return value.map(stripVolatileAttachmentIds);
+function canonicalEvidenceValue(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(canonicalEvidenceValue)
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== "attachmentId")
-      .map(([key, entry]) => [key, stripVolatileAttachmentIds(entry)])
+      .filter(([key]) => !["attachmentId", "generatedAt"].includes(key))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalEvidenceValue(entry)])
   );
 }
 
