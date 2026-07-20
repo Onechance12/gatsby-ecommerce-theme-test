@@ -150,6 +150,7 @@ export async function readQuoInbox(config, input = {}) {
   const items = [...itemsById.values()].sort((a, b) => String(b.atUtc).localeCompare(String(a.atUtc)));
   const transcriptCandidates = items
     .filter((item) => item.type === "call" || item.type === "missed_call" || item.type === "voicemail")
+    .sort((a, b) => transcriptPriority(b) - transcriptPriority(a) || String(b.atUtc).localeCompare(String(a.atUtc)))
     .slice(0, transcriptLimit);
   for (const item of transcriptCandidates) {
     const transcript = await readQuoTranscript(config, item.id, { allowMissing: true });
@@ -170,6 +171,12 @@ export async function readQuoInbox(config, input = {}) {
     failures,
     items
   };
+}
+
+function transcriptPriority(item) {
+  if (item.type === "voicemail" || item.voicemail) return 3;
+  if (Number(item.durationSec || 0) > 0 || item.status === "completed") return 2;
+  return 0;
 }
 
 async function listRecentConversations(config, numbers, updatedAfter, maxResults) {
