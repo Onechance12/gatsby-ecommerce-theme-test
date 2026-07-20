@@ -1995,6 +1995,9 @@ async function retellCarrierFollowUpCall(input = {}) {
     dynamicVariables.availableAppointmentWindows = "None. Do not schedule an appointment.";
     dynamicVariables.availabilityWindowsJson = "[]";
   }
+  for (const [key, value] of Object.entries(dynamicVariables)) {
+    dynamicVariables[key] = String(value ?? "");
+  }
   const metadata = {
     source: "hcn-wave-jobnimbus-bridge",
     contactId: file.id,
