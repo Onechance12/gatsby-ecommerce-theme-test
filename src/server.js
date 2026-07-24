@@ -24,6 +24,16 @@ import { renderBrain } from "./memory/brain.js";
 import { safeCloseoutAction } from "./memory/actionCloseout.js";
 import { latestActionReceipts, listMemory } from "./memory/store.js";
 import { readFileSnapshot, refreshFileSnapshot, summarizeFileSnapshot } from "./memory/fileSnapshot.js";
+import {
+  createOperationalAdvisory,
+  operationalState,
+  reconcileOperationalState
+} from "./memory/operationalBrain.js";
+import {
+  createOpenAiOperationalProvider,
+  createZaiOperationalProvider,
+  ZAI_OPERATIONAL_MODEL as DEFAULT_ZAI_OPERATIONAL_MODEL
+} from "./memory/operationalAdvisoryProvider.js";
 import { listQuoNumbers, readQuoHistory, readQuoInbox, readQuoTranscript, sendQuoText } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
@@ -113,6 +123,11 @@ const ARTIFACT_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("ARTIFACT_TTL
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
+const OPENAI_OPERATIONAL_MODEL = process.env.OPENAI_OPERATIONAL_MODEL || "gpt-5.6-luna";
+const ZAI_API_KEY = process.env.ZAI_API_KEY || "";
+const ZAI_OPERATIONAL_MODEL = process.env.ZAI_OPERATIONAL_MODEL || DEFAULT_ZAI_OPERATIONAL_MODEL;
+const OPERATIONAL_LLM_PROVIDER = String(process.env.OPERATIONAL_LLM_PROVIDER || "zai").trim().toLowerCase();
+const OPERATIONAL_LLM_FALLBACK_PROVIDER = String(process.env.OPERATIONAL_LLM_FALLBACK_PROVIDER || "").trim().toLowerCase();
 const OPENAI_VOICE = process.env.OPENAI_VOICE || "marin";
 const VOICE_PUBLIC_BASE_URL = stripTrailingSlash(process.env.VOICE_PUBLIC_BASE_URL || PUBLIC_BASE_URL);
 const VOICE_STREAM_TOKEN = process.env.VOICE_STREAM_TOKEN || BRIDGE_TOKEN || "";
@@ -440,12 +455,27 @@ function health() {
     },
     brain: {
       available: true,
-      mode: "verified_company_context_with_live_client_snapshots_and_action_receipts",
+      mode: "verified_company_context_with_live_client_snapshots_action_receipts_and_operational_open_loops",
       autonomousLearning: false,
       externalActions: false,
       clientMemoryExposed: "exact_Chance_file_only",
       clientSnapshots: true,
       automaticRefreshOnReview: true,
+      operationalOpenLoops: true,
+      deterministicRulesRunOnExactReview: true,
+      optionalModelAdvisory: operationalAdvisoryProviderDescriptors().length > 0,
+      operationalProvider: OPERATIONAL_LLM_PROVIDER,
+      operationalModel: operationalModelName(OPERATIONAL_LLM_PROVIDER),
+      operationalProviderConfigured: operationalProviderConfigured(OPERATIONAL_LLM_PROVIDER),
+      fallbackProvider: OPERATIONAL_LLM_FALLBACK_PROVIDER || "disabled",
+      fallbackProviderConfigured: Boolean(
+        OPERATIONAL_LLM_FALLBACK_PROVIDER
+        && operationalProviderConfigured(OPERATIONAL_LLM_FALLBACK_PROVIDER)
+      ),
+      providerNeutralAdapter: true,
+      exactClientDataMinimized: true,
+      modelHasTools: false,
+      modelCanExecute: false,
       liveSourcesWin: true,
       doesNotAuthorizeActions: true,
       persistentRootConfigured: Boolean(process.env.MEMORY_ROOT)
@@ -462,6 +492,53 @@ function oauthBrokerConfigured() {
     && GPT_OAUTH_CLIENT_SECRET
     && OAUTH_SESSION_SECRET
   );
+}
+
+function operationalAdvisoryProviders() {
+  const names = [...new Set([
+    OPERATIONAL_LLM_PROVIDER,
+    OPERATIONAL_LLM_FALLBACK_PROVIDER
+  ].filter(Boolean))];
+  const providers = [];
+  for (const name of names) {
+    if (name === "zai" && ZAI_API_KEY) {
+      providers.push(createZaiOperationalProvider({
+        apiKey: ZAI_API_KEY,
+        model: ZAI_OPERATIONAL_MODEL
+      }));
+    }
+    if (name === "openai" && OPENAI_API_KEY) {
+      providers.push(createOpenAiOperationalProvider({
+        apiKey: OPENAI_API_KEY,
+        model: OPENAI_OPERATIONAL_MODEL
+      }));
+    }
+  }
+  return providers;
+}
+
+function operationalAdvisoryProviderDescriptors() {
+  return [...new Set([
+    OPERATIONAL_LLM_PROVIDER,
+    OPERATIONAL_LLM_FALLBACK_PROVIDER
+  ].filter(Boolean))]
+    .filter(operationalProviderConfigured)
+    .map((provider) => ({
+      provider,
+      model: operationalModelName(provider)
+    }));
+}
+
+function operationalProviderConfigured(provider) {
+  if (provider === "zai") return Boolean(ZAI_API_KEY);
+  if (provider === "openai") return Boolean(OPENAI_API_KEY);
+  return false;
+}
+
+function operationalModelName(provider) {
+  if (provider === "zai") return ZAI_OPERATIONAL_MODEL;
+  if (provider === "openai") return OPENAI_OPERATIONAL_MODEL;
+  return "unconfigured";
 }
 
 function oauthAuthorize(res, url) {
@@ -689,6 +766,7 @@ async function memoryFileActions(input = {}) {
   const file = compactContact(contact);
   const receipts = latestActionReceipts(MEMORY_CONFIG, limit, { subjectKey: file.id });
   const clientSnapshot = summarizeFileSnapshot(readFileSnapshot(MEMORY_CONFIG, file.id));
+  const operational = operationalState(MEMORY_CONFIG, file.id);
   const claimCallLedger = (await readClaimCallLedger())
     .filter((row) => row.contactId === file.id || String(row.fileNumber || "") === String(file.number || ""))
     .slice(-limit)
@@ -701,6 +779,7 @@ async function memoryFileActions(input = {}) {
       snapshot: clientSnapshot,
       authority: "Continuity only. Live evidence wins and explicit approval is still required for every action."
     },
+    operational,
     references: buildFileReferenceRegistry(file, receipts, claimCallLedger),
     receipts,
     claimCalls: claimCallLedger.map((row) => cleanObject({
@@ -1395,6 +1474,7 @@ async function reviewFile(input) {
     sourceStatus,
     factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, {}, {})
   });
+  const operational = reconcileOperationalState(MEMORY_CONFIG, snapshot);
   return {
     file,
     rawContact: contact,
@@ -1408,6 +1488,7 @@ async function reviewFile(input) {
     actionReceipts,
     sourceStatus,
     clientMemory: clientMemoryEnvelope(snapshot),
+    operational,
     brain: reviewBrainContext(file.id, input.maxPerSection)
   };
 }
@@ -2221,7 +2302,9 @@ function compactClientCoordinatorEvidence(packet = {}) {
       authority: "Company-wide Quo communication is read-only evidence. This call cannot send from any employee's line."
     },
     actionReceipts: (Array.isArray(packet.actionReceipts) ? packet.actionReceipts : []).slice(0, 8),
-    factualSignals: packet.factualSignals || {}
+    factualSignals: packet.factualSignals || {},
+    operational: packet.operational || null,
+    operationalAdvisory: packet.operationalAdvisory || null
   };
 }
 
@@ -4758,8 +4841,14 @@ async function reviewChanceFiles(input = {}) {
     };
   }
   const selected = input.query ? contacts : contacts.slice((page - 1) * limit, page * limit);
+  const exactModelAdvisory = input.includeBrainAdvisory === true && Boolean(input.query) && selected.length === 1;
   const packets = [];
-  for (const contact of selected) packets.push(await buildChanceEvidencePacket(contact, input));
+  for (const contact of selected) {
+    packets.push(await buildChanceEvidencePacket(contact, {
+      ...input,
+      includeBrainAdvisory: exactModelAdvisory
+    }));
+  }
   const exactSubjectKey = input.query && packets.length === 1 ? packets[0].file.id : "";
   return {
     generatedAt: new Date().toISOString(),
@@ -4825,6 +4914,7 @@ async function startThresherOperationalSession(input = {}) {
     gmailLimit: input.gmailLimit,
     gmailThreadLimit: input.gmailThreadLimit,
     quoLimit: input.quoLimit,
+    includeBrainAdvisory: input.includeBrainAdvisory === true,
     maxPerSection: input.maxPerSection
   });
   return {
@@ -4979,6 +5069,7 @@ async function startTodaysInspectionReview(input, identity) {
       gmailLimit: input.gmailLimit,
       gmailThreadLimit: input.gmailThreadLimit,
       quoLimit: input.quoLimit,
+      includeBrainAdvisory: input.includeBrainAdvisory === true,
       maxPerSection: input.maxPerSection
     });
     const packet = Array.isArray(review.packets) ? review.packets[0] : null;
@@ -5158,9 +5249,29 @@ async function buildChanceEvidencePacket(contact, input) {
     sourceStatus: packet.sourceStatus,
     factualSignals: packet.factualSignals
   });
+  const operational = reconcileOperationalState(MEMORY_CONFIG, snapshot);
+  let operationalAdvisory = {
+    status: "not_requested",
+    reason: "Set includeBrainAdvisory:true on an exact-file review to request one bounded model advisory."
+  };
+  if (input.includeBrainAdvisory === true) {
+    try {
+      operationalAdvisory = await createOperationalAdvisory(MEMORY_CONFIG, snapshot, operational, {
+        providers: operationalAdvisoryProviders()
+      });
+    } catch (error) {
+      operationalAdvisory = {
+        status: "error",
+        error: redactSensitiveText(error.message || String(error)),
+        authority: "The model advisory failed, but the deterministic evidence review and open-loop ledger remain valid. No action was executed."
+      };
+    }
+  }
   return {
     ...packet,
-    clientMemory: clientMemoryEnvelope(snapshot)
+    clientMemory: clientMemoryEnvelope(snapshot),
+    operational,
+    operationalAdvisory
   };
 }
 
@@ -6841,6 +6952,10 @@ function compactTask(task) {
   return {
     id: task.jnid || task.id,
     title: task.title || task.subject || "",
+    description: task.description || task.note || "",
+    createdAt: task.date_created || "",
+    dateStart: task.date_start || "",
+    dateEnd: task.date_end || "",
     dueDate: task.date_start || task.date_end || "",
     completed: Boolean(task.is_completed)
   };
@@ -7272,7 +7387,7 @@ function requireApprovalDigest(provided, expected, label) {
 
 function redactSensitiveText(value) {
   let text = String(value || "");
-  for (const secret of [API_KEY, BRIDGE_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+  for (const secret of [API_KEY, BRIDGE_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
     text = text.split(secret).join("[REDACTED]");
   }
   return text
@@ -8555,6 +8670,7 @@ const OPENAPI = {
           includeGmail: { type: "boolean", default: true },
           includeQuo: { type: "boolean", default: true, description: "When true, reads matching homeowner/adjuster communications across every Quo team line, including other employees' lines, as evidence only." },
           includeQuoTranscripts: { type: "boolean", default: false },
+          includeBrainAdvisory: { type: "boolean", default: false, description: "Requests one bounded no-tools model advisory over evidence-backed open loops. The result is a candidate and cannot execute or approve anything." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
           gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },
@@ -8941,6 +9057,7 @@ const OPENAPI = {
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25 },
           includeQuoTranscripts: { type: "boolean", default: false },
+          includeBrainAdvisory: { type: "boolean", default: false, description: "For priority or today_inspections, request a bounded no-tools model advisory for each exact reviewed file. Default false avoids unnecessary model cost." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
           gmailThreadLimit: { type: "integer", minimum: 1, maximum: 5, default: 3 },

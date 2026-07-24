@@ -52,9 +52,18 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.userOAuth.available, false);
   assert.equal(health.userOAuth.perUserGmail, true);
   assert.equal(health.userOAuth.roleEnforcement, true);
-  assert.equal(health.brain.mode, "verified_company_context_with_live_client_snapshots_and_action_receipts");
+  assert.equal(health.brain.mode, "verified_company_context_with_live_client_snapshots_action_receipts_and_operational_open_loops");
   assert.equal(health.brain.clientSnapshots, true);
   assert.equal(health.brain.automaticRefreshOnReview, true);
+  assert.equal(health.brain.operationalOpenLoops, true);
+  assert.equal(health.brain.deterministicRulesRunOnExactReview, true);
+  assert.equal(health.brain.operationalProvider, "zai");
+  assert.equal(health.brain.operationalModel, "glm-4.7-flash");
+  assert.equal(health.brain.providerNeutralAdapter, true);
+  assert.equal(health.brain.exactClientDataMinimized, true);
+  assert.equal(health.brain.fallbackProvider, "disabled");
+  assert.equal(health.brain.modelHasTools, false);
+  assert.equal(health.brain.modelCanExecute, false);
   assert.equal(health.brain.doesNotAuthorizeActions, true);
   assert.equal(health.brain.autonomousLearning, false);
   assert.equal(health.brain.externalActions, false);
@@ -855,7 +864,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const brain = await brainResponse.json();
   assert.equal(brain.scope, "company_only");
   assert.equal(brain.execution, "none");
-  assert.match(brain.context, /Memory, snapshots, receipts, and proposals never authorize or execute external actions/);
+  assert.match(brain.context, /Memory, snapshots, receipts, operational loops, model advisories, and proposals never authorize or execute external actions/);
   assert.match(brain.context, /UNVERIFIED CANDIDATES/);
 
   const chanceIndexResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
@@ -1479,7 +1488,7 @@ async function waitForServer(child, port) {
   const capture = (chunk) => { output += chunk.toString("utf8"); };
   child.stdout.on("data", capture);
   child.stderr.on("data", capture);
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     if (child.exitCode !== null) throw new Error(`Server exited before smoke test: ${output}`);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);

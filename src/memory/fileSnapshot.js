@@ -209,7 +209,11 @@ function compactTask(value) {
   return cleanObject({
     id: primitive(value?.id || value?.jnid),
     title: text(value?.title || value?.subject, 500),
-    dueDate: primitive(value?.dueDate || value?.date_start || value?.date_end),
+    description: text(value?.description || value?.note, 1200),
+    createdAt: primitive(value?.createdAt || value?.dateCreated || value?.date_created),
+    dateStart: primitive(value?.dateStart || value?.date_start),
+    dateEnd: primitive(value?.dateEnd || value?.date_end),
+    dueDate: primitive(value?.dueDate || value?.dateStart || value?.date_start || value?.dateEnd || value?.date_end),
     completed: Boolean(value?.completed || value?.is_completed)
   });
 }

@@ -3,7 +3,8 @@
 Small authenticated bridge that lets a ChatGPT Custom GPT Action read and, when explicitly enabled, update JobNimbus.
 It also supports Gmail search/thread/attachment review, verified PDF attachments,
 Quo messages/calls/transcripts, durable private action receipts, private
-per-client evidence snapshots, and a unified Chance-only review/approval transaction.
+per-client evidence snapshots, persistent operational open loops, and a unified
+Chance-only review/approval transaction.
 Scanned or visually complex JobNimbus documents can be returned as native
 ChatGPT conversation files so the GPT inspects the original pages instead of
 guessing from a filename or relying only on server-side OCR.
@@ -41,6 +42,10 @@ transport is unavailable.
 - Client snapshots are private continuity caches, not operating authority. A
   snapshot never authorizes a write, send, call, task, event, upload, or status
   change, and fresh JobNimbus/Gmail/Quo evidence always wins.
+- Exact-file reviews deterministically reconcile evidence-backed operational
+  open loops such as an upcoming inspection without homeowner confirmation.
+  Open loops and optional model advisories are suggestions only; neither can
+  send, write, call, approve, or promote itself into verified company memory.
 - The handoff inbox allows public handoff creation so browser agents can submit Gmail/Quo findings. Listing/completing handoffs still requires the bridge bearer token.
 - Artifact endpoints always require the bridge bearer token. They never apply,
   execute, commit, push, or deploy an uploaded patch.
@@ -89,6 +94,12 @@ ARTIFACT_TTL_HOURS=72
 CLAIM_CALL_STORE_PATH=/var/data/bridge/claim-call-ledger.json
 ACTION_BATCH_STORE_PATH=/var/data/bridge/action-batches.json
 OUTBOUND_SEND_STORE_PATH=/var/data/bridge/outbound-sends.json
+OPENAI_API_KEY=
+OPENAI_OPERATIONAL_MODEL=gpt-5.6-luna
+ZAI_API_KEY=
+ZAI_OPERATIONAL_MODEL=glm-4.7-flash
+OPERATIONAL_LLM_PROVIDER=zai
+OPERATIONAL_LLM_FALLBACK_PROVIDER=
 ```
 
 ## Fresh Review And Approval
@@ -98,8 +109,15 @@ open tasks, non-photo operational documents, Gmail evidence, Quo evidence, and
 private action receipts. Every full file review also loads the verified company
 Brain and refreshes that exact client's durable snapshot. A later partial review
 preserves the last successful Gmail/Quo evidence instead of erasing it. The
-endpoint deliberately returns evidence rather than pretending that fixed rules
-can replace assistant judgment.
+review also reconciles durable operational open loops. Set
+`includeBrainAdvisory:true` on an exact-file review when one bounded no-tools
+model pass would help rank or explain those already grounded loops. The
+provider-neutral adapter uses Z.AI `glm-4.7-flash` by default. OpenAI can be
+configured as an explicit fallback, but fallback is disabled by default to
+avoid duplicate provider cost. The provider packet omits the homeowner name,
+uses only the exact file's bounded operational evidence, validates source IDs
+and zero tool calls, stores hashed provenance and normalized token usage, and
+still requires a separate exact action approval.
 
 `POST /ops/action-batch` then provides the two-step execution flow:
 

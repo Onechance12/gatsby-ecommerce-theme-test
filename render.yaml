@@ -80,6 +80,16 @@ services:
         sync: false
       - key: OPENAI_REALTIME_MODEL
         value: gpt-realtime
+      - key: OPENAI_OPERATIONAL_MODEL
+        value: gpt-5.6-luna
+      - key: ZAI_API_KEY
+        sync: false
+      - key: ZAI_OPERATIONAL_MODEL
+        value: glm-4.7-flash
+      - key: OPERATIONAL_LLM_PROVIDER
+        value: zai
+      - key: OPERATIONAL_LLM_FALLBACK_PROVIDER
+        value: ""
       - key: OPENAI_VOICE
         value: marin
       - key: VOICE_PUBLIC_BASE_URL

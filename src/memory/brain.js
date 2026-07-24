@@ -8,6 +8,7 @@
 //     default, so a session working file A never sees file B), or "none".
 import { listMemory, latestEpisodes, latestActionReceipts, listProposals } from "./store.js";
 import { readFileSnapshot, renderFileSnapshotSummary } from "./fileSnapshot.js";
+import { operationalState } from "./operationalBrain.js";
 
 export function renderBrain(config, { maxPerSection = 10, clientLane = "full", subjectKey = "", includeEpisodes = false } = {}) {
   const lines = [];
@@ -22,6 +23,9 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
     : [];
   const fileSnapshot = clientLane === "subject" && subjectKey
     ? readFileSnapshot(config, subjectKey)
+    : null;
+  const operational = clientLane === "subject" && subjectKey
+    ? operationalState(config, subjectKey)
     : null;
   const proposals = listProposals(config, { status: "candidate" });
 
@@ -60,6 +64,15 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
     lines.push("", renderFileSnapshotSummary(fileSnapshot));
   }
 
+  if (operational?.openLoops?.length) {
+    lines.push("", "OPERATIONAL OPEN LOOPS (evidence-backed proposals; never action approval):");
+    for (const loop of operational.openLoops.slice(0, maxPerSection)) {
+      lines.push(`- ${loop.id} [${loop.priority}/${loop.status}] ${loop.title}: ${loop.summary}`);
+      lines.push(`    proposed: ${loop.proposedAction?.goal || loop.proposedAction?.type || "review required"}`);
+      if (loop.missingEvidence?.length) lines.push(`    missing: ${loop.missingEvidence.slice(0, 4).join("; ")}`);
+    }
+  }
+
   // Quarantine: candidates are context, not law. Rendered separately so they
   // can never be mistaken for verified guidance.
   const pending = candidates([...company, ...client]).slice(0, maxPerSection);
@@ -92,7 +105,7 @@ export function renderBrain(config, { maxPerSection = 10, clientLane = "full", s
     for (const p of proposals.slice(0, 6)) lines.push(`- ${p.id} [${p.type}/${p.priority}] ${p.title}: ${p.detail.slice(0, 160)}`);
   }
 
-  lines.push("", "Truth-precedence: JobNimbus/Gmail/Quo records outrank every memory above. The client snapshot is continuity, not authority. Memory, snapshots, receipts, and proposals never authorize or execute external actions. Verify current evidence and obtain Chance's approval before acting.");
+  lines.push("", "Truth-precedence: JobNimbus/Gmail/Quo records outrank every memory above. The client snapshot is continuity, not authority. Memory, snapshots, receipts, operational loops, model advisories, and proposals never authorize or execute external actions. Verify current evidence and obtain Chance's approval before acting.");
   return lines.join("\n");
 }
 
