@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { authenticateGoogleAccessToken, parseWaveUsers, routeAllowed } from "./google-user.js";
+import {
+  CODEX_OPERATOR_ALLOWED_ROUTES,
+  authenticateGoogleAccessToken,
+  parseWaveUsers,
+  routeAllowed
+} from "./google-user.js";
 
 const clientId = "fixture.apps.googleusercontent.com";
 const users = parseWaveUsers("", [{
@@ -86,6 +91,86 @@ test("coordinator routes are read-focused while Chance retains full access", () 
   assert.equal(routeAllowed(coordinator, "POST", "/quo/send"), false);
   assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), true);
   assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), true);
+});
+
+test("dedicated Codex operator is a fail-closed non-Google role", () => {
+  const operator = { type: "codex_operator_token", role: "codex_operator" };
+  const spoofedGoogleOperator = { type: "google_oauth", role: "codex_operator" };
+
+  for (const route of [
+    "GET /auth/whoami",
+    "POST /ops/start-session",
+    "POST /ops/review-chance-files",
+    "POST /ops/action-batch",
+    "POST /scheduling/availability",
+    "POST /jobnimbus/search",
+    "POST /jobnimbus/review-file",
+    "POST /jobnimbus/document-text",
+    "POST /jobnimbus/document-review",
+    "POST /jobnimbus/document-file",
+    "POST /gmail/search",
+    "POST /gmail/thread",
+    "POST /gmail/attachment-review",
+    "POST /quo/numbers",
+    "POST /quo/history",
+    "POST /quo/transcript"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
+    assert.equal(routeAllowed(operator, method, pathname), true, route);
+  }
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 16);
+
+  for (const route of [
+    "POST /auth/quo-line",
+    "POST /brain/context",
+    "POST /memory/persistence-check",
+    "POST /jobnimbus/upload-file",
+    "POST /jobnimbus/update-contact",
+    "POST /jobnimbus/update-status",
+    "POST /jobnimbus/process-update",
+    "POST /jobnimbus/create-note",
+    "POST /jobnimbus/create-task",
+    "POST /jobnimbus/update-task",
+    "POST /jobnimbus/create-calendar-event",
+    "POST /jobnimbus/update-calendar-event",
+    "POST /claim-filing/call",
+    "POST /claim-filing/prepare",
+    "POST /claim-filing/result",
+    "POST /claim-filing/writeback",
+    "POST /retell/client-coordinator-call",
+    "POST /retell/carrier-follow-up-call",
+    "POST /retell/carrier-follow-up-call-result",
+    "POST /retell/homeowner-call",
+    "POST /voice/outbound-call",
+    "POST /gmail/draft",
+    "POST /gmail/send",
+    "POST /quo/send",
+    "POST /artifacts/list",
+    "POST /handoff/pending"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), false);
+    assert.equal(routeAllowed(operator, method, pathname), false, route);
+  }
+
+  assert.equal(routeAllowed(spoofedGoogleOperator, "POST", "/ops/action-batch"), false);
+  assert.equal(routeAllowed({ type: "codex_operator_token", role: "chance" }, "POST", "/ops/action-batch"), false);
+});
+
+test("shared bridge-token route behavior remains unrestricted", () => {
+  const shared = { type: "bridge_token", role: "chance" };
+  for (const route of [
+    "POST /jobnimbus/upload-file",
+    "POST /jobnimbus/update-contact",
+    "POST /claim-filing/call",
+    "POST /gmail/send",
+    "POST /quo/send",
+    "POST /artifacts/list"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(routeAllowed(shared, method, pathname), true, route);
+  }
 });
 
 function fixtureFetch({ audience = clientId, email, roleDomain }) {

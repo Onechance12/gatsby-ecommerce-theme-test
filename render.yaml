@@ -18,6 +18,8 @@ services:
         sync: false
       - key: JOBNIMBUS_BRIDGE_TOKEN
         sync: false
+      - key: CODEX_OPERATOR_TOKEN
+        sync: false
       - key: BRIDGE_ALLOW_WRITES
         value: "false"
       - key: MEMORY_ROOT
@@ -54,6 +56,12 @@ services:
         value: me
       - key: ALLOW_GMAIL_SEND
         value: "false"
+      - key: STANDARD_W9_GMAIL_MESSAGE_ID
+        sync: false
+      - key: STANDARD_W9_GMAIL_ATTACHMENT_ID
+        sync: false
+      - key: STANDARD_W9_SHA256
+        sync: false
       - key: QUO_API_KEY
         sync: false
       - key: QUO_API_BASE_URL
@@ -136,6 +144,10 @@ services:
         value: /var/data/bridge/claim-call-ledger.json
       - key: ACTION_BATCH_STORE_PATH
         value: /var/data/bridge/action-batches.json
+      - key: ACTION_APPROVAL_STORE_PATH
+        value: /var/data/bridge/action-approvals.json
+      - key: ACTION_APPROVAL_TTL_SECONDS
+        value: "900"
       - key: OUTBOUND_SEND_STORE_PATH
         value: /var/data/bridge/outbound-sends.json
       - key: QUO_LINE_LINK_STORE_PATH

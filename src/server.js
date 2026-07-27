@@ -78,6 +78,7 @@ const API_BASE = stripTrailingSlash(process.env.JOBNIMBUS_API_BASE_URL || "https
 const JOBNIMBUS_FILE_BASE_URL = stripTrailingSlash(process.env.JOBNIMBUS_FILE_BASE_URL || "https://app.jobnimbus.com/files");
 const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
+const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const ALLOW_WRITES = process.env.BRIDGE_ALLOW_WRITES === "true";
 const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://jobnimbus-chatgpt-bridge.onrender.com");
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -108,7 +109,9 @@ const WAVE_AUTH_USERS = parseWaveUsers(process.env.WAVE_AUTH_USERS_JSON, [{
 }]);
 const GMAIL_API_BASE_URL = stripTrailingSlash(process.env.GMAIL_API_BASE_URL || "https://gmail.googleapis.com");
 const GMAIL_USER = process.env.GMAIL_USER || "me";
-const STANDARD_W9_GMAIL_MESSAGE_ID = process.env.STANDARD_W9_GMAIL_MESSAGE_ID || "19e88b6a5da1ac61";
+const STANDARD_W9_GMAIL_MESSAGE_ID = String(process.env.STANDARD_W9_GMAIL_MESSAGE_ID || "").trim();
+const STANDARD_W9_GMAIL_ATTACHMENT_ID = String(process.env.STANDARD_W9_GMAIL_ATTACHMENT_ID || "").trim();
+const STANDARD_W9_SHA256 = String(process.env.STANDARD_W9_SHA256 || "").trim().toLowerCase();
 const ALLOW_GMAIL_SEND = process.env.ALLOW_GMAIL_SEND === "true";
 const PERSISTENT_DATA_ROOT = process.env.MEMORY_ROOT || tmpdir();
 const BRIDGE_DATA_DIR = path.join(PERSISTENT_DATA_ROOT, "bridge");
@@ -156,6 +159,8 @@ const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c
 const CHANCE_GOOGLE_EMAIL = String(process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com").trim().toLowerCase();
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
+const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-approvals.json");
+const ACTION_APPROVAL_TTL_SECONDS = Math.max(1, Math.min(positiveIntegerEnv("ACTION_APPROVAL_TTL_SECONDS", 900), 3600));
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
 const QUO_LINE_LINK_STORE_PATH = process.env.QUO_LINE_LINK_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-links.json");
 const QUO_LINE_CHALLENGE_STORE_PATH = process.env.QUO_LINE_CHALLENGE_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-challenges.json");
@@ -182,10 +187,24 @@ const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
 const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText };
 const REQUEST_CONTEXT = new AsyncLocalStorage();
+const INTERNAL_COMMUNICATION_SCOPE = Symbol("internalCommunicationScope");
+const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
+const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
+const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
 const USED_OAUTH_CODES = new Map();
 let quoLineMutationQueue = Promise.resolve();
+let actionBatchMutationQueue = Promise.resolve();
+let actionApprovalMutationQueue = Promise.resolve();
+let outboundSendMutationQueue = Promise.resolve();
+
+if (CODEX_OPERATOR_TOKEN && !/^[\x21-\x7E]{32,512}$/.test(CODEX_OPERATOR_TOKEN)) {
+  throw new Error("CODEX_OPERATOR_TOKEN must contain 32 to 512 printable non-space ASCII characters.");
+}
+if (BRIDGE_TOKEN && CODEX_OPERATOR_TOKEN && secureEqual(BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN)) {
+  throw new Error("CODEX_OPERATOR_TOKEN must be different from JOBNIMBUS_BRIDGE_TOKEN.");
+}
 
 const routes = new Map([
   ["GET /health", health],
@@ -287,12 +306,15 @@ const server = createServer(async (req, res) => {
       }
     }
     const body = req.method === "GET" ? {} : await readJson(req);
+    assertIdentityRequestScope(identity, req.method, url.pathname, body);
     const result = await REQUEST_CONTEXT.run({ identity }, () => handler(body));
     if (result?.html) sendHtml(res, 200, result.html);
     else if (typeof result === "string") sendText(res, 200, result);
     else send(res, 200, result);
   } catch (error) {
-    send(res, error.statusCode || 500, { error: error.message || String(error) });
+    send(res, error.statusCode || 500, {
+      error: redactSensitiveText(error.message || String(error))
+    });
   }
 });
 
@@ -351,6 +373,21 @@ function health() {
       authorizationUrl: `${PUBLIC_BASE_URL}/oauth/authorize`,
       tokenUrl: `${PUBLIC_BASE_URL}/oauth/token`
     },
+    codexOperator: {
+      available: Boolean(CODEX_OPERATOR_TOKEN),
+      role: "codex_operator",
+      assignedJobNimbusFilesOnly: true,
+      gmailReadsRequireExactAssignedFile: true,
+      quoReadsRequireExactAssignedFile: true,
+      broadUnmatchedCommunicationsSweep: false,
+      existingDraftSendRequiresBridgeReceipt: true,
+      retainedDraftIdIsOneShot: true,
+      querylessIndexIsPiiMinimized: true,
+      chanceBrainClientMemory: "disabled",
+      directWriteUploadSendOrCallRoutes: false,
+      actionBatchOnly: true,
+      approvalChallenge: "short_lived_identity_bound_single_use"
+    },
     gmailSendAllowed: ALLOW_GMAIL_SEND,
     quoConfigured: Boolean(QUO_API_KEY),
     quoSendAllowed: ALLOW_QUO_SEND,
@@ -367,6 +404,7 @@ function health() {
       automaticEmailOrTextSending: false,
       explicitChanceApprovalRequired: true,
       exactDryRunDigestRequired: true,
+      shortLivedSingleUseChallengeRequired: true,
       changedPayloadInvalidatesApproval: true,
       duplicateSendBlocked: true,
       failedSendRequiresFreshApproval: true
@@ -455,12 +493,14 @@ function health() {
     },
     brain: {
       available: true,
-      mode: "verified_company_context_with_live_client_snapshots_action_receipts_and_operational_open_loops",
+      mode: "legacy_v1_client_snapshot_persistence_requires_v2_privacy_migration",
       autonomousLearning: false,
       externalActions: false,
-      clientMemoryExposed: "exact_Chance_file_only",
-      clientSnapshots: true,
-      automaticRefreshOnReview: true,
+      codexOperatorClientMemory: "disabled_no_read_no_write",
+      clientMemoryExposed: "legacy_non_operator_paths_only",
+      clientSnapshots: "legacy_v1_unsafe_until_migrated",
+      automaticRefreshOnReview: "legacy_non_operator_paths_only",
+      legacySnapshotPurgeRequiresSeparateApproval: true,
       operationalOpenLoops: true,
       deterministicRulesRunOnExactReview: true,
       optionalModelAdvisory: operationalAdvisoryProviderDescriptors().length > 0,
@@ -473,7 +513,7 @@ function health() {
         && operationalProviderConfigured(OPERATIONAL_LLM_FALLBACK_PROVIDER)
       ),
       providerNeutralAdapter: true,
-      exactClientDataMinimized: true,
+      exactClientDataMinimized: false,
       modelHasTools: false,
       modelCanExecute: false,
       liveSourcesWin: true,
@@ -718,7 +758,9 @@ async function authWhoAmI() {
     gmailMode: identity.type === "google_oauth" ? "signed_in_employee_mailbox" : "legacy_chance_mailbox",
     instruction: identity.type === "google_oauth"
       ? "The bridge will use this signed-in employee's Google token for Gmail and enforce this employee's Wave Ops role."
-      : "This task is using the temporary shared bridge-token fallback and Chance's legacy Gmail connection."
+      : identity.type === "codex_operator_token"
+        ? "This task is using the dedicated least-privilege Codex HP operator credential. It may review evidence and prepare exact approval batches, but direct writes, uploads, calls, drafts, and sends are denied."
+        : "This task is using the temporary shared bridge-token fallback and Chance's legacy Gmail connection."
   };
 }
 
@@ -756,6 +798,49 @@ function clientMemoryEnvelope(snapshot) {
   return {
     snapshot: summarizeFileSnapshot(snapshot),
     authority: "Private read-through continuity only. Fresh source evidence wins. This snapshot never authorizes a write, send, call, task, event, upload, or status change."
+  };
+}
+
+function isCodexOperatorRequest() {
+  return currentRequestIdentity()?.type === "codex_operator_token";
+}
+
+function operatorBrainBoundary() {
+  return {
+    status: "not_read",
+    scope: "disabled_for_codex_operator",
+    persistedClientMemory: false,
+    authority: "The Codex HP operator does not read or write Chance Brain client snapshots, episodes, receipts, or operational state. Fresh, exact-file source evidence is authoritative."
+  };
+}
+
+function operatorEphemeralContinuity(file, sourceStatus = {}, counts = {}) {
+  return {
+    persistence: "disabled_for_codex_operator",
+    persisted: false,
+    existingClientMemoryRead: false,
+    snapshot: {
+      schemaVersion: 2,
+      ephemeral: true,
+      observedAt: new Date().toISOString(),
+      file: cleanObject({
+        id: file?.id || "",
+        number: file?.number || "",
+        name: file?.name || "",
+        status: file?.status || ""
+      }),
+      sourceStatus: cleanObject(sourceStatus),
+      counts: cleanObject(counts)
+    },
+    authority: "Ephemeral continuity metadata only. It is not persisted to Chance Brain and never authorizes an action."
+  };
+}
+
+function operatorMemoryCloseoutBoundary() {
+  return {
+    recorded: false,
+    reason: "operator_privacy_boundary",
+    authority: "The external action security ledger remains authoritative; no client receipt, free text, or source evidence was written to Chance Brain."
   };
 }
 
@@ -1424,6 +1509,9 @@ async function completeArtifact(input) {
 
 async function searchContacts(input) {
   const query = required(input.query, "query").toLowerCase();
+  if (isCodexOperatorRequest() && normalizeCompare(query).length < 3) {
+    badRequest("The Codex HP operator search query is too broad. Use at least three identifying characters, a JobNimbus number, claim number, or exact address.");
+  }
   const limit = clamp(Number(input.limit || 10), 1, 25);
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 10) });
   const matches = contacts
@@ -1431,7 +1519,17 @@ async function searchContacts(input) {
     .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
     .filter((contact) => contactMatches(contact, query))
     .slice(0, limit);
-  const compactMatches = matches.map(compactContact);
+  const compactMatches = matches.map((contact) => {
+    const file = compactContact(contact);
+    return isCodexOperatorRequest()
+      ? {
+          id: file.id,
+          number: file.number,
+          name: file.name,
+          status: file.status
+        }
+      : file;
+  });
   return {
     query,
     count: compactMatches.length,
@@ -1451,7 +1549,10 @@ async function reviewFile(input) {
   const sortedActivities = [...activities].sort((a, b) => Number(b.date_created || 0) - Number(a.date_created || 0));
   const openTasks = tasks.filter((task) => !task.is_completed).sort((a, b) => Number(a.date_start || a.date_end || 0) - Number(b.date_start || b.date_end || 0));
   const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
-  const actionReceipts = latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id });
+  const operatorRequest = isCodexOperatorRequest();
+  const actionReceipts = operatorRequest
+    ? []
+    : latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id });
   const sourceStatus = {
     jobNimbus: { status: "fresh", at: new Date().toISOString() },
     gmail: { status: "not_requested", at: new Date().toISOString() },
@@ -1464,17 +1565,21 @@ async function reviewFile(input) {
     excludedPhotoLikeDocumentCount: documents.length - operationalDocuments.length,
     assistantRead: buildAssistantRead(contact, activities, tasks, operationalDocuments)
   };
-  const snapshot = refreshFileSnapshot(MEMORY_CONFIG, {
-    subjectKey: file.id,
-    file,
-    liveJobNimbus,
-    gmail: { status: "not_requested", messages: [], threads: [] },
-    quo: { status: "not_requested", timeline: [], transcripts: [] },
-    actionReceipts,
-    sourceStatus,
-    factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, {}, {})
-  });
-  const operational = reconcileOperationalState(MEMORY_CONFIG, snapshot);
+  const snapshot = operatorRequest
+    ? null
+    : refreshFileSnapshot(MEMORY_CONFIG, {
+        subjectKey: file.id,
+        file,
+        liveJobNimbus,
+        gmail: { status: "not_requested", messages: [], threads: [] },
+        quo: { status: "not_requested", timeline: [], transcripts: [] },
+        actionReceipts,
+        sourceStatus,
+        factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, {}, {})
+      });
+  const operational = operatorRequest
+    ? operatorBrainBoundary()
+    : reconcileOperationalState(MEMORY_CONFIG, snapshot);
   return {
     file,
     rawContact: contact,
@@ -1487,9 +1592,15 @@ async function reviewFile(input) {
     assistantRead: liveJobNimbus.assistantRead,
     actionReceipts,
     sourceStatus,
-    clientMemory: clientMemoryEnvelope(snapshot),
+    clientMemory: operatorRequest
+      ? operatorEphemeralContinuity(file, sourceStatus, {
+          recentActivityCount: liveJobNimbus.recentActivities.length,
+          openTaskCount: liveJobNimbus.openTasks.length,
+          operationalDocumentCount: liveJobNimbus.operationalDocuments.length
+        })
+      : clientMemoryEnvelope(snapshot),
     operational,
-    brain: reviewBrainContext(file.id, input.maxPerSection)
+    brain: operatorRequest ? operatorBrainBoundary() : reviewBrainContext(file.id, input.maxPerSection)
   };
 }
 
@@ -3494,10 +3605,17 @@ async function updateContact(input) {
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
   const { contact } = await findChanceContact(query);
   const normalizedFields = normalizeContactFields(fields);
+  assertCodexOperatorFields(
+    normalizedFields,
+    CODEX_OPERATOR_CONTACT_FIELDS,
+    "contact",
+    { allowContactCustomFields: true }
+  );
   const plan = { endpoint: `/contacts/${contact.jnid}`, fields: normalizedFields };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: normalizedFields });
   const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
+  assertOperatorContactScope(refreshedContact);
   if (!recordMatchesFields(refreshedContact, normalizedFields)) {
     conflictError("JobNimbus accepted the update request, but a fresh read did not confirm the requested fields. The bridge will not report this update as complete.");
   }
@@ -3524,6 +3642,7 @@ async function updateStatus(input) {
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
   const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
+  assertOperatorContactScope(refreshedContact);
   if (!recordMatchesFields(refreshedContact, body)) {
     conflictError("JobNimbus accepted the status update request, but a fresh read did not confirm the requested status. The bridge will not report this update as complete.");
   }
@@ -3546,7 +3665,20 @@ async function processUpdate(input) {
   const { contact, knownStatusNames } = await findChanceContact(query);
   const status = requestedStatus ? resolveWorkflowStatusName(requestedStatus, knownStatusNames) : "";
   const file = compactContact(contact);
-  const contactBody = normalizeContactFields({ ...fields, ...(status ? { status_name: status } : {}) });
+  const normalizedInputFields = normalizeContactFields(fields);
+  assertCodexOperatorFields(
+    normalizedInputFields,
+    CODEX_OPERATOR_CONTACT_FIELDS,
+    "contact",
+    { allowContactCustomFields: true }
+  );
+  const contactBody = { ...normalizedInputFields, ...(status ? { status_name: status } : {}) };
+  assertCodexOperatorFields(
+    contactBody,
+    CODEX_OPERATOR_CONTACT_FIELDS,
+    "contact",
+    { allowContactCustomFields: true, allowResolvedStatus: true }
+  );
   const noteBody = note ? {
     note,
     date_created: Math.floor(Date.now() / 1000),
@@ -3568,6 +3700,7 @@ async function processUpdate(input) {
   if (Object.keys(contactBody).length) {
     results.contact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: contactBody });
     const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
+    assertOperatorContactScope(refreshedContact);
     if (!recordMatchesFields(refreshedContact, contactBody)) {
       conflictError("JobNimbus accepted the bundled update request, but a fresh read did not confirm the requested contact fields. The bridge will not report this update as complete.");
     }
@@ -3590,7 +3723,9 @@ async function documentText(input) {
   const maxOcrPages = clamp(Number(input.maxOcrPages || 5), 1, 20);
   const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
   const documents = await listRelated("/files", contact.jnid, 1000);
-  const document = selectDocument(documents, documentQuery);
+  const document = isCodexOperatorRequest()
+    ? selectDocumentForChat(documents, documentQuery)
+    : selectDocument(documents, documentQuery);
   if (!document) {
     return {
       file: compactContact(contact),
@@ -3625,7 +3760,9 @@ async function documentReview(input) {
   const { contact, readScope } = await findDocumentReadContact(query, { documentQuery });
   const documents = await listRelated("/files", contact.jnid, 1000);
   const document = documentQuery
-    ? selectDocument(documents, documentQuery)
+    ? isCodexOperatorRequest()
+      ? selectDocumentForChat(documents, documentQuery)
+      : selectDocument(documents, documentQuery)
     : selectDocumentByPurpose(documents, documentPurpose);
   if (!document) {
     return {
@@ -3847,6 +3984,13 @@ async function createTask(input) {
   const query = required(input.query, "query");
   const title = required(input.title || input.subject, "title");
   const { contact } = await findChanceContact(query);
+  if (
+    currentRequestIdentity()?.type === "codex_operator_token"
+    && input.recordTypeName !== undefined
+    && String(input.recordTypeName).trim().toLowerCase() !== "task"
+  ) {
+    badRequest("The Codex HP operator can create only JobNimbus Task records through this action.");
+  }
   const body = cleanObject({
     title,
     subject: title,
@@ -3855,7 +3999,9 @@ async function createTask(input) {
     date_start: toUnixSeconds(input.dateStart || input.dueDate),
     date_end: toUnixSeconds(input.dateEnd || input.dueDate),
     is_completed: Boolean(input.completed || false),
-    record_type_name: input.recordTypeName || "Task",
+    record_type_name: currentRequestIdentity()?.type === "codex_operator_token"
+      ? "Task"
+      : input.recordTypeName || "Task",
     owners: [{ id: CHANCE_OWNER_ID }],
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
@@ -3916,6 +4062,23 @@ function jobNimbusUploadPlan(contact, input) {
   };
 }
 
+function assertOperatorRelatedRecord(record, contact, resource, allowedRecordTypes) {
+  if (!referencesContact(record, String(contact.jnid || contact.id || ""))) {
+    badRequest(`The requested ${resource} does not belong to the resolved Chance Pearson JobNimbus file.`);
+  }
+  const recordType = String(record.record_type_name || record.type_name || record.type || "").trim().toLowerCase();
+  if (!allowedRecordTypes.includes(recordType)) {
+    badRequest(`The requested JobNimbus record is not an allowed ${resource}.`);
+  }
+}
+
+async function requireOperatorRelatedRecord({ query, resource, endpoint, recordId, allowedRecordTypes }) {
+  const { contact } = await findChanceContact(required(query, "query"));
+  const record = await jobNimbus(`${endpoint}/${encodeURIComponent(recordId)}`);
+  assertOperatorRelatedRecord(record, contact, resource, allowedRecordTypes);
+  return { contact, record };
+}
+
 async function uploadBytesToJobNimbus(plan, bytes) {
   const reservation = await jobNimbusFileApi("/files/v1/uploads/url", { method: "POST", body: plan });
   const uploadUrl = reservation?.data?.url;
@@ -3952,10 +4115,21 @@ async function updateTask(input) {
     badRequest("Task changes are required. To complete a task, use completed:true or fields:{is_completed:true}.");
   }
   const body = normalizeDateFields(fields);
+  assertCodexOperatorFields(body, CODEX_OPERATOR_TASK_FIELDS, "task");
   validateDateRange(body.date_start, body.date_end);
+  const scopedRecord = currentRequestIdentity()?.type === "codex_operator_token"
+    ? await requireOperatorRelatedRecord({
+        query: input.query,
+        resource: "task",
+        endpoint: "/tasks",
+        recordId: taskId,
+        allowedRecordTypes: ["task"]
+      })
+    : null;
   if (input.execute !== true) {
     return {
       mode: "dry_run",
+      ...(scopedRecord ? { file: compactContact(scopedRecord.contact) } : {}),
       plan: { endpoint: `/tasks/${taskId}`, body, schedule: centralSchedulePreview(body.date_start, body.date_end) }
     };
   }
@@ -3970,9 +4144,19 @@ async function updateTask(input) {
     result = task;
     reconciledAfterApiError = true;
   }
-  const taskSubjectKey = String(input.subjectKey || result?.primary?.id || result?.related?.[0]?.id || "").trim();
-  const taskFile = input.query
-    ? compactContact((await findChanceContact(input.query)).contact)
+  if (scopedRecord) {
+    const refreshedTask = await jobNimbus(`/tasks/${encodeURIComponent(taskId)}`);
+    assertOperatorRelatedRecord(refreshedTask, scopedRecord.contact, "task", ["task"]);
+    if (!recordMatchesFields(refreshedTask, body)) {
+      conflictError("JobNimbus accepted the task update request, but a fresh read did not confirm the requested fields.");
+    }
+    result = refreshedTask;
+  }
+  const taskSubjectKey = String(scopedRecord?.contact?.jnid || input.subjectKey || result?.primary?.id || result?.related?.[0]?.id || "").trim();
+  const taskFile = scopedRecord
+    ? compactContact(scopedRecord.contact)
+    : input.query
+      ? compactContact((await findChanceContact(input.query)).contact)
     : taskSubjectKey ? { id: taskSubjectKey, name: String(input.fileLabel || "") } : null;
   const memoryCloseout = taskFile
     ? await closeoutJobNimbusAction(taskFile, "update_task", result, `Updated approved JobNimbus task ${taskId}.`)
@@ -3985,7 +4169,14 @@ async function updateTask(input) {
       externalId: resultId(result) || taskId,
       evidence: [`jobnimbus:task:${taskId}`]
     });
-  return { mode: "executed", taskId, result, reconciledAfterApiError, memoryCloseout };
+  return {
+    mode: "executed",
+    ...(taskFile ? { file: taskFile } : {}),
+    taskId,
+    result,
+    reconciledAfterApiError,
+    memoryCloseout
+  };
 }
 
 async function createCalendarEvent(input) {
@@ -3998,6 +4189,13 @@ async function createCalendarEvent(input) {
   const dateEnd = toUnixSeconds(input.dateEnd || input.end) || dateStart;
   validateDateRange(dateStart, dateEnd);
   const { contact } = await findChanceContact(query);
+  if (
+    currentRequestIdentity()?.type === "codex_operator_token"
+    && input.recordTypeName !== undefined
+    && String(input.recordTypeName).trim().toLowerCase() !== "event"
+  ) {
+    badRequest("The Codex HP operator can create only JobNimbus Event records through this action.");
+  }
   const body = cleanObject({
     title,
     subject: title,
@@ -4005,7 +4203,9 @@ async function createCalendarEvent(input) {
     description: input.description || input.note || "",
     date_start: dateStart,
     date_end: dateEnd,
-    record_type_name: input.recordTypeName || "Event",
+    record_type_name: currentRequestIdentity()?.type === "codex_operator_token"
+      ? "Event"
+      : input.recordTypeName || "Event",
     owners: [{ id: CHANCE_OWNER_ID }],
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
@@ -4031,16 +4231,37 @@ async function updateCalendarEvent(input) {
   if (!eventId) badRequest("eventId is required");
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
-  const file = input.query ? compactContact((await findChanceContact(input.query)).contact) : null;
+  const scopedRecord = currentRequestIdentity()?.type === "codex_operator_token"
+    ? await requireOperatorRelatedRecord({
+        query: input.query,
+        resource: "calendar event",
+        endpoint: "/activities",
+        recordId: eventId,
+        allowedRecordTypes: ["event", "appointment"]
+      })
+    : null;
+  const file = scopedRecord
+    ? compactContact(scopedRecord.contact)
+    : input.query ? compactContact((await findChanceContact(input.query)).contact) : null;
   const body = normalizeDateFields(fields);
+  assertCodexOperatorFields(body, CODEX_OPERATOR_EVENT_FIELDS, "calendar event");
   validateDateRange(body.date_start, body.date_end);
   if (input.execute !== true) {
     return {
       mode: "dry_run",
+      ...(file ? { file } : {}),
       plan: { endpoint: `/activities/${eventId}`, body, schedule: centralSchedulePreview(body.date_start, body.date_end) }
     };
   }
-  const result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
+  let result = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`, { method: "PUT", body });
+  if (scopedRecord) {
+    const refreshedEvent = await jobNimbus(`/activities/${encodeURIComponent(eventId)}`);
+    assertOperatorRelatedRecord(refreshedEvent, scopedRecord.contact, "calendar event", ["event", "appointment"]);
+    if (!recordMatchesFields(refreshedEvent, body)) {
+      conflictError("JobNimbus accepted the calendar-event update request, but a fresh read did not confirm the requested fields.");
+    }
+    result = refreshedEvent;
+  }
   const memoryCloseout = file
     ? await closeoutJobNimbusAction(file, "update_calendar_event", result, `Updated approved JobNimbus calendar event ${eventId}.`)
     : safeCloseoutAction(MEMORY_CONFIG, {
@@ -4050,21 +4271,30 @@ async function updateCalendarEvent(input) {
       externalId: resultId(result) || eventId,
       evidence: [`jobnimbus:activity:${eventId}`]
     });
-  return { mode: "executed", eventId, result, memoryCloseout };
+  return { mode: "executed", ...(file ? { file } : {}), eventId, result, memoryCloseout };
 }
 
 async function gmailSearch(input) {
-  const query = required(input.query, "query");
+  const operatorFile = await operatorCommunicationFile(input, "Gmail search");
+  const query = operatorFile
+    ? buildFileGmailQuery(operatorFile, input.communicationDays)
+    : required(input.query, "query");
   const limit = clamp(Number(input.limit || 10), 1, 25);
   const messages = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`);
   const rows = Array.isArray(messages.messages) ? messages.messages : [];
   const hydrated = [];
   for (const row of rows) {
-    const message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`);
+    const message = await gmailApi(
+      operatorFile
+        ? `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=full`
+        : `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`
+    );
+    if (operatorFile && !gmailMessageMatchesFile(compactGmailFullMessage(message), operatorFile)) continue;
     hydrated.push(compactGmailMessage(message));
   }
   return {
     query,
+    ...(operatorFile ? { file: operatorFile, scope: "chance_assigned_file" } : {}),
     count: hydrated.length,
     messages: hydrated,
     threads: groupGmailMessagesByThread(hydrated)
@@ -4072,11 +4302,16 @@ async function gmailSearch(input) {
 }
 
 async function gmailThread(input) {
+  const operatorFile = await operatorCommunicationFile(input, "Gmail thread");
   const threadId = required(input.threadId, "threadId");
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
   const messages = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
+  if (operatorFile && !messages.some((message) => gmailMessageMatchesFile(message, operatorFile))) {
+    operatorScopeError("That Gmail thread is not strongly correlated to the resolved Chance-assigned file.");
+  }
   return {
     id: thread.id || threadId,
+    ...(operatorFile ? { file: operatorFile, scope: "chance_assigned_file" } : {}),
     historyId: thread.historyId || "",
     messageCount: messages.length,
     messages,
@@ -4085,10 +4320,30 @@ async function gmailThread(input) {
 }
 
 async function gmailAttachmentReview(input) {
+  const operatorFile = await operatorCommunicationFile(input, "Gmail attachment review");
   const messageId = required(input.messageId, "messageId");
   const attachmentId = required(input.attachmentId, "attachmentId");
-  const filename = safeMimeFilename(required(input.filename, "filename"));
-  const contentType = String(input.contentType || "application/octet-stream").trim();
+  let filename = safeMimeFilename(required(input.filename, "filename"));
+  let contentType = String(input.contentType || "application/octet-stream").trim();
+  if (operatorFile) {
+    const message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageId)}?format=full`);
+    const compact = compactGmailFullMessage(message);
+    if (!gmailMessageMatchesFile(compact, operatorFile)) {
+      operatorScopeError("That Gmail message is not strongly correlated to the resolved Chance-assigned file.");
+    }
+    const verifiedAttachment = compact.attachments.find((row) => String(row.attachmentId || "") === attachmentId);
+    if (!verifiedAttachment) {
+      operatorScopeError("That attachment id is not present on the verified client-scoped Gmail message.");
+    }
+    if (normalizeCompare(verifiedAttachment.filename) !== normalizeCompare(filename)) {
+      badRequest("The requested filename does not match the verified Gmail attachment metadata.");
+    }
+    if (input.contentType && String(verifiedAttachment.mimeType || "").trim().toLowerCase() !== contentType.toLowerCase()) {
+      badRequest("The requested content type does not match the verified Gmail attachment metadata.");
+    }
+    filename = safeMimeFilename(verifiedAttachment.filename);
+    contentType = String(verifiedAttachment.mimeType || contentType || "application/octet-stream").trim();
+  }
   const payload = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`);
   const bytes = base64UrlToBuffer(payload?.data || "");
   const attachment = validateEmailAttachment({ filename, contentType, bytes });
@@ -4139,16 +4394,89 @@ async function gmailAttachmentReview(input) {
   };
 }
 
+async function operatorCommunicationFile(input, label) {
+  if (currentRequestIdentity()?.type !== "codex_operator_token") return null;
+  const internalFile = input?.[INTERNAL_COMMUNICATION_SCOPE]?.file;
+  const file = internalFile?.id
+    ? internalFile
+    : compactContact((await findChanceContact(required(input?.fileQuery, `${label} fileQuery`))).contact);
+  if (file[GMAIL_FILE_EMAIL_UNIQUE] === undefined) {
+    const email = String(file.email || "").trim().toLowerCase();
+    const contacts = email ? await listContacts({ maxPages: 25 }) : [];
+    const matchingFileCount = contacts
+      .filter(isInsuranceFile)
+      .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+      .filter((contact) => String(compactContact(contact).email || "").trim().toLowerCase() === email)
+      .length;
+    Object.defineProperty(file, GMAIL_FILE_EMAIL_UNIQUE, {
+      value: Boolean(email) && matchingFileCount === 1,
+      enumerable: false
+    });
+  }
+  return file;
+}
+
+async function operatorGmailActionFile(input, label) {
+  if (currentRequestIdentity()?.type !== "codex_operator_token") return null;
+  const fileQuery = required(input?.query || input?.fileQuery, `${label} query`);
+  return compactContact((await findChanceContact(fileQuery)).contact);
+}
+
+function operatorScopeError(message) {
+  const error = new Error(message);
+  error.statusCode = 403;
+  throw error;
+}
+
+function gmailMessageMatchesFile(message, file) {
+  const headerText = [
+    message.from,
+    message.to,
+    message.cc,
+    message.bcc,
+    message.subject
+  ].map((value) => String(value || "")).join("\n").toLowerCase();
+  const clientEmail = String(file.email || "").trim().toLowerCase();
+  const headerAddresses = new Set(
+    [...headerText.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)]
+      .map((match) => String(match[0] || "").toLowerCase())
+  );
+  if (file[GMAIL_FILE_EMAIL_UNIQUE] === true && clientEmail && headerAddresses.has(clientEmail)) return true;
+
+  const content = [
+    headerText,
+    message.plainText,
+    message.htmlText,
+    message.snippet,
+    ...(Array.isArray(message.attachments) ? message.attachments.map((row) => row.filename) : [])
+  ].map((value) => String(value || "")).join("\n");
+  const claimNumber = String(file.claimNumber || "").trim();
+  return normalizeCompare(claimNumber).length >= 6
+    && contentContainsExactIdentifier(content, claimNumber);
+}
+
+function contentContainsExactIdentifier(content, identifier) {
+  const expected = String(identifier || "").normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+  if (expected.length < 6) return false;
+  const candidates = String(content || "").match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [];
+  return candidates.some((candidate) => (
+    candidate.normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase() === expected
+  ));
+}
+
 async function gmailDraft(input) {
-  const to = required(input.to, "to");
-  const subject = required(input.subject, "subject");
-  const cc = String(input.cc || "").trim();
-  const bcc = String(input.bcc || "").trim();
+  const operatorFile = await operatorGmailActionFile(input, "Gmail draft");
+  const to = validateEmailAddressList(required(input.to, "to"), "to", { required: true });
+  const subject = validateEmailHeaderValue(required(input.subject, "subject"), "subject");
+  const cc = validateEmailAddressList(input.cc, "cc");
+  const bcc = validateEmailAddressList(input.bcc, "bcc");
   const threadId = String(input.threadId || "").trim();
-  const attachments = await loadEmailAttachments(input);
+  const attachments = await loadEmailAttachments(operatorFile
+    ? { ...input, [INTERNAL_GMAIL_ACTION_SCOPE]: { file: operatorFile } }
+    : input);
   const resolvedMessage = await resolveGmailMessageBody(input, attachments);
   const body = resolvedMessage.body;
-  const reusable = await reusableGmailDraft(input, subject);
+  const reusable = operatorFile ? null : await reusableGmailDraft(input, subject);
   if (reusable) {
     const bodyMatches = normalizeEmailBody(reusable.snapshot.body) === normalizeEmailBody(body);
     return {
@@ -4157,7 +4485,7 @@ async function gmailDraft(input) {
       bodyTemplate: resolvedMessage.template,
       bodyMatches,
       instruction: bodyMatches
-        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId so Gmail sends and removes the reviewed draft."
+        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId; the reviewed source draft remains for separately approved cleanup."
         : "A Gmail draft already exists for this file and subject, but its body does not match the current approved carrier template. Do not send it and do not create a duplicate. Show Chance the mismatch and obtain approval before replacing the existing draft.",
       sendPayload: cleanObject({
         query: input.query || input.fileQuery || "",
@@ -4168,40 +4496,77 @@ async function gmailDraft(input) {
   }
   const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const draftBody = { message: cleanObject({ raw, threadId }) };
+  const plan = {
+    endpoint: "/gmail/v1/users/me/drafts",
+    ...(operatorFile ? {
+      fileScope: {
+        id: operatorFile.id,
+        number: operatorFile.number,
+        name: operatorFile.name
+      }
+    } : {}),
+    to,
+    cc,
+    bcc,
+    subject,
+    body,
+    bodyTemplate: resolvedMessage.template,
+    threadId,
+    attemptId: String(input.attemptId || "initial"),
+    attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
+  };
+  const approvalDigest = digest({ channel: "gmail", action: "create_draft", plan });
   if (input.execute !== true) {
     return {
       mode: "dry_run",
-      plan: {
-        endpoint: "/gmail/v1/users/me/drafts",
-        to,
-        cc,
-        bcc,
-        subject,
-        body,
-        bodyTemplate: resolvedMessage.template,
-        threadId,
-        attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
-      }
+      plan,
+      approvalDigest
     };
   }
+  requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail draft");
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to create Gmail drafts.");
-  const result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts`, {
-    method: "POST",
-    body: draftBody
-  });
-  const file = await optionalChanceFile(input.query || input.fileQuery);
+  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, { to, subject });
+  let result;
+  try {
+    result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts`, {
+      method: "POST",
+      body: draftBody
+    });
+    await completeOutboundSend(reservation.id, "completed", result.id || result.message?.id || "");
+  } catch (error) {
+    await completeOutboundSend(reservation.id, "failed_requires_review", "", error.message);
+    throw error;
+  }
+  const file = operatorFile || await optionalChanceFile(input.query || input.fileQuery);
   const memoryCloseout = closeoutGmailAction(input, file, "create_draft", result.id || result.message?.id, `Created approved Gmail draft with subject ${subject} and ${attachments.length} verified attachment(s).`, "drafted");
-  return { mode: "executed", draft: compactGmailDraft(result), attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source)), memoryCloseout };
+  return {
+    mode: "executed",
+    ...(file ? { file } : {}),
+    ...(operatorFile ? {
+      fileScope: {
+        id: operatorFile.id,
+        number: operatorFile.number,
+        name: operatorFile.name
+      }
+    } : {}),
+    draft: compactGmailDraft(result),
+    attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source)),
+    memoryCloseout
+  };
 }
 
 async function gmailSend(input) {
   const draftId = String(input.draftId || "").trim();
-  if (draftId) return gmailSendExistingDraft(input, draftId);
+  const operatorFile = await operatorGmailActionFile(input, "Gmail send");
+  if (draftId) return gmailSendExistingDraft(input, draftId, operatorFile);
+  if (operatorFile) {
+    badRequest("The Codex HP operator may send only a bridge-created Gmail draft that was reviewed by exact draftId.");
+  }
 
-  const to = required(input.to, "to");
-  const subject = required(input.subject, "subject");
-  const cc = String(input.cc || "").trim();
-  const bcc = String(input.bcc || "").trim();
+  const to = validateEmailAddressList(required(input.to, "to"), "to", { required: true });
+  const subject = validateEmailHeaderValue(required(input.subject, "subject"), "subject");
+  const cc = validateEmailAddressList(input.cc, "cc");
+  const bcc = validateEmailAddressList(input.bcc, "bcc");
   const threadId = String(input.threadId || "").trim();
   const attachments = await loadEmailAttachments(input);
   const resolvedMessage = await resolveGmailMessageBody(input, attachments);
@@ -4305,11 +4670,22 @@ async function resolveGmailMessageBody(input, attachments) {
   return { body: required(input.body, "body"), template: "custom" };
 }
 
-async function gmailSendExistingDraft(input, draftId) {
+async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
+  if (operatorFile) await assertOperatorDraftProvenance(operatorFile, draftId);
+  const sourceKey = `gmail-draft:${String(draftId)}`;
+  await assertOutboundSourceAvailable("gmail", sourceKey);
   const snapshot = await gmailDraftSnapshot(draftId);
   const plan = {
-    endpoint: "/gmail/v1/users/me/drafts/send",
+    endpoint: "/gmail/v1/users/me/messages/send",
     action: "send_existing_draft",
+    deliveryMode: "immutable_reviewed_snapshot_source_draft_retained",
+    ...(operatorFile ? {
+      fileScope: {
+        id: operatorFile.id,
+        number: operatorFile.number,
+        name: operatorFile.name
+      }
+    } : {}),
     draftId: snapshot.id,
     messageId: snapshot.messageId,
     threadId: snapshot.threadId,
@@ -4317,9 +4693,14 @@ async function gmailSendExistingDraft(input, draftId) {
     cc: snapshot.cc,
     bcc: snapshot.bcc,
     subject: snapshot.subject,
+    deliveryHeaders: snapshot.deliveryHeaders,
     body: snapshot.body,
+    bodyRepresentations: snapshot.bodyRepresentations,
     attachments: snapshot.attachments,
-    contentDigest: snapshot.contentDigest
+    contentDigest: snapshot.contentDigest,
+    transmittedHeaders: ["From", "Sender", "Reply-To", "To", "Cc", "Bcc", "Subject", "MIME-Version", "Content-Type"],
+    omittedOriginalHeaders: "Any original draft header not listed in transmittedHeaders is excluded from the immutable send.",
+    sourceDraftRetention: "retained_for_separate_cleanup"
   };
   const approvalDigest = digest({ channel: "gmail", action: "send_existing_draft", plan });
   if (input.execute !== true) {
@@ -4327,37 +4708,59 @@ async function gmailSendExistingDraft(input, draftId) {
       mode: "dry_run",
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After Chance approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. Gmail will send and remove the reviewed draft."
+      instruction: "Nothing was sent. After Chance approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. The bridge sends only the immutable reviewed snapshot and retains the source draft; deleting it is a separate approval-gated action."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
   if (!ALLOW_GMAIL_SEND) badRequest("Gmail sending is disabled. Set ALLOW_GMAIL_SEND=true in Render.");
   requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail existing-draft send");
-  const reservation = await reserveOutboundSend("gmail", approvalDigest, { to: snapshot.to, subject: snapshot.subject });
+  const reservation = await reserveOutboundSend("gmail", approvalDigest, {
+    to: snapshot.to,
+    subject: snapshot.subject,
+    sourceKey
+  });
   let result;
   try {
-    result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts/send`, {
+    const raw = buildRawEmail({
+      from: snapshot.deliveryHeaders.from || "",
+      sender: snapshot.deliveryHeaders.sender || "",
+      replyTo: snapshot.deliveryHeaders.replyTo || "",
+      to: snapshot.to,
+      cc: snapshot.cc,
+      bcc: snapshot.bcc,
+      subject: snapshot.subject,
+      body: snapshot.body,
+      attachments: snapshot[GMAIL_DRAFT_MIME_BYTES]
+    });
+    result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/send`, {
       method: "POST",
-      body: { id: draftId }
+      body: cleanObject({ raw, threadId: snapshot.threadId })
     });
     await completeOutboundSend(reservation.id, "completed", result.id || "");
   } catch (error) {
     await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
     throw error;
   }
-  const file = await optionalChanceFile(input.query || input.fileQuery);
+  const sourceDraftRetention = {
+    retained: true,
+    status: "retained_for_separate_cleanup",
+    authority: "The send approval did not authorize deleting the source draft."
+  };
+  const file = operatorFile || await optionalChanceFile(input.query || input.fileQuery);
   const memoryCloseout = closeoutGmailAction(
     input,
     file,
     "send_draft",
     result.id,
-    `Sent and consumed approved Gmail draft with subject ${snapshot.subject} and ${snapshot.attachments.length} verified attachment(s).`
+    `Sent approved immutable Gmail draft snapshot with ${snapshot.attachments.length} verified attachment(s); the source draft was retained.`
   );
   return {
     mode: "executed",
+    ...(file ? { file } : {}),
     message: compactGmailMessage(result),
-    consumedDraftId: draftId,
+    sourceDraftId: draftId,
     attachments: snapshot.attachments,
+    sourceDraftRetention,
     memoryCloseout
   };
 }
@@ -4378,15 +4781,38 @@ async function reusableGmailDraft(input, subject) {
   }
 }
 
+async function assertOperatorDraftProvenance(file, draftId) {
+  const batches = await readActionBatchLedger();
+  const receipt = batches
+    .flatMap((batch) => Array.isArray(batch.completed) ? batch.completed : [])
+    .find((row) => (
+      row.type === "gmail.create_draft"
+      && row.status === "executed"
+      && String(row.receipt?.fileId || "") === String(file.id)
+      && String(row.receipt?.externalId || "") === String(draftId)
+    ));
+  if (!receipt) {
+    operatorScopeError("The Codex HP operator may send only a Gmail draft created by this bridge for the resolved Chance-assigned file.");
+  }
+  return receipt;
+}
+
 async function gmailDraftSnapshot(draftId) {
   const draft = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts/${encodeURIComponent(draftId)}?format=full`);
-  const message = compactGmailFullMessage(draft.message || {});
-  const headers = gmailHeaders(draft.message || {});
-  const attachments = message.attachments.map((attachment) => ({
-    filename: attachment.filename,
-    mimeType: attachment.mimeType || ""
-  }));
-  return {
+  const rawMessage = draft.message || {};
+  const message = compactGmailMessage(rawMessage);
+  const headers = gmailDeliveryHeaders(draft.message || {});
+  const mime = await gmailDraftMimeSnapshot(rawMessage);
+  const deliveryHeaders = cleanObject({
+    from: headers.from,
+    sender: headers.sender,
+    replyTo: headers["reply-to"],
+    to: headers.to,
+    cc: headers.cc,
+    bcc: headers.bcc,
+    subject: headers.subject
+  });
+  const snapshot = {
     id: String(draft.id || draftId),
     messageId: message.id,
     threadId: message.threadId,
@@ -4394,15 +4820,133 @@ async function gmailDraftSnapshot(draftId) {
     cc: headers.cc || "",
     bcc: headers.bcc || "",
     subject: headers.subject || "",
-    body: message.plainText || message.htmlText || message.snippet || "",
-    attachments,
+    deliveryHeaders,
+    body: mime.primaryBody,
+    bodyRepresentations: mime.bodyRepresentations,
+    attachments: mime.attachments,
     contentDigest: digest({
       draftId: String(draft.id || draftId),
       messageId: message.id,
       threadId: message.threadId,
+      deliveryHeaders,
+      bodyRepresentations: mime.bodyRepresentations,
+      attachments: mime.attachments,
       payload: draft.message?.payload || null
     })
   };
+  Object.defineProperty(snapshot, GMAIL_DRAFT_MIME_BYTES, {
+    value: mime[GMAIL_DRAFT_MIME_BYTES],
+    enumerable: false
+  });
+  return snapshot;
+}
+
+async function gmailDraftMimeSnapshot(message) {
+  const bodyRepresentations = [];
+  const attachments = [];
+  const attachmentMaterial = [];
+  let bodyBytesTotal = 0;
+  let attachmentBytesTotal = 0;
+  let leafIndex = 0;
+  const leafParts = [];
+  walkGmailParts(message?.payload || {}, (part) => {
+    if (Array.isArray(part?.parts) && part.parts.length) return;
+    leafParts.push(part || {});
+  });
+
+  for (const part of leafParts) {
+    leafIndex += 1;
+    const mimeType = String(part.mimeType || "application/octet-stream").trim().toLowerCase();
+    const filename = String(part.filename || "").trim();
+    const partHeaders = gmailPartHeaders(part);
+    const attachmentId = String(part.body?.attachmentId || "").trim();
+    let bytes = Buffer.alloc(0);
+    if (attachmentId) {
+      if (!message?.id) badRequest("Gmail draft attachment is missing its message id.");
+      const payload = await gmailApi(
+        `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(message.id)}/attachments/${encodeURIComponent(attachmentId)}`
+      );
+      bytes = base64UrlToBuffer(payload?.data || "");
+    } else if (part.body?.data) {
+      bytes = base64UrlToBuffer(part.body.data);
+    }
+
+    const isBodyRepresentation = !filename && ["text/plain", "text/html"].includes(mimeType);
+    if (isBodyRepresentation) {
+      bodyBytesTotal += bytes.length;
+      if (bodyBytesTotal > 100 * 1024) {
+        badRequest("Gmail draft body representations exceed the 100 KB exact-review limit.");
+      }
+      const content = bytes.toString("utf8");
+      if (!Buffer.from(content, "utf8").equals(bytes)) {
+        badRequest(`Gmail draft ${mimeType} body is not valid UTF-8 and cannot be reviewed exactly.`);
+      }
+      bodyRepresentations.push(cleanObject({
+        partId: String(part.partId || leafIndex),
+        mimeType,
+        disposition: partHeaders["content-disposition"] || "",
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        content
+      }));
+      continue;
+    }
+
+    if (!bytes.length) {
+      badRequest(`Gmail draft MIME part ${filename || part.partId || leafIndex} is empty or unavailable.`);
+    }
+    if (!filename) {
+      badRequest(`Gmail draft MIME part ${part.partId || leafIndex} has no filename and cannot be reconstructed for an exact immutable send.`);
+    }
+    const disposition = String(partHeaders["content-disposition"] || "").trim();
+    if (disposition && !/^attachment(?:;|$)/i.test(disposition)) {
+      badRequest(`Gmail draft attachment ${filename} uses unsupported non-attachment disposition.`);
+    }
+    if (partHeaders["content-id"]) {
+      badRequest(`Gmail draft attachment ${filename} uses an unsupported Content-ID.`);
+    }
+    attachmentBytesTotal += bytes.length;
+    if (attachmentBytesTotal > 20 * 1024 * 1024) {
+      badRequest("Gmail draft attachments exceed the bridge's 20 MB exact-review limit.");
+    }
+    const descriptor = cleanObject({
+      partId: String(part.partId || leafIndex),
+      filename: safeMimeFilename(filename),
+      mimeType,
+      disposition,
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex")
+    });
+    attachments.push(descriptor);
+    attachmentMaterial.push({
+      filename: descriptor.filename,
+      contentType: mimeType,
+      bytes
+    });
+  }
+
+  if (
+    bodyRepresentations.length !== 1
+    || bodyRepresentations[0].mimeType !== "text/plain"
+  ) {
+    badRequest("Exact Gmail draft sending requires exactly one UTF-8 text/plain body representation; alternate HTML or multiple bodies are not supported.");
+  }
+  return {
+    primaryBody: bodyRepresentations[0].content || "",
+    bodyRepresentations,
+    attachments,
+    [GMAIL_DRAFT_MIME_BYTES]: attachmentMaterial
+  };
+}
+
+function gmailPartHeaders(part) {
+  const out = {};
+  for (const header of Array.isArray(part?.headers) ? part.headers : []) {
+    const key = String(header.name || "").trim().toLowerCase();
+    if (!key || out[key] !== undefined) continue;
+    out[key] = String(header.value || "");
+  }
+  return out;
 }
 
 function quoConfig() {
@@ -4416,15 +4960,40 @@ function quoConfig() {
 }
 
 async function quoNumbers() {
+  if (currentRequestIdentity()?.type === "codex_operator_token") {
+    const line = await authorizedQuoLine();
+    const numbers = line.number ? [line] : [];
+    return { count: numbers.length, numbers, scope: "authenticated_operator_line" };
+  }
   const numbers = await listQuoNumbers(quoConfig());
   return { count: numbers.length, numbers };
+}
+
+async function assertUniqueChanceFilePhone(file, label) {
+  const phone = normalizePhone(file?.phone);
+  if (!phone) badRequest(`The resolved Chance file has no phone number for ${label}.`);
+  const contacts = await listContacts({ maxPages: 25 });
+  const matchingFiles = contacts
+    .filter(isInsuranceFile)
+    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter((contact) => normalizePhone(compactContact(contact).phone) === phone);
+  if (matchingFiles.length !== 1 || String(compactContact(matchingFiles[0]).id) !== String(file.id)) {
+    badRequest(`The resolved phone is shared across multiple Chance-assigned files, so ${label} is ambiguous and blocked.`);
+  }
 }
 
 async function quoHistory(input = {}) {
   let file = null;
   let phone = String(input.phone || "").trim();
+  if (currentRequestIdentity()?.type === "codex_operator_token") {
+    if (phone) badRequest("The Codex HP operator cannot query arbitrary Quo phone numbers.");
+    const query = required(input.query, "query");
+    file = compactContact((await findChanceContact(query)).contact);
+    phone = file.phone;
+    await assertUniqueChanceFilePhone(file, "Quo history");
+  }
   if (input.query) {
-    file = compactContact((await findChanceContact(input.query)).contact);
+    file ||= compactContact((await findChanceContact(input.query)).contact);
     phone ||= file.phone;
   }
   if (!phone) badRequest("phone or a Chance file query with a phone number is required");
@@ -4438,7 +5007,27 @@ async function quoHistory(input = {}) {
 
 async function quoTranscript(input = {}) {
   const callId = required(input.callId, "callId");
-  return readQuoTranscript(quoConfig(), callId);
+  if (currentRequestIdentity()?.type !== "codex_operator_token") {
+    return readQuoTranscript(quoConfig(), callId);
+  }
+  const query = required(input.query, "query");
+  const file = compactContact((await findChanceContact(query)).contact);
+  await assertUniqueChanceFilePhone(file, "Quo transcript verification");
+  const history = await readQuoHistory(quoConfig(), {
+    phone: file.phone,
+    maxResults: 50,
+    includeTranscripts: false
+  });
+  const call = history.timeline.find((row) => row.type === "call" && String(row.id || "") === callId);
+  if (!call) {
+    operatorScopeError("That Quo call id is not present in the current history for the resolved Chance-assigned file.");
+  }
+  return {
+    file,
+    call,
+    transcript: await readQuoTranscript(quoConfig(), callId),
+    scope: "chance_assigned_file"
+  };
 }
 
 async function quoSend(input = {}) {
@@ -4447,6 +5036,18 @@ async function quoSend(input = {}) {
   const file = compactContact(contact);
   const to = String(input.to || file.phone || "").trim();
   const content = required(input.content || input.message || input.text, "content");
+  if (currentRequestIdentity()?.type === "codex_operator_token") {
+    await assertUniqueChanceFilePhone(file, "Quo sending");
+    if (input.userId !== undefined && String(input.userId || "").trim()) {
+      badRequest("The Codex HP operator cannot select an arbitrary Quo userId.");
+    }
+    const allowedRecipients = new Set(
+      [file.phone, file.adjusterPhone].map(normalizePhone).filter(Boolean)
+    );
+    if (!allowedRecipients.has(normalizePhone(to))) {
+      badRequest("The Codex HP operator may text only a freshly verified client or desk-adjuster phone on the resolved file.");
+    }
+  }
   const authorizedLine = await authorizedQuoLine();
   const from = authorizedLine.number;
   if (!from) badRequest("No Quo sending line is configured for the authenticated employee.");
@@ -4454,7 +5055,7 @@ async function quoSend(input = {}) {
     from,
     to,
     content,
-    userId: input.userId,
+    userId: currentRequestIdentity()?.type === "codex_operator_token" ? undefined : input.userId,
     execute: false
   });
   const plan = { ...preview.plan, attemptId: String(input.attemptId || "initial") };
@@ -4478,28 +5079,35 @@ async function quoSend(input = {}) {
       from: preview.plan.from,
       to: preview.plan.to,
       content: preview.plan.content,
-      userId: input.userId,
+      userId: currentRequestIdentity()?.type === "codex_operator_token" ? undefined : input.userId,
       execute: true
     });
-    await completeOutboundSend(reservation.id, "completed", result.message.id || "");
+    const acceptedStatus = String(result.message.status || "accepted").toLowerCase();
+    await completeOutboundSend(
+      reservation.id,
+      acceptedStatus === "delivered" ? "completed" : `accepted_${acceptedStatus}`,
+      result.message.id || ""
+    );
   } catch (error) {
     await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
     throw error;
   }
-  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
-    channel: "quo",
-    action: "send_text",
-    status: result.message.status || "accepted",
-    subjectKey: file.id,
-    fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
-    summary: "Submitted approved Quo text from Chance's configured line; final carrier delivery must be verified from Quo history.",
-    externalId: result.message.id || "",
-    followUps: input.followUps || [],
-    evidence: result.message.id ? [`quo:${result.message.id}`] : []
-  });
   const deliveryStatus = String(result.message.status || "accepted").toLowerCase();
   const deliveryConfirmed = deliveryStatus === "delivered";
   const deliveryFailed = deliveryStatus === "failed" || deliveryStatus === "undelivered";
+  const memoryCloseout = isCodexOperatorRequest()
+    ? operatorMemoryCloseoutBoundary()
+    : safeCloseoutAction(MEMORY_CONFIG, {
+        channel: "quo",
+        action: "send_text",
+        status: result.message.status || "accepted",
+        subjectKey: file.id,
+        fileLabel: `${file.number || ""} ${file.name || ""}`.trim(),
+        summary: "Submitted approved Quo text from Chance's configured line; final carrier delivery must be verified from Quo history.",
+        externalId: result.message.id || "",
+        followUps: input.followUps || [],
+        evidence: result.message.id ? [`quo:${result.message.id}`] : []
+      });
   return {
     ...result,
     file,
@@ -4810,6 +5418,7 @@ async function authorizedQuoLine(identity = currentRequestIdentity()) {
 }
 
 async function reviewChanceFiles(input = {}) {
+  const operatorRequest = isCodexOperatorRequest();
   const page = clamp(Number(input.page || 1), 1, 1000);
   const limit = clamp(Number(input.limit || (input.query ? 1 : 5)), 1, 10);
   let contacts;
@@ -4830,10 +5439,12 @@ async function reviewChanceFiles(input = {}) {
       mode: "index",
       total,
       files: contacts.map(compactChanceIndexContact),
-      brain: reviewBrainContext("", input.maxPerSection),
+      brain: operatorRequest ? operatorBrainBoundary() : reviewBrainContext("", input.maxPerSection),
       assistantDirective: [
         "This is a lightweight, fresh JobNimbus index for prioritization only.",
-        "The company brain is included, but rich client snapshots are intentionally not overwritten by this lightweight index.",
+        operatorRequest
+          ? "Chance Brain client memory is neither read nor written by the Codex HP operator."
+          : "The company brain is included, but rich client snapshots are intentionally not overwritten by this lightweight index.",
         "Choose the highest-priority candidate using current status, missing claim facts, and last update.",
         "Then call this endpoint again with that exact file as query, limit 1, and Gmail/Quo enabled before proposing any action.",
         "Do not execute or infer completed work from this index."
@@ -4860,11 +5471,15 @@ async function reviewChanceFiles(input = {}) {
     pageCount: Math.ceil(total / limit),
     complete: packets.every((packet) => packet.complete),
     packets,
-    brain: reviewBrainContext(exactSubjectKey, input.maxPerSection),
+    brain: operatorRequest ? operatorBrainBoundary() : reviewBrainContext(exactSubjectKey, input.maxPerSection),
     assistantDirective: [
-      "These are fresh evidence packets joined with durable client continuity, not automatic decisions.",
+      operatorRequest
+        ? "These are fresh exact-file evidence packets with ephemeral continuity metadata; no Chance Brain client memory was read or written."
+        : "These are fresh evidence packets joined with durable client continuity, not automatic decisions.",
       "Compare current JobNimbus fields, activities, tasks, operational documents, Gmail, Quo, and prior action receipts.",
-      "The snapshot has been refreshed by this review. Use it to remember prior context, but let live evidence win.",
+      operatorRequest
+        ? "Use only the live evidence in this response; no client snapshot was refreshed."
+        : "The snapshot has been refreshed by this review. Use it to remember prior context, but let live evidence win.",
       "For each file, choose one primary next action, draft its exact content, and show Chance what requires approval.",
       "Do not treat memory or an old task as proof that work is still needed. Do not execute without approval."
     ]
@@ -5156,7 +5771,10 @@ function operationalPriority(file = {}) {
 function compactChanceIndexContact(contact) {
   const file = compactContact(contact);
   return {
-    ...file,
+    id: file.id,
+    number: file.number,
+    name: file.name,
+    status: file.status,
     dateUpdated: contact.date_updated || "",
     missing: {
       claimNumber: !file.claimNumber,
@@ -5168,6 +5786,7 @@ function compactChanceIndexContact(contact) {
 }
 
 async function buildChanceEvidencePacket(contact, input) {
+  const operatorRequest = isCodexOperatorRequest();
   const file = compactContact(contact);
   const [activities, tasks, documents] = await Promise.all([
     listRelated("/activities", contact.jnid, 60),
@@ -5184,10 +5803,18 @@ async function buildChanceEvidencePacket(contact, input) {
     } else {
       try {
         const query = buildFileGmailQuery(file, input.communicationDays);
-        const search = await gmailSearch({ query, limit: clamp(Number(input.gmailLimit || 8), 1, 15) });
+        const communicationScope = { file };
+        const search = await gmailSearch({
+          query,
+          limit: clamp(Number(input.gmailLimit || 8), 1, 15),
+          [INTERNAL_COMMUNICATION_SCOPE]: communicationScope
+        });
         const threads = [];
         for (const row of search.threads.slice(0, clamp(Number(input.gmailThreadLimit || 3), 1, 5))) {
-          const thread = await gmailThread({ threadId: row.threadId });
+          const thread = await gmailThread({
+            threadId: row.threadId,
+            [INTERNAL_COMMUNICATION_SCOPE]: communicationScope
+          });
           threads.push(compactGmailEvidenceThread(thread));
         }
         gmail = { status: "fresh", query, messages: search.messages, threads };
@@ -5206,6 +5833,7 @@ async function buildChanceEvidencePacket(contact, input) {
       quo = { status: "no_file_phone", timeline: [], transcripts: [] };
     } else {
       try {
+        if (operatorRequest) await assertUniqueChanceFilePhone(file, "Quo evidence review");
         const history = await readQuoHistory(quoConfig(), {
           phone: file.phone,
           maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
@@ -5235,10 +5863,31 @@ async function buildChanceEvidencePacket(contact, input) {
     },
     gmail,
     quo,
-    actionReceipts: latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id }),
+    actionReceipts: operatorRequest
+      ? []
+      : latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id }),
     sourceStatus,
     factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, gmail, quo)
   };
+  if (operatorRequest) {
+    return {
+      ...packet,
+      clientMemory: operatorEphemeralContinuity(file, sourceStatus, {
+        recentActivityCount: packet.liveJobNimbus.recentActivities.length,
+        openTaskCount: packet.liveJobNimbus.openTasks.length,
+        operationalDocumentCount: packet.liveJobNimbus.operationalDocuments.length,
+        gmailMessageCount: Array.isArray(gmail.messages) ? gmail.messages.length : 0,
+        gmailThreadCount: Array.isArray(gmail.threads) ? gmail.threads.length : 0,
+        quoTimelineItemCount: Array.isArray(quo.timeline) ? quo.timeline.length : 0,
+        quoTranscriptCount: Array.isArray(quo.transcripts) ? quo.transcripts.length : 0
+      }),
+      operational: operatorBrainBoundary(),
+      operationalAdvisory: {
+        status: "blocked_for_operator_privacy",
+        authority: "The Codex HP operator cannot send client evidence to an advisory model."
+      }
+    };
+  }
   const snapshot = refreshFileSnapshot(MEMORY_CONFIG, {
     subjectKey: file.id,
     file: packet.file,
@@ -5279,56 +5928,53 @@ async function processActionBatch(input = {}) {
   const operations = normalizeActionOperations(input.operations);
   const plans = [];
   for (const operation of operations) plans.push(await prepareActionOperation(operation));
-  const approvalDigest = digest({ version: 1, operations, plans: stableApprovalPlans(plans) });
+  assertOperatorBatchFileScope(plans);
+  const approvalDigest = digest({ version: 2, plans: stableApprovalPlans(plans) });
   if (input.execute !== true) {
+    const approval = await issueActionApprovalChallenge(approvalDigest, operations.length);
     return {
       mode: "dry_run",
       operationCount: operations.length,
       operations: plans,
       approvalDigest,
-      instruction: "Nothing was executed. Show Chance every exact action. After approval, repeat unchanged with execute:true and this approvalDigest."
+      approvalChallenge: approval.challenge,
+      approvalExpiresAt: approval.expiresAt,
+      instruction: "Nothing was executed. Show Chance every exact action. After approval, repeat unchanged before expiry with execute:true, this approvalDigest, and the single-use approval challenge."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true before executing an approved batch.");
   requireApprovalDigest(input.approvalDigest, approvalDigest, "action batch");
+  const approval = await consumeActionApprovalChallenge(input.approvalChallenge, approvalDigest);
 
-  const ledger = await readActionBatchLedger();
-  const existing = ledger.find((row) => row.approvalDigest === approvalDigest);
-  if (existing) {
+  const reservation = await reserveActionBatch(approval.id, approvalDigest, operations.length);
+  if (reservation.existing) {
     return {
       mode: "blocked_duplicate",
-      reason: `This exact approved batch is already ${existing.status}. Review its receipt before attempting anything again.`,
-      batch: existing
+      reason: `This exact approved batch is already ${reservation.existing.status}. Review its receipt before attempting anything again.`,
+      batch: reservation.existing
     };
   }
-  const batch = {
-    id: randomUUID(),
-    approvalDigest,
-    status: "in_progress",
-    createdAt: new Date().toISOString(),
-    operationCount: operations.length,
-    completed: []
-  };
-  ledger.push(batch);
-  await writeActionBatchLedger(ledger);
+  const batch = reservation.batch;
 
   for (let index = 0; index < operations.length; index += 1) {
     try {
       const result = await executeActionOperation(operations[index], plans[index]);
       batch.completed.push({ index, type: operations[index].type, status: "executed", receipt: summarizeOperationResult(result) });
-      await writeActionBatchLedger(ledger);
+      await updateActionBatch(batch);
     } catch (error) {
       batch.status = "partial_failure";
       batch.failedAt = index;
       batch.error = redactSensitiveText(error.message || String(error));
       batch.updatedAt = new Date().toISOString();
-      await writeActionBatchLedger(ledger);
+      await updateActionBatch(batch);
       return { mode: "partial_failure", batch, reason: "Execution stopped immediately. Review completed receipts before retrying any action." };
     }
   }
-  batch.status = "completed";
+  batch.status = batch.completed.some((item) => item.receipt?.manualVerificationRequired === true)
+    ? "completed_pending_verification"
+    : "completed";
   batch.completedAt = new Date().toISOString();
-  await writeActionBatchLedger(ledger);
+  await updateActionBatch(batch);
   return { mode: "executed", batch };
 }
 
@@ -5349,10 +5995,11 @@ async function findChanceContact(query) {
     .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
     .filter((contact) => contactMatches(contact, lower))
     .map((contact) => ({ contact, score: chanceMatchScore(contact, needle) }))
+    .filter(({ score }) => score >= 85)
     .sort((a, b) => b.score - a.score || fileSort(a.contact, b.contact));
 
   if (!matches.length) badRequest(`No Chance Pearson JobNimbus insurance file found for: ${needle}`);
-  if (matches.length > 1 && matches[0].score === matches[1].score && matches[0].score < 90) {
+  if (matches.length > 1 && matches[0].score === matches[1].score) {
     const choices = matches.slice(0, 5).map(({ contact }) => `${contact.number || contact.recid || "?"}: ${contact.display_name || contact.name || "Unnamed"}`);
     badRequest(`Ambiguous Chance file query: ${needle}. Use the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
   }
@@ -5411,12 +6058,16 @@ async function findDocumentReadContact(query, { documentQuery = "" } = {}) {
     .filter(isInsuranceFile)
     .filter((contact) => contactMatches(contact, lower))
     .map((contact) => ({ contact, score: chanceMatchScore(contact, needle) }))
+    .filter(({ score }) => score >= 85)
     .sort((a, b) => b.score - a.score || fileSort(a.contact, b.contact));
   const chanceMatches = ranked.filter(({ contact }) => assignedTo(contact, CHANCE_OWNER_ID));
 
   let matches = chanceMatches;
   let readScope = "chance_assigned";
   if (!matches.length) {
+    if (currentRequestIdentity()?.type === "codex_operator_token") {
+      badRequest(`No Chance Pearson JobNimbus insurance file found for document review: ${needle}.`);
+    }
     matches = ranked.filter(({ score }) => score >= 85);
     readScope = "explicit_company_read";
   }
@@ -5508,8 +6159,11 @@ function chanceMatchScore(contact, query) {
     const words = new Set(name.split(" ").filter(Boolean));
     return nameTokens.every((token) => words.has(token));
   })) return 85;
-  const address = normalizeCompare([contact.address_line1, contact.city, contact.state_text, contact.zip].filter(Boolean).join(" "));
-  if (address && address === exact) return 90;
+  const addresses = [
+    contact.address_line1,
+    [contact.address_line1, contact.city, contact.state_text, contact.zip].filter(Boolean).join(" ")
+  ].map(normalizeCompare).filter(Boolean);
+  if (addresses.includes(exact)) return 90;
   return 10;
 }
 
@@ -6358,6 +7012,59 @@ async function readJsonFile(filePath, fallback) {
   }
 }
 
+function assertOperatorBatchFileScope(plans) {
+  if (!isCodexOperatorRequest()) return;
+  const fileIds = plans.map((prepared, index) => {
+    const id = String(
+      prepared?.plan?.file?.id
+      || prepared?.plan?.plan?.fileScope?.id
+      || prepared?.plan?.fileScope?.id
+      || ""
+    ).trim();
+    if (!id) {
+      badRequest(`The Codex HP operator could not bind action ${index + 1} to one exact Chance-assigned file.`);
+    }
+    return id;
+  });
+  if (new Set(fileIds).size !== 1) {
+    badRequest("A Codex HP action batch may contain operations for only one exact Chance-assigned file.");
+  }
+}
+
+async function readSecurityLedger(filePath, label) {
+  let raw;
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    const unavailable = new Error(`${label} is unavailable. Stop and review before retrying.`);
+    unavailable.statusCode = 503;
+    throw unavailable;
+  }
+  let rows;
+  try {
+    rows = JSON.parse(raw);
+  } catch {
+    const corrupt = new Error(`${label} is corrupted. Stop and review before retrying.`);
+    corrupt.statusCode = 503;
+    throw corrupt;
+  }
+  if (!Array.isArray(rows) || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+    const invalid = new Error(`${label} has an invalid structure. Stop and review before retrying.`);
+    invalid.statusCode = 503;
+    throw invalid;
+  }
+  return rows;
+}
+
+async function writeSecurityLedger(filePath, rows) {
+  if (!Array.isArray(rows)) throw new TypeError("Security ledger rows must be an array.");
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, `${JSON.stringify(rows, null, 2)}\n`, "utf8");
+  await rename(temporary, filePath);
+}
+
 function normalizeUploadId(value) {
   const uploadId = String(value || "").trim();
   if (!/^[a-zA-Z0-9_-]{1,80}$/.test(uploadId)) badRequest("uploadId may only contain letters, numbers, underscore, or hyphen");
@@ -6537,6 +7244,35 @@ function gmailHeaders(message) {
   return out;
 }
 
+function gmailDeliveryHeaders(message) {
+  const headers = Array.isArray(message?.payload?.headers) ? message.payload.headers : [];
+  const relevant = new Set(["from", "sender", "reply-to", "to", "cc", "bcc", "subject"]);
+  const values = new Map();
+  for (const header of headers) {
+    const key = String(header.name || "").trim().toLowerCase();
+    if (key.startsWith("resent-")) {
+      badRequest(`Gmail draft contains unsupported delivery header: ${key}.`);
+    }
+    if (!relevant.has(key)) continue;
+    const rows = values.get(key) || [];
+    rows.push(String(header.value || ""));
+    values.set(key, rows);
+  }
+  for (const [key, rows] of values) {
+    if (rows.length > 1) badRequest(`Gmail draft contains duplicate delivery header: ${key}.`);
+  }
+  const value = (key) => values.get(key)?.[0] || "";
+  return {
+    from: validateEmailAddressList(value("from"), "From"),
+    sender: validateEmailAddressList(value("sender"), "Sender"),
+    "reply-to": validateEmailAddressList(value("reply-to"), "Reply-To"),
+    to: validateEmailAddressList(value("to"), "To", { required: true }),
+    cc: validateEmailAddressList(value("cc"), "Cc"),
+    bcc: validateEmailAddressList(value("bcc"), "Bcc"),
+    subject: validateEmailHeaderValue(value("subject"), "Subject")
+  };
+}
+
 function groupGmailMessagesByThread(messages) {
   const map = new Map();
   for (const message of messages) {
@@ -6604,6 +7340,11 @@ function walkGmailParts(part, visitor) {
 async function loadEmailAttachments(input = {}) {
   const specs = Array.isArray(input.attachments) ? input.attachments : [];
   if (specs.length > 8) badRequest("A Gmail message may include at most 8 attachments through this bridge.");
+  const isOperator = currentRequestIdentity()?.type === "codex_operator_token";
+  const operatorFile = input?.[INTERNAL_GMAIL_ACTION_SCOPE]?.file || null;
+  if (isOperator && !operatorFile?.id) {
+    operatorScopeError("The Codex HP operator requires an internally verified top-level file before loading Gmail attachments.");
+  }
   const attachments = [];
   for (const [index, spec] of specs.entries()) {
     if (!spec || typeof spec !== "object" || Array.isArray(spec)) badRequest(`attachments[${index}] must be an object`);
@@ -6611,8 +7352,13 @@ async function loadEmailAttachments(input = {}) {
     if (source === "jobnimbus") {
       const query = required(spec.query || input.query || input.fileQuery, `attachments[${index}].query`);
       const { contact } = await findChanceContact(query);
+      const sourceFile = compactContact(contact);
+      assertOperatorAttachmentFile(operatorFile, sourceFile, index);
       const documents = await listRelated("/files", contact.jnid, 1000);
-      const document = selectDocument(documents, String(spec.documentQuery || spec.documentId || "").trim());
+      const documentQuery = String(spec.documentQuery || spec.documentId || "").trim();
+      const document = isOperator
+        ? selectDocumentForChat(documents, documentQuery)
+        : selectDocument(documents, documentQuery);
       if (!document) badRequest(`No matching JobNimbus document found for attachment ${index + 1}.`);
       const downloaded = await downloadJobNimbusFile(document);
       attachments.push(validateEmailAttachment({
@@ -6621,7 +7367,9 @@ async function loadEmailAttachments(input = {}) {
         bytes: downloaded.bytes,
         source,
         sourceId: document.jnid || document.id || "",
-        sourceFileId: contact.jnid
+        sourceFileId: sourceFile.id,
+        sourceFileNumber: sourceFile.number,
+        sourceFileName: sourceFile.name
       }));
       continue;
     }
@@ -6629,6 +7377,7 @@ async function loadEmailAttachments(input = {}) {
       const query = required(spec.query || input.query || input.fileQuery, `attachments[${index}].query`);
       const { contact } = await findChanceContact(query);
       const file = compactContact(contact);
+      assertOperatorAttachmentFile(operatorFile, file, index);
       const insured = String(spec.insuredName || file.name || "").trim();
       const carrier = String(spec.carrier || file.carrier || "").trim();
       const claimNumber = String(spec.claimNumber || file.claimNumber || input.subject || "").trim();
@@ -6651,7 +7400,13 @@ async function loadEmailAttachments(input = {}) {
         bytes,
         source,
         insuredName: insured,
-        sourceFileId: contact.jnid || contact.id || ""
+        carrier,
+        claimNumber,
+        dateOfLoss,
+        letterDate,
+        sourceFileId: file.id,
+        sourceFileNumber: file.number,
+        sourceFileName: file.name
       }));
       continue;
     }
@@ -6660,11 +7415,15 @@ async function loadEmailAttachments(input = {}) {
       attachments.push(validateEmailAttachment({
         ...attachment,
         filename: spec.filename || attachment.filename,
-        source
+        source,
+        sourceLabel: "Verified Wave company W-9"
       }));
       continue;
     }
     if (source === "base64") {
+      if (isOperator) {
+        badRequest("The Codex HP operator cannot attach arbitrary base64 content. Use an exact JobNimbus document, generated LOR, or verified standard W-9.");
+      }
       const contentBase64 = required(spec.contentBase64, `attachments[${index}].contentBase64`).replace(/\s+/g, "");
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) badRequest(`attachments[${index}].contentBase64 is not valid base64`);
       attachments.push(validateEmailAttachment({
@@ -6682,33 +7441,47 @@ async function loadEmailAttachments(input = {}) {
   return attachments;
 }
 
+function assertOperatorAttachmentFile(operatorFile, sourceFile, index) {
+  if (!operatorFile) return;
+  if (String(sourceFile?.id || "") !== String(operatorFile.id || "")) {
+    operatorScopeError(`Gmail attachment ${index + 1} resolves to a different Chance file than the approved top-level query.`);
+  }
+}
+
 async function loadStandardW9Attachment() {
-  const query = 'from:richard@wavepa.com filename:"Wave W-9.pdf"';
-  const rows = [];
-  if (STANDARD_W9_GMAIL_MESSAGE_ID) rows.push({ id: STANDARD_W9_GMAIL_MESSAGE_ID });
-  const search = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages?q=${encodeURIComponent(query)}&maxResults=10`);
-  for (const row of Array.isArray(search?.messages) ? search.messages : []) {
-    if (!rows.some((candidate) => candidate.id === row.id)) rows.push(row);
+  if (
+    !STANDARD_W9_GMAIL_MESSAGE_ID
+    || !STANDARD_W9_GMAIL_ATTACHMENT_ID
+    || !/^[a-f0-9]{64}$/.test(STANDARD_W9_SHA256)
+  ) {
+    badRequest("The standard Wave W-9 is not pinned. Configure its exact Gmail message id, attachment id, and SHA-256 before using source=standard_w9.");
   }
-  for (const row of rows) {
-    let message;
-    try {
-      message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=full`);
-    } catch (error) {
-      if (error?.statusCode === 404) continue;
-      throw error;
-    }
-    const match = listGmailAttachments(message?.payload).find((attachment) => /(?:^|\b)wave[ _-]*w[ _-]*9\.pdf$/i.test(attachment.filename));
-    if (!match) continue;
-    const payload = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}/attachments/${encodeURIComponent(match.attachmentId)}`);
-    return {
-      filename: "Wave_W-9.pdf",
-      contentType: match.mimeType || "application/pdf",
-      bytes: base64UrlToBuffer(payload?.data || ""),
-      sourceId: `${row.id}:${match.attachmentId}`
-    };
+  const message = await gmailApi(
+    `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(STANDARD_W9_GMAIL_MESSAGE_ID)}?format=full`
+  );
+  const match = listGmailAttachments(message?.payload).find((attachment) => (
+    String(attachment.attachmentId || "") === STANDARD_W9_GMAIL_ATTACHMENT_ID
+  ));
+  if (!match) {
+    badRequest("The pinned standard Wave W-9 attachment id is not present in its configured Gmail message.");
   }
-  badRequest("The standard Wave W-9 could not be found in authenticated Gmail. Search Richard's messages for Wave W-9.pdf and verify the attachment still exists.");
+  const payload = await gmailApi(
+    `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(STANDARD_W9_GMAIL_MESSAGE_ID)}/attachments/${encodeURIComponent(STANDARD_W9_GMAIL_ATTACHMENT_ID)}`
+  );
+  const bytes = base64UrlToBuffer(payload?.data || "");
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha256 !== STANDARD_W9_SHA256) {
+    const error = new Error("The pinned standard Wave W-9 SHA-256 does not match. Nothing was drafted or sent; re-verify the company document through an approved credential-safe process.");
+    error.statusCode = 409;
+    throw error;
+  }
+  return {
+    filename: "Wave_W-9.pdf",
+    contentType: match.mimeType || "application/pdf",
+    bytes,
+    sha256: actualSha256,
+    sourceId: `${STANDARD_W9_GMAIL_MESSAGE_ID}:${STANDARD_W9_GMAIL_ATTACHMENT_ID}`
+  };
 }
 
 function formatLorDate(value) {
@@ -6726,11 +7499,47 @@ function filenameToken(value) {
     .slice(0, 80) || "document";
 }
 
+function validateEmailHeaderValue(value, label) {
+  const text = String(value || "").trim();
+  if (!text) badRequest(`${label} is required`);
+  if (/[\r\n\x00-\x1F\x7F]/.test(text)) {
+    badRequest(`${label} contains a prohibited email-header control character.`);
+  }
+  if (text.length > 998) badRequest(`${label} is too long.`);
+  return text;
+}
+
+function validateEmailAddressList(value, label, options = {}) {
+  const text = String(value || "").trim();
+  if (!text) {
+    if (options.required) badRequest(`${label} is required`);
+    return "";
+  }
+  validateEmailHeaderValue(text, label);
+  const entries = text.split(",").map((entry) => entry.trim());
+  if (entries.some((entry) => !entry)) badRequest(`${label} contains an empty recipient.`);
+  const canonical = [];
+  for (const entry of entries) {
+    const angleMatch = /^([\p{L}\p{N}][\p{L}\p{N} .'-]{0,199})\s*<([^<>\s]+)>$/u.exec(entry);
+    const addrSpec = angleMatch ? angleMatch[2] : entry;
+    if (!/^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)*$/i.test(addrSpec)) {
+      badRequest(`${label} contains an invalid email address.`);
+    }
+    canonical.push(angleMatch
+      ? `${angleMatch[1].replace(/\s+/g, " ").trim()} <${addrSpec}>`
+      : addrSpec);
+  }
+  return canonical.join(", ");
+}
+
 function validateEmailAttachment(attachment) {
   const filename = safeMimeFilename(attachment.filename);
   const bytes = Buffer.isBuffer(attachment.bytes) ? attachment.bytes : Buffer.from(attachment.bytes || []);
   if (!bytes.length) badRequest(`Attachment ${filename} is empty; refusing to draft or send.`);
-  const contentType = String(attachment.contentType || "application/octet-stream").trim();
+  const contentType = String(attachment.contentType || "application/octet-stream").trim().toLowerCase();
+  if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType)) {
+    badRequest(`Attachment ${filename} has an invalid content type.`);
+  }
   const isPdf = contentType === "application/pdf" || /\.pdf$/i.test(filename);
   if (isPdf) {
     if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
@@ -6752,13 +7561,31 @@ function emailAttachmentDescriptor(attachment, source = "") {
     sha256: createHash("sha256").update(attachment.bytes).digest("hex"),
     source,
     sourceId: attachment.sourceId || "",
-    sourceFileId: attachment.sourceFileId || ""
+    sourceFileId: attachment.sourceFileId || "",
+    sourceFile: attachment.sourceFileId ? {
+      id: attachment.sourceFileId,
+      number: attachment.sourceFileNumber || "",
+      name: attachment.sourceFileName || ""
+    } : undefined,
+    sourceLabel: attachment.sourceLabel || "",
+    generatedFacts: attachment.source === "generated_lor" || source === "generated_lor" ? {
+      insuredName: attachment.insuredName || "",
+      carrier: attachment.carrier || "",
+      claimNumber: attachment.claimNumber || "",
+      dateOfLoss: attachment.dateOfLoss || "",
+      letterDate: attachment.letterDate || ""
+    } : undefined
   });
 }
 
-function buildRawEmail({ to, cc, bcc, subject, body, attachments = [] }) {
-  if (attachments.length) return buildMultipartRawEmail({ to, cc, bcc, subject, body, attachments });
+function buildRawEmail({ from = "", sender = "", replyTo = "", to, cc, bcc, subject, body, attachments = [] }) {
+  if (attachments.length) {
+    return buildMultipartRawEmail({ from, sender, replyTo, to, cc, bcc, subject, body, attachments });
+  }
   const headers = [
+    from ? `From: ${from}` : "",
+    sender ? `Sender: ${sender}` : "",
+    replyTo ? `Reply-To: ${replyTo}` : "",
     `To: ${to}`,
     cc ? `Cc: ${cc}` : "",
     bcc ? `Bcc: ${bcc}` : "",
@@ -6769,7 +7596,7 @@ function buildRawEmail({ to, cc, bcc, subject, body, attachments = [] }) {
   return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${body}`);
 }
 
-function buildMultipartRawEmail({ to, cc, bcc, subject, body, attachments }) {
+function buildMultipartRawEmail({ from = "", sender = "", replyTo = "", to, cc, bcc, subject, body, attachments }) {
   const checked = attachments.map(validateEmailAttachment);
   const boundary = `wave_mixed_${Date.now()}_${randomUUID().replace(/-/g, "")}`;
   const parts = [
@@ -6791,6 +7618,9 @@ function buildMultipartRawEmail({ to, cc, bcc, subject, body, attachments }) {
   }
   parts.push(`--${boundary}--`, "");
   const headers = [
+    from ? `From: ${from}` : "",
+    sender ? `Sender: ${sender}` : "",
+    replyTo ? `Reply-To: ${replyTo}` : "",
     `To: ${to}`,
     cc ? `Cc: ${cc}` : "",
     bcc ? `Bcc: ${bcc}` : "",
@@ -7000,6 +7830,59 @@ function normalizeTaskUpdateFields(input) {
   return cleanObject(source);
 }
 
+const CODEX_OPERATOR_CONTACT_FIELDS = new Set([
+  "first_name",
+  "last_name",
+  "display_name",
+  "email",
+  "mobile_phone",
+  "home_phone",
+  "work_phone",
+  "address_line1",
+  "address_line2",
+  "city",
+  "state_text",
+  "zip"
+]);
+
+const CODEX_OPERATOR_TASK_FIELDS = new Set([
+  "title",
+  "subject",
+  "description",
+  "note",
+  "date_start",
+  "date_end",
+  "is_completed"
+]);
+
+const CODEX_OPERATOR_EVENT_FIELDS = new Set([
+  "title",
+  "subject",
+  "description",
+  "note",
+  "date_start",
+  "date_end"
+]);
+
+function assertCodexOperatorFields(fields, allowed, label, options = {}) {
+  if (currentRequestIdentity()?.type !== "codex_operator_token") return;
+  for (const key of Object.keys(fields)) {
+    const isContactCustomField = options.allowContactCustomFields === true
+      && /^cf_(?:string|text|date|number|integer|decimal|currency|bool|boolean)_\d+$/i.test(key);
+    const isResolvedStatus = options.allowResolvedStatus === true && key === "status_name";
+    if (!allowed.has(key) && !isContactCustomField && !isResolvedStatus) {
+      badRequest(`The Codex HP operator cannot change ${label} field: ${key}.`);
+    }
+  }
+}
+
+function assertOperatorContactScope(contact) {
+  if (currentRequestIdentity()?.type !== "codex_operator_token") return;
+  if (!isInsuranceFile(contact) || !assignedTo(contact, CHANCE_OWNER_ID)) {
+    conflictError("The refreshed JobNimbus record is no longer a Chance-assigned insurance file.");
+  }
+}
+
 function isAmbiguousTaskUpdateError(error) {
   return Number(error?.statusCode) === 400 && /jnLog is not a function/i.test(String(error?.message || ""));
 }
@@ -7184,12 +8067,29 @@ function normalizeActionOperations(value) {
   if (value.length > 12) badRequest("An approval batch may contain at most 12 actions.");
   return value.map((operation, index) => {
     if (!operation || typeof operation !== "object" || Array.isArray(operation)) badRequest(`operations[${index}] must be an object`);
+    const unsupportedOperationField = Object.keys(operation).find((key) => !["type", "payload"].includes(key));
+    if (unsupportedOperationField) badRequest(`operations[${index}] contains unsupported field: ${unsupportedOperationField}`);
     const type = String(operation.type || "").trim().toLowerCase();
-    const payload = operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
-      ? { ...operation.payload }
-      : {};
-    delete payload.execute;
-    delete payload.approvalDigest;
+    if (!operation.payload || typeof operation.payload !== "object" || Array.isArray(operation.payload)) {
+      badRequest(`operations[${index}].payload must be an object`);
+    }
+    const payload = { ...operation.payload };
+    for (const forbidden of ["execute", "approvalDigest", "approvalChallenge"]) {
+      if (Object.prototype.hasOwnProperty.call(payload, forbidden)) {
+        badRequest(`operations[${index}].payload must not include ${forbidden}`);
+      }
+    }
+    if (isCodexOperatorRequest()) {
+      if (type === "jobnimbus.process_update") {
+        badRequest("The Codex HP operator must use separate contact/status and note operations so each completed mutation has its own durable batch receipt.");
+      }
+      const freeFormMemoryField = Object.keys(payload).find((key) => (
+        ["followups", "learning", "episode"].includes(key.toLowerCase())
+      ));
+      if (freeFormMemoryField) {
+        badRequest(`operations[${index}].payload cannot persist free-form ${freeFormMemoryField} through the Codex HP operator.`);
+      }
+    }
     if (!ACTION_OPERATION_TYPES.has(type)) badRequest(`Unsupported action type: ${type}`);
     return { type, payload };
   });
@@ -7240,73 +8140,245 @@ async function executeActionOperation(operation, prepared) {
     case "jobnimbus.update_task": return updateTask(input);
     case "jobnimbus.create_calendar_event": return createCalendarEvent(input);
     case "jobnimbus.update_calendar_event": return updateCalendarEvent(input);
-    case "gmail.create_draft": return gmailDraft(input);
+    case "gmail.create_draft": return gmailDraft({ ...input, approvalDigest: prepared.plan.approvalDigest });
     case "gmail.send": return gmailSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
     case "quo.send_text": return quoSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
 }
 
+function withActionApprovalMutation(callback) {
+  const run = actionApprovalMutationQueue.then(callback);
+  actionApprovalMutationQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+function actionApprovalIdentityHash() {
+  const identity = currentRequestIdentity();
+  if (!identity) {
+    const error = new Error("No authenticated identity is available for this approval.");
+    error.statusCode = 401;
+    throw error;
+  }
+  return createHash("sha256")
+    .update([
+      String(identity.type || ""),
+      String(identity.subject || ""),
+      String(identity.email || "").toLowerCase(),
+      String(identity.role || "")
+    ].join("|"), "utf8")
+    .digest("hex");
+}
+
+async function issueActionApprovalChallenge(approvalDigest, operationCount) {
+  return withActionApprovalMutation(async () => {
+    const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
+    const identityHash = actionApprovalIdentityHash();
+    const now = Date.now();
+    for (const row of ledger) {
+      if (row.status === "active" && Number(row.expiresAtMs || 0) <= now) {
+        row.status = "expired";
+        row.expiredAt = new Date(now).toISOString();
+      } else if (row.status === "active" && row.identityHash === identityHash) {
+        row.status = "superseded";
+        row.supersededAt = new Date(now).toISOString();
+      }
+    }
+    const challenge = randomBytes(32).toString("base64url");
+    const expiresAtMs = now + ACTION_APPROVAL_TTL_SECONDS * 1000;
+    const row = {
+      id: randomUUID(),
+      challengeHash: createHash("sha256").update(challenge, "utf8").digest("hex"),
+      identityHash,
+      approvalDigest,
+      operationCount,
+      status: "active",
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      expiresAtMs
+    };
+    ledger.push(row);
+    await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, ledger);
+    return { id: row.id, challenge, expiresAt: row.expiresAt };
+  });
+}
+
+async function consumeActionApprovalChallenge(value, approvalDigest) {
+  const challenge = String(value || "").trim();
+  if (!/^[A-Za-z0-9_-]{40,100}$/.test(challenge)) {
+    badRequest("Action batch execution requires the single-use approvalChallenge from its exact dry run.");
+  }
+  return withActionApprovalMutation(async () => {
+    const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
+    const challengeHash = createHash("sha256").update(challenge, "utf8").digest("hex");
+    const row = ledger.find((item) => item.challengeHash === challengeHash);
+    const identityHash = actionApprovalIdentityHash();
+    if (!row || row.identityHash !== identityHash || row.approvalDigest !== approvalDigest) {
+      const error = new Error("The action approval challenge does not match this identity and exact plan. Nothing was executed; prepare and approve a fresh dry run.");
+      error.statusCode = 409;
+      throw error;
+    }
+    const now = Date.now();
+    if (row.status !== "active" || Number(row.expiresAtMs || 0) <= now) {
+      if (row.status === "active") {
+        row.status = "expired";
+        row.expiredAt = new Date(now).toISOString();
+        await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, ledger);
+      }
+      const error = new Error(`The action approval challenge is ${row.status || "unavailable"}. Nothing was executed; prepare and approve a fresh dry run.`);
+      error.statusCode = 409;
+      throw error;
+    }
+    row.status = "consumed";
+    row.consumedAt = new Date(now).toISOString();
+    await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, ledger);
+    return { id: row.id, approvalDigest: row.approvalDigest };
+  });
+}
+
+function withActionBatchMutation(callback) {
+  const run = actionBatchMutationQueue.then(callback);
+  actionBatchMutationQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+async function reserveActionBatch(approvalId, approvalDigest, operationCount) {
+  return withActionBatchMutation(async () => {
+    const ledger = await readActionBatchLedger();
+    const existing = ledger.find((row) => (
+      row.approvalId === approvalId || row.approvalDigest === approvalDigest
+    ));
+    if (existing) return { existing };
+
+    const batch = {
+      id: randomUUID(),
+      approvalId,
+      approvalDigest,
+      status: "in_progress",
+      createdAt: new Date().toISOString(),
+      operationCount,
+      completed: []
+    };
+    ledger.push(batch);
+    await writeActionBatchLedger(ledger);
+    return { batch };
+  });
+}
+
+async function updateActionBatch(batch) {
+  return withActionBatchMutation(async () => {
+    const ledger = await readActionBatchLedger();
+    const index = ledger.findIndex((row) => row.id === batch.id);
+    if (index === -1) {
+      const error = new Error("The reserved action batch receipt is missing. Stop and review before retrying.");
+      error.statusCode = 409;
+      throw error;
+    }
+    ledger[index] = JSON.parse(JSON.stringify(batch));
+    await writeActionBatchLedger(ledger);
+  });
+}
+
 async function readActionBatchLedger() {
-  const rows = await readJsonFile(ACTION_BATCH_STORE_PATH, []);
-  return Array.isArray(rows) ? rows : [];
+  return readSecurityLedger(ACTION_BATCH_STORE_PATH, "Action batch ledger");
 }
 
 async function writeActionBatchLedger(rows) {
-  await mkdir(path.dirname(ACTION_BATCH_STORE_PATH), { recursive: true });
-  const temporary = `${ACTION_BATCH_STORE_PATH}.tmp-${process.pid}`;
-  await writeFile(temporary, `${JSON.stringify(rows.slice(-300), null, 2)}\n`, "utf8");
-  await rename(temporary, ACTION_BATCH_STORE_PATH);
+  await writeSecurityLedger(ACTION_BATCH_STORE_PATH, rows);
 }
 
 async function reserveOutboundSend(channel, approvalDigest, metadata = {}) {
-  const rows = await readJsonFile(OUTBOUND_SEND_STORE_PATH, []);
-  const ledger = Array.isArray(rows) ? rows : [];
-  const existing = ledger.find((row) => row.channel === channel && row.approvalDigest === approvalDigest);
+  return withOutboundSendMutation(async () => {
+    const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+    const sourceKeyHash = metadata.sourceKey
+      ? createHash("sha256").update(String(metadata.sourceKey), "utf8").digest("hex")
+      : "";
+    const existing = ledger.find((row) => (
+      row.channel === channel
+      && (
+        row.approvalDigest === approvalDigest
+        || (sourceKeyHash && row.sourceKeyHash === sourceKeyHash)
+      )
+    ));
+    if (existing) {
+      const error = new Error(`This exact approved ${channel} send is already ${existing.status}. Review its receipt before any retry.`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const row = {
+      id: randomUUID(),
+      channel,
+      approvalDigest,
+      status: "in_progress",
+      createdAt: new Date().toISOString(),
+      destinationHash: metadata.to ? createHash("sha256").update(String(metadata.to)).digest("hex") : "",
+      subjectHash: metadata.subject ? createHash("sha256").update(String(metadata.subject), "utf8").digest("hex") : "",
+      sourceKeyHash
+    };
+    ledger.push(row);
+    await writeOutboundSendLedger(ledger);
+    return row;
+  });
+}
+
+async function assertOutboundSourceAvailable(channel, sourceKey) {
+  const sourceKeyHash = createHash("sha256").update(String(sourceKey), "utf8").digest("hex");
+  const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+  const existing = ledger.find((row) => row.channel === channel && row.sourceKeyHash === sourceKeyHash);
   if (existing) {
-    const error = new Error(`This exact approved ${channel} send is already ${existing.status}. Review its receipt before any retry.`);
+    const error = new Error(`This ${channel} source was already used by an outbound attempt that is ${existing.status}. Create and approve a new source draft for any intentional resend.`);
     error.statusCode = 409;
     throw error;
   }
-  const row = {
-    id: randomUUID(),
-    channel,
-    approvalDigest,
-    status: "in_progress",
-    createdAt: new Date().toISOString(),
-    destinationHash: metadata.to ? createHash("sha256").update(String(metadata.to)).digest("hex") : "",
-    subject: String(metadata.subject || "").slice(0, 160)
-  };
-  ledger.push(row);
-  await writeOutboundSendLedger(ledger);
-  return row;
 }
 
 async function completeOutboundSend(id, status, externalId = "", error = "") {
-  const rows = await readJsonFile(OUTBOUND_SEND_STORE_PATH, []);
-  const ledger = Array.isArray(rows) ? rows : [];
-  const row = ledger.find((item) => item.id === id);
-  if (!row) return;
-  row.status = status;
-  row.externalId = String(externalId || "").slice(0, 300);
-  row.error = String(error || "").slice(0, 500);
-  row.updatedAt = new Date().toISOString();
-  await writeOutboundSendLedger(ledger);
+  return withOutboundSendMutation(async () => {
+    const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+    const row = ledger.find((item) => item.id === id);
+    if (!row) return;
+    row.status = status;
+    row.externalId = String(externalId || "").slice(0, 300);
+    row.error = redactSensitiveText(String(error || "")).slice(0, 500);
+    row.updatedAt = new Date().toISOString();
+    await writeOutboundSendLedger(ledger);
+  });
+}
+
+function withOutboundSendMutation(callback) {
+  const run = outboundSendMutationQueue.then(callback);
+  outboundSendMutationQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
 }
 
 async function writeOutboundSendLedger(rows) {
-  await mkdir(path.dirname(OUTBOUND_SEND_STORE_PATH), { recursive: true });
-  const temporary = `${OUTBOUND_SEND_STORE_PATH}.tmp-${process.pid}`;
-  await writeFile(temporary, `${JSON.stringify(rows.slice(-500), null, 2)}\n`, "utf8");
-  await rename(temporary, OUTBOUND_SEND_STORE_PATH);
+  await writeSecurityLedger(OUTBOUND_SEND_STORE_PATH, rows);
 }
 
 function summarizeOperationResult(result) {
+  const deliveryStatus = String(result?.delivery?.status || "");
+  const deliveryConfirmed = result?.delivery?.confirmed === true;
+  const deliveryFailed = result?.delivery?.failed === true;
   return cleanObject({
     mode: result?.mode || "executed",
     fileId: result?.file?.id || "",
     fileNumber: result?.file?.number || "",
     externalId: resultId(result?.message || result?.draft || result?.result || result?.results || result),
+    verifiedByReadback: result?.verifiedByReadback,
+    deliveryStatus,
+    deliveryConfirmed: deliveryStatus ? deliveryConfirmed : undefined,
+    manualVerificationRequired: deliveryStatus ? !deliveryConfirmed && !deliveryFailed : undefined,
+    sourceDraftId: result?.sourceDraftId || "",
+    sourceDraftRetention: result?.sourceDraftRetention?.status || "",
     memoryReceiptId: result?.memoryCloseout?.receipt?.id || "",
     clientSnapshotRefreshed: result?.memoryCloseout?.clientMemoryRefresh?.refreshed === true
   });
@@ -7321,6 +8393,15 @@ function resultId(result) {
 }
 
 async function closeoutJobNimbusAction(file, action, result, summary) {
+  if (isCodexOperatorRequest()) {
+    return {
+      ...operatorMemoryCloseoutBoundary(),
+      clientMemoryRefresh: {
+        refreshed: false,
+        reason: "operator_privacy_boundary"
+      }
+    };
+  }
   const externalId = resultId(result);
   const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
     channel: "jobnimbus",
@@ -7336,6 +8417,9 @@ async function closeoutJobNimbusAction(file, action, result, summary) {
 }
 
 async function safeRefreshClientSnapshot(subjectKey) {
+  if (isCodexOperatorRequest()) {
+    return { refreshed: false, reason: "operator_privacy_boundary" };
+  }
   const id = String(subjectKey || "").trim();
   if (!id) return { refreshed: false, reason: "missing_subject_key" };
   try {
@@ -7362,6 +8446,7 @@ async function optionalChanceFile(query) {
 }
 
 function closeoutGmailAction(input, file, action, externalId, summary, status = "executed") {
+  if (isCodexOperatorRequest()) return operatorMemoryCloseoutBoundary();
   return safeCloseoutAction(MEMORY_CONFIG, {
     channel: "gmail",
     action,
@@ -7387,7 +8472,7 @@ function requireApprovalDigest(provided, expected, label) {
 
 function redactSensitiveText(value) {
   let text = String(value || "");
-  for (const secret of [API_KEY, BRIDGE_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
     text = text.split(secret).join("[REDACTED]");
   }
   return text
@@ -7416,6 +8501,21 @@ async function authenticateRequest(req) {
       jobNimbusOwnerId: CHANCE_OWNER_ID,
       jobNimbusScope: "assigned",
       quoLineId: ""
+    };
+  }
+  if (CODEX_OPERATOR_TOKEN && secureEqual(token, CODEX_OPERATOR_TOKEN)) {
+    return {
+      type: "codex_operator_token",
+      subject: "codex-hp-operator",
+      email: "",
+      name: "Codex HP Operator",
+      role: "codex_operator",
+      hostedDomain: "",
+      scopes: ["client_evidence:read", "approval_batches:prepare_execute"],
+      googleAccessToken: "",
+      jobNimbusOwnerId: CHANCE_OWNER_ID,
+      jobNimbusScope: "assigned",
+      quoLineId: QUO_DEFAULT_FROM_NUMBER
     };
   }
   if (!ALLOW_GOOGLE_USER_AUTH) return null;
@@ -7678,6 +8778,73 @@ function bearerToken(req) {
   const header = String(req.headers.authorization || "").trim();
   const match = header.match(/^Bearer\s+(.+)$/i);
   return match ? match[1].trim() : "";
+}
+
+function assertIdentityRequestScope(identity, method, pathname, body = {}) {
+  if (identity?.type !== "codex_operator_token") return;
+  if (body.includeBrainAdvisory === true) {
+    const error = new Error("The Codex HP operator cannot send client evidence to an operational advisory model.");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (
+    pathname === "/jobnimbus/document-text"
+    && !String(body.documentQuery || "").trim()
+  ) {
+    const error = new Error("The Codex HP operator requires an exact documentQuery for document text review.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (
+    String(method || "").toUpperCase() === "POST"
+    && pathname === "/gmail/attachment-review"
+    && body.uploadToJobNimbus === true
+  ) {
+    const error = new Error("The Codex HP operator may review Gmail attachments but cannot upload them directly to JobNimbus. Use an authorized human workflow for the upload.");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (
+    pathname === "/ops/start-session"
+    && String(body.focus || "").trim().toLowerCase() === "communications"
+  ) {
+    const error = new Error("The Codex HP operator cannot run a broad unmatched communications sweep. Review an exact Chance-assigned file instead.");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (pathname === "/ops/review-chance-files" && !String(body.query || "").trim()) {
+    if (body.indexOnly !== true) {
+      const error = new Error("The Codex HP operator requires an exact-file query unless indexOnly:true is explicitly requested.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (body.includeGmail === true || body.includeQuo === true || body.includeQuoTranscripts === true) {
+      const error = new Error("A query-less Codex HP index cannot include Gmail, Quo, or transcripts.");
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+  if (
+    ["/gmail/search", "/gmail/thread", "/gmail/attachment-review"].includes(pathname)
+    && !String(body.fileQuery || "").trim()
+  ) {
+    const error = new Error("The Codex HP operator requires an exact Chance-assigned fileQuery for every Gmail read.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (
+    ["/quo/history", "/quo/transcript"].includes(pathname)
+    && !String(body.query || "").trim()
+  ) {
+    const error = new Error("The Codex HP operator requires an exact Chance-assigned file query for every Quo read.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (pathname === "/quo/history" && String(body.phone || "").trim()) {
+    const error = new Error("The Codex HP operator cannot query an arbitrary Quo phone number.");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 function currentRequestIdentity() {
@@ -8527,14 +9694,20 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Gmail search query. Use Gmail operators like from:, to:, subject:, newer_than:, older_than:, has:attachment, or plain client/claim terms." },
+          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex HP operator; its Gmail search is built server-side from current file facts." },
+          communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           limit: { type: "integer", minimum: 1, maximum: 25, default: 10 }
         },
-        required: ["query"]
+        anyOf: [
+          { required: ["query"] },
+          { required: ["fileQuery"] }
+        ]
       },
       GmailThreadRequest: {
         type: "object",
         properties: {
-          threadId: { type: "string", description: "Gmail thread id returned by searchGmail." }
+          threadId: { type: "string", description: "Gmail thread id returned by searchGmail." },
+          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex HP operator so the thread is strongly correlated before disclosure." }
         },
         required: ["threadId"]
       },
@@ -8551,6 +9724,7 @@ const OPENAPI = {
           maxOcrPages: { type: "integer", minimum: 1, maximum: 20, default: 5 },
           uploadToJobNimbus: { type: "boolean", default: false, description: "When true, also prepares an upload to the exact Chance file." },
           query: { type: "string", description: "Required when uploadToJobNimbus is true." },
+          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for Codex HP operator read scope." },
           description: { type: "string" },
           isPrivate: { type: "boolean", default: false },
           execute: { type: "boolean", default: false, description: "Only affects the optional JobNimbus upload. Attachment review itself is read-only." }
@@ -8560,7 +9734,7 @@ const OPENAPI = {
       GmailAttachmentSpec: {
         type: "object",
         properties: {
-          source: { type: "string", enum: ["jobnimbus", "generated_lor", "standard_w9", "base64"], default: "jobnimbus", description: "Use generated_lor to build the standard one-page Wave LOR from the current Chance file, standard_w9 to retrieve the verified company W-9 from Gmail, jobnimbus for TDI/FIN535 and other client documents, or base64 only for an already verified external file." },
+          source: { type: "string", enum: ["jobnimbus", "generated_lor", "standard_w9", "base64"], default: "jobnimbus", description: "Use generated_lor to build the standard one-page Wave LOR from the current Chance file, standard_w9 only for the exact pinned Gmail message/attachment/SHA-256, jobnimbus for TDI/FIN535 and other client documents, or base64 only for an already verified external file." },
           query: { type: "string", description: "Chance file identifier. May be inherited from the message-level query." },
           documentQuery: { type: "string", description: "JobNimbus document id or filename." },
           documentId: { type: "string", description: "Alias for documentQuery." },
@@ -8590,8 +9764,8 @@ const OPENAPI = {
           fileQuery: { type: "string", description: "Alias for query." },
           attemptId: { type: "string", description: "Defaults to initial. After a failed/uncertain send, use a new explicit value only when Chance approves a fresh retry dry run." },
           attachments: { type: "array", maxItems: 8, items: { $ref: "#/components/schemas/GmailAttachmentSpec" }, description: "Verified attachments. Prefer source=jobnimbus so the bridge fetches and validates the exact document bytes." },
-          approvalDigest: { type: "string", description: "Required only for a live send. Must exactly match the immediately preceding send dry run." },
-          execute: { type: "boolean", default: false, description: "False returns a dry run. A live send additionally requires ALLOW_GMAIL_SEND=true and the exact approvalDigest." }
+          approvalDigest: { type: "string", description: "Required for a live draft or send. Must exactly match the immediately preceding unchanged dry run." },
+          execute: { type: "boolean", default: false, description: "False returns a dry run. A live draft or send additionally requires its server-side gate and the exact approvalDigest." }
         },
         anyOf: [
           { required: ["draftId"] },
@@ -8602,7 +9776,7 @@ const OPENAPI = {
       QuoHistoryRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Optional exact Chance file identifier. Its current phone number will be used." },
+          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex HP operator; its current phone number is always used." },
           phone: { type: "string", description: "US phone number. Used when query is omitted or as an explicit override." },
           maxResults: { type: "integer", minimum: 1, maximum: 50, default: 25 },
           includeTranscripts: { type: "boolean", default: false, description: "Try to include transcripts for up to the three most recent recorded calls." }
@@ -8620,7 +9794,10 @@ const OPENAPI = {
       },
       QuoTranscriptRequest: {
         type: "object",
-        properties: { callId: { type: "string" } },
+        properties: {
+          callId: { type: "string" },
+          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex HP operator so call membership is verified before transcript disclosure." }
+        },
         required: ["callId"]
       },
       QuoSendRequest: {
@@ -8692,7 +9869,7 @@ const OPENAPI = {
           payload: {
             type: "object",
             additionalProperties: true,
-            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {taskId:'ID',completed:true}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. If that draft is approved later, send it with gmail.send {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy."
+            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {query:'JN',taskId:'ID',completed:true}; calendar update {query:'JN',eventId:'ID',fields:{...}}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. If that draft is approved later, send it with gmail.send {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy."
           }
         },
         required: ["type", "payload"]
@@ -8705,10 +9882,11 @@ const OPENAPI = {
             minItems: 1,
             maxItems: 12,
             items: { $ref: "#/components/schemas/ActionOperation" },
-            description: "Every exact approved action. For task completion use type jobnimbus.update_task with payload {taskId:'TASK_ID',completed:true}. The dry run returns the canonical JobNimbus body before anything executes."
+            description: "Every exact approved action. For task completion use type jobnimbus.update_task with payload {query:'EXACT_FILE',taskId:'TASK_ID',completed:true} so ownership is verified. The dry run returns the canonical JobNimbus body before anything executes."
           },
           approvalDigest: { type: "string", description: "Required for execution. Must match the immediately preceding unchanged batch dry run." },
-          execute: { type: "boolean", default: false, description: "False prepares the exact batch. True executes once after Chance approves its digest. Duplicate execution is blocked." }
+          approvalChallenge: { type: "string", description: "Single-use, short-lived server challenge returned by the immediately preceding dry run. The local operator wrapper retains and forwards it; do not copy it into chat." },
+          execute: { type: "boolean", default: false, description: "False prepares the exact batch and issues a short-lived challenge. True consumes that challenge once after Chance approves the exact plan. Duplicate execution is blocked." }
         },
         required: ["operations"]
       },
