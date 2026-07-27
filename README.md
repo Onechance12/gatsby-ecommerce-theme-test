@@ -17,6 +17,21 @@ transport is unavailable.
 
 - Keep `JOBNIMBUS_API_KEY` only in Render environment variables.
 - Set `JOBNIMBUS_BRIDGE_TOKEN` and use it as the Custom GPT bearer token.
+- Set `CODEX_OPERATOR_TOKEN` to a different strong random value for the
+  dedicated Codex HP operator. This credential is a non-Google
+  `codex_operator` identity, not an alias for the shared bridge token. It can
+  read Chance-assigned JobNimbus client evidence and exact-file-correlated Gmail
+  and Quo evidence, and use the consolidated action batch. Every operator Gmail
+  and Quo read requires an exact Chance-assigned file; arbitrary mailbox queries,
+  phone numbers, call IDs, and broad unmatched-communications sweeps fail closed.
+  Resolver search and query-less indexes return only minimized identifying
+  metadata. Gmail email correlation and Quo phone correlation fail closed when
+  that identifier is shared by multiple Chance files.
+  It cannot
+  call direct JobNimbus write/upload, claim-filing, Retell/Twilio live-call,
+  direct Gmail draft/send, direct Quo send, configuration, enrollment,
+  artifact-mailbox, or other unrelated routes. Gmail attachment review is
+  read-only for this identity.
 - Leave `BRIDGE_ALLOW_WRITES=false` until you intentionally want approved write actions.
 - Write endpoints are dry-run unless the request includes `execute:true` and Render has `BRIDGE_ALLOW_WRITES=true`.
 - A live Gmail send requires `BRIDGE_ALLOW_WRITES=true`, `ALLOW_GMAIL_SEND=true`,
@@ -30,7 +45,9 @@ transport is unavailable.
   exact-draft and approval-gated.
 - The consolidated Custom GPT schema exposes one consequential action batch for
   JobNimbus writes, Gmail drafts/sends, and Quo sends. The assistant must show
-  the exact dry run and wait for Chance's approval; review, memory closeout,
+  the exact one-client dry run and wait for Chance's approval. Execution also
+  consumes the newest identity-bound, short-lived server challenge exactly once;
+  review, memory closeout,
   document, and sweep endpoints never send messages.
 - Quo review scans matching communication across every available company team
   line, including Andrea's line, and labels the source line. That access is
@@ -42,6 +59,10 @@ transport is unavailable.
 - Client snapshots are private continuity caches, not operating authority. A
   snapshot never authorizes a write, send, call, task, event, upload, or status
   change, and fresh JobNimbus/Gmail/Quo evidence always wins.
+- Legacy v1 snapshots can retain raw client and communications data. The Codex
+  HP operator never reads or writes those snapshots, receipts, episodes, open
+  loops, or model advisories. Brain client memory remains unavailable to that
+  operator until a reviewed v2 migration and separately approved legacy purge.
 - Exact-file reviews deterministically reconcile evidence-backed operational
   open loops such as an upcoming inspection without homeowner confirmation.
   Open loops and optional model advisories are suggestions only; neither can
@@ -69,6 +90,7 @@ Required private env vars:
 ```text
 JOBNIMBUS_API_KEY=
 JOBNIMBUS_BRIDGE_TOKEN=
+CODEX_OPERATOR_TOKEN=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
@@ -93,6 +115,8 @@ MAX_ARTIFACT_BYTES=5242880
 ARTIFACT_TTL_HOURS=72
 CLAIM_CALL_STORE_PATH=/var/data/bridge/claim-call-ledger.json
 ACTION_BATCH_STORE_PATH=/var/data/bridge/action-batches.json
+ACTION_APPROVAL_STORE_PATH=/var/data/bridge/action-approvals.json
+ACTION_APPROVAL_TTL_SECONDS=900
 OUTBOUND_SEND_STORE_PATH=/var/data/bridge/outbound-sends.json
 OPENAI_API_KEY=
 OPENAI_OPERATIONAL_MODEL=gpt-5.6-luna
@@ -119,15 +143,34 @@ uses only the exact file's bounded operational evidence, validates source IDs
 and zero tool calls, stores hashed provenance and normalized token usage, and
 still requires a separate exact action approval.
 
+The dedicated Codex HP operator is a stricter exception: it never reads or
+writes Chance Brain client snapshots, episodes, operational state, or action
+receipts, and it cannot request a model advisory. Exact-file reviews return
+fresh source evidence plus ephemeral metadata only. Query-less indexes omit
+contact details, claim/policy values, addresses, phone numbers, email addresses,
+and adjuster details. Legacy Brain client snapshots remain outside this
+operator path and must not be trusted or purged without a separate approved
+schema-v2 migration.
+
 `POST /ops/action-batch` then provides the two-step execution flow:
 
 1. Send exact operations with `execute:false` and show Chance the resulting plan.
 2. After Chance approves, repeat the unchanged operations with `execute:true`
-   and the returned `approvalDigest`.
+   and the returned `approvalDigest` plus the short-lived, single-use
+   `approvalChallenge` before `approvalExpiresAt`.
 
 The bridge records successful actions on the persistent disk, appends their
 receipts to the exact client snapshot, refreshes JobNimbus state after approved
 JobNimbus writes, and refuses to run the same approved batch twice.
+
+Possession of `CODEX_OPERATOR_TOKEN` is not approval. For every consequential
+batch, Codex must prepare the exact dry run, show the user the actions and
+`approvalDigest`, and obtain the user's explicit approval at action time. Only
+then may it repeat the unchanged batch with `execute:true`. The local operator
+keeps the challenge out of model input and forwards it internally. Setup-time,
+standing, inferred, or prior approval does not authorize a later batch. The
+server still requires the exact digest, the current unconsumed challenge, and
+`BRIDGE_ALLOW_WRITES=true`; channel send gates also remain in force.
 
 ## Custom ChatGPT
 
@@ -145,11 +188,21 @@ texts are prepared and executed through `processApprovedWaveActionBatch`.
 Gmail review-first sends preserve one message identity. A successful
 `gmail.create_draft` receipt returns the Gmail `draftId`. If Chance later says to
 send that reviewed draft, use `gmail.send` with `{ query, draftId }`; the bridge
-re-reads the current draft, produces a fresh exact approval digest, and sends it
-through Gmail's draft-send endpoint so the draft is consumed. Do not rebuild the
-same message as a raw send and do not create another draft. The bridge also
+requires that the operator's draft has a matching bridge receipt on that exact
+file, re-reads the current draft, rejects duplicate or unsupported delivery
+headers, displays all delivery-relevant headers and attachment hashes, produces
+a fresh exact approval digest, reconstructs only the reviewed immutable snapshot,
+and sends it through Gmail's message-send endpoint. The source draft is retained;
+deleting it is a separate approval-gated action. Unlisted original MIME headers
+are not transmitted. Do not rebuild the same message as a raw send and do not
+create another draft. The bridge also
 detects a still-existing verified draft for the same Chance file and subject and
 refuses duplicate draft creation/raw resend.
+
+`source=standard_w9` is unavailable until the exact Gmail message id, attachment
+id, and expected SHA-256 are pinned. Those nonsecret identifiers still require a
+separate action-time-approved provider configuration step; the bridge never falls
+back to mailbox search or trusts sender/filename text as document integrity.
 
 For document review, call `reviewJobNimbusDocument` with either an exact
 `documentQuery` or a natural-language `documentPurpose`. This is the canonical
@@ -294,10 +347,8 @@ are explicitly approved.
 
 First-use employee enrollment can be enabled with `AUTO_ENROLL_WAVE_USERS=true`. A new employee must sign in with a verified `@wavepa.com` Google account that exactly matches an active JobNimbus user. The employee initially receives onboarding-only access, verifies a company-owned Quo line by SMS code, and then receives full company operational access. Missing JobNimbus or Quo verification fails closed. Explicit `WAVE_AUTH_USERS_JSON` entries remain available for role overrides and disabling access.
 
-Create a Google OAuth client with Gmail API enabled, then run:
-
-```bash
-GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... npm run gmail:oauth
-```
-
-Open the printed URL, approve access, and copy the printed refresh token into Render as `GOOGLE_REFRESH_TOKEN`.
+The legacy `npm run gmail:oauth` helper is intentionally disabled: it accepted
+a client secret through shell history and printed a refresh token. Provisioning
+Google credentials is a separate, explicitly approved production step. Enter
+secrets only through the Google and Render provider secret UIs; never paste,
+print, log, download, or save them in a shell, chat, repository, or local file.

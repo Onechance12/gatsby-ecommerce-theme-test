@@ -48,6 +48,25 @@ export const WAVE_ROLE_POLICIES = {
   }
 };
 
+export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
+  "GET /auth/whoami",
+  "POST /ops/start-session",
+  "POST /ops/review-chance-files",
+  "POST /ops/action-batch",
+  "POST /scheduling/availability",
+  "POST /jobnimbus/search",
+  "POST /jobnimbus/review-file",
+  "POST /jobnimbus/document-text",
+  "POST /jobnimbus/document-review",
+  "POST /jobnimbus/document-file",
+  "POST /gmail/search",
+  "POST /gmail/thread",
+  "POST /gmail/attachment-review",
+  "POST /quo/numbers",
+  "POST /quo/history",
+  "POST /quo/transcript"
+]);
+
 export function parseWaveUsers(raw, defaults = []) {
   const users = new Map();
   for (const entry of defaults) addUser(users, entry);
@@ -137,6 +156,10 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   if (identity.type === "bridge_token") return true;
+  if (identity.type === "codex_operator_token") {
+    return identity.role === "codex_operator"
+      && CODEX_OPERATOR_ALLOWED_ROUTES.has(`${String(method || "").toUpperCase()} ${pathname}`);
+  }
   const policy = WAVE_ROLE_POLICIES[identity.role];
   if (!policy) return false;
   if (policy.allRoutes) return true;
