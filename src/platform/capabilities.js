@@ -104,7 +104,9 @@ export function capabilitiesForIdentity(identity) {
 
   const policyIdentity = safeIdentity.type === "codex_operator"
     ? { type: "codex_operator_token", role: "codex_operator" }
-    : { type: "google_oauth", role: safeIdentity.role };
+    : safeIdentity.type === "hcn_browser_session"
+      ? { type: "hcn_browser_session", role: safeIdentity.role }
+      : { type: "google_oauth", role: safeIdentity.role };
 
   return CAPABILITY_ROUTE_REGISTRY
     .filter(({ route }) => {
@@ -238,6 +240,20 @@ function normalizeIdentity(identity) {
       role,
       jobNimbusScope: normalizeJobNimbusScope(candidate.jobNimbusScope, role),
       gmailMode: "signed_in_employee_mailbox"
+    };
+  }
+
+  if (
+    candidate.enabled !== false
+    && candidate.type === "hcn_browser_session"
+    && GOOGLE_ROLES.has(role)
+  ) {
+    return {
+      authentication: "authenticated",
+      type: "hcn_browser_session",
+      role,
+      jobNimbusScope: "none",
+      gmailMode: "none"
     };
   }
 

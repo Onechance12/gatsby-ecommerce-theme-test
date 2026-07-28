@@ -16,8 +16,12 @@ transport is unavailable.
 
 ## Safety
 
-- Chance Brain, HCN Operations Brain, and Jobrolo are permanently separate.
-  They share no storage, credentials, routes, imports, backups, or memory.
+- HCN Operations Brain v2 and Jobrolo are permanently separate from Chance
+  Brain. The v2 surface shares no storage, credentials, routes, imports,
+  backups, or memory with either system. Existing non-operator legacy-v1
+  compatibility paths still read old Chance Brain continuity data without
+  writing it; platform metadata reports that transitional state explicitly
+  until those paths are removed.
 - `GET /api/v1/meta` exposes privacy-safe build, runtime, release-gate drift,
   and boundary metadata. Only a full provider-owned `RENDER_GIT_COMMIT` is
   labeled attested; caller-declared commit values are never deployment proof.
@@ -137,6 +141,65 @@ ZAI_OPERATIONAL_MODEL=glm-4.7-flash
 OPERATIONAL_LLM_PROVIDER=zai
 OPERATIONAL_LLM_FALLBACK_PROVIDER=
 ```
+
+## HCN Operations Console
+
+The first HCN console release is a responsive, installable foundation shell at
+`/hcn/`. It reports fresh bridge/build readiness, connector and release-gate
+status, explicit Chance Brain/HCN Operations Brain/Jobrolo boundaries, and the
+signed-in employee's exact console capabilities. It does not display client
+records and its browser session currently has no JobNimbus, Gmail, Quo, upload,
+send, call, or action-batch authority.
+
+The console is disabled by default. To enable it for one exact HTTPS origin,
+configure:
+
+```text
+HCN_CONSOLE_ENABLED=true
+HCN_CONSOLE_ORIGIN=https://jobnimbus-chatgpt-bridge.onrender.com
+PUBLIC_BASE_URL=https://jobnimbus-chatgpt-bridge.onrender.com
+ALLOW_GOOGLE_USER_AUTH=true
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+CHANCE_GOOGLE_SUBJECT=
+OAUTH_SESSION_SECRET=
+WAVE_AUTH_USERS_JSON=
+```
+
+`HCN_CONSOLE_ORIGIN` must exactly match the origin of `PUBLIC_BASE_URL`.
+Sign-in reuses the existing Google redirect URI at
+`/oauth/google/callback`; no second Google redirect URI is required. Only
+enabled employees in the bridge's approved-user registry can receive a console
+session; `WAVE_AUTH_USERS_JSON` supplies explicit entries and role overrides.
+Every console user must have an immutable Google `googleSubject` pin in that
+registry (the default Chance entry reads `CHANCE_GOOGLE_SUBJECT`). The console
+remains unavailable unless Chance's pin is configured, and the verified Google
+subject must match it exactly. Each opaque server session privately retains
+that binding and revalidates it on every request, so a changed pin invalidates
+the old session without exposing the subject to the browser. The Custom GPT
+flow remains compatible with unpinned approved users, but enforces the pin
+whenever one is configured.
+Provider access and refresh tokens are discarded after the callback; the
+browser receives only host-only, Secure, HttpOnly opaque cookies plus a
+session-scoped CSRF value.
+
+Generate `OAUTH_SESSION_SECRET` from at least 32 random bytes and store its
+base64url encoding. The bridge rejects weak values. HCN state uses a dedicated,
+purpose-derived authenticated-encryption key and envelope, so it is not
+interchangeable with the Custom GPT token broker. Credential-bearing Google
+provider URLs are pinned to the reviewed Google HTTPS endpoints in production,
+with redirects, oversized responses, and stalled requests rejected.
+
+The public login route is protected by bounded per-source and global admission
+windows before any OAuth transaction is allocated. On Render, the limiter uses
+the client address forwarded by Render; outside Render it uses the direct
+socket peer. Denied requests receive `429` and a bounded `Retry-After` value.
+
+Console login transactions and sessions are intentionally bounded and
+in-memory in this foundation phase. A restart or deployment signs everyone
+out, and horizontal instances do not share sessions. Move those opaque,
+short-lived records to a reviewed server-side shared session store before
+scaling beyond one instance; never persist them in browser storage.
 
 ## Fresh Review And Approval
 

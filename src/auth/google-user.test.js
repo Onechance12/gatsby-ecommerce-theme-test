@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   CODEX_OPERATOR_ALLOWED_ROUTES,
   authenticateGoogleAccessToken,
+  hcnConsoleChanceUserConfigured,
+  hcnConsoleSessionMatchesApprovedUser,
   parseWaveUsers,
   routeAllowed
 } from "./google-user.js";
@@ -32,6 +34,110 @@ test("valid Google token maps an explicitly approved employee", async () => {
   assert.equal(identity.email, "andrea@wavepa.com");
   assert.equal(identity.jobNimbusScope, "company");
   assert.equal(identity.googleAccessToken, "access-token");
+});
+
+test("approved users preserve a strictly validated immutable Google subject", () => {
+  const pinned = parseWaveUsers(JSON.stringify([{
+    email: "chance@wavepa.com",
+    role: "chance",
+    subject: "google-subject-1"
+  }]), [{
+    email: "chance@wavepa.com",
+    role: "chance",
+    googleSubject: "default-google-subject"
+  }]);
+  assert.equal(
+    pinned.get("chance@wavepa.com").googleSubject,
+    "google-subject-1"
+  );
+  assert.equal(
+    hcnConsoleChanceUserConfigured(pinned, "chance@wavepa.com"),
+    true
+  );
+
+  const inherited = parseWaveUsers(JSON.stringify([{
+    email: "chance@wavepa.com",
+    role: "chance",
+    name: "Chance"
+  }]), [{
+    email: "chance@wavepa.com",
+    role: "chance",
+    googleSubject: "default-google-subject"
+  }]);
+  assert.equal(
+    inherited.get("chance@wavepa.com").googleSubject,
+    "default-google-subject"
+  );
+});
+
+test("invalid or conflicting configured Google subjects fail closed", () => {
+  for (const invalid of [
+    " subject-with-space",
+    "subject/with/slash",
+    "x".repeat(256)
+  ]) {
+    assert.throws(() => parseWaveUsers(JSON.stringify([{
+      email: "chance@wavepa.com",
+      role: "chance",
+      googleSubject: invalid
+    }])), /Google subject is invalid/);
+  }
+  assert.throws(() => parseWaveUsers(JSON.stringify([{
+    email: "chance@wavepa.com",
+    role: "chance",
+    googleSubject: "first-subject",
+    subject: "different-subject"
+  }])), /aliases do not match/);
+  assert.equal(
+    hcnConsoleChanceUserConfigured(
+      parseWaveUsers("", [{
+        email: "chance@wavepa.com",
+        role: "chance"
+      }]),
+      "chance@wavepa.com"
+    ),
+    false
+  );
+});
+
+test("an existing HCN session is invalid after its configured subject pin changes", () => {
+  const session = {
+    role: "chance",
+    googleSubject: "original-google-subject"
+  };
+  assert.equal(hcnConsoleSessionMatchesApprovedUser(session, {
+    role: "chance",
+    enabled: true,
+    googleSubject: "original-google-subject"
+  }), true);
+  assert.equal(hcnConsoleSessionMatchesApprovedUser(session, {
+    role: "chance",
+    enabled: true,
+    googleSubject: "rotated-google-subject"
+  }), false);
+  assert.equal(hcnConsoleSessionMatchesApprovedUser(session, {
+    role: "chance",
+    enabled: false,
+    googleSubject: "original-google-subject"
+  }), false);
+});
+
+test("an explicit Google subject pin is enforced without changing unpinned GPT users", async () => {
+  const pinned = parseWaveUsers("", [{
+    email: "andrea@wavepa.com",
+    role: "client_coordinator",
+    googleSubject: "different-google-subject"
+  }]);
+  await assert.rejects(() => authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: pinned,
+    fetchImpl: fixtureFetch({
+      email: "andrea@wavepa.com",
+      roleDomain: "wavepa.com"
+    })
+  }), /not approved/i);
 });
 
 test("token issued to another OAuth client is rejected", async () => {
@@ -177,6 +283,35 @@ test("shared bridge token preserves legacy routes but cannot read scoped session
     const [method, pathname] = route.split(" ");
     assert.equal(routeAllowed(shared, method, pathname), true, route);
   }
+});
+
+test("HCN browser sessions receive only the reviewed console surface", () => {
+  const browser = { type: "hcn_browser_session", role: "chance" };
+  for (const route of [
+    "GET /api/v1/session",
+    "GET /hcn/auth/session",
+    "POST /hcn/auth/logout"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(routeAllowed(browser, method, pathname), true, route);
+  }
+  for (const route of [
+    "GET /auth/whoami",
+    "POST /ops/review-chance-files",
+    "POST /ops/action-batch",
+    "POST /jobnimbus/search",
+    "POST /jobnimbus/update-contact",
+    "POST /gmail/send",
+    "POST /quo/send",
+    "POST /claim-filing/call"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(routeAllowed(browser, method, pathname), false, route);
+  }
+  assert.equal(
+    routeAllowed({ type: "hcn_browser_session", role: "unsupported" }, "GET", "/api/v1/session"),
+    false
+  );
 });
 
 function fixtureFetch({ audience = clientId, email, roleDomain }) {

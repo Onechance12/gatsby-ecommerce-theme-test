@@ -70,6 +70,28 @@ test("Google roles are normalized to named capabilities without wildcard authori
   assert.equal(JSON.stringify(chance).includes('"*"'), false);
 });
 
+test("HCN browser capability metadata is intersected with the console surface", () => {
+  const browser = buildCapabilityDescriptor({
+    identity: {
+      type: "hcn_browser_session",
+      role: "chance",
+      subject: "private-google-subject",
+      email: "private@example.test",
+      googleAccessToken: "private-provider-token"
+    }
+  });
+
+  assert.deepEqual(browser.authorizedCapabilities, ["platform.session.read"]);
+  assert.deepEqual(browser.identity, {
+    authentication: "authenticated",
+    type: "hcn_browser_session",
+    role: "chance",
+    jobNimbusScope: "none",
+    gmailMode: "none"
+  });
+  assert.doesNotMatch(JSON.stringify(browser), /private-google-subject|private@example|private-provider-token/);
+});
+
 test("unsupported or spoofed identities fail closed", () => {
   for (const identity of [
     null,

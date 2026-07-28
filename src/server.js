@@ -67,12 +67,42 @@ import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspecti
 import { buildCommunicationRecoveryQueue } from "./operations/communication-recovery.js";
 import {
   authenticateGoogleAccessToken,
+  hcnConsoleChanceUserConfigured,
+  hcnConsoleSessionMatchesApprovedUser,
   parseWaveUsers,
   publicIdentity,
   routeAllowed
 } from "./auth/google-user.js";
+import {
+  createHcnConsoleOAuthCoordinator
+} from "./auth/hcn-console-auth.js";
+import { hcnLoginSourceFromRequest } from "./auth/hcn-console-client-source.js";
+import {
+  HCN_LOGIN_COOKIE_NAME,
+  HCN_SESSION_COOKIE_NAME,
+  clearHcnLoginCookie,
+  clearHcnSessionCookie,
+  hcnNoStoreSecurityHeaders,
+  readHcnCookie,
+  validateExactHcnOrigin
+} from "./auth/hcn-console-http.js";
+import { createHcnConsoleLoginAdmission } from "./auth/hcn-console-login-admission.js";
+import { createHcnConsoleSessionStore } from "./auth/hcn-console-session-store.js";
+import {
+  createHcnConsoleStateCodec,
+  isHcnConsoleStateEnvelope
+} from "./auth/hcn-console-state-codec.js";
+import {
+  fetchBoundedProviderJson,
+  resolveGoogleProviderEndpoint
+} from "./auth/google-provider-http.js";
+import { assertStrongOAuthSessionSecret } from "./auth/oauth-secret.js";
 import { buildPlatformMeta, buildPlatformSession } from "./platform/metadata.js";
 import { readReleaseGates } from "./platform/release-gates.js";
+import {
+  HCN_CONSOLE_SECURITY_HEADERS,
+  readHcnConsoleAsset
+} from "./console/static.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -87,15 +117,35 @@ const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || proces
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
-const GOOGLE_TOKEN_URL = process.env.GOOGLE_TOKEN_URL || "https://oauth2.googleapis.com/token";
-const GOOGLE_TOKENINFO_URL = process.env.GOOGLE_TOKENINFO_URL || "https://www.googleapis.com/oauth2/v2/tokeninfo";
-const GOOGLE_USERINFO_URL = process.env.GOOGLE_USERINFO_URL || "https://openidconnect.googleapis.com/v1/userinfo";
+const ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS = process.env.NODE_ENV === "test";
+const GOOGLE_TOKEN_URL = resolveGoogleProviderEndpoint(
+  "token",
+  process.env.GOOGLE_TOKEN_URL,
+  { allowLoopbackForTests: ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS }
+);
+const GOOGLE_TOKENINFO_URL = resolveGoogleProviderEndpoint(
+  "tokenInfo",
+  process.env.GOOGLE_TOKENINFO_URL,
+  { allowLoopbackForTests: ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS }
+);
+const GOOGLE_USERINFO_URL = resolveGoogleProviderEndpoint(
+  "userInfo",
+  process.env.GOOGLE_USERINFO_URL,
+  { allowLoopbackForTests: ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS }
+);
 const GOOGLE_OAUTH_ALLOWED_DOMAIN = process.env.GOOGLE_OAUTH_ALLOWED_DOMAIN || "wavepa.com";
 const ALLOW_GOOGLE_USER_AUTH = process.env.ALLOW_GOOGLE_USER_AUTH === "true";
 const AUTO_ENROLL_WAVE_USERS = process.env.AUTO_ENROLL_WAVE_USERS === "true";
 const GPT_OAUTH_CLIENT_ID = process.env.GPT_OAUTH_CLIENT_ID || "wave-jobnimbus-gpt";
 const GPT_OAUTH_CLIENT_SECRET = process.env.GPT_OAUTH_CLIENT_SECRET || "";
-const OAUTH_SESSION_SECRET = process.env.OAUTH_SESSION_SECRET || "";
+const OAUTH_SESSION_SECRET = assertStrongOAuthSessionSecret(
+  process.env.OAUTH_SESSION_SECRET || "",
+  { required: false }
+);
+const HCN_CONSOLE_ENABLED = process.env.HCN_CONSOLE_ENABLED === "true";
+const HCN_CONSOLE_ORIGIN = resolveHcnConsoleOrigin(
+  process.env.HCN_CONSOLE_ORIGIN || PUBLIC_BASE_URL
+);
 const GOOGLE_OAUTH_SCOPES = [
   "openid",
   "email",
@@ -103,10 +153,14 @@ const GOOGLE_OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/calendar.readonly"
 ];
+const CHANCE_GOOGLE_EMAIL = String(
+  process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com"
+).trim().toLowerCase();
 const WAVE_AUTH_USERS = parseWaveUsers(process.env.WAVE_AUTH_USERS_JSON, [{
-  email: process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com",
+  email: CHANCE_GOOGLE_EMAIL,
   name: "Chance Pearson",
   role: "chance",
+  googleSubject: process.env.CHANCE_GOOGLE_SUBJECT || "",
   jobNimbusOwnerId: process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941",
   jobNimbusScope: "assigned"
 }]);
@@ -157,7 +211,6 @@ const ALLOW_RETELL_CALLS = RELEASE_GATES.ALLOW_RETELL_CALLS;
 const ALLOW_CLIENT_COORDINATOR_CALLS = RELEASE_GATES.ALLOW_CLIENT_COORDINATOR_CALLS;
 const ALLOW_CARRIER_FOLLOWUP_CALLS = RELEASE_GATES.ALLOW_CARRIER_FOLLOWUP_CALLS;
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
-const CHANCE_GOOGLE_EMAIL = String(process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com").trim().toLowerCase();
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-approvals.json");
@@ -193,6 +246,7 @@ const MEMORY_CONFIG = {
   allowLegacyClientMemoryWrites: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
 };
 const REQUEST_CONTEXT = new AsyncLocalStorage();
+const HTTP_RESPONSE = Symbol("httpResponse");
 const INTERNAL_COMMUNICATION_SCOPE = Symbol("internalCommunicationScope");
 const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
 const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
@@ -200,6 +254,12 @@ const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
 const USED_OAUTH_CODES = new Map();
+const HCN_CONSOLE_SESSION_STORE = createHcnConsoleSessionStore();
+const HCN_CONSOLE_LOGIN_ADMISSION = createHcnConsoleLoginAdmission();
+const HCN_CONSOLE_STATE_CODEC = OAUTH_SESSION_SECRET
+  ? createHcnConsoleStateCodec({ secret: OAUTH_SESSION_SECRET })
+  : null;
+let hcnConsoleOAuthCoordinatorInstance = null;
 let quoLineMutationQueue = Promise.resolve();
 let actionBatchMutationQueue = Promise.resolve();
 let actionApprovalMutationQueue = Promise.resolve();
@@ -216,6 +276,8 @@ const routes = new Map([
   ["GET /health", health],
   ["GET /api/v1/meta", hcnPlatformMeta],
   ["GET /api/v1/session", hcnPlatformSession],
+  ["GET /hcn/auth/session", hcnBrowserSession],
+  ["POST /hcn/auth/logout", hcnBrowserLogout],
   ["GET /auth/whoami", authWhoAmI],
   ["POST /auth/quo-line", quoLineLink],
   ["GET /openapi.json", openapi],
@@ -295,8 +357,27 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/oauth/authorize") return oauthAuthorize(res, url);
-    if (req.method === "GET" && url.pathname === "/oauth/google/callback") return oauthGoogleCallback(res, url);
+    if (req.method === "GET" && url.pathname === "/oauth/google/callback") {
+      return oauthGoogleCallback(req, res, url);
+    }
     if (req.method === "POST" && url.pathname === "/oauth/token") return oauthToken(req, res);
+    if (req.method === "GET" && url.pathname === "/hcn/auth/login") {
+      return hcnConsoleLogin(req, res, url);
+    }
+    if (HCN_CONSOLE_ENABLED && req.method === "GET" && url.pathname === "/hcn") {
+      res.writeHead(308, {
+        ...HCN_CONSOLE_SECURITY_HEADERS,
+        location: "/hcn/"
+      });
+      return res.end();
+    }
+    if (HCN_CONSOLE_ENABLED && req.method === "GET") {
+      const consoleAsset = await readHcnConsoleAsset(url.pathname);
+      if (consoleAsset) {
+        res.writeHead(200, consoleAsset.headers);
+        return res.end(consoleAsset.body);
+      }
+    }
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
     if (url.pathname.startsWith("/artifacts/") && (!BRIDGE_TOKEN || !authorized(req))) {
@@ -305,20 +386,43 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/retell/inbound" && !retellInboundAuthorized(url)) {
       return send(res, 401, { error: "Unauthorized inbound webhook" });
     }
+    let authentication = null;
     let identity = null;
     if (url.pathname !== "/retell/inbound" && !isPublicRoute(req.method, url.pathname)) {
-      identity = await authenticateRequest(req);
+      authentication = await authenticateRequest(req);
+      identity = authentication?.identity || null;
       if (!identity) return send(res, 401, { error: "Unauthorized" });
       if (!routeAllowed(identity, req.method, url.pathname)) {
         return send(res, 403, { error: "This Wave Ops role is not permitted to use that action." });
       }
+      assertHcnCookieRequestSafety(req, authentication);
     }
     const body = req.method === "GET" ? {} : await readJson(req);
     assertIdentityRequestScope(identity, req.method, url.pathname, body);
-    const result = await REQUEST_CONTEXT.run({ identity }, () => handler(body));
-    if (result?.html) sendHtml(res, 200, result.html);
+    const result = await REQUEST_CONTEXT.run(
+      authentication || { identity },
+      () => handler(body)
+    );
+    if (result?.[HTTP_RESPONSE]) {
+      send(
+        res,
+        result.status,
+        result.body,
+        result.headers
+      );
+    } else if (result?.html) sendHtml(res, 200, result.html);
     else if (typeof result === "string") sendText(res, 200, result);
-    else send(res, 200, result);
+    else send(
+      res,
+      200,
+      result,
+      authentication?.authenticationMethod === "hcn_cookie"
+        ? {
+            ...hcnNoStoreSecurityHeaders(),
+            vary: "Cookie, Authorization"
+          }
+        : {}
+    );
   } catch (error) {
     send(res, error.statusCode || 500, {
       error: redactSensitiveText(error.message || String(error))
@@ -365,7 +469,7 @@ function health() {
     jobNimbusConfigured: Boolean(API_KEY),
     gmailConfigured: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
     userOAuth: {
-      available: oauthBrokerConfigured(),
+      available: oauthBrokerConfigured() || hcnConsoleAuthConfigured(),
       provider: "google_via_bridge",
       allowedWorkspaceDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
       approvedUserCount: WAVE_AUTH_USERS.size,
@@ -380,6 +484,20 @@ function health() {
       roleEnforcement: true,
       authorizationUrl: `${PUBLIC_BASE_URL}/oauth/authorize`,
       tokenUrl: `${PUBLIC_BASE_URL}/oauth/token`
+    },
+    hcnConsole: {
+      enabled: HCN_CONSOLE_ENABLED,
+      available: hcnConsoleAuthConfigured(),
+      authentication: "google_workspace_server_session",
+      sessionStore: "bounded_in_memory_single_instance",
+      browserCredential: "secure_http_only_host_cookie",
+      csrfProtection: "exact_origin_and_session_token",
+      authorizedSurface: "foundation_metadata_only",
+      clientDataLoaded: false,
+      providerTokensExposedToBrowser: false,
+      chanceBrainDataFlow: false,
+      jobroloDataFlow: false,
+      loginAdmission: HCN_CONSOLE_LOGIN_ADMISSION.stats()
     },
     codexOperator: {
       available: Boolean(CODEX_OPERATOR_TOKEN),
@@ -550,6 +668,122 @@ function oauthBrokerConfigured() {
   );
 }
 
+function hcnConsoleAuthConfigured() {
+  if (
+    !HCN_CONSOLE_ENABLED
+    || !ALLOW_GOOGLE_USER_AUTH
+    || !GOOGLE_CLIENT_ID
+    || !GOOGLE_CLIENT_SECRET
+    || !OAUTH_SESSION_SECRET
+    || !HCN_CONSOLE_STATE_CODEC
+    || !HCN_CONSOLE_ORIGIN
+    || !hcnConsoleChanceUserConfigured(
+      WAVE_AUTH_USERS,
+      CHANCE_GOOGLE_EMAIL
+    )
+  ) {
+    return false;
+  }
+  let publicOrigin;
+  try {
+    publicOrigin = new URL(PUBLIC_BASE_URL).origin;
+  } catch {
+    return false;
+  }
+  if (publicOrigin !== HCN_CONSOLE_ORIGIN) return false;
+  const originUrl = new URL(HCN_CONSOLE_ORIGIN);
+  if (originUrl.protocol === "https:") return true;
+  return process.env.NODE_ENV === "test"
+    && originUrl.protocol === "http:"
+    && originUrl.hostname === "127.0.0.1";
+}
+
+function hcnConsoleOAuthCoordinator() {
+  if (!hcnConsoleAuthConfigured()) {
+    throw oauthError(
+      "temporarily_unavailable",
+      "HCN console sign-in is not fully configured.",
+      503
+    );
+  }
+  if (!hcnConsoleOAuthCoordinatorInstance) {
+    hcnConsoleOAuthCoordinatorInstance = createHcnConsoleOAuthCoordinator({
+      store: HCN_CONSOLE_SESSION_STORE,
+      sealState: HCN_CONSOLE_STATE_CODEC.seal,
+      openState: HCN_CONSOLE_STATE_CODEC.open,
+      authenticateGoogleAccessToken,
+      resolveApprovedUser: async (candidate) => {
+        const approved = WAVE_AUTH_USERS.get(candidate.email);
+        if (
+          !approved
+          || approved.enabled === false
+          || !approved.googleSubject
+        ) {
+          return null;
+        }
+        return {
+          ...approved,
+          email: candidate.email,
+          googleSubject: approved.googleSubject
+        };
+      },
+      canonicalOrigin: HCN_CONSOLE_ORIGIN,
+      allowTestProviderEndpoints:
+        ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS,
+      google: {
+        clientId: GOOGLE_CLIENT_ID,
+        clientSecret: GOOGLE_CLIENT_SECRET,
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+        tokenUrl: GOOGLE_TOKEN_URL,
+        tokenInfoUrl: GOOGLE_TOKENINFO_URL,
+        userInfoUrl: GOOGLE_USERINFO_URL,
+        allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+        prompt: "select_account"
+      }
+    });
+  }
+  return hcnConsoleOAuthCoordinatorInstance;
+}
+
+async function hcnConsoleLogin(req, res, url) {
+  try {
+    const admission = HCN_CONSOLE_LOGIN_ADMISSION.admit(
+      hcnLoginSourceFromRequest(req, {
+        renderProxy: Boolean(process.env.RENDER)
+      })
+    );
+    if (!admission.allowed) {
+      return send(
+        res,
+        429,
+        {
+          error: "rate_limited",
+          error_description:
+            "HCN console sign-in is temporarily rate limited.",
+          retryAfterSeconds: admission.retryAfterSeconds
+        },
+        {
+          ...hcnNoStoreSecurityHeaders(),
+          vary: "Cookie, Authorization",
+          "retry-after": String(admission.retryAfterSeconds)
+        }
+      );
+    }
+    const result = await hcnConsoleOAuthCoordinator().beginAuthorization({
+      returnTo: url.searchParams.get("returnTo") || "/hcn"
+    });
+    res.writeHead(302, {
+      ...hcnNoStoreSecurityHeaders(),
+      vary: "Cookie, Authorization",
+      location: result.redirectUrl,
+      "set-cookie": result.setCookies
+    });
+    res.end();
+  } catch (error) {
+    sendHcnOAuthError(res, error);
+  }
+}
+
 function operationalAdvisoryProviders() {
   const names = [...new Set([
     OPERATIONAL_LLM_PROVIDER,
@@ -628,20 +862,41 @@ function oauthAuthorize(res, url) {
   res.end();
 }
 
-async function oauthGoogleCallback(res, url) {
+async function oauthGoogleCallback(req, res, url) {
+  const sealedState = String(url.searchParams.get("state") || "");
+  if (isHcnConsoleStateEnvelope(sealedState)) {
+    return oauthHcnConsoleCallback(req, res, url, sealedState);
+  }
   try {
-    if (!oauthBrokerConfigured()) throw oauthError("temporarily_unavailable", "Employee OAuth is not fully configured.", 503);
-    const state = openOAuthPayload(required(url.searchParams.get("state"), "state"));
-    if (state.kind !== "authorize_state" || Number(state.exp || 0) <= Date.now()) {
+    required(sealedState, "state");
+    const state = openOAuthPayload(sealedState);
+    if (state.kind !== "authorize_state") {
       throw oauthError("invalid_request", "OAuth state is invalid or expired.");
     }
-    if (url.searchParams.get("error")) {
-      return redirectOAuthError(res, state.redirectUri, state.clientState, url.searchParams.get("error"));
-    }
-    const code = required(url.searchParams.get("code"), "code");
-    const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+    return oauthBrokerGoogleCallback(res, url, state);
+  } catch (error) {
+    sendOAuthError(res, error.statusCode || 400, error.oauthCode || "invalid_request", error.message || "OAuth callback failed.");
+  }
+}
+
+async function oauthBrokerGoogleCallback(res, url, state) {
+  if (!oauthBrokerConfigured()) throw oauthError("temporarily_unavailable", "Employee OAuth is not fully configured.", 503);
+  if (Number(state.exp || 0) <= Date.now()) {
+    throw oauthError("invalid_request", "OAuth state is invalid or expired.");
+  }
+  if (url.searchParams.get("error")) {
+    return redirectOAuthError(res, state.redirectUri, state.clientState, url.searchParams.get("error"));
+  }
+  const code = required(url.searchParams.get("code"), "code");
+  const tokenResult = await fetchBoundedProviderJson(
+    fetch,
+    GOOGLE_TOKEN_URL,
+    {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json"
+      },
       body: new URLSearchParams({
         code,
         client_id: GOOGLE_CLIENT_ID,
@@ -649,39 +904,64 @@ async function oauthGoogleCallback(res, url) {
         redirect_uri: `${PUBLIC_BASE_URL}/oauth/google/callback`,
         grant_type: "authorization_code"
       })
-    });
-    const tokens = await tokenResponse.json().catch(() => ({}));
-    if (!tokenResponse.ok || !tokens.access_token) throw oauthError("access_denied", "Google sign-in could not be completed.", 401);
-    const identity = await authenticateGoogleAccessToken({
-      token: tokens.access_token,
-      clientId: GOOGLE_CLIENT_ID,
-      tokenInfoUrl: GOOGLE_TOKENINFO_URL,
-      userInfoUrl: GOOGLE_USERINFO_URL,
-      allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
-      users: WAVE_AUTH_USERS,
-      resolveUser: resolveFirstUseWaveUser
-    });
-    if (!tokens.refresh_token) throw oauthError("access_denied", "Google did not return offline access. Reconnect and approve the requested access.", 401);
+    }
+  );
+  const tokenResponse = tokenResult.response;
+  const tokens = tokenResult.payload;
+  if (!tokenResponse.ok || !tokens.access_token) throw oauthError("access_denied", "Google sign-in could not be completed.", 401);
+  const identity = await authenticateGoogleAccessToken({
+    token: tokens.access_token,
+    clientId: GOOGLE_CLIENT_ID,
+    tokenInfoUrl: GOOGLE_TOKENINFO_URL,
+    userInfoUrl: GOOGLE_USERINFO_URL,
+    allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+    users: WAVE_AUTH_USERS,
+    resolveUser: resolveFirstUseWaveUser,
+    allowTestProviderEndpoints:
+      ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS
+  });
+  if (!tokens.refresh_token) throw oauthError("access_denied", "Google did not return offline access. Reconnect and approve the requested access.", 401);
 
-    const brokerCode = sealOAuthPayload({
-      kind: "authorization_code",
-      jti: randomUUID(),
-      exp: Date.now() + 5 * 60 * 1000,
-      redirectUri: state.redirectUri,
-      codeChallenge: state.codeChallenge,
-      codeChallengeMethod: state.codeChallengeMethod,
-      googleAccessToken: tokens.access_token,
-      googleRefreshToken: tokens.refresh_token,
-      googleExpiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000,
-      identity: oauthIdentityPayload(identity)
+  const brokerCode = sealOAuthPayload({
+    kind: "authorization_code",
+    jti: randomUUID(),
+    exp: Date.now() + 5 * 60 * 1000,
+    redirectUri: state.redirectUri,
+    codeChallenge: state.codeChallenge,
+    codeChallengeMethod: state.codeChallengeMethod,
+    googleAccessToken: tokens.access_token,
+    googleRefreshToken: tokens.refresh_token,
+    googleExpiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000,
+    identity: oauthIdentityPayload(identity)
+  });
+  const destination = new URL(state.redirectUri);
+  destination.searchParams.set("code", brokerCode);
+  destination.searchParams.set("state", state.clientState);
+  res.writeHead(302, { location: destination.toString(), "cache-control": "no-store" });
+  res.end();
+}
+
+async function oauthHcnConsoleCallback(req, res, url, sealedState) {
+  try {
+    const loginBinding = readHcnCookie(
+      req.headers.cookie,
+      HCN_LOGIN_COOKIE_NAME
+    );
+    const result = await hcnConsoleOAuthCoordinator().completeCallback({
+      state: sealedState,
+      code: url.searchParams.get("code") || "",
+      error: url.searchParams.get("error") || "",
+      loginBinding
     });
-    const destination = new URL(state.redirectUri);
-    destination.searchParams.set("code", brokerCode);
-    destination.searchParams.set("state", state.clientState);
-    res.writeHead(302, { location: destination.toString(), "cache-control": "no-store" });
+    res.writeHead(302, {
+      ...hcnNoStoreSecurityHeaders(),
+      vary: "Cookie, Authorization",
+      location: result.redirectPath,
+      "set-cookie": result.setCookies
+    });
     res.end();
   } catch (error) {
-    sendOAuthError(res, error.statusCode || 400, error.oauthCode || "invalid_request", error.message || "OAuth callback failed.");
+    sendHcnOAuthError(res, error, [clearHcnLoginCookie()]);
   }
 }
 
@@ -708,17 +988,25 @@ async function oauthToken(req, res) {
     if (form.grant_type === "refresh_token") {
       const refresh = openOAuthPayload(required(form.refresh_token, "refresh_token"));
       if (refresh.kind !== "refresh_token" || Number(refresh.exp || 0) <= Date.now()) throw oauthError("invalid_grant", "Refresh token is invalid or expired.");
-      const googleResponse = await fetch(GOOGLE_TOKEN_URL, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-        body: new URLSearchParams({
-          refresh_token: refresh.googleRefreshToken,
-          client_id: GOOGLE_CLIENT_ID,
-          client_secret: GOOGLE_CLIENT_SECRET,
-          grant_type: "refresh_token"
-        })
-      });
-      const google = await googleResponse.json().catch(() => ({}));
+      const googleResult = await fetchBoundedProviderJson(
+        fetch,
+        GOOGLE_TOKEN_URL,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            accept: "application/json"
+          },
+          body: new URLSearchParams({
+            refresh_token: refresh.googleRefreshToken,
+            client_id: GOOGLE_CLIENT_ID,
+            client_secret: GOOGLE_CLIENT_SECRET,
+            grant_type: "refresh_token"
+          })
+        }
+      );
+      const googleResponse = googleResult.response;
+      const google = googleResult.payload;
       if (!googleResponse.ok || !google.access_token) throw oauthError("invalid_grant", "Google access could not be refreshed.", 401);
       return send(res, 200, issueBrokerTokens({
         ...refresh,
@@ -788,6 +1076,48 @@ function hcnPlatformSession() {
   return buildPlatformSession({
     identity: currentRequestIdentity(),
     runtime: health()
+  });
+}
+
+function hcnBrowserSession() {
+  const context = currentRequestAuthentication();
+  if (
+    context?.authenticationMethod !== "hcn_cookie"
+    || !context.hcnSession
+    || !context.hcnSession.csrfToken
+  ) {
+    const error = new Error("HCN browser session authentication is required.");
+    error.statusCode = 403;
+    throw error;
+  }
+  return {
+    ...hcnPlatformSession(),
+    browserSession: {
+      schemaVersion: "hcn.console.browser-session.v1",
+      idleExpiresAt: context.hcnSession.idleExpiresAt,
+      expiresAt: context.hcnSession.expiresAt,
+      csrfToken: context.hcnSession.csrfToken
+    }
+  };
+}
+
+function hcnBrowserLogout() {
+  const context = currentRequestAuthentication();
+  if (
+    context?.authenticationMethod !== "hcn_cookie"
+    || !context.hcnSessionId
+  ) {
+    const error = new Error("HCN browser session authentication is required.");
+    error.statusCode = 403;
+    throw error;
+  }
+  HCN_CONSOLE_SESSION_STORE.revokeSession(context.hcnSessionId);
+  return httpResponse(200, {
+    signedOut: true
+  }, {
+    ...hcnNoStoreSecurityHeaders(),
+    vary: "Cookie, Authorization",
+    "set-cookie": clearHcnSessionCookie()
   });
 }
 
@@ -7224,19 +7554,29 @@ async function gmailApi(endpoint, options = {}) {
 async function getGoogleAccessToken() {
   const userToken = requestGoogleAccessToken();
   if (userToken) return userToken;
-  const response = await fetch(GOOGLE_TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
-      refresh_token: GOOGLE_REFRESH_TOKEN,
-      grant_type: "refresh_token"
-    })
-  });
-  const json = await response.json().catch(() => ({}));
+  const result = await fetchBoundedProviderJson(
+    fetch,
+    GOOGLE_TOKEN_URL,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json"
+      },
+      body: new URLSearchParams({
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        refresh_token: GOOGLE_REFRESH_TOKEN,
+        grant_type: "refresh_token"
+      })
+    }
+  );
+  const response = result.response;
+  const json = result.payload;
   if (!response.ok || !json.access_token) {
-    const error = new Error(`Google OAuth ${response.status}: ${JSON.stringify(json)}`);
+    const error = new Error(
+      `Google OAuth token refresh failed with HTTP ${response.status}.`
+    );
     error.statusCode = response.status;
     throw error;
   }
@@ -8530,6 +8870,66 @@ function authorized(req) {
 }
 
 async function authenticateRequest(req) {
+  const authorizationHeader = String(req.headers.authorization || "").trim();
+  const hcnSessionId = readHcnCookie(
+    req.headers.cookie,
+    HCN_SESSION_COOKIE_NAME
+  );
+  if (authorizationHeader && hcnSessionId) {
+    const error = new Error("Ambiguous authentication is not allowed.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (hcnSessionId) {
+    if (!hcnConsoleAuthConfigured()) return null;
+    const session = HCN_CONSOLE_SESSION_STORE.touchSession(hcnSessionId);
+    if (!session) return null;
+    const approvedUser = WAVE_AUTH_USERS.get(
+      String(session.subject || "").trim().toLowerCase()
+    );
+    if (
+      !approvedUser
+      || !hcnConsoleSessionMatchesApprovedUser(
+        session,
+        approvedUser
+      )
+    ) {
+      HCN_CONSOLE_SESSION_STORE.revokeSession(hcnSessionId);
+      return null;
+    }
+    return {
+      identity: {
+        type: "hcn_browser_session",
+        subject: "",
+        email: "",
+        name: "",
+        role: approvedUser.role,
+        hostedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+        scopes: [],
+        googleAccessToken: "",
+        jobNimbusOwnerId: "",
+        jobNimbusScope: "none",
+        quoLineId: "",
+        enabled: true
+      },
+      authenticationMethod: "hcn_cookie",
+      hcnSession: session,
+      hcnSessionId
+    };
+  }
+
+  const identity = await authenticateBearerRequest(req);
+  return identity
+    ? {
+        identity,
+        authenticationMethod: "bearer",
+        hcnSession: null,
+        hcnSessionId: ""
+      }
+    : null;
+}
+
+async function authenticateBearerRequest(req) {
   const token = bearerToken(req);
   if (!token) return null;
   if (BRIDGE_TOKEN && token === BRIDGE_TOKEN) {
@@ -8591,7 +8991,9 @@ async function authenticateRequest(req) {
     userInfoUrl: GOOGLE_USERINFO_URL,
     allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
     users: WAVE_AUTH_USERS,
-    resolveUser: resolveFirstUseWaveUser
+    resolveUser: resolveFirstUseWaveUser,
+    allowTestProviderEndpoints:
+      ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS
   });
   GOOGLE_IDENTITY_CACHE.set(cacheKey, {
     identity: { ...identity, googleAccessToken: "" },
@@ -8810,6 +9212,22 @@ function sendOAuthError(res, status, error, description) {
   return send(res, status, { error, error_description: description });
 }
 
+function sendHcnOAuthError(res, error, setCookies = []) {
+  return send(
+    res,
+    error?.statusCode || 400,
+    {
+      error: error?.code || error?.oauthCode || "invalid_request",
+      error_description: error?.message || "HCN console sign-in failed."
+    },
+    {
+      ...hcnNoStoreSecurityHeaders(),
+      vary: "Cookie, Authorization",
+      ...(setCookies.length ? { "set-cookie": setCookies } : {})
+    }
+  );
+}
+
 function redirectOAuthError(res, redirectUri, state, error) {
   const destination = new URL(redirectUri);
   destination.searchParams.set("error", error || "access_denied");
@@ -8891,8 +9309,40 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
   }
 }
 
+function assertHcnCookieRequestSafety(req, authentication) {
+  if (authentication?.authenticationMethod !== "hcn_cookie") return;
+  const method = String(req.method || "").toUpperCase();
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return;
+  if (!validateExactHcnOrigin(req.headers.origin, HCN_CONSOLE_ORIGIN)) {
+    const error = new Error("HCN browser request origin is invalid.");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (!HCN_CONSOLE_SESSION_STORE.validateSessionCsrf(
+    authentication.hcnSessionId,
+    req.headers["x-hcn-csrf"]
+  )) {
+    const error = new Error("HCN browser request CSRF token is invalid.");
+    error.statusCode = 403;
+    throw error;
+  }
+  const contentType = String(req.headers["content-type"] || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    const error = new Error("HCN browser unsafe requests require application/json.");
+    error.statusCode = 415;
+    throw error;
+  }
+}
+
 function currentRequestIdentity() {
   return REQUEST_CONTEXT.getStore()?.identity || null;
+}
+
+function currentRequestAuthentication() {
+  return REQUEST_CONTEXT.getStore() || null;
 }
 
 function requestGoogleAccessToken() {
@@ -9370,18 +9820,40 @@ function badRequest(message) {
   throw error;
 }
 
-function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+function httpResponse(status, body, headers = {}) {
+  return {
+    [HTTP_RESPONSE]: true,
+    status,
+    body,
+    headers
+  };
+}
+
+function send(res, status, body, headers = {}) {
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store, max-age=0",
+    "x-content-type-options": "nosniff",
+    ...headers
+  });
   res.end(JSON.stringify(body, null, 2));
 }
 
 function sendText(res, status, text) {
-  res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+  res.writeHead(status, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store, max-age=0",
+    "x-content-type-options": "nosniff"
+  });
   res.end(text);
 }
 
 function sendHtml(res, status, html) {
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store, max-age=0",
+    "x-content-type-options": "nosniff"
+  });
   res.end(html);
 }
 
@@ -9396,6 +9868,16 @@ function escapeXml(value) {
 
 function stripTrailingSlash(value) {
   return String(value || "").replace(/\/+$/, "");
+}
+
+function resolveHcnConsoleOrigin(value) {
+  const candidate = stripTrailingSlash(String(value || "").trim());
+  if (!candidate || !validateExactHcnOrigin(candidate, candidate)) return "";
+  try {
+    return new URL(candidate).origin;
+  } catch {
+    return "";
+  }
 }
 
 function centralIsoDate(date = new Date()) {
@@ -9702,7 +10184,7 @@ const OPENAPI = {
             additionalProperties: false,
             properties: {
               authentication: { type: "string", enum: ["authenticated", "unsupported"] },
-              type: { type: "string", enum: ["codex_operator", "google_oauth", "unsupported"] },
+              type: { type: "string", enum: ["codex_operator", "google_oauth", "hcn_browser_session", "unsupported"] },
               role: {
                 type: "string",
                 enum: ["chance", "administrator", "employee", "onboarding", "client_coordinator", "manager", "codex_operator", "unsupported"]

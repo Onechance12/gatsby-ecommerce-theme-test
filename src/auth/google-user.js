@@ -1,3 +1,8 @@
+import {
+  fetchBoundedProviderJson,
+  resolveGoogleProviderEndpoint
+} from "./google-provider-http.js";
+
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
   administrator: { allRoutes: true },
@@ -71,6 +76,12 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /quo/transcript"
 ]);
 
+export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
+  "GET /api/v1/session",
+  "GET /hcn/auth/session",
+  "POST /hcn/auth/logout"
+]);
+
 export function parseWaveUsers(raw, defaults = []) {
   const users = new Map();
   for (const entry of defaults) addUser(users, entry);
@@ -96,6 +107,31 @@ export function parseWaveUsers(raw, defaults = []) {
   return users;
 }
 
+export function hcnConsoleChanceUserConfigured(users, chanceEmail) {
+  if (!(users instanceof Map)) return false;
+  const email = String(chanceEmail || "").trim().toLowerCase();
+  if (!email) return false;
+  const user = users.get(email);
+  return Boolean(
+    user
+    && user.enabled !== false
+    && user.role === "chance"
+    && user.googleSubject
+  );
+}
+
+export function hcnConsoleSessionMatchesApprovedUser(session, user) {
+  return Boolean(
+    session
+    && user
+    && user.enabled !== false
+    && session.role === user.role
+    && session.googleSubject
+    && user.googleSubject
+    && session.googleSubject === user.googleSubject
+  );
+}
+
 export async function authenticateGoogleAccessToken({
   token,
   clientId,
@@ -104,20 +140,46 @@ export async function authenticateGoogleAccessToken({
   allowedDomain,
   users,
   resolveUser,
+  allowTestProviderEndpoints = false,
   fetchImpl = fetch
 }) {
   const accessToken = String(token || "").trim();
   if (!accessToken) throw authError("Missing Google OAuth access token", 401);
   if (!clientId) throw authError("Google OAuth client id is not configured", 503);
 
-  const tokenUrl = new URL(tokenInfoUrl);
+  const safeTokenInfoUrl = resolveGoogleProviderEndpoint(
+    "tokenInfo",
+    tokenInfoUrl,
+    { allowLoopbackForTests: allowTestProviderEndpoints }
+  );
+  const safeUserInfoUrl = resolveGoogleProviderEndpoint(
+    "userInfo",
+    userInfoUrl,
+    { allowLoopbackForTests: allowTestProviderEndpoints }
+  );
+  const tokenUrl = new URL(safeTokenInfoUrl);
   tokenUrl.searchParams.set("access_token", accessToken);
-  const [tokenResponse, userResponse] = await Promise.all([
-    fetchImpl(tokenUrl, { headers: { accept: "application/json" } }),
-    fetchImpl(userInfoUrl, { headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" } })
-  ]);
-  const tokenInfo = await tokenResponse.json().catch(() => ({}));
-  const profile = await userResponse.json().catch(() => ({}));
+  let tokenResult;
+  let userResult;
+  try {
+    [tokenResult, userResult] = await Promise.all([
+      fetchBoundedProviderJson(fetchImpl, tokenUrl, {
+        headers: { accept: "application/json" }
+      }),
+      fetchBoundedProviderJson(fetchImpl, safeUserInfoUrl, {
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          accept: "application/json"
+        }
+      })
+    ]);
+  } catch {
+    throw authError("Google OAuth token validation failed", 401);
+  }
+  const tokenResponse = tokenResult.response;
+  const userResponse = userResult.response;
+  const tokenInfo = tokenResult.payload;
+  const profile = userResult.payload;
   if (!tokenResponse.ok || !userResponse.ok) throw authError("Google OAuth token validation failed", 401);
 
   const audience = String(tokenInfo.audience || tokenInfo.aud || tokenInfo.issued_to || "");
@@ -140,6 +202,15 @@ export async function authenticateGoogleAccessToken({
   if (!user || user.enabled === false) throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   const role = String(user.role || "").trim().toLowerCase();
   if (!WAVE_ROLE_POLICIES[role]) throw authError("This employee has an unsupported Wave Ops role", 403);
+  let approvedGoogleSubject;
+  try {
+    approvedGoogleSubject = configuredGoogleSubject(user);
+  } catch {
+    throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+  }
+  if (approvedGoogleSubject && approvedGoogleSubject !== subject) {
+    throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+  }
 
   return {
     type: "google_oauth",
@@ -165,6 +236,10 @@ export function routeAllowed(identity, method, pathname) {
   if (identity.type === "codex_operator_token") {
     return identity.role === "codex_operator"
       && CODEX_OPERATOR_ALLOWED_ROUTES.has(`${String(method || "").toUpperCase()} ${pathname}`);
+  }
+  if (identity.type === "hcn_browser_session") {
+    return Boolean(WAVE_ROLE_POLICIES[identity.role])
+      && HCN_BROWSER_ALLOWED_ROUTES.has(`${String(method || "").toUpperCase()} ${pathname}`);
   }
   const policy = WAVE_ROLE_POLICIES[identity.role];
   if (!policy) return false;
@@ -193,6 +268,9 @@ function addUser(users, entry = {}) {
   if (!email) return;
   const role = String(entry.role || "").trim().toLowerCase();
   if (!WAVE_ROLE_POLICIES[role]) throw new Error(`Unsupported Wave Ops role for ${email}: ${role || "missing"}`);
+  const existing = users.get(email);
+  const hasConfiguredSubject = Object.hasOwn(entry, "googleSubject")
+    || Object.hasOwn(entry, "subject");
   users.set(email, {
     email,
     name: String(entry.name || email).trim(),
@@ -200,8 +278,37 @@ function addUser(users, entry = {}) {
     enabled: entry.enabled !== false,
     jobNimbusOwnerId: String(entry.jobNimbusOwnerId || "").trim(),
     jobNimbusScope: String(entry.jobNimbusScope || defaultJobNimbusScope(role)).trim(),
-    quoLineId: String(entry.quoLineId || "").trim()
+    quoLineId: String(entry.quoLineId || "").trim(),
+    googleSubject: hasConfiguredSubject
+      ? configuredGoogleSubject(entry)
+      : String(existing?.googleSubject || "")
   });
+}
+
+function configuredGoogleSubject(entry) {
+  const hasGoogleSubject = Object.hasOwn(entry, "googleSubject");
+  const hasSubjectAlias = Object.hasOwn(entry, "subject");
+  const googleSubject = hasGoogleSubject
+    ? normalizeConfiguredGoogleSubject(entry.googleSubject)
+    : "";
+  const subjectAlias = hasSubjectAlias
+    ? normalizeConfiguredGoogleSubject(entry.subject)
+    : "";
+  if (googleSubject && subjectAlias && googleSubject !== subjectAlias) {
+    throw new Error("Configured Google subject aliases do not match");
+  }
+  return googleSubject || subjectAlias;
+}
+
+function normalizeConfiguredGoogleSubject(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (
+    typeof value !== "string"
+    || !/^[A-Za-z0-9._~-]{1,255}$/.test(value)
+  ) {
+    throw new Error("Configured Google subject is invalid");
+  }
+  return value;
 }
 
 function defaultJobNimbusScope(role) {

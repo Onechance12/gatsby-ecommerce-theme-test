@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -314,6 +315,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
       ALLOW_VOICE_CALLS: "false",
       ALLOW_GOOGLE_USER_AUTH: "false",
+      HCN_CONSOLE_ENABLED: "true",
       ALLOW_GMAIL_SEND: "false",
       ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false",
       ALLOW_QUO_SEND: "false",
@@ -325,6 +327,22 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, port);
+
+  const consoleRedirectResponse = await fetch(`http://127.0.0.1:${port}/hcn`, {
+    redirect: "manual"
+  });
+  assert.equal(consoleRedirectResponse.status, 308);
+  assert.equal(consoleRedirectResponse.headers.get("location"), "/hcn/");
+  assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
+
+  const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`);
+  assert.equal(consoleResponse.status, 200);
+  assert.match(consoleResponse.headers.get("content-type"), /^text\/html/);
+  assert.match(consoleResponse.headers.get("content-security-policy"), /default-src 'self'/);
+  assert.equal(consoleResponse.headers.get("x-frame-options"), "DENY");
+  const consoleHtml = await consoleResponse.text();
+  assert.match(consoleHtml, /HCN Operations Console/);
+  assert.doesNotMatch(consoleHtml, /type=["']password["']/i);
 
   const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
   assert.equal(healthResponse.status, 200);
@@ -1366,6 +1384,7 @@ test("Chance file resolution fails closed on tied exact names", async (t) => {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      NODE_ENV: "test",
       PORT: String(bridgePort),
       JOBNIMBUS_BRIDGE_TOKEN: "",
       CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
@@ -1419,6 +1438,7 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
       GOOGLE_CLIENT_ID: "fixture-client",
       GOOGLE_CLIENT_SECRET: "fixture-secret",
       GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      NODE_ENV: "test",
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
       GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       ALLOW_GOOGLE_USER_AUTH: "false",
@@ -1552,6 +1572,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     cwd: process.cwd(),
     env: {
       ...process.env,
+      NODE_ENV: "test",
       PORT: String(bridgePort),
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
       GOOGLE_CLIENT_ID: "fixture-google-client",
@@ -1693,6 +1714,274 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   assert.equal(brokerIdentityResponse.status, 200);
   const brokerIdentity = await brokerIdentityResponse.json();
   assert.equal(brokerIdentity.identity.email, "andrea@wavepa.com");
+});
+
+test("HCN console uses a cookie-bound Google session with foundation-only authority", async (t) => {
+  const bridgePort = 18930;
+  const fakeGooglePort = 18931;
+  const origin = `http://127.0.0.1:${bridgePort}`;
+  const providerRequests = [];
+  const fakeGoogle = createServer(async (req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
+    if (url.pathname === "/token" && req.method === "POST") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      providerRequests.push({
+        code: form.get("code"),
+        verifier: form.get("code_verifier"),
+        redirectUri: form.get("redirect_uri")
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        access_token: "hcn-google-access-token",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }));
+      return;
+    }
+    if (url.pathname === "/tokeninfo") {
+      assert.equal(url.searchParams.get("access_token"), "hcn-google-access-token");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        audience: "hcn-google-client",
+        expires_in: 3600,
+        verified_email: true,
+        scope: "openid email profile"
+      }));
+      return;
+    }
+    if (url.pathname === "/userinfo") {
+      assert.equal(req.headers.authorization, "Bearer hcn-google-access-token");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        sub: "hcn-google-subject",
+        email: "chance@wavepa.com",
+        email_verified: true,
+        hd: "wavepa.com",
+        name: "Chance Fixture"
+      }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise((resolve) => fakeGoogle.listen(fakeGooglePort, "127.0.0.1", resolve));
+  t.after(() => fakeGoogle.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      PUBLIC_BASE_URL: origin,
+      HCN_CONSOLE_ENABLED: "true",
+      HCN_CONSOLE_ORIGIN: origin,
+      ALLOW_GOOGLE_USER_AUTH: "true",
+      GOOGLE_CLIENT_ID: "hcn-google-client",
+      GOOGLE_CLIENT_SECRET: "hcn-google-secret",
+      GOOGLE_REFRESH_TOKEN: "",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeGooglePort}/token`,
+      GOOGLE_TOKENINFO_URL: `http://127.0.0.1:${fakeGooglePort}/tokeninfo`,
+      GOOGLE_USERINFO_URL: `http://127.0.0.1:${fakeGooglePort}/userinfo`,
+      GOOGLE_OAUTH_ALLOWED_DOMAIN: "wavepa.com",
+      CHANCE_GOOGLE_EMAIL: "chance@wavepa.com",
+      CHANCE_GOOGLE_SUBJECT: "hcn-google-subject",
+      OAUTH_SESSION_SECRET: "hcn-session-sealing-secret-for-tests",
+      GPT_OAUTH_CLIENT_SECRET: "",
+      WAVE_AUTH_USERS_JSON: JSON.stringify([{
+        email: "chance@wavepa.com",
+        name: "Chance Fixture",
+        role: "chance",
+        enabled: true,
+        googleSubject: "hcn-google-subject",
+        jobNimbusScope: "assigned"
+      }]),
+      AUTO_ENROLL_WAVE_USERS: "false",
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-for-ambiguity",
+      CODEX_OPERATOR_TOKEN: "",
+      JOBNIMBUS_API_KEY: "",
+      RETELL_API_KEY: "",
+      QUO_API_KEY: "",
+      BRIDGE_ALLOW_WRITES: "false",
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      ALLOW_VOICE_CALLS: "false",
+      ALLOW_RETELL_CALLS: "false",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const loginResponse = await fetch(
+    `${origin}/hcn/auth/login?returnTo=${encodeURIComponent("/hcn")}`,
+    { redirect: "manual" }
+  );
+  assert.equal(loginResponse.status, 302);
+  assert.equal(loginResponse.headers.get("cache-control"), "no-store, max-age=0");
+  const loginCookies = loginResponse.headers.getSetCookie();
+  assert.equal(loginCookies.length, 1);
+  assert.match(loginCookies[0], /^__Host-hcn_login=[A-Za-z0-9_-]{43};/);
+  assert.match(loginCookies[0], /Secure; HttpOnly; SameSite=Lax/);
+  const loginCookie = loginCookies[0].split(";", 1)[0];
+  const googleAuthorize = new URL(loginResponse.headers.get("location"));
+  assert.equal(googleAuthorize.hostname, "accounts.google.com");
+  assert.equal(googleAuthorize.searchParams.get("redirect_uri"), `${origin}/oauth/google/callback`);
+  assert.equal(googleAuthorize.searchParams.get("scope"), "openid email profile");
+  assert.equal(googleAuthorize.searchParams.get("code_challenge_method"), "S256");
+  assert.equal(googleAuthorize.searchParams.get("access_type"), "online");
+  assert.equal(googleAuthorize.searchParams.get("prompt"), "select_account");
+  assert.match(
+    googleAuthorize.searchParams.get("state"),
+    /^hcn1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
+  );
+
+  const callbackUrl = `${origin}/oauth/google/callback?${new URLSearchParams({
+    code: "hcn-google-code",
+    state: googleAuthorize.searchParams.get("state")
+  })}`;
+  const callbackResponse = await fetch(callbackUrl, {
+    redirect: "manual",
+    headers: { cookie: loginCookie }
+  });
+  assert.equal(callbackResponse.status, 302);
+  assert.equal(callbackResponse.headers.get("location"), "/hcn");
+  const callbackCookies = callbackResponse.headers.getSetCookie();
+  assert.equal(callbackCookies.length, 2);
+  assert.match(callbackCookies[0], /^__Host-hcn_login=;/);
+  const sessionSetCookie = callbackCookies.find((value) =>
+    value.startsWith("__Host-hcn_session=")
+  );
+  assert.ok(sessionSetCookie);
+  assert.match(sessionSetCookie, /Secure; HttpOnly; SameSite=Lax/);
+  assert.doesNotMatch(callbackCookies.join("\n"), /hcn-google-access-token|hcn-google-code/);
+  const sessionCookie = sessionSetCookie.split(";", 1)[0];
+
+  assert.equal(providerRequests.length, 1);
+  assert.equal(providerRequests[0].code, "hcn-google-code");
+  assert.equal(providerRequests[0].redirectUri, `${origin}/oauth/google/callback`);
+  assert.match(providerRequests[0].verifier, /^[A-Za-z0-9_-]{86}$/);
+  assert.equal(
+    createHash("sha256").update(providerRequests[0].verifier).digest("base64url"),
+    googleAuthorize.searchParams.get("code_challenge")
+  );
+
+  const replayResponse = await fetch(callbackUrl, {
+    redirect: "manual",
+    headers: { cookie: loginCookie }
+  });
+  assert.equal(replayResponse.status, 400);
+  assert.equal(providerRequests.length, 1);
+
+  const platformSessionResponse = await fetch(`${origin}/api/v1/session`, {
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(platformSessionResponse.status, 200);
+  assert.equal(platformSessionResponse.headers.get("cache-control"), "no-store, max-age=0");
+  assert.equal(platformSessionResponse.headers.get("vary"), "Cookie, Authorization");
+  const platformSession = await platformSessionResponse.json();
+  assert.equal(platformSession.authenticated, true);
+  assert.equal(platformSession.identity.type, "hcn_browser_session");
+  assert.equal(platformSession.identity.role, "chance");
+  assert.equal(platformSession.identity.jobNimbusScope, "none");
+  assert.deepEqual(platformSession.authorizedCapabilities, ["platform.session.read"]);
+
+  const browserSessionResponse = await fetch(`${origin}/hcn/auth/session`, {
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(browserSessionResponse.status, 200);
+  const browserSession = await browserSessionResponse.json();
+  assert.match(browserSession.browserSession.csrfToken, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(browserSession.browserSession.expiresAt, /Z$/);
+  const serializedBrowserSession = JSON.stringify(browserSession);
+  assert.doesNotMatch(serializedBrowserSession, /chance@wavepa|hcn-google-subject|hcn-google-access-token/);
+
+  const directRouteResponse = await fetch(`${origin}/jobnimbus/search`, {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      origin,
+      "x-hcn-csrf": browserSession.browserSession.csrfToken,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ query: "fixture" })
+  });
+  assert.equal(directRouteResponse.status, 403);
+
+  const ambiguousResponse = await fetch(`${origin}/api/v1/session`, {
+    headers: {
+      cookie: sessionCookie,
+      authorization: "Bearer fixture-shared-bridge-token-for-ambiguity"
+    }
+  });
+  assert.equal(ambiguousResponse.status, 400);
+
+  const missingOriginLogout = await fetch(`${origin}/hcn/auth/logout`, {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      "x-hcn-csrf": browserSession.browserSession.csrfToken,
+      "content-type": "application/json"
+    },
+    body: "{}"
+  });
+  assert.equal(missingOriginLogout.status, 403);
+
+  const logoutResponse = await fetch(`${origin}/hcn/auth/logout`, {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      origin,
+      "x-hcn-csrf": browserSession.browserSession.csrfToken,
+      "content-type": "application/json"
+    },
+    body: "{}"
+  });
+  assert.equal(logoutResponse.status, 200);
+  assert.match(logoutResponse.headers.get("set-cookie"), /^__Host-hcn_session=;/);
+  assert.deepEqual(await logoutResponse.json(), { signedOut: true });
+
+  const revokedSessionResponse = await fetch(`${origin}/api/v1/session`, {
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(revokedSessionResponse.status, 401);
+
+  for (let index = 0; index < 5; index += 1) {
+    const retryLogin = await fetch(`${origin}/hcn/auth/login`, {
+      redirect: "manual"
+    });
+    assert.equal(retryLogin.status, 302);
+  }
+  const rateLimitedLogin = await fetch(`${origin}/hcn/auth/login`, {
+    redirect: "manual"
+  });
+  assert.equal(rateLimitedLogin.status, 429);
+  assert.equal(rateLimitedLogin.headers.get("retry-after"), "600");
+  assert.equal(
+    (await rateLimitedLogin.json()).error,
+    "rate_limited"
+  );
+});
+
+test("production startup rejects weak OAuth secrets and unreviewed Google endpoints", async () => {
+  await expectBridgeStartupFailure({
+    OAUTH_SESSION_SECRET: "weak",
+    GOOGLE_TOKEN_URL: "",
+    GOOGLE_TOKENINFO_URL: "",
+    GOOGLE_USERINFO_URL: ""
+  }, /OAUTH_SESSION_SECRET must be 32-1024 bytes/);
+
+  await expectBridgeStartupFailure({
+    OAUTH_SESSION_SECRET: "",
+    GOOGLE_TOKEN_URL: "https://credential-sink.example/token",
+    GOOGLE_TOKENINFO_URL: "",
+    GOOGLE_USERINFO_URL: ""
+  }, /Google token endpoint must use the reviewed Google HTTPS URL/);
 });
 
 test("Retell configuration creates an editable draft before publishing", async (t) => {
@@ -2118,6 +2407,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     cwd: process.cwd(),
     env: {
       ...process.env,
+      NODE_ENV: "test",
       PORT: String(bridgePort),
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       JOBNIMBUS_FILE_BASE_URL: `http://127.0.0.1:${fakeApiPort}/file-content`,
@@ -2981,6 +3271,44 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const rejected = await rejectedResponse.json();
   assert.match(rejected.error, /No Chance Pearson/);
 });
+
+async function expectBridgeStartupFailure(environment, pattern) {
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      RENDER: "",
+      HCN_CONSOLE_ENABLED: "false",
+      ...environment
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => {
+    output += chunk.toString("utf8");
+  });
+  child.stderr.on("data", (chunk) => {
+    output += chunk.toString("utf8");
+  });
+  let timeout;
+  try {
+    const result = await Promise.race([
+      once(child, "close"),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          child.kill("SIGTERM");
+          reject(new Error("Invalid bridge configuration did not fail startup"));
+        }, 3_000);
+      })
+    ]);
+    assert.notEqual(result[0], 0);
+    assert.match(output, pattern);
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null) child.kill("SIGTERM");
+  }
+}
 
 async function waitForServer(child, port) {
   let output = "";
