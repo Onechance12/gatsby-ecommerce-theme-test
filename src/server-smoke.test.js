@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+const PHASE_ZERO_BUILD_SHA = "810802542c35625327662e97fd21f7208532b371";
+const PLATFORM_FIXTURE_SECRET = "platform-fixture-secret-must-not-leak";
+
 async function startOperatorJobNimbusFixture(t, port, options = {}) {
   const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
   const chance = {
@@ -308,8 +311,15 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       RETELL_FROM_NUMBER: "",
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      ALLOW_VOICE_CALLS: "false",
       ALLOW_GOOGLE_USER_AUTH: "false",
-      BRIDGE_ALLOW_WRITES: "false"
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false",
+      ALLOW_QUO_SEND: "false",
+      BRIDGE_ALLOW_WRITES: "false",
+      RENDER_GIT_COMMIT: PHASE_ZERO_BUILD_SHA,
+      PLATFORM_FIXTURE_SECRET
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -348,7 +358,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.codexOperator.chanceBrainClientMemory, "disabled");
   assert.equal(health.brain.mode, "legacy_v1_client_snapshot_persistence_requires_v2_privacy_migration");
   assert.equal(health.brain.clientSnapshots, "legacy_v1_unsafe_until_migrated");
-  assert.equal(health.brain.automaticRefreshOnReview, "legacy_non_operator_paths_only");
+  assert.equal(health.brain.legacyClientMemoryWritesAllowed, false);
+  assert.equal(health.brain.automaticRefreshOnReview, "disabled_privacy_gate");
   assert.equal(health.brain.codexOperatorClientMemory, "disabled_no_read_no_write");
   assert.equal(health.brain.operationalOpenLoops, true);
   assert.equal(health.brain.deterministicRulesRunOnExactReview, true);
@@ -371,10 +382,57 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.dateOfLossResearch.automaticJobNimbusUpdate, false);
   assert.equal(health.voice.streamPath, "/voice/twilio-stream");
   assert.equal(health.voice.streamUrl, undefined);
+  assert.equal(health.platform.build.attested, true);
+  assert.equal(health.platform.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
+  assert.equal(health.platform.build.sourceCommitTrust, "provider_attested");
+  assert.equal(health.platform.boundaries.chanceBrain, "legacy_read_only_non_operator_paths");
+  assert.equal(health.platform.boundaries.hcnV2ChanceBrainDataFlow, "disconnected");
+  assert.equal(health.platform.boundaries.jobrolo, "disconnected");
+  assert.equal(health.platform.boundaries.hcnOperationsBrain, "v2_foundation");
+  assert.equal(health.platform.runtime.configurationDrift.status, "detected");
+  assert.deepEqual(
+    health.platform.runtime.configurationDrift.differences.map((item) => item.key),
+    ["ALLOW_CARRIER_FOLLOWUP_CALLS", "ALLOW_RETELL_CALLS"]
+  );
+  assert.equal(JSON.stringify(health.platform).includes(PLATFORM_FIXTURE_SECRET), false);
+
+  const platformMetaResponse = await fetch(`http://127.0.0.1:${port}/api/v1/meta`);
+  assert.equal(platformMetaResponse.status, 200);
+  const platformMeta = await platformMetaResponse.json();
+  assert.equal(platformMeta.build.attested, true);
+  assert.equal(platformMeta.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
+  assert.equal(platformMeta.build.sourceCommitTrust, "provider_attested");
+  assert.equal(platformMeta.boundaries.chanceBrain, "legacy_read_only_non_operator_paths");
+  assert.equal(platformMeta.boundaries.hcnV2ChanceBrainDataFlow, "disconnected");
+  assert.equal(platformMeta.boundaries.jobrolo, "disconnected");
+  assert.equal(platformMeta.runtime.configurationDrift.status, "detected");
+  const serializedPlatformMeta = JSON.stringify(platformMeta);
+  assert.equal(serializedPlatformMeta.includes(PLATFORM_FIXTURE_SECRET), false);
+  assert.equal(serializedPlatformMeta.includes("JOBNIMBUS_API_KEY"), false);
+
+  const unauthenticatedSessionResponse = await fetch(`http://127.0.0.1:${port}/api/v1/session`);
+  assert.equal(unauthenticatedSessionResponse.status, 401);
 
   const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
   assert.equal(schemaResponse.status, 200);
   const schema = await schemaResponse.json();
+  assert.equal(schema.paths["/api/v1/meta"].get.operationId, "readHcnPlatformMetadata");
+  assert.equal(schema.paths["/api/v1/session"].get.operationId, "readHcnPlatformSession");
+  assert.equal(
+    schema.paths["/api/v1/meta"].get.responses["200"].content["application/json"].schema.$ref,
+    "#/components/schemas/PlatformMetadataResponse"
+  );
+  assert.equal(
+    schema.paths["/api/v1/session"].get.responses["200"].content["application/json"].schema.$ref,
+    "#/components/schemas/PlatformSessionResponse"
+  );
+  assert.equal(schema.components.schemas.PlatformMetadataResponse.additionalProperties, false);
+  assert.equal(schema.components.schemas.PlatformSessionResponse.additionalProperties, false);
+  assert.equal(schema.components.schemas.PlatformRuntimeStatus.additionalProperties, false);
+  assert.equal(
+    schema.components.schemas.PlatformSessionResponse.properties.identity.additionalProperties,
+    false
+  );
   assert.equal(schema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
   assert.equal(schema.paths["/claim-filing/call"].post.operationId, "placeApprovedClaimFilingCall");
   assert.equal(schema.paths["/claim-filing/result"].post.operationId, "reviewClaimFilingCallResult");
@@ -417,6 +475,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
   assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 30);
+  assert.equal(chatgptSchema.paths["/api/v1/meta"], undefined);
+  assert.equal(chatgptSchema.paths["/api/v1/session"], undefined);
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post.operationId, "linkAuthenticatedQuoLine");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post["x-openai-isConsequential"], true);
@@ -535,7 +595,11 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "",
       MEMORY_ROOT: memoryRoot,
-      BRIDGE_ALLOW_WRITES: "false"
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      BRIDGE_ALLOW_WRITES: "false",
+      RENDER_GIT_COMMIT: PHASE_ZERO_BUILD_SHA,
+      PLATFORM_FIXTURE_SECRET
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -562,6 +626,32 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
   assert.equal(identity.identity.email, "");
   assert.deepEqual(identity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
   assert.match(identity.instruction, /dedicated least-privilege Codex HP operator/i);
+
+  const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
+    headers: operatorHeaders
+  });
+  assert.equal(platformSessionResponse.status, 200);
+  const platformSession = await platformSessionResponse.json();
+  assert.equal(platformSession.authenticated, true);
+  assert.equal(platformSession.identity.type, "codex_operator");
+  assert.equal(platformSession.identity.jobNimbusScope, "assigned");
+  assert.equal(platformSession.build.attested, true);
+  assert.equal(platformSession.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
+  assert.equal(platformSession.build.sourceCommitTrust, "provider_attested");
+  assert.equal(platformSession.authorizedCapabilities.includes("platform.session.read"), true);
+  assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".send")), false);
+  assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".upload")), false);
+  assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.startsWith("brain.")), false);
+  const serializedPlatformSession = JSON.stringify(platformSession);
+  assert.equal(serializedPlatformSession.includes(PLATFORM_FIXTURE_SECRET), false);
+  assert.equal(serializedPlatformSession.includes('"subject"'), false);
+  assert.equal(serializedPlatformSession.includes('"email"'), false);
+  assert.equal(serializedPlatformSession.includes('"token"'), false);
+
+  const sharedTokenSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
+    headers: sharedHeaders
+  });
+  assert.equal(sharedTokenSessionResponse.status, 403);
 
   const brainResponse = await fetch(`http://127.0.0.1:${bridgePort}/brain/context`, {
     method: "POST",
@@ -776,6 +866,39 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
   assert.equal(privacyReview.brain.status, "not_read");
   await assert.rejects(
     stat(path.join(memoryRoot, "data", "memory", "files")),
+    { code: "ENOENT" }
+  );
+
+  const legacyReadOnlyReviewResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/review-file`, {
+    method: "POST",
+    headers: sharedHeaders,
+    body: JSON.stringify({ query: "2739" })
+  });
+  assert.equal(legacyReadOnlyReviewResponse.status, 200);
+  const legacyReadOnlyReview = await legacyReadOnlyReviewResponse.json();
+  assert.equal(legacyReadOnlyReview.clientMemory.snapshot, null);
+  assert.deepEqual(legacyReadOnlyReview.operational.openLoops, []);
+  await assert.rejects(
+    stat(path.join(memoryRoot, "data", "memory", "files")),
+    { code: "ENOENT" }
+  );
+
+  const legacyAdvisoryResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: sharedHeaders,
+    body: JSON.stringify({
+      query: "2739",
+      includeBrainAdvisory: true,
+      includeGmail: false,
+      includeQuo: false
+    })
+  });
+  assert.equal(legacyAdvisoryResponse.status, 200);
+  const legacyAdvisoryReview = await legacyAdvisoryResponse.json();
+  assert.equal(legacyAdvisoryReview.packets[0].operationalAdvisory.status, "disabled_privacy_gate");
+  assert.match(legacyAdvisoryReview.assistantDirective.join(" "), /no legacy client snapshot or advisory was written/i);
+  await assert.rejects(
+    stat(path.join(memoryRoot, "data", "memory", "operational-advisories.jsonl")),
     { code: "ENOENT" }
   );
 
@@ -2008,6 +2131,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       RETELL_API_KEY: "fixture-retell-key",
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "true",
       BRIDGE_ALLOW_WRITES: "true",
       MEMORY_ROOT: memoryRoot,
       ALLOW_GMAIL_SEND: "true",

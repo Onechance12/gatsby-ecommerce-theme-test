@@ -77,8 +77,12 @@ export function reconcileOperationalState(config, snapshot, options = {}) {
   return operationalState(config, snapshot.subjectKey, { evaluations });
 }
 
-export function operationalState(config, subjectKey, { evaluations = [] } = {}) {
-  const rows = readJsonl(operationalBrainPaths(config).loops)
+export function operationalState(
+  config,
+  subjectKey,
+  { evaluations = [], quarantineCorrupt = true } = {}
+) {
+  const rows = readJsonl(operationalBrainPaths(config).loops, { quarantineCorrupt })
     .filter((row) => row.subjectKey === String(subjectKey || ""))
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   return {
@@ -691,7 +695,7 @@ function operationalAuthority() {
   };
 }
 
-function readJsonl(file) {
+function readJsonl(file, { quarantineCorrupt = true } = {}) {
   if (!fs.existsSync(file)) return [];
   const rows = [];
   let corrupt = 0;
@@ -699,9 +703,13 @@ function readJsonl(file) {
     try { rows.push(JSON.parse(line)); } catch { corrupt++; }
   }
   if (corrupt) {
-    const quarantined = `${file}.corrupt-${Date.now()}`;
-    try { fs.renameSync(file, quarantined); } catch { /* leave it for inspection if quarantine fails */ }
-    console.error(`WARN: quarantined operational ledger ${file} with ${corrupt} corrupt line(s). It will rebuild from fresh exact-file reviews.`);
+    if (quarantineCorrupt) {
+      const quarantined = `${file}.corrupt-${Date.now()}`;
+      try { fs.renameSync(file, quarantined); } catch { /* leave it for inspection if quarantine fails */ }
+      console.error(`WARN: quarantined operational ledger ${file} with ${corrupt} corrupt line(s). It will rebuild from fresh exact-file reviews.`);
+    } else {
+      console.error(`WARN: corrupt operational ledger left unchanged by read-only review ${file} with ${corrupt} corrupt line(s).`);
+    }
     return [];
   }
   return rows;

@@ -2,9 +2,10 @@
 
 Small authenticated bridge that lets a ChatGPT Custom GPT Action read and, when explicitly enabled, update JobNimbus.
 It also supports Gmail search/thread/attachment review, verified PDF attachments,
-Quo messages/calls/transcripts, durable private action receipts, private
-per-client evidence snapshots, persistent operational open loops, and a unified
-Chance-only review/approval transaction.
+Quo messages/calls/transcripts, durable private action receipts, a unified
+Chance-only review/approval transaction, and the isolated HCN Operations v2
+contract foundation. Legacy per-client snapshots and operational advisories are
+read-only by default while the v2 operational state layer is built.
 Scanned or visually complex JobNimbus documents can be returned as native
 ChatGPT conversation files so the GPT inspects the original pages instead of
 guessing from a filename or relying only on server-side OCR.
@@ -15,6 +16,18 @@ transport is unavailable.
 
 ## Safety
 
+- Chance Brain, HCN Operations Brain, and Jobrolo are permanently separate.
+  They share no storage, credentials, routes, imports, backups, or memory.
+- `GET /api/v1/meta` exposes privacy-safe build, runtime, release-gate drift,
+  and boundary metadata. Only a full provider-owned `RENDER_GIT_COMMIT` is
+  labeled attested; caller-declared commit values are never deployment proof.
+- `GET /api/v1/session` exposes privacy-safe route authorization for a Google
+  employee or dedicated Codex operator. The legacy wildcard bridge token is
+  denied this scoped descriptor so its effective authority is never understated.
+- Keep `ALLOW_LEGACY_CLIENT_MEMORY_WRITES=false`. With this default, reviews
+  may read existing legacy continuity but cannot refresh snapshots, reconcile
+  legacy operational state, append receipts into snapshots, or create model
+  advisories. Legacy removal remains a separately approved process.
 - Keep `JOBNIMBUS_API_KEY` only in Render environment variables.
 - Set `JOBNIMBUS_BRIDGE_TOKEN` and use it as the Custom GPT bearer token.
 - Set `CODEX_OPERATOR_TOKEN` to a different strong random value for the
@@ -56,17 +69,16 @@ transport is unavailable.
 - Changing one character, recipient, subject, or attachment invalidates the
   approval digest. Duplicate approved action batches are blocked by a persistent ledger.
 - JobNimbus write actions resolve only Chance Pearson-owned insurance files.
-- Client snapshots are private continuity caches, not operating authority. A
-  snapshot never authorizes a write, send, call, task, event, upload, or status
-  change, and fresh JobNimbus/Gmail/Quo evidence always wins.
+- Existing legacy client snapshots are read-only continuity caches, not
+  operating authority. A snapshot never authorizes a write, send, call, task,
+  event, upload, or status change, and fresh JobNimbus/Gmail/Quo evidence wins.
 - Legacy v1 snapshots can retain raw client and communications data. The Codex
   HP operator never reads or writes those snapshots, receipts, episodes, open
   loops, or model advisories. Brain client memory remains unavailable to that
   operator until a reviewed v2 migration and separately approved legacy purge.
-- Exact-file reviews deterministically reconcile evidence-backed operational
-  open loops such as an upcoming inspection without homeowner confirmation.
-  Open loops and optional model advisories are suggestions only; neither can
-  send, write, call, approve, or promote itself into verified company memory.
+- Legacy exact-file reconciliation and model-advisory writes remain disabled by
+  the privacy gate. HCN v2 rules use minimized, tenant-bound observations with
+  provenance and freshness; they cannot send, write, call, or approve.
 - The handoff inbox allows public handoff creation so browser agents can submit Gmail/Quo findings. Listing/completing handoffs still requires the bridge bearer token.
 - Artifact endpoints always require the bridge bearer token. They never apply,
   execute, commit, push, or deploy an uploaded patch.
@@ -130,18 +142,14 @@ OPERATIONAL_LLM_FALLBACK_PROVIDER=
 
 `POST /ops/review-chance-files` gathers fresh JobNimbus fields, recent activity,
 open tasks, non-photo operational documents, Gmail evidence, Quo evidence, and
-private action receipts. Every full file review also loads the verified company
-Brain and refreshes that exact client's durable snapshot. A later partial review
-preserves the last successful Gmail/Quo evidence instead of erasing it. The
-review also reconciles durable operational open loops. Set
-`includeBrainAdvisory:true` on an exact-file review when one bounded no-tools
-model pass would help rank or explain those already grounded loops. The
-provider-neutral adapter uses Z.AI `glm-4.7-flash` by default. OpenAI can be
-configured as an explicit fallback, but fallback is disabled by default to
-avoid duplicate provider cost. The provider packet omits the homeowner name,
-uses only the exact file's bounded operational evidence, validates source IDs
-and zero tool calls, stores hashed provenance and normalized token usage, and
-still requires a separate exact action approval.
+private action receipts. With the production-default
+`ALLOW_LEGACY_CLIENT_MEMORY_WRITES=false`, a review may read existing legacy
+continuity for non-operator compatibility, but it does not refresh a client
+snapshot, reconcile an operational ledger, or create a model advisory. Live
+JobNimbus, Gmail, and Quo evidence is authoritative. The old refresh,
+reconciliation, and bounded advisory behavior remains available only behind an
+explicit legacy opt-in while HCN Operations Brain v2 is built from fresh
+evidence in its own isolated domain.
 
 The dedicated Codex HP operator is a stricter exception: it never reads or
 writes Chance Brain client snapshots, episodes, operational state, or action
@@ -159,9 +167,10 @@ schema-v2 migration.
    and the returned `approvalDigest` plus the short-lived, single-use
    `approvalChallenge` before `approvalExpiresAt`.
 
-The bridge records successful actions on the persistent disk, appends their
-receipts to the exact client snapshot, refreshes JobNimbus state after approved
-JobNimbus writes, and refuses to run the same approved batch twice.
+The bridge records successful actions in its dedicated persistent security and
+action ledgers and refuses to run the same approved batch twice. With the
+legacy-memory gate off, it does not append those receipts to a legacy client
+snapshot or refresh that snapshot after an approved JobNimbus write.
 
 Possession of `CODEX_OPERATOR_TOKEN` is not approval. For every consequential
 batch, Codex must prepare the exact dry run, show the user the actions and
@@ -180,7 +189,7 @@ HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
 and start a new chat after schema changes. Arbitrary standard chats do not gain
 the bridge automatically; the Action must be installed on that GPT.
 
-The GPT-facing schema is intentionally consolidated to 23 high-level operations.
+The GPT-facing schema is intentionally consolidated to 30 high-level operations.
 Detailed bridge routes remain available to the server and local agents, while
 routine JobNimbus edits, tasks, calendar changes, Gmail drafts/sends, and Quo
 texts are prepared and executed through `processApprovedWaveActionBatch`.

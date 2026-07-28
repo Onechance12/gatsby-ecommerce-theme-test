@@ -8,6 +8,8 @@ import path from "node:path";
 import { saveMemory, listMemory, setMemoryStatus, saveProposal, reviewProposal, recordEpisode, recordActionReceipt, latestActionReceipts, memoryPaths } from "./store.js";
 import { renderBrain } from "./brain.js";
 import { assertCompanyLaneSafe, normalizeMemoryDraft } from "./contracts.js";
+import { closeoutAction } from "./actionCloseout.js";
+import { fileSnapshotPath } from "./fileSnapshot.js";
 
 function freshCfg() {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memtest-repo-"));
@@ -187,4 +189,59 @@ test("action receipts are private, deduplicated, and subject-isolated", () => {
   assert.equal(latestActionReceipts(cfg, 10, { subjectKey: "fileB" }).length, 1);
   assert.match(renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA", includeEpisodes: true }), /Sent approved carrier email/);
   assert.doesNotMatch(renderBrain(cfg, { clientLane: "subject", subjectKey: "fileA", includeEpisodes: true }), /homeowner text/);
+});
+
+test("legacy client-memory gate preserves the action receipt but blocks snapshot writes", () => {
+  const cfg = {
+    ...freshCfg(),
+    allowLegacyClientMemoryWrites: false
+  };
+  const result = closeoutAction(cfg, {
+    channel: "jobnimbus",
+    action: "create_note",
+    subjectKey: "synthetic-file",
+    summary: "Recorded an approved synthetic action.",
+    externalId: "synthetic-action-1"
+  });
+
+  assert.equal(result.snapshotUpdate.updated, false);
+  assert.equal(result.snapshotUpdate.reason, "legacy_client_memory_writes_disabled");
+  assert.equal(latestActionReceipts(cfg, 10, { subjectKey: "synthetic-file" }).length, 1);
+  assert.equal(fs.existsSync(fileSnapshotPath(cfg, "synthetic-file")), false);
+});
+
+test("legacy receipt-to-snapshot writes require an explicit true gate", () => {
+  for (const [index, gate] of [undefined, false, "true"].entries()) {
+    const cfg = freshCfg();
+    if (gate !== undefined) cfg.allowLegacyClientMemoryWrites = gate;
+    const subjectKey = `synthetic-file-${index}`;
+    const result = closeoutAction(cfg, {
+      channel: "jobnimbus",
+      action: "create_note",
+      subjectKey,
+      summary: "Recorded another approved synthetic action.",
+      externalId: `synthetic-action-${index + 2}`
+    });
+
+    assert.equal(result.snapshotUpdate.updated, false);
+    assert.equal(result.snapshotUpdate.reason, "legacy_client_memory_writes_disabled");
+    assert.equal(fs.existsSync(fileSnapshotPath(cfg, subjectKey)), false);
+  }
+
+  const explicitlyEnabled = {
+    ...freshCfg(),
+    allowLegacyClientMemoryWrites: true
+  };
+  const enabled = closeoutAction(explicitlyEnabled, {
+    channel: "jobnimbus",
+    action: "create_note",
+    subjectKey: "explicitly-enabled-file",
+    summary: "Recorded an explicitly enabled synthetic action.",
+    externalId: "synthetic-action-enabled"
+  });
+  assert.equal(enabled.snapshotUpdate.updated, true);
+  assert.equal(
+    fs.existsSync(fileSnapshotPath(explicitlyEnabled, "explicitly-enabled-file")),
+    true
+  );
 });

@@ -25,7 +25,7 @@ export function fileSnapshotPath(config, subjectKey) {
   return path.join(path.dirname(memoryPaths(config).client), "files", `${digest}.json`);
 }
 
-export function readFileSnapshot(config, subjectKey) {
+export function readFileSnapshot(config, subjectKey, { quarantineCorrupt = true } = {}) {
   const file = fileSnapshotPath(config, subjectKey);
   if (!fs.existsSync(file)) return null;
   try {
@@ -38,9 +38,13 @@ export function readFileSnapshot(config, subjectKey) {
     // Snapshots are a rebuildable cache, not source-of-truth records. Preserve
     // the damaged bytes for inspection, then let the next live review rebuild
     // clean continuity instead of taking the operational bridge offline.
-    const quarantined = `${file}.corrupt-${Date.now()}`;
-    try { fs.renameSync(file, quarantined); } catch { /* leave the original in place if quarantine fails */ }
-    console.error(`WARN: quarantined unreadable client snapshot ${file}: ${error.message}`);
+    if (quarantineCorrupt) {
+      const quarantined = `${file}.corrupt-${Date.now()}`;
+      try { fs.renameSync(file, quarantined); } catch { /* leave the original in place if quarantine fails */ }
+      console.error(`WARN: quarantined unreadable client snapshot ${file}: ${error.message}`);
+    } else {
+      console.error(`WARN: unreadable client snapshot left unchanged by read-only review ${file}: ${error.message}`);
+    }
     return null;
   }
 }

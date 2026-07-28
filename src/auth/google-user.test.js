@@ -99,6 +99,7 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
 
   for (const route of [
     "GET /auth/whoami",
+    "GET /api/v1/session",
     "POST /ops/start-session",
     "POST /ops/review-chance-files",
     "POST /ops/action-batch",
@@ -119,7 +120,7 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
     assert.equal(routeAllowed(operator, method, pathname), true, route);
   }
-  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 16);
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 17);
 
   for (const route of [
     "POST /auth/quo-line",
@@ -158,8 +159,13 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
   assert.equal(routeAllowed({ type: "codex_operator_token", role: "chance" }, "POST", "/ops/action-batch"), false);
 });
 
-test("shared bridge-token route behavior remains unrestricted", () => {
+test("shared bridge token preserves legacy routes but cannot read scoped session metadata", () => {
   const shared = { type: "bridge_token", role: "chance" };
+  assert.equal(
+    routeAllowed(shared, "GET", "/api/v1/session"),
+    false,
+    "the legacy wildcard token must not receive a misleading least-privilege session descriptor"
+  );
   for (const route of [
     "POST /jobnimbus/upload-file",
     "POST /jobnimbus/update-contact",

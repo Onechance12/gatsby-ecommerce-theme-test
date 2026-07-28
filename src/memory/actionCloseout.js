@@ -7,13 +7,20 @@ import { appendActionReceiptToFileSnapshot } from "./fileSnapshot.js";
 export function closeoutAction(config, input = {}) {
   const saved = recordActionReceipt(config, input);
   let snapshotUpdate;
-  try {
-    snapshotUpdate = appendActionReceiptToFileSnapshot(config, saved.receipt);
-  } catch (error) {
+  if (config?.allowLegacyClientMemoryWrites !== true) {
     snapshotUpdate = {
       updated: false,
-      error: config?.redact ? config.redact(error.message || String(error)) : String(error.message || error)
+      reason: "legacy_client_memory_writes_disabled"
     };
+  } else {
+    try {
+      snapshotUpdate = appendActionReceiptToFileSnapshot(config, saved.receipt);
+    } catch (error) {
+      snapshotUpdate = {
+        updated: false,
+        error: config?.redact ? config.redact(error.message || String(error)) : String(error.message || error)
+      };
+    }
   }
   if (saved.deduped) {
     return { receipt: saved.receipt, deduped: true, episode: null, candidates: [], snapshotUpdate };

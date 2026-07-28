@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import { refreshFileSnapshot } from "./fileSnapshot.js";
 import {
   createOperationalAdvisory,
+  operationalBrainPaths,
   operationalState,
   reconcileOperationalState
 } from "./operationalBrain.js";
@@ -250,4 +251,25 @@ test("operational advisory uses an explicitly configured fallback once without g
   }]);
   assert.equal(result.advisory.provider, "openai");
   assert.equal(result.advisory.authority.automaticExternalActions, false);
+});
+
+test("read-only operational inspection never renames corrupt legacy data", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "wave-operational-read-only-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = { projectRoot: root, memoryRoot: root };
+  const file = operationalBrainPaths(config).loops;
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, "{not-json\n", { encoding: "utf8", mode: 0o600 });
+
+  const state = operationalState(config, "fixture-contact", {
+    quarantineCorrupt: false
+  });
+
+  assert.deepEqual(state.openLoops, []);
+  const names = await readdir(path.dirname(file));
+  assert.equal(names.includes(path.basename(file)), true);
+  assert.equal(
+    names.some((name) => name.startsWith(`${path.basename(file)}.corrupt-`)),
+    false
+  );
 });

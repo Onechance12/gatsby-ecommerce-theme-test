@@ -136,6 +136,8 @@ services:
         value: "false"
       - key: ALLOW_CARRIER_FOLLOWUP_CALLS
         value: "true"
+      - key: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+        value: "false"
       - key: RETELL_CALLBACK_TTL_HOURS
         value: "72"
       - key: CHANCE_JOBNIMBUS_OWNER_ID

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import { renderBrain } from "./brain.js";
 import {
   appendActionReceiptToFileSnapshot,
+  fileSnapshotPath,
   readFileSnapshot,
   refreshFileSnapshot,
   summarizeFileSnapshot
@@ -114,4 +115,22 @@ test("client snapshots retain useful evidence, track changes, and never grant ap
   assert.match(subjectBrain, /never authorize/i);
   const companyBrain = renderBrain(config, { clientLane: "none" });
   assert.doesNotMatch(companyBrain, /CURRENT CLIENT SNAPSHOT/);
+});
+
+test("read-only snapshot inspection never renames corrupt legacy data", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "wave-client-snapshot-read-only-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = { projectRoot: root, memoryRoot: root };
+  const subjectKey = "corrupt-fixture";
+  const file = fileSnapshotPath(config, subjectKey);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, "{not-valid-json", { encoding: "utf8", mode: 0o600 });
+
+  assert.equal(
+    readFileSnapshot(config, subjectKey, { quarantineCorrupt: false }),
+    null
+  );
+  const names = await readdir(path.dirname(file));
+  assert.equal(names.includes(path.basename(file)), true);
+  assert.equal(names.some((name) => name.startsWith(`${path.basename(file)}.corrupt-`)), false);
 });

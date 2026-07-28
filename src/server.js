@@ -71,15 +71,18 @@ import {
   publicIdentity,
   routeAllowed
 } from "./auth/google-user.js";
+import { buildPlatformMeta, buildPlatformSession } from "./platform/metadata.js";
+import { readReleaseGates } from "./platform/release-gates.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
+const RELEASE_GATES = readReleaseGates(process.env);
 const API_BASE = stripTrailingSlash(process.env.JOBNIMBUS_API_BASE_URL || "https://app.jobnimbus.com/api1");
 const JOBNIMBUS_FILE_BASE_URL = stripTrailingSlash(process.env.JOBNIMBUS_FILE_BASE_URL || "https://app.jobnimbus.com/files");
 const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
-const ALLOW_WRITES = process.env.BRIDGE_ALLOW_WRITES === "true";
+const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
 const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://jobnimbus-chatgpt-bridge.onrender.com");
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
@@ -112,7 +115,7 @@ const GMAIL_USER = process.env.GMAIL_USER || "me";
 const STANDARD_W9_GMAIL_MESSAGE_ID = String(process.env.STANDARD_W9_GMAIL_MESSAGE_ID || "").trim();
 const STANDARD_W9_GMAIL_ATTACHMENT_ID = String(process.env.STANDARD_W9_GMAIL_ATTACHMENT_ID || "").trim();
 const STANDARD_W9_SHA256 = String(process.env.STANDARD_W9_SHA256 || "").trim().toLowerCase();
-const ALLOW_GMAIL_SEND = process.env.ALLOW_GMAIL_SEND === "true";
+const ALLOW_GMAIL_SEND = RELEASE_GATES.ALLOW_GMAIL_SEND;
 const PERSISTENT_DATA_ROOT = process.env.MEMORY_ROOT || tmpdir();
 const BRIDGE_DATA_DIR = path.join(PERSISTENT_DATA_ROOT, "bridge");
 const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(BRIDGE_DATA_DIR, "handoffs.json");
@@ -142,7 +145,7 @@ const TWILIO_API_BASE_URL = stripTrailingSlash(process.env.TWILIO_API_BASE_URL |
 const QUO_VERIFICATION_FROM_NUMBER = process.env.QUO_VERIFICATION_FROM_NUMBER || TWILIO_FROM_NUMBER;
 const TWILIO_STATUS_CALLBACK_URL = process.env.TWILIO_STATUS_CALLBACK_URL || "";
 const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "";
-const ALLOW_VOICE_CALLS = process.env.ALLOW_VOICE_CALLS === "true";
+const ALLOW_VOICE_CALLS = RELEASE_GATES.ALLOW_VOICE_CALLS;
 const RETELL_API_BASE_URL = stripTrailingSlash(process.env.RETELL_API_BASE_URL || "https://api.retellai.com");
 const RETELL_API_KEY = process.env.RETELL_API_KEY || "";
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
@@ -150,11 +153,9 @@ const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agen
 const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR_AGENT_ID || RETELL_HOMEOWNER_AGENT_ID;
 const RETELL_CARRIER_FOLLOWUP_AGENT_ID = process.env.RETELL_CARRIER_FOLLOWUP_AGENT_ID || "agent_66fb8a49fc6ab5a777eb9f0474";
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
-const ALLOW_RETELL_CALLS = process.env.ALLOW_RETELL_CALLS === "true";
-const ALLOW_CLIENT_COORDINATOR_CALLS = process.env.ALLOW_CLIENT_COORDINATOR_CALLS === "true";
-const ALLOW_CARRIER_FOLLOWUP_CALLS = process.env.ALLOW_CARRIER_FOLLOWUP_CALLS
-  ? process.env.ALLOW_CARRIER_FOLLOWUP_CALLS === "true"
-  : ALLOW_RETELL_CALLS;
+const ALLOW_RETELL_CALLS = RELEASE_GATES.ALLOW_RETELL_CALLS;
+const ALLOW_CLIENT_COORDINATOR_CALLS = RELEASE_GATES.ALLOW_CLIENT_COORDINATOR_CALLS;
+const ALLOW_CARRIER_FOLLOWUP_CALLS = RELEASE_GATES.ALLOW_CARRIER_FOLLOWUP_CALLS;
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
 const CHANCE_GOOGLE_EMAIL = String(process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com").trim().toLowerCase();
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
@@ -168,7 +169,8 @@ const AUTO_ENROLLED_USER_STORE_PATH = process.env.AUTO_ENROLLED_USER_STORE_PATH 
 const QUO_API_KEY = process.env.QUO_API_KEY || "";
 const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
-const ALLOW_QUO_SEND = process.env.ALLOW_QUO_SEND === "true";
+const ALLOW_QUO_SEND = RELEASE_GATES.ALLOW_QUO_SEND;
+const ALLOW_LEGACY_CLIENT_MEMORY_WRITES = RELEASE_GATES.ALLOW_LEGACY_CLIENT_MEMORY_WRITES;
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
@@ -185,7 +187,11 @@ const HAIL_REPORTS_URL = process.env.HAIL_REPORTS_URL || "https://mesonet.agron.
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
-const MEMORY_CONFIG = { projectRoot: process.cwd(), redact: redactSensitiveText };
+const MEMORY_CONFIG = {
+  projectRoot: process.cwd(),
+  redact: redactSensitiveText,
+  allowLegacyClientMemoryWrites: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+};
 const REQUEST_CONTEXT = new AsyncLocalStorage();
 const INTERNAL_COMMUNICATION_SCOPE = Symbol("internalCommunicationScope");
 const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
@@ -208,6 +214,8 @@ if (BRIDGE_TOKEN && CODEX_OPERATOR_TOKEN && secureEqual(BRIDGE_TOKEN, CODEX_OPER
 
 const routes = new Map([
   ["GET /health", health],
+  ["GET /api/v1/meta", hcnPlatformMeta],
+  ["GET /api/v1/session", hcnPlatformSession],
   ["GET /auth/whoami", authWhoAmI],
   ["POST /auth/quo-line", quoLineLink],
   ["GET /openapi.json", openapi],
@@ -351,7 +359,7 @@ server.listen(PORT, HOST, () => {
 });
 
 function health() {
-  return {
+  const status = {
     ok: true,
     service: "jobnimbus-chatgpt-bridge",
     jobNimbusConfigured: Boolean(API_KEY),
@@ -400,6 +408,7 @@ function health() {
       actualMessagesRemainApprovalGated: true
     },
     writesAllowed: ALLOW_WRITES,
+    releaseGates: RELEASE_GATES,
     outboundSafety: {
       automaticEmailOrTextSending: false,
       explicitChanceApprovalRequired: true,
@@ -497,9 +506,12 @@ function health() {
       autonomousLearning: false,
       externalActions: false,
       codexOperatorClientMemory: "disabled_no_read_no_write",
-      clientMemoryExposed: "legacy_non_operator_paths_only",
+      clientMemoryExposed: "legacy_read_only_non_operator_paths",
       clientSnapshots: "legacy_v1_unsafe_until_migrated",
-      automaticRefreshOnReview: "legacy_non_operator_paths_only",
+      legacyClientMemoryWritesAllowed: ALLOW_LEGACY_CLIENT_MEMORY_WRITES,
+      automaticRefreshOnReview: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+        ? "legacy_non_operator_paths_only"
+        : "disabled_privacy_gate",
       legacySnapshotPurgeRequiresSeparateApproval: true,
       operationalOpenLoops: true,
       deterministicRulesRunOnExactReview: true,
@@ -520,6 +532,10 @@ function health() {
       doesNotAuthorizeActions: true,
       persistentRootConfigured: Boolean(process.env.MEMORY_ROOT)
     }
+  };
+  return {
+    ...status,
+    platform: buildPlatformMeta({ runtime: status })
   };
 }
 
@@ -764,6 +780,17 @@ async function authWhoAmI() {
   };
 }
 
+function hcnPlatformMeta() {
+  return health().platform;
+}
+
+function hcnPlatformSession() {
+  return buildPlatformSession({
+    identity: currentRequestIdentity(),
+    runtime: health()
+  });
+}
+
 function brainContext(input = {}) {
   const maxPerSection = clamp(Number(input.maxPerSection || 25), 1, 25);
   return {
@@ -1005,7 +1032,7 @@ function chatgptOpenapi() {
     info: {
       ...OPENAPI.info,
       title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 29-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
+      description: "Consolidated 30-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     security: [{ googleOAuth: [] }],
@@ -1567,7 +1594,8 @@ async function reviewFile(input) {
   };
   const snapshot = operatorRequest
     ? null
-    : refreshFileSnapshot(MEMORY_CONFIG, {
+    : ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+      ? refreshFileSnapshot(MEMORY_CONFIG, {
         subjectKey: file.id,
         file,
         liveJobNimbus,
@@ -1576,10 +1604,13 @@ async function reviewFile(input) {
         actionReceipts,
         sourceStatus,
         factualSignals: buildFactualSignals(file, sortedActivities, openTasks, operationalDocuments, {}, {})
-      });
+      })
+      : readFileSnapshot(MEMORY_CONFIG, file.id, { quarantineCorrupt: false });
   const operational = operatorRequest
     ? operatorBrainBoundary()
-    : reconcileOperationalState(MEMORY_CONFIG, snapshot);
+    : ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+      ? reconcileOperationalState(MEMORY_CONFIG, snapshot)
+      : operationalState(MEMORY_CONFIG, file.id, { quarantineCorrupt: false });
   return {
     file,
     rawContact: contact,
@@ -5475,11 +5506,15 @@ async function reviewChanceFiles(input = {}) {
     assistantDirective: [
       operatorRequest
         ? "These are fresh exact-file evidence packets with ephemeral continuity metadata; no Chance Brain client memory was read or written."
-        : "These are fresh evidence packets joined with durable client continuity, not automatic decisions.",
+        : ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+          ? "These are fresh evidence packets joined with durable client continuity, not automatic decisions."
+          : "These are fresh evidence packets. Existing legacy continuity is read-only while HCN Operations Brain v2 is established.",
       "Compare current JobNimbus fields, activities, tasks, operational documents, Gmail, Quo, and prior action receipts.",
       operatorRequest
         ? "Use only the live evidence in this response; no client snapshot was refreshed."
-        : "The snapshot has been refreshed by this review. Use it to remember prior context, but let live evidence win.",
+        : ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+          ? "The snapshot has been refreshed by this review. Use it to remember prior context, but let live evidence win."
+          : "No legacy client snapshot or advisory was written. Live evidence is authoritative.",
       "For each file, choose one primary next action, draft its exact content, and show Chance what requires approval.",
       "Do not treat memory or an old task as proof that work is still needed. Do not execute without approval."
     ]
@@ -5888,22 +5923,28 @@ async function buildChanceEvidencePacket(contact, input) {
       }
     };
   }
-  const snapshot = refreshFileSnapshot(MEMORY_CONFIG, {
-    subjectKey: file.id,
-    file: packet.file,
-    liveJobNimbus: packet.liveJobNimbus,
-    gmail: packet.gmail,
-    quo: packet.quo,
-    actionReceipts: packet.actionReceipts,
-    sourceStatus: packet.sourceStatus,
-    factualSignals: packet.factualSignals
-  });
-  const operational = reconcileOperationalState(MEMORY_CONFIG, snapshot);
+  const snapshot = ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+    ? refreshFileSnapshot(MEMORY_CONFIG, {
+        subjectKey: file.id,
+        file: packet.file,
+        liveJobNimbus: packet.liveJobNimbus,
+        gmail: packet.gmail,
+        quo: packet.quo,
+        actionReceipts: packet.actionReceipts,
+        sourceStatus: packet.sourceStatus,
+        factualSignals: packet.factualSignals
+      })
+    : readFileSnapshot(MEMORY_CONFIG, file.id, { quarantineCorrupt: false });
+  const operational = ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+    ? reconcileOperationalState(MEMORY_CONFIG, snapshot)
+    : operationalState(MEMORY_CONFIG, file.id, { quarantineCorrupt: false });
   let operationalAdvisory = {
-    status: "not_requested",
-    reason: "Set includeBrainAdvisory:true on an exact-file review to request one bounded model advisory."
+    status: ALLOW_LEGACY_CLIENT_MEMORY_WRITES ? "not_requested" : "disabled_privacy_gate",
+    reason: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
+      ? "Set includeBrainAdvisory:true on an exact-file review to request one bounded model advisory."
+      : "Legacy client-memory and advisory writes are disabled while HCN Operations Brain v2 is being established."
   };
-  if (input.includeBrainAdvisory === true) {
+  if (input.includeBrainAdvisory === true && ALLOW_LEGACY_CLIENT_MEMORY_WRITES) {
     try {
       operationalAdvisory = await createOperationalAdvisory(MEMORY_CONFIG, snapshot, operational, {
         providers: operationalAdvisoryProviders()
@@ -8420,6 +8461,9 @@ async function safeRefreshClientSnapshot(subjectKey) {
   if (isCodexOperatorRequest()) {
     return { refreshed: false, reason: "operator_privacy_boundary" };
   }
+  if (!ALLOW_LEGACY_CLIENT_MEMORY_WRITES) {
+    return { refreshed: false, reason: "legacy_client_memory_writes_disabled" };
+  }
   const id = String(subjectKey || "").trim();
   if (!id) return { refreshed: false, reason: "missing_subject_key" };
   try {
@@ -8861,7 +8905,7 @@ function googleAccessConfiguredForRequest() {
 }
 
 function isPublicRoute(method, pathname) {
-  return (method === "GET" && ["/health", "/openapi.json", "/openapi-chatgpt.json", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
+  return (method === "GET" && ["/health", "/api/v1/meta", "/openapi.json", "/openapi-chatgpt.json", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
     || (method === "POST" && ["/handoff", "/handoff/chunk"].includes(pathname));
 }
 
@@ -9394,6 +9438,310 @@ const OPENAPI = {
   components: {
     securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
     schemas: {
+      PlatformBuildInfo: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          service: { type: "string", const: "jobnimbus-chatgpt-bridge" },
+          apiVersion: { type: "string", const: "v1" },
+          schemaVersion: { type: "string", const: "0.1.0" },
+          sourceCommit: {
+            type: ["string", "null"],
+            pattern: "^[a-f0-9]{7,64}$"
+          },
+          sourceCommitTrust: {
+            type: "string",
+            enum: ["provider_attested", "declared", "invalid", "unavailable"]
+          },
+          buildId: { type: ["string", "null"] },
+          deployId: { type: ["string", "null"] },
+          runtime: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              name: { type: "string", const: "node" },
+              version: { type: "string" },
+              platform: { type: "string" },
+              architecture: { type: "string" }
+            },
+            required: ["name", "version", "platform", "architecture"]
+          },
+          attested: { type: "boolean" }
+        },
+        required: [
+          "service",
+          "apiVersion",
+          "schemaVersion",
+          "sourceCommit",
+          "sourceCommitTrust",
+          "buildId",
+          "deployId",
+          "runtime",
+          "attested"
+        ]
+      },
+      PlatformRuntimeStatus: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          brain: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              advisory: { type: "string", enum: ["configured", "unconfigured", "disabled", "unknown"] },
+              availability: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              clientMemory: { type: "string", enum: ["disabled", "legacy_restricted", "hcn_v2_minimized", "unknown"] },
+              execution: { $ref: "#/components/schemas/PlatformGateStatus" },
+              fallback: { type: "string", enum: ["configured", "unconfigured", "disabled", "unknown"] },
+              legacyClientMemoryWrites: { $ref: "#/components/schemas/PlatformGateStatus" },
+              persistence: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              snapshotSafety: { type: "string", enum: ["migration_required", "current", "unknown"] }
+            },
+            required: [
+              "advisory",
+              "availability",
+              "clientMemory",
+              "execution",
+              "fallback",
+              "legacyClientMemoryWrites",
+              "persistence",
+              "snapshotSafety"
+            ]
+          },
+          connectors: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              carrierFollowUp: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              claimFiling: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              clientCoordinator: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              gmail: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              googleCalendar: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              googleOAuth: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              jobNimbus: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              quo: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              realtimeVoice: { $ref: "#/components/schemas/PlatformConfigurationStatus" }
+            },
+            required: [
+              "carrierFollowUp",
+              "claimFiling",
+              "clientCoordinator",
+              "gmail",
+              "googleCalendar",
+              "googleOAuth",
+              "jobNimbus",
+              "quo",
+              "realtimeVoice"
+            ]
+          },
+          controls: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              actionBatchOnly: { $ref: "#/components/schemas/PlatformGateStatus" },
+              automaticEmailOrTextSending: { $ref: "#/components/schemas/PlatformGateStatus" },
+              changedPayloadInvalidatesApproval: { $ref: "#/components/schemas/PlatformGateStatus" },
+              directEffectRoutes: { $ref: "#/components/schemas/PlatformGateStatus" },
+              exactDryRunDigestRequired: { $ref: "#/components/schemas/PlatformGateStatus" },
+              explicitChanceApprovalRequired: { $ref: "#/components/schemas/PlatformGateStatus" },
+              modelCanExecute: { $ref: "#/components/schemas/PlatformGateStatus" },
+              roleEnforcement: { $ref: "#/components/schemas/PlatformGateStatus" },
+              schedulingFailClosed: { $ref: "#/components/schemas/PlatformGateStatus" },
+              shortLivedSingleUseChallengeRequired: { $ref: "#/components/schemas/PlatformGateStatus" }
+            },
+            required: [
+              "actionBatchOnly",
+              "automaticEmailOrTextSending",
+              "changedPayloadInvalidatesApproval",
+              "directEffectRoutes",
+              "exactDryRunDigestRequired",
+              "explicitChanceApprovalRequired",
+              "modelCanExecute",
+              "roleEnforcement",
+              "schedulingFailClosed",
+              "shortLivedSingleUseChallengeRequired"
+            ]
+          },
+          gates: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              carrierFollowUpCalls: { $ref: "#/components/schemas/PlatformGateStatus" },
+              claimFilingCalls: { $ref: "#/components/schemas/PlatformGateStatus" },
+              clientCoordinatorAppointmentCalls: { $ref: "#/components/schemas/PlatformGateStatus" },
+              clientCoordinatorExpandedCalls: { $ref: "#/components/schemas/PlatformGateStatus" },
+              externalWrites: { $ref: "#/components/schemas/PlatformGateStatus" },
+              gmailSend: { $ref: "#/components/schemas/PlatformGateStatus" },
+              quoSend: { $ref: "#/components/schemas/PlatformGateStatus" },
+              realtimeVoiceCalls: { $ref: "#/components/schemas/PlatformGateStatus" }
+            },
+            required: [
+              "carrierFollowUpCalls",
+              "claimFilingCalls",
+              "clientCoordinatorAppointmentCalls",
+              "clientCoordinatorExpandedCalls",
+              "externalWrites",
+              "gmailSend",
+              "quoSend",
+              "realtimeVoiceCalls"
+            ]
+          },
+          configurationDrift: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              scope: { type: "string", const: "release_critical_effect_gates" },
+              monitoredKeys: {
+                type: "array",
+                items: { $ref: "#/components/schemas/PlatformReleaseGateKey" },
+                uniqueItems: true
+              },
+              status: { type: "string", enum: ["aligned", "detected", "unknown"] },
+              differences: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    key: { $ref: "#/components/schemas/PlatformReleaseGateKey" },
+                    checkedIn: { $ref: "#/components/schemas/PlatformGateStatus" },
+                    runtime: { $ref: "#/components/schemas/PlatformGateStatus" }
+                  },
+                  required: ["key", "checkedIn", "runtime"]
+                }
+              },
+              unknown: {
+                type: "array",
+                items: { $ref: "#/components/schemas/PlatformReleaseGateKey" },
+                uniqueItems: true
+              }
+            },
+            required: ["scope", "monitoredKeys", "status", "differences", "unknown"]
+          }
+        },
+        required: ["brain", "connectors", "controls", "gates", "configurationDrift"]
+      },
+      PlatformConfigurationStatus: {
+        type: "string",
+        enum: ["configured", "unconfigured", "unknown"]
+      },
+      PlatformGateStatus: {
+        type: "string",
+        enum: ["enabled", "disabled", "unknown"]
+      },
+      PlatformReleaseGateKey: {
+        type: "string",
+        enum: [
+          "ALLOW_CARRIER_FOLLOWUP_CALLS",
+          "ALLOW_CLIENT_COORDINATOR_CALLS",
+          "ALLOW_GMAIL_SEND",
+          "ALLOW_LEGACY_CLIENT_MEMORY_WRITES",
+          "ALLOW_QUO_SEND",
+          "ALLOW_RETELL_CALLS",
+          "ALLOW_VOICE_CALLS",
+          "BRIDGE_ALLOW_WRITES"
+        ]
+      },
+      PlatformMetadataResponse: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          schemaVersion: { type: "string", const: "hcn.platform.meta.v1" },
+          generatedAt: { type: "string", format: "date-time" },
+          build: { $ref: "#/components/schemas/PlatformBuildInfo" },
+          capabilityCatalog: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              schema: { type: "string", const: "hcn.platform.capability-descriptor" },
+              schemaVersion: { type: "string", const: "1.0.0" },
+              capabilityVersion: { type: "string" },
+              semantics: { type: "string", const: "route_authorization_only" },
+              effectiveAvailability: { type: "string", const: "combine_with_runtime" }
+            },
+            required: [
+              "schema",
+              "schemaVersion",
+              "capabilityVersion",
+              "semantics",
+              "effectiveAvailability"
+            ]
+          },
+          runtime: { $ref: "#/components/schemas/PlatformRuntimeStatus" },
+          boundaries: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              chanceBrain: { type: "string", const: "legacy_read_only_non_operator_paths" },
+              hcnV2ChanceBrainDataFlow: { type: "string", const: "disconnected" },
+              jobrolo: { type: "string", const: "disconnected" },
+              hcnOperationsBrain: { type: "string", const: "v2_foundation" },
+              legacyClientMemory: { type: "string", const: "migration_required" }
+            },
+            required: [
+              "chanceBrain",
+              "hcnV2ChanceBrainDataFlow",
+              "jobrolo",
+              "hcnOperationsBrain",
+              "legacyClientMemory"
+            ]
+          }
+        },
+        required: ["schemaVersion", "generatedAt", "build", "capabilityCatalog", "runtime", "boundaries"]
+      },
+      PlatformSessionResponse: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          schemaVersion: { type: "string", const: "hcn.platform.session.v1" },
+          generatedAt: { type: "string", format: "date-time" },
+          authenticated: { type: "boolean" },
+          build: { $ref: "#/components/schemas/PlatformBuildInfo" },
+          identity: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              authentication: { type: "string", enum: ["authenticated", "unsupported"] },
+              type: { type: "string", enum: ["codex_operator", "google_oauth", "unsupported"] },
+              role: {
+                type: "string",
+                enum: ["chance", "administrator", "employee", "onboarding", "client_coordinator", "manager", "codex_operator", "unsupported"]
+              },
+              jobNimbusScope: { type: "string", enum: ["assigned", "company", "none"] },
+              gmailMode: {
+                type: "string",
+                enum: ["exact_assigned_file_evidence", "signed_in_employee_mailbox", "none"]
+              }
+            },
+            required: ["authentication", "type", "role", "jobNimbusScope", "gmailMode"]
+          },
+          authorizedCapabilities: {
+            type: "array",
+            items: { type: "string", pattern: "^[a-z][a-z0-9_.]*$" },
+            uniqueItems: true
+          },
+          runtime: { $ref: "#/components/schemas/PlatformRuntimeStatus" },
+          descriptorHash: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" }
+        },
+        required: [
+          "schemaVersion",
+          "generatedAt",
+          "authenticated",
+          "build",
+          "identity",
+          "authorizedCapabilities",
+          "runtime",
+          "descriptorHash"
+        ]
+      },
+      PlatformErrorResponse: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          error: { type: "string" }
+        },
+        required: ["error"]
+      },
       SearchRequest: {
         type: "object",
         properties: {
@@ -10247,6 +10595,53 @@ const OPENAPI = {
   },
   paths: {
     "/health": { get: { operationId: "health", responses: { "200": { description: "OK" } } } },
+    "/api/v1/meta": {
+      get: {
+        operationId: "readHcnPlatformMetadata",
+        security: [],
+        responses: {
+          "200": {
+            description: "Privacy-safe HCN bridge build attestation, capability schema versions, normalized runtime status, configuration drift, and permanent system boundaries.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PlatformMetadataResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session": {
+      get: {
+        operationId: "readHcnPlatformSession",
+        responses: {
+          "200": {
+            description: "Privacy-safe authenticated identity class, explicit named capabilities, normalized runtime status, build attestation, and deterministic descriptor hash.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PlatformSessionResponse" }
+              }
+            }
+          },
+          "401": {
+            description: "Authentication required.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PlatformErrorResponse" }
+              }
+            }
+          },
+          "403": {
+            description: "The authenticated identity is not allowed to read the HCN platform session.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PlatformErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/whoami": {
       get: {
         operationId: "readSignedInWaveIdentity",

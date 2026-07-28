@@ -5,12 +5,14 @@ export const WAVE_ROLE_POLICIES = {
   onboarding: {
     allowedRoutes: [
       "GET /auth/whoami",
+      "GET /api/v1/session",
       "POST /auth/quo-line"
     ]
   },
   client_coordinator: {
     allowedRoutes: [
       "GET /auth/whoami",
+      "GET /api/v1/session",
       "POST /auth/quo-line",
       "POST /brain/context",
       "POST /memory/file-actions",
@@ -31,6 +33,7 @@ export const WAVE_ROLE_POLICIES = {
   manager: {
     allowedRoutes: [
       "GET /auth/whoami",
+      "GET /api/v1/session",
       "POST /auth/quo-line",
       "POST /brain/context",
       "POST /memory/file-actions",
@@ -50,6 +53,7 @@ export const WAVE_ROLE_POLICIES = {
 
 export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "GET /auth/whoami",
+  "GET /api/v1/session",
   "POST /ops/start-session",
   "POST /ops/review-chance-files",
   "POST /ops/action-batch",
@@ -155,7 +159,9 @@ export async function authenticateGoogleAccessToken({
 
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
-  if (identity.type === "bridge_token") return true;
+  if (identity.type === "bridge_token") {
+    return `${String(method || "").toUpperCase()} ${pathname}` !== "GET /api/v1/session";
+  }
   if (identity.type === "codex_operator_token") {
     return identity.role === "codex_operator"
       && CODEX_OPERATOR_ALLOWED_ROUTES.has(`${String(method || "").toUpperCase()} ${pathname}`);
