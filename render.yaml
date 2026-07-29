@@ -20,6 +20,8 @@ services:
         sync: false
       - key: CODEX_OPERATOR_TOKEN
         sync: false
+      - key: CODEX_MAC_OPERATOR_TOKEN
+        sync: false
       - key: BRIDGE_ALLOW_WRITES
         value: "false"
       - key: HCN_ACTION_EXECUTION_ENABLED

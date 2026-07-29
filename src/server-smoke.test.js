@@ -619,6 +619,7 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
       PORT: String(bridgePort),
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
       CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       JOBNIMBUS_API_KEY: "fixture-key",
       GOOGLE_CLIENT_ID: "",
@@ -660,6 +661,21 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
   assert.equal(identity.identity.email, "");
   assert.deepEqual(identity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
   assert.match(identity.instruction, /dedicated least-privilege Codex HP operator/i);
+
+  const macIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
+    headers: {
+      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+      "content-type": "application/json"
+    }
+  });
+  assert.equal(macIdentityResponse.status, 200);
+  const macIdentity = await macIdentityResponse.json();
+  assert.equal(macIdentity.identity.type, "codex_operator_token");
+  assert.equal(macIdentity.identity.role, "codex_operator");
+  assert.equal(macIdentity.identity.subject, "codex-mac-operator");
+  assert.equal(macIdentity.identity.name, "Codex Mac Operator");
+  assert.deepEqual(macIdentity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
+  assert.match(macIdentity.instruction, /dedicated least-privilege Codex Mac Operator/i);
 
   const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
     headers: operatorHeaders
@@ -1390,6 +1406,29 @@ test("Codex HP operator token fails closed when weak or malformed", async () => 
   const exitCode = await new Promise((resolve) => child.on("exit", resolve));
   assert.notEqual(exitCode, 0);
   assert.match(stderr, /32 to 512 printable non-space ASCII/i);
+});
+
+test("Codex operator device tokens must be distinct", async () => {
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: "18889",
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_OPERATOR_TOKEN: "fixture-duplicate-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-duplicate-operator-token-1234567890",
+      JOBNIMBUS_API_KEY: "",
+      ALLOW_GOOGLE_USER_AUTH: "false"
+    },
+    stdio: ["ignore", "ignore", "pipe"]
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+  const exitCode = await new Promise((resolve) => child.on("exit", resolve));
+  assert.notEqual(exitCode, 0);
+  assert.match(stderr, /CODEX_MAC_OPERATOR_TOKEN must be different from CODEX_OPERATOR_TOKEN/i);
 });
 
 test("Chance file resolution fails closed on tied exact names", async (t) => {

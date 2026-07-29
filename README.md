@@ -44,6 +44,10 @@ transport is unavailable.
   Resolver search and query-less indexes return only minimized identifying
   metadata. Gmail email correlation and Quo phone correlation fail closed when
   that identifier is shared by multiple Chance files.
+- Set `CODEX_MAC_OPERATOR_TOKEN` to a separate strong random value for the
+  dedicated Mac operator. Never copy the HP token to the Mac or reuse the
+  shared bridge token. The Mac identity has the same least-privilege policy
+  with an independent approval and audit subject.
   It cannot
   call direct JobNimbus write/upload, claim-filing, Retell/Twilio live-call,
   direct Gmail draft/send, direct Quo send, configuration, enrollment,
@@ -107,6 +111,7 @@ Required private env vars:
 JOBNIMBUS_API_KEY=
 JOBNIMBUS_BRIDGE_TOKEN=
 CODEX_OPERATOR_TOKEN=
+CODEX_MAC_OPERATOR_TOKEN=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=

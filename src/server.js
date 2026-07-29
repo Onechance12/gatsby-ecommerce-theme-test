@@ -153,6 +153,7 @@ const JOBNIMBUS_FILE_BASE_URL = stripTrailingSlash(process.env.JOBNIMBUS_FILE_BA
 const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
+const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
 const HCN_ACTION_EXECUTION_ENABLED =
   RELEASE_GATES.HCN_ACTION_EXECUTION_ENABLED;
@@ -337,11 +338,23 @@ let actionBatchMutationQueue = Promise.resolve();
 let actionApprovalMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
 
-if (CODEX_OPERATOR_TOKEN && !/^[\x21-\x7E]{32,512}$/.test(CODEX_OPERATOR_TOKEN)) {
-  throw new Error("CODEX_OPERATOR_TOKEN must contain 32 to 512 printable non-space ASCII characters.");
+for (const [name, token] of [
+  ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+  ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN]
+]) {
+  if (token && !/^[\x21-\x7E]{32,512}$/.test(token)) {
+    throw new Error(`${name} must contain 32 to 512 printable non-space ASCII characters.`);
+  }
+  if (BRIDGE_TOKEN && token && secureEqual(BRIDGE_TOKEN, token)) {
+    throw new Error(`${name} must be different from JOBNIMBUS_BRIDGE_TOKEN.`);
+  }
 }
-if (BRIDGE_TOKEN && CODEX_OPERATOR_TOKEN && secureEqual(BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN)) {
-  throw new Error("CODEX_OPERATOR_TOKEN must be different from JOBNIMBUS_BRIDGE_TOKEN.");
+if (
+  CODEX_OPERATOR_TOKEN
+  && CODEX_MAC_OPERATOR_TOKEN
+  && secureEqual(CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN)
+) {
+  throw new Error("CODEX_MAC_OPERATOR_TOKEN must be different from CODEX_OPERATOR_TOKEN.");
 }
 
 const routes = new Map([
@@ -608,7 +621,11 @@ function health() {
       loginAdmission: HCN_CONSOLE_LOGIN_ADMISSION.stats()
     },
     codexOperator: {
-      available: Boolean(CODEX_OPERATOR_TOKEN),
+      available: Boolean(CODEX_OPERATOR_TOKEN || CODEX_MAC_OPERATOR_TOKEN),
+      configuredIdentities: [
+        CODEX_OPERATOR_TOKEN ? "hp" : "",
+        CODEX_MAC_OPERATOR_TOKEN ? "mac" : ""
+      ].filter(Boolean),
       role: "codex_operator",
       assignedJobNimbusFilesOnly: true,
       gmailReadsRequireExactAssignedFile: true,
@@ -1187,7 +1204,7 @@ async function authWhoAmI() {
     instruction: identity.type === "google_oauth"
       ? "The bridge will use this signed-in employee's Google token for Gmail and enforce this employee's Wave Ops role."
       : identity.type === "codex_operator_token"
-        ? "This task is using the dedicated least-privilege Codex HP operator credential. It may review evidence and prepare exact approval batches, but direct writes, uploads, calls, drafts, and sends are denied."
+        ? `This task is using the dedicated least-privilege ${identity.name || "Codex operator"} credential. It may review evidence and prepare exact approval batches, but direct writes, uploads, calls, drafts, and sends are denied.`
         : "This task is using the temporary shared bridge-token fallback and Chance's legacy Gmail connection."
   };
 }
@@ -2151,7 +2168,7 @@ function operatorBrainBoundary() {
     status: "not_read",
     scope: "disabled_for_codex_operator",
     persistedClientMemory: false,
-    authority: "The Codex HP operator does not read or write Chance Brain client snapshots, episodes, receipts, or operational state. Fresh, exact-file source evidence is authoritative."
+    authority: "The Codex operator does not read or write Chance Brain client snapshots, episodes, receipts, or operational state. Fresh, exact-file source evidence is authoritative."
   };
 }
 
@@ -10802,7 +10819,7 @@ function requireApprovalDigest(provided, expected, label) {
 
 function redactSensitiveText(value) {
   let text = String(value || "");
-  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
     text = text.split(secret).join("[REDACTED]");
   }
   return text
@@ -10899,6 +10916,21 @@ async function authenticateBearerRequest(req) {
       subject: "codex-hp-operator",
       email: "",
       name: "Codex HP Operator",
+      role: "codex_operator",
+      hostedDomain: "",
+      scopes: ["client_evidence:read", "approval_batches:prepare_execute"],
+      googleAccessToken: "",
+      jobNimbusOwnerId: CHANCE_OWNER_ID,
+      jobNimbusScope: "assigned",
+      quoLineId: QUO_DEFAULT_FROM_NUMBER
+    };
+  }
+  if (CODEX_MAC_OPERATOR_TOKEN && secureEqual(token, CODEX_MAC_OPERATOR_TOKEN)) {
+    return {
+      type: "codex_operator_token",
+      subject: "codex-mac-operator",
+      email: "",
+      name: "Codex Mac Operator",
       role: "codex_operator",
       hostedDomain: "",
       scopes: ["client_evidence:read", "approval_batches:prepare_execute"],
