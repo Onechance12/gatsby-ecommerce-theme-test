@@ -81,12 +81,26 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /hcn/auth/session",
   "POST /hcn/auth/logout",
   "POST /hcn/api/v1/work-center",
-  "POST /hcn/api/v1/file-review"
+  "POST /hcn/api/v1/file-review",
+  "POST /hcn/api/v1/action-plans/prepare",
+  "POST /hcn/api/v1/action-plans/list",
+  "POST /hcn/api/v1/action-plans/detail",
+  "POST /hcn/api/v1/action-plans/execute",
+  "POST /hcn/api/v1/action-plans/invalidate",
+  "POST /hcn/api/v1/action-receipts/list",
+  "POST /hcn/api/v1/action-receipts/detail"
 ]);
 
 export const HCN_BROWSER_CHANCE_ONLY_ROUTES = new Set([
   "POST /hcn/api/v1/work-center",
-  "POST /hcn/api/v1/file-review"
+  "POST /hcn/api/v1/file-review",
+  "POST /hcn/api/v1/action-plans/prepare",
+  "POST /hcn/api/v1/action-plans/list",
+  "POST /hcn/api/v1/action-plans/detail",
+  "POST /hcn/api/v1/action-plans/execute",
+  "POST /hcn/api/v1/action-plans/invalidate",
+  "POST /hcn/api/v1/action-receipts/list",
+  "POST /hcn/api/v1/action-receipts/detail"
 ]);
 
 export function parseWaveUsers(raw, defaults = []) {

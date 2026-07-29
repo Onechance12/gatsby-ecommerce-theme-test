@@ -30,7 +30,7 @@
       </a>
 
       <div class="topbar-actions">
-        <span class="environment-label">Read-only operations</span>
+        <span class="environment-label">Controlled operations</span>
         <button id="sign-out-action" class="topbar-signout" type="button" hidden>
           Sign out
         </button>
@@ -56,21 +56,21 @@
             <span>Work Center</span>
             <small>Live</small>
           </a>
-          <span class="nav-item is-disabled" aria-disabled="true">
+          <a class="nav-item" href="#work-center">
             <span class="nav-glyph glyph-files" aria-hidden="true"></span>
             <span>Files</span>
-            <small>Next</small>
-          </span>
-          <span class="nav-item is-disabled" aria-disabled="true">
+            <small>Live</small>
+          </a>
+          <a class="nav-item" href="#approvals">
             <span class="nav-glyph glyph-approval" aria-hidden="true"></span>
             <span>Approvals</span>
-            <small>Next</small>
-          </span>
-          <span class="nav-item is-disabled" aria-disabled="true">
+            <small>Live</small>
+          </a>
+          <a class="nav-item" href="#receipts">
             <span class="nav-glyph glyph-receipt" aria-hidden="true"></span>
             <span>Receipts</span>
-            <small>Next</small>
-          </span>
+            <small>Live</small>
+          </a>
         </nav>
 
         <div class="sidebar-note">
@@ -332,6 +332,400 @@
                     </article>
                   </div>
                 </section>
+
+                <section
+                  id="action-composer"
+                  class="file-block action-composer"
+                  aria-labelledby="action-composer-title"
+                >
+                  <div class="file-block-heading">
+                    <div>
+                      <h4 id="action-composer-title">Prepare exact actions</h4>
+                      <p>
+                        Build a memory-only batch for this file. Preparation does not
+                        change JobNimbus.
+                      </p>
+                    </div>
+                    <span id="action-composer-count">0 / 12 actions</span>
+                  </div>
+
+                  <div
+                    id="action-composer-alert"
+                    class="operations-alert"
+                    data-tone="neutral"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    Choose an allowlisted action and enter the exact material to review.
+                  </div>
+
+                  <form id="action-form" class="action-form" novalidate>
+                    <label class="field field-wide">
+                      <span>Action</span>
+                      <select id="action-type" name="actionType">
+                        <option value="jobnimbus.create_note">Create JobNimbus note</option>
+                        <option value="jobnimbus.create_task">Create JobNimbus task</option>
+                        <option value="jobnimbus.update_task">Update JobNimbus task</option>
+                        <option value="jobnimbus.update_status">Change JobNimbus status</option>
+                        <option value="jobnimbus.update_contact">Set date of loss</option>
+                      </select>
+                    </label>
+
+                    <div class="action-fields" data-action-fields="jobnimbus.create_note">
+                      <label class="field field-wide">
+                        <span>Exact note</span>
+                        <textarea
+                          id="action-note"
+                          rows="5"
+                          maxlength="8000"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="jobnimbus.create_task" hidden>
+                      <label class="field field-wide">
+                        <span>Task title</span>
+                        <input
+                          id="create-task-title"
+                          type="text"
+                          maxlength="256"
+                          autocomplete="off"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>Description <small>optional</small></span>
+                        <textarea
+                          id="create-task-description"
+                          rows="4"
+                          maxlength="4000"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                      <label class="field">
+                        <span>Due date <small>optional</small></span>
+                        <input id="create-task-due-date" type="date">
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="jobnimbus.update_task" hidden>
+                      <label class="field field-wide">
+                        <span>Task from this fresh file</span>
+                        <select id="update-task-ref">
+                          <option value="">Choose a task</option>
+                        </select>
+                      </label>
+                      <label class="field field-wide">
+                        <span>New title <small>leave blank for no change</small></span>
+                        <input
+                          id="update-task-title"
+                          type="text"
+                          maxlength="256"
+                          autocomplete="off"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>New description <small>leave blank for no change</small></span>
+                        <textarea
+                          id="update-task-description"
+                          rows="4"
+                          maxlength="4000"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                      <label class="field">
+                        <span>New due date <small>optional</small></span>
+                        <input id="update-task-due-date" type="date">
+                      </label>
+                      <label class="field">
+                        <span>Completion</span>
+                        <select id="update-task-completed">
+                          <option value="">No change</option>
+                          <option value="false">Mark open</option>
+                          <option value="true">Mark complete</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="jobnimbus.update_status" hidden>
+                      <label class="field field-wide">
+                        <span>Requested JobNimbus status</span>
+                        <input
+                          id="action-status"
+                          type="text"
+                          maxlength="128"
+                          autocomplete="off"
+                        >
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="jobnimbus.update_contact" hidden>
+                      <label class="field">
+                        <span>Date of loss</span>
+                        <input id="action-date-of-loss" type="date">
+                      </label>
+                    </div>
+
+                    <div class="action-form-actions">
+                      <button id="action-add" class="button button-surface" type="submit">
+                        Add to review batch
+                      </button>
+                    </div>
+                  </form>
+
+                  <div class="draft-heading">
+                    <div>
+                      <strong>Unprepared draft</strong>
+                      <span>Held only in this page until cleared or prepared.</span>
+                    </div>
+                    <button id="action-draft-clear" class="text-button" type="button">
+                      Clear draft
+                    </button>
+                  </div>
+                  <div id="action-draft-list" class="action-draft-list" aria-live="polite">
+                    <p class="recent-empty">No actions have been added.</p>
+                  </div>
+                  <button
+                    id="action-prepare"
+                    class="button button-primary action-prepare-button"
+                    type="button"
+                    disabled
+                  >
+                    Prepare immutable review
+                  </button>
+                </section>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section
+          id="approvals"
+          class="operations-section approval-section"
+          aria-labelledby="approvals-title"
+        >
+          <div class="operations-section-heading">
+            <div>
+              <p class="eyebrow">Human control plane</p>
+              <h2 id="approvals-title">Approvals</h2>
+              <p>
+                Review the exact immutable plan, its digest, and expiry before a
+                separate action-time approval.
+              </p>
+            </div>
+            <div class="work-center-actions">
+              <span id="approval-status" class="card-status" data-tone="neutral">
+                Sign in required
+              </span>
+              <button
+                id="approval-refresh"
+                class="button button-surface"
+                type="button"
+                hidden
+              >
+                Refresh approvals
+              </button>
+            </div>
+          </div>
+
+          <div
+            id="approval-alert"
+            class="operations-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
+          >
+            Approval plans stay closed until fresh authority is verified.
+          </div>
+
+          <div id="approval-locked" class="operations-locked">
+            <span class="operations-lock-mark" aria-hidden="true"></span>
+            <div>
+              <strong>Approval authority is closed.</strong>
+              <p>Sign in with the authorized Chance account to review pending plans.</p>
+            </div>
+          </div>
+
+          <div id="approval-workspace" class="approval-workspace" hidden>
+            <section class="approval-list-panel" aria-labelledby="approval-list-title">
+              <div class="workspace-panel-heading">
+                <div>
+                  <p class="eyebrow">This browser session</p>
+                  <h3 id="approval-list-title">Action plans</h3>
+                </div>
+                <span id="approval-count" class="queue-count">0</span>
+              </div>
+              <div
+                id="approval-list"
+                class="approval-list"
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <p class="workspace-empty">No action plans are loaded.</p>
+              </div>
+            </section>
+
+            <section class="approval-detail-panel" aria-labelledby="approval-detail-title">
+              <div id="approval-placeholder" class="approval-placeholder">
+                <h3 id="approval-detail-title">Choose one immutable plan</h3>
+                <p>
+                  Every action, material field, digest, and expiration is shown
+                  before execution can be acknowledged.
+                </p>
+              </div>
+
+              <div id="approval-detail" hidden>
+                <div class="approval-detail-heading">
+                  <div>
+                    <p class="eyebrow">Exact server-prepared plan</p>
+                    <h3 id="approval-plan-title">Action plan</h3>
+                  </div>
+                  <span id="approval-plan-state" class="card-status" data-tone="neutral">
+                    Checking
+                  </span>
+                </div>
+                <dl class="approval-meta">
+                  <div>
+                    <dt>Plan</dt>
+                    <dd id="approval-plan-id">—</dd>
+                  </div>
+                  <div>
+                    <dt>File</dt>
+                    <dd id="approval-file-ref">—</dd>
+                  </div>
+                  <div>
+                    <dt>Expires</dt>
+                    <dd id="approval-expires-at">—</dd>
+                  </div>
+                  <div class="approval-meta-digest">
+                    <dt>Approval digest</dt>
+                    <dd id="approval-digest">—</dd>
+                  </div>
+                </dl>
+
+                <div id="approval-operations" class="approval-operations"></div>
+
+                <div class="execution-guard">
+                  <p id="execution-gate-message">
+                    Execution remains disabled until both effect gates and the exact
+                    capability are enabled.
+                  </p>
+                  <label class="approval-acknowledgment">
+                    <input id="approval-acknowledge" type="checkbox" disabled>
+                    <span>
+                      I reviewed every action and material field above and approve
+                      this exact unchanged plan for execution now.
+                    </span>
+                  </label>
+                  <div class="approval-actions">
+                    <button
+                      id="approval-invalidate"
+                      class="button button-surface"
+                      type="button"
+                      disabled
+                    >
+                      Invalidate plan
+                    </button>
+                    <button
+                      id="approval-execute"
+                      class="button button-primary"
+                      type="button"
+                      disabled
+                    >
+                      Execute approved plan
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section
+          id="receipts"
+          class="operations-section receipt-section"
+          aria-labelledby="receipts-title"
+        >
+          <div class="operations-section-heading">
+            <div>
+              <p class="eyebrow">Durable outcome metadata</p>
+              <h2 id="receipts-title">Receipts</h2>
+              <p>
+                Confirm what finished, what needs verification, and what must be
+                reconciled against fresh source evidence.
+              </p>
+            </div>
+            <div class="work-center-actions">
+              <span id="receipt-status" class="card-status" data-tone="neutral">
+                Sign in required
+              </span>
+              <button
+                id="receipt-refresh"
+                class="button button-surface"
+                type="button"
+                hidden
+              >
+                Refresh receipts
+              </button>
+            </div>
+          </div>
+
+          <div
+            id="receipt-alert"
+            class="operations-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
+          >
+            Receipt metadata stays closed until fresh authority is verified.
+          </div>
+
+          <div id="receipt-locked" class="operations-locked">
+            <span class="operations-lock-mark" aria-hidden="true"></span>
+            <div>
+              <strong>Receipt authority is closed.</strong>
+              <p>Sign in with the authorized Chance account to review execution outcomes.</p>
+            </div>
+          </div>
+
+          <div id="receipt-workspace" class="receipt-workspace" hidden>
+            <section class="receipt-list-panel" aria-labelledby="receipt-list-title">
+              <div class="workspace-panel-heading">
+                <div>
+                  <p class="eyebrow">Metadata only</p>
+                  <h3 id="receipt-list-title">Execution receipts</h3>
+                </div>
+                <span id="receipt-count" class="queue-count">0</span>
+              </div>
+              <div
+                id="receipt-list"
+                class="receipt-list"
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <p class="workspace-empty">No receipts are loaded.</p>
+              </div>
+            </section>
+
+            <section class="receipt-detail-panel" aria-labelledby="receipt-detail-title">
+              <div id="receipt-placeholder" class="approval-placeholder">
+                <h3 id="receipt-detail-title">Choose one receipt</h3>
+                <p>
+                  Receipt details contain bounded outcome counts and opaque
+                  references, never provider credentials or client bodies.
+                </p>
+              </div>
+              <div id="receipt-detail" hidden>
+                <div class="approval-detail-heading">
+                  <div>
+                    <p class="eyebrow">Execution outcome</p>
+                    <h3 id="receipt-detail-heading">Receipt</h3>
+                  </div>
+                  <span id="receipt-detail-state" class="card-status" data-tone="neutral">
+                    Checking
+                  </span>
+                </div>
+                <dl id="receipt-detail-fields" class="approval-meta receipt-meta"></dl>
               </div>
             </section>
           </div>
@@ -428,7 +822,7 @@
               <p class="eyebrow">Operating roadmap</p>
               <h2 id="next-title">What is live and what comes next</h2>
             </div>
-            <p>Fresh read-only review is live. Effectful areas stay unavailable until their approval contracts are ready.</p>
+            <p>Fresh review, exact approvals, and durable receipt metadata now share one controlled workflow.</p>
           </div>
 
           <div class="next-grid">
@@ -448,19 +842,19 @@
               <span class="next-number">03</span>
               <h3>Approvals</h3>
               <p>Review every material action before an unchanged batch can run.</p>
-              <span class="coming-label">Planned</span>
+              <span class="coming-label">Live · exact review</span>
             </article>
             <article class="next-card">
               <span class="next-number">04</span>
               <h3>Receipts</h3>
               <p>Verify exactly what changed, what did not, and what remains open.</p>
-              <span class="coming-label">Planned</span>
+              <span class="coming-label">Live · metadata only</span>
             </article>
           </div>
         </section>
 
         <footer class="console-footer">
-          <p>HCN Operations Console · Read-only operations release</p>
+          <p>HCN Operations Console · Controlled operations release</p>
           <p id="freshness-text">Awaiting fresh platform metadata.</p>
         </footer>
       </main>

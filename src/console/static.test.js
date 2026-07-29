@@ -79,7 +79,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v4";/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v5";/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   assert.match(script, /identity\.role === "chance"/);
   assert.match(script, /hcn\.work_center\.read/);
@@ -104,4 +104,140 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.match(worker, /"\/hcn\/api\/"/);
   assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
   assert.doesNotMatch(worker, /work-center|file-review/);
+});
+
+test("approval composer exposes only the bounded HCN v1 JobNimbus actions", async () => {
+  const [htmlAsset, scriptAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+
+  for (const action of [
+    "jobnimbus.create_note",
+    "jobnimbus.create_task",
+    "jobnimbus.update_task",
+    "jobnimbus.update_status",
+    "jobnimbus.update_contact"
+  ]) {
+    assert.match(html, new RegExp(`value="${action.replace(".", "\\.")}"`));
+    assert.match(script, new RegExp(`"${action.replace(".", "\\.")}"`));
+  }
+
+  assert.match(html, /id="update-task-ref"/);
+  assert.match(html, /id="approval-acknowledge" type="checkbox" disabled/);
+  assert.match(html, /Prepare immutable review/);
+  assert.match(html, /Execute approved plan/);
+  assert.match(script, /const TASK_REF = \/\^ref_/);
+  assert.match(script, /reference: reference/);
+  assert.match(script, /state\.actionDraft = state\.actionDraft\.concat/);
+  assert.match(script, /MAX_ACTIONS = 12/);
+  assert.match(script, /new TextEncoder\(\)\.encode\(value\)\.length/);
+  const composer = html.slice(
+    html.indexOf('id="action-composer"'),
+    html.indexOf('id="approvals"')
+  );
+  assert.doesNotMatch(
+    composer,
+    /gmail\.|quo\.|calendar\.|upload|delete|payment|financial/i
+  );
+});
+
+test("action plans require immutable review, acknowledgment, capability, and both gates", async () => {
+  const scriptAsset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = scriptAsset.body.toString("utf8");
+
+  for (const route of [
+    "/hcn/api/v1/action-plans/prepare",
+    "/hcn/api/v1/action-plans/list",
+    "/hcn/api/v1/action-plans/detail",
+    "/hcn/api/v1/action-plans/execute",
+    "/hcn/api/v1/action-plans/invalidate",
+    "/hcn/api/v1/action-receipts/list",
+    "/hcn/api/v1/action-receipts/detail"
+  ]) {
+    assert.match(script, new RegExp(route.replaceAll("/", "\\/")));
+  }
+
+  for (const capability of [
+    "hcn.action_plans.prepare",
+    "hcn.action_plans.read",
+    "hcn.action_plans.execute",
+    "hcn.action_plans.invalidate",
+    "hcn.action_receipts.read"
+  ]) {
+    assert.match(script, new RegExp(capability.replace(".", "\\.")));
+  }
+
+  assert.match(script, /\{ fileRef: fileRef, operations: operations \}/);
+  assert.match(script, /\{ planId: planId \}/);
+  assert.match(script, /runtimeGateEnabled\("externalWrites"\)/);
+  assert.match(script, /runtimeGateEnabled\("hcnActionExecution"\)/);
+  assert.match(
+    script,
+    /elements\["approval-acknowledge"\]\.checked !== true/
+  );
+  assert.match(
+    script,
+    /elements\["approval-execute"\]\.addEventListener\(\s*"click",\s*executeSelectedPlan/
+  );
+  assert.equal((script.match(/ENDPOINTS\.actionExecute/g) || []).length, 1);
+  assert.equal((script.match(/\bexecuteSelectedPlan\b/g) || []).length, 2);
+  assert.match(script, /assertNoStoreEnvelope\(value\)/);
+  assert.match(script, /value\.schema !== "hcn\.console\.actions\.v1"/);
+  assert.match(script, /authority\.automaticExecution !== false/);
+  assert.match(script, /authority\.automaticRetry !== false/);
+  assert.match(script, /authority\.providerIdentifiersExposed !== false/);
+  assert.match(script, /setText\(elements\["approval-digest"\], plan\.approvalDigest\)/);
+  assert.match(
+    script,
+    /The outcome could not be confirmed\. Do not retry\. Refresh receipts and reconcile/
+  );
+  assert.match(script, /if \(status === "executed"\) return "good"/);
+  assert.doesNotMatch(
+    script,
+    /status === "executed" \|\| status === "completed_pending_verification"/
+  );
+  assert.match(
+    script,
+    /fresh JobNimbus verification is still required\. Do not repeat them\./
+  );
+  assert.match(
+    script,
+    /Execution has no terminal receipt yet\. Do not retry; reconcile/
+  );
+  assert.doesNotMatch(
+    script,
+    /durable receipts for this browser session/i
+  );
+  assert.doesNotMatch(script, /approvalChallenge/);
+  assert.doesNotMatch(script, /setInterval\(/);
+});
+
+test("action and receipt data are memory-only, purge on operational loss, and bypass the shell cache", async () => {
+  const [scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(script, /function clearActionControlData\(message\)/);
+  assert.match(
+    script,
+    /clearActionControlData\(\s*message \|\| "Action plans and receipt metadata are not retained on this page\."/
+  );
+  assert.match(script, /clearOperationalData\("Client data was cleared when the connection went offline\."/);
+  assert.match(script, /resetActionComposerForFile\(/);
+  assert.match(script, /purgeApprovalDetailDom\(\)/);
+  assert.match(script, /purgeReceiptDetailDom\(\)/);
+  assert.match(script, /state\.actionDraft = \[\]/);
+  assert.match(script, /state\.actionPlans = null/);
+  assert.match(script, /state\.receipts = null/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
+
+  assert.match(worker, /"\/hcn\/api\/"/);
+  assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
+  assert.doesNotMatch(worker, /action-plans|action-receipts/);
 });

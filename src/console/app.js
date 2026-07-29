@@ -6,15 +6,65 @@
     session: "/hcn/auth/session",
     logout: "/hcn/auth/logout",
     workCenter: "/hcn/api/v1/work-center",
-    fileReview: "/hcn/api/v1/file-review"
+    fileReview: "/hcn/api/v1/file-review",
+    actionPrepare: "/hcn/api/v1/action-plans/prepare",
+    actionList: "/hcn/api/v1/action-plans/list",
+    actionDetail: "/hcn/api/v1/action-plans/detail",
+    actionExecute: "/hcn/api/v1/action-plans/execute",
+    actionInvalidate: "/hcn/api/v1/action-plans/invalidate",
+    receiptList: "/hcn/api/v1/action-receipts/list",
+    receiptDetail: "/hcn/api/v1/action-receipts/detail"
   });
 
   const WORK_CENTER_CAPABILITY = "hcn.work_center.read";
   const FILE_REVIEW_CAPABILITY = "hcn.file.review";
+  const ACTION_PREPARE_CAPABILITY = "hcn.action_plans.prepare";
+  const ACTION_READ_CAPABILITY = "hcn.action_plans.read";
+  const ACTION_EXECUTE_CAPABILITY = "hcn.action_plans.execute";
+  const ACTION_INVALIDATE_CAPABILITY = "hcn.action_plans.invalidate";
+  const RECEIPT_READ_CAPABILITY = "hcn.action_receipts.read";
   const FILE_REF = /^subject_[a-f0-9]{32}$/;
+  const TASK_REF = /^ref_[a-f0-9]{32}$/;
+  const PLAN_ID = /^plan_[a-f0-9]{32}$/;
+  const BATCH_REF = /^batch_[a-f0-9]{32}$/;
+  const APPROVAL_DIGEST = /^[a-f0-9]{64}$/;
+  const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
   const SESSION_IDLE_HEADER = "x-hcn-session-idle-expires-at";
   const SESSION_ABSOLUTE_HEADER = "x-hcn-session-expires-at";
   const MAX_TIMER_DELAY_MS = 2_147_000_000;
+  const MAX_ACTIONS = 12;
+
+  const ACTION_LABELS = Object.freeze({
+    "jobnimbus.create_note": "Create JobNimbus note",
+    "jobnimbus.create_task": "Create JobNimbus task",
+    "jobnimbus.update_task": "Update JobNimbus task",
+    "jobnimbus.update_status": "Change JobNimbus status",
+    "jobnimbus.update_contact": "Set JobNimbus date of loss"
+  });
+
+  const PLAN_STATUSES = new Set([
+    "pending",
+    "executing",
+    "executed",
+    "completed_pending_verification",
+    "partial_failure",
+    "blocked_duplicate",
+    "failed",
+    "reconciliation_required",
+    "superseded",
+    "expired",
+    "invalidated"
+  ]);
+
+  const RECEIPT_STATUSES = new Set([
+    "executing",
+    "executed",
+    "completed_pending_verification",
+    "partial_failure",
+    "blocked_duplicate",
+    "failed",
+    "reconciliation_required"
+  ]);
 
   const ATTENTION_LABELS = Object.freeze({
     missing_adjuster: "Adjuster missing",
@@ -56,6 +106,7 @@
     clientCoordinatorAppointmentCalls: "Appointment calls",
     clientCoordinatorExpandedCalls: "Expanded coordinator calls",
     externalWrites: "External writes",
+    hcnActionExecution: "HCN action execution",
     gmailSend: "Gmail sending",
     quoSend: "Quo sending",
     realtimeVoiceCalls: "Realtime voice calls"
@@ -99,6 +150,7 @@
     claims: "Claims",
     gmail: "Gmail",
     handoff: "Handoffs",
+    hcn: "HCN console",
     identity: "Identity",
     jobnimbus: "JobNimbus",
     memory: "Memory controls",
@@ -124,6 +176,17 @@
     fileLoading: false,
     workCenterController: null,
     fileController: null,
+    actionController: null,
+    receiptController: null,
+    actionDraft: [],
+    actionPlans: null,
+    selectedPlanId: null,
+    actionPlan: null,
+    actionLoading: false,
+    receipts: null,
+    selectedReceiptPlanId: null,
+    receipt: null,
+    receiptLoading: false,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
   };
@@ -194,7 +257,59 @@
       "recent-documents",
       "recent-gmail",
       "recent-quo",
-      "recent-activities"
+      "recent-activities",
+      "action-composer",
+      "action-composer-count",
+      "action-composer-alert",
+      "action-form",
+      "action-type",
+      "action-note",
+      "create-task-title",
+      "create-task-description",
+      "create-task-due-date",
+      "update-task-ref",
+      "update-task-title",
+      "update-task-description",
+      "update-task-due-date",
+      "update-task-completed",
+      "action-status",
+      "action-date-of-loss",
+      "action-add",
+      "action-draft-clear",
+      "action-draft-list",
+      "action-prepare",
+      "approval-status",
+      "approval-refresh",
+      "approval-alert",
+      "approval-locked",
+      "approval-workspace",
+      "approval-count",
+      "approval-list",
+      "approval-placeholder",
+      "approval-detail",
+      "approval-plan-title",
+      "approval-plan-state",
+      "approval-plan-id",
+      "approval-file-ref",
+      "approval-expires-at",
+      "approval-digest",
+      "approval-operations",
+      "execution-gate-message",
+      "approval-acknowledge",
+      "approval-invalidate",
+      "approval-execute",
+      "receipt-status",
+      "receipt-refresh",
+      "receipt-alert",
+      "receipt-locked",
+      "receipt-workspace",
+      "receipt-count",
+      "receipt-list",
+      "receipt-placeholder",
+      "receipt-detail",
+      "receipt-detail-heading",
+      "receipt-detail-state",
+      "receipt-detail-fields"
     ].forEach(function (id) {
       elements[id] = document.getElementById(id);
     });
@@ -208,6 +323,30 @@
       if (state.selectedFileRef) loadFileReview(state.selectedFileRef);
     });
     elements["file-back"].addEventListener("click", closeFileReview);
+    elements["action-type"].addEventListener("change", renderActionFields);
+    elements["action-form"].addEventListener("submit", addDraftAction);
+    elements["action-draft-clear"].addEventListener("click", function () {
+      clearActionDraft("The memory-only draft was cleared.");
+    });
+    elements["action-prepare"].addEventListener("click", prepareActionPlan);
+    elements["approval-refresh"].addEventListener("click", function () {
+      loadActionPlans();
+    });
+    elements["approval-acknowledge"].addEventListener(
+      "change",
+      syncExecutionControls
+    );
+    elements["approval-invalidate"].addEventListener(
+      "click",
+      invalidateSelectedPlan
+    );
+    elements["approval-execute"].addEventListener(
+      "click",
+      executeSelectedPlan
+    );
+    elements["receipt-refresh"].addEventListener("click", function () {
+      loadReceipts();
+    });
     window.addEventListener("online", handleNetworkChange);
     window.addEventListener("offline", handleNetworkChange);
     document.addEventListener("visibilitychange", enforceSessionDeadline);
@@ -283,8 +422,14 @@
     return data;
   }
 
-  async function postOperationalJson(url, body, signal) {
-    if (!hasWorkCenterAuthority()) {
+  async function postOperationalJson(url, body, signal, requiredCapability) {
+    if (
+      !hasChanceBrowserAuthority()
+      || (
+        requiredCapability
+        && !sessionCapabilities().includes(requiredCapability)
+      )
+    ) {
       const error = new Error("Operational authority is unavailable");
       error.status = 403;
       throw error;
@@ -442,6 +587,7 @@
         ? "Platform metadata checked " + generatedAt + "."
         : "Platform metadata received; timestamp unavailable."
     );
+    syncExecutionControls();
   }
 
   function renderMetaError(error) {
@@ -462,6 +608,7 @@
       elements["freshness-text"],
       statusOf(error) ? "Platform check returned status " + statusOf(error) + "." : "Platform check failed."
     );
+    syncExecutionControls();
   }
 
   function renderConnectors(connectors) {
@@ -729,7 +876,7 @@
       : [];
   }
 
-  function hasWorkCenterAuthority() {
+  function hasChanceBrowserAuthority() {
     if (
       state.sessionDeadlineMs
       && Date.now() >= state.sessionDeadlineMs
@@ -745,8 +892,14 @@
       session.authenticated === true &&
       identity.authentication === "authenticated" &&
       identity.type === "hcn_browser_session" &&
-      identity.role === "chance" &&
-      sessionCapabilities().includes(WORK_CENTER_CAPABILITY)
+      identity.role === "chance"
+    );
+  }
+
+  function hasWorkCenterAuthority() {
+    return (
+      hasChanceBrowserAuthority()
+      && sessionCapabilities().includes(WORK_CENTER_CAPABILITY)
     );
   }
 
@@ -757,7 +910,37 @@
     );
   }
 
+  function hasActionReadAuthority() {
+    return (
+      hasChanceBrowserAuthority()
+      && sessionCapabilities().includes(ACTION_READ_CAPABILITY)
+    );
+  }
+
+  function hasActionPrepareAuthority() {
+    return (
+      hasFileReviewAuthority()
+      && hasActionReadAuthority()
+      && sessionCapabilities().includes(ACTION_PREPARE_CAPABILITY)
+    );
+  }
+
+  function hasActionInvalidateAuthority() {
+    return (
+      hasActionReadAuthority()
+      && sessionCapabilities().includes(ACTION_INVALIDATE_CAPABILITY)
+    );
+  }
+
+  function hasReceiptReadAuthority() {
+    return (
+      hasChanceBrowserAuthority()
+      && sessionCapabilities().includes(RECEIPT_READ_CAPABILITY)
+    );
+  }
+
   function syncOperationalAccess() {
+    syncActionAccess();
     if (!navigator.onLine) {
       clearOperationalData("Reconnect to request fresh client evidence.");
       renderOperationsLocked(
@@ -810,8 +993,12 @@
   function clearOperationalData(message) {
     if (state.workCenterController) state.workCenterController.abort();
     if (state.fileController) state.fileController.abort();
+    if (state.actionController) state.actionController.abort();
+    if (state.receiptController) state.receiptController.abort();
     state.workCenterController = null;
     state.fileController = null;
+    state.actionController = null;
+    state.receiptController = null;
     state.workCenterLoading = false;
     state.fileLoading = false;
     state.workCenter = null;
@@ -825,6 +1012,9 @@
     setText(elements["work-center-freshness"], "No client records are retained on this page.");
     renderWorkspaceEmpty(elements["work-center-list"], message || "Fresh data is not loaded.");
     closeFileReview();
+    clearActionControlData(
+      message || "Action plans and receipt metadata are not retained on this page."
+    );
   }
 
   async function loadWorkCenter(options) {
@@ -1118,6 +1308,9 @@
   }
 
   function openFileLoading(selected) {
+    resetActionComposerForFile(
+      "Waiting for fresh file evidence before actions can be prepared."
+    );
     elements["work-center-workspace"].dataset.fileOpen = "true";
     elements["file-placeholder"].hidden = true;
     elements["file-review"].hidden = false;
@@ -1153,6 +1346,7 @@
     elements["file-review"].hidden = true;
     elements["file-refresh"].disabled = false;
     purgeFileReviewDom();
+    resetActionComposerForFile("Choose one exact file before preparing actions.");
     if (state.workCenter) renderWorkCenter(state.workCenter);
   }
 
@@ -1279,8 +1473,13 @@
     if (!Array.isArray(value)) return [];
     return value.slice(0, 20).map(function (candidate) {
       const item = record(candidate);
+      const reference = boundedString(item.reference, 80);
+      if (kind === "task" && !TASK_REF.test(reference)) {
+        throw new Error("Invalid task reference");
+      }
       const base = {
         category: kind,
+        reference: reference,
         typeCode: boundedString(item.kind, 64),
         label: boundedString(item.label, 160),
         occurredAt: boundedString(item.occurredAt, 40),
@@ -1348,6 +1547,8 @@
       review.recent.activities,
       "activities"
     );
+    populateTaskOptions(review.recent.tasks);
+    renderActionComposerState();
   }
 
   function renderSourceHealth(sources) {
@@ -1560,6 +1761,1591 @@
     container.replaceChildren(paragraph);
   }
 
+  function syncActionAccess() {
+    if (!navigator.onLine || !hasChanceBrowserAuthority()) {
+      clearActionControlData(
+        navigator.onLine
+          ? "Action and receipt data was cleared because authority is unavailable."
+          : "Action and receipt data was cleared when the connection went offline."
+      );
+      renderApprovalLocked(
+        navigator.onLine ? "Sign in required" : "Offline",
+        "Fresh authority is required before action plans can be reviewed."
+      );
+      renderReceiptLocked(
+        navigator.onLine ? "Sign in required" : "Offline",
+        "Fresh authority is required before receipt metadata can be reviewed."
+      );
+      return;
+    }
+
+    if (hasActionReadAuthority()) {
+      elements["approval-locked"].hidden = true;
+      elements["approval-workspace"].hidden = false;
+      elements["approval-refresh"].hidden = false;
+      badge(elements["approval-status"], "Exact review", "good");
+      if (state.actionPlans === null && !state.actionLoading) {
+        loadActionPlans();
+      }
+    } else {
+      clearApprovalData("No action plans are retained without approval-read authority.");
+      renderApprovalLocked(
+        "Not authorized",
+        "This session does not have the exact action-plan read capability."
+      );
+    }
+
+    if (hasReceiptReadAuthority()) {
+      elements["receipt-locked"].hidden = true;
+      elements["receipt-workspace"].hidden = false;
+      elements["receipt-refresh"].hidden = false;
+      badge(elements["receipt-status"], "Metadata only", "good");
+      if (state.receipts === null && !state.receiptLoading) {
+        loadReceipts();
+      }
+    } else {
+      clearReceiptData("No receipt metadata is retained without receipt-read authority.");
+      renderReceiptLocked(
+        "Not authorized",
+        "This session does not have the exact receipt-read capability."
+      );
+    }
+
+    renderActionComposerState();
+    syncExecutionControls();
+  }
+
+  function renderApprovalLocked(status, message) {
+    elements["approval-locked"].hidden = false;
+    elements["approval-workspace"].hidden = true;
+    elements["approval-refresh"].hidden = true;
+    badge(elements["approval-status"], status, "neutral");
+    notice(elements["approval-alert"], message, "neutral");
+  }
+
+  function renderReceiptLocked(status, message) {
+    elements["receipt-locked"].hidden = false;
+    elements["receipt-workspace"].hidden = true;
+    elements["receipt-refresh"].hidden = true;
+    badge(elements["receipt-status"], status, "neutral");
+    notice(elements["receipt-alert"], message, "neutral");
+  }
+
+  function clearActionControlData(message) {
+    clearApprovalData(message);
+    clearReceiptData(message);
+    resetActionComposerForFile(
+      "Choose one exact fresh file before preparing actions."
+    );
+  }
+
+  function clearApprovalData(message) {
+    if (state.actionController) state.actionController.abort();
+    state.actionController = null;
+    state.actionLoading = false;
+    state.actionPlans = null;
+    state.selectedPlanId = null;
+    state.actionPlan = null;
+    elements["approval-list"].setAttribute("aria-busy", "false");
+    elements["approval-refresh"].disabled = false;
+    setText(elements["approval-count"], "0");
+    renderWorkspaceEmpty(
+      elements["approval-list"],
+      message || "No action plans are retained on this page."
+    );
+    purgeApprovalDetailDom();
+  }
+
+  function clearReceiptData(message) {
+    if (state.receiptController) state.receiptController.abort();
+    state.receiptController = null;
+    state.receiptLoading = false;
+    state.receipts = null;
+    state.selectedReceiptPlanId = null;
+    state.receipt = null;
+    elements["receipt-list"].setAttribute("aria-busy", "false");
+    elements["receipt-refresh"].disabled = false;
+    setText(elements["receipt-count"], "0");
+    renderWorkspaceEmpty(
+      elements["receipt-list"],
+      message || "No receipt metadata is retained on this page."
+    );
+    purgeReceiptDetailDom();
+  }
+
+  function purgeApprovalDetailDom() {
+    elements["approval-placeholder"].hidden = false;
+    elements["approval-detail"].hidden = true;
+    setText(elements["approval-plan-title"], "Action plan");
+    badge(elements["approval-plan-state"], "Not loaded", "neutral");
+    setText(elements["approval-plan-id"], "—");
+    setText(elements["approval-file-ref"], "—");
+    setText(elements["approval-expires-at"], "—");
+    setText(elements["approval-digest"], "—");
+    elements["approval-operations"].replaceChildren();
+    elements["approval-acknowledge"].checked = false;
+    elements["approval-acknowledge"].disabled = true;
+    elements["approval-invalidate"].disabled = true;
+    elements["approval-execute"].disabled = true;
+    setText(
+      elements["execution-gate-message"],
+      "Choose one pending immutable plan before action-time approval."
+    );
+  }
+
+  function purgeReceiptDetailDom() {
+    elements["receipt-placeholder"].hidden = false;
+    elements["receipt-detail"].hidden = true;
+    setText(elements["receipt-detail-heading"], "Receipt");
+    badge(elements["receipt-detail-state"], "Not loaded", "neutral");
+    elements["receipt-detail-fields"].replaceChildren();
+  }
+
+  function resetActionComposerForFile(message) {
+    state.actionDraft = [];
+    elements["action-form"].reset();
+    elements["action-type"].value = "jobnimbus.create_note";
+    const taskSelect = elements["update-task-ref"];
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    setText(emptyOption, "Choose a task");
+    taskSelect.replaceChildren(emptyOption);
+    renderActionFields();
+    renderActionComposerState();
+    notice(
+      elements["action-composer-alert"],
+      message || "No action draft is retained.",
+      "neutral"
+    );
+  }
+
+  function clearActionDraft(message) {
+    state.actionDraft = [];
+    renderActionComposerState();
+    notice(
+      elements["action-composer-alert"],
+      message || "The memory-only action draft was cleared.",
+      "neutral"
+    );
+  }
+
+  function renderActionFields() {
+    const selectedType = elements["action-type"].value;
+    document.querySelectorAll("[data-action-fields]").forEach(function (panel) {
+      panel.hidden = panel.dataset.actionFields !== selectedType;
+    });
+  }
+
+  function populateTaskOptions(tasks) {
+    const select = elements["update-task-ref"];
+    const fragment = document.createDocumentFragment();
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    setText(emptyOption, "Choose a task");
+    fragment.append(emptyOption);
+    tasks.forEach(function (task) {
+      if (!TASK_REF.test(task.reference)) return;
+      const option = document.createElement("option");
+      option.value = task.reference;
+      setText(
+        option,
+        (task.label || humanize(task.typeCode || "Task"))
+          + (task.status ? " · " + humanize(task.status) : "")
+      );
+      fragment.append(option);
+    });
+    select.replaceChildren(fragment);
+  }
+
+  function renderActionComposerState() {
+    const available = Boolean(
+      navigator.onLine
+      && hasActionPrepareAuthority()
+      && state.fileReview
+      && state.selectedFileRef
+      && state.fileReview.file.fileRef === state.selectedFileRef
+      && !state.fileLoading
+    );
+    const controls = elements["action-form"].querySelectorAll(
+      "input, select, textarea, button"
+    );
+    controls.forEach(function (control) {
+      control.disabled = !available || state.actionLoading;
+    });
+    if (
+      available
+      && elements["update-task-ref"].options.length <= 1
+    ) {
+      elements["update-task-ref"].disabled = true;
+    }
+    elements["action-draft-clear"].disabled =
+      state.actionDraft.length === 0 || state.actionLoading;
+    elements["action-prepare"].disabled =
+      !available
+      || state.actionLoading
+      || state.actionDraft.length === 0;
+    setText(
+      elements["action-composer-count"],
+      state.actionDraft.length + " / " + MAX_ACTIONS + " actions"
+    );
+    renderActionDraft();
+    if (!available) {
+      notice(
+        elements["action-composer-alert"],
+        state.fileReview
+          ? "This session cannot prepare actions for the selected file."
+          : "Open one exact fresh file before preparing actions.",
+        "neutral"
+      );
+    } else if (state.actionDraft.length > 0) {
+      notice(
+        elements["action-composer-alert"],
+        "The draft is memory only. Prepare it to create an immutable server review.",
+        "good"
+      );
+    }
+  }
+
+  function addDraftAction(event) {
+    event.preventDefault();
+    if (
+      !hasActionPrepareAuthority()
+      || !state.fileReview
+      || state.fileReview.file.fileRef !== state.selectedFileRef
+    ) {
+      notice(
+        elements["action-composer-alert"],
+        "Fresh exact-file authority is required before adding an action.",
+        "bad"
+      );
+      return;
+    }
+    if (state.actionDraft.length >= MAX_ACTIONS) {
+      notice(
+        elements["action-composer-alert"],
+        "A review batch may contain no more than 12 exact actions.",
+        "warn"
+      );
+      return;
+    }
+
+    try {
+      const operation = buildDraftOperation();
+      state.actionDraft = state.actionDraft.concat([operation]);
+      clearActionEntryFields(operation.type);
+      renderActionComposerState();
+    } catch (error) {
+      notice(
+        elements["action-composer-alert"],
+        stringValue(error.message) || "Enter all required exact action material.",
+        "warn"
+      );
+    }
+  }
+
+  function buildDraftOperation() {
+    const type = elements["action-type"].value;
+    if (!Object.hasOwn(ACTION_LABELS, type)) {
+      throw new Error("That action is not enabled for HCN v1.");
+    }
+
+    if (type === "jobnimbus.create_note") {
+      const note = exactMultilineText(elements["action-note"].value, 8192, "Enter the exact note.");
+      return { type: type, input: { note: note } };
+    }
+
+    if (type === "jobnimbus.create_task") {
+      const title = exactTitle(
+        elements["create-task-title"].value,
+        "Enter a task title without leading or trailing spaces."
+      );
+      const input = { title: title };
+      const description = elements["create-task-description"].value;
+      const dueDate = elements["create-task-due-date"].value;
+      if (description) {
+        input.description = exactMultilineText(
+          description,
+          4096,
+          "The task description is not valid bounded text."
+        );
+      }
+      if (dueDate) input.dueDate = exactIsoDate(dueDate);
+      return { type: type, input: input };
+    }
+
+    if (type === "jobnimbus.update_task") {
+      const taskRef = elements["update-task-ref"].value;
+      if (!TASK_REF.test(taskRef)) {
+        throw new Error("Choose a task from this fresh file.");
+      }
+      const input = { taskRef: taskRef };
+      let changes = 0;
+      const title = elements["update-task-title"].value;
+      const description = elements["update-task-description"].value;
+      const dueDate = elements["update-task-due-date"].value;
+      const completed = elements["update-task-completed"].value;
+      if (title) {
+        input.title = exactTitle(
+          title,
+          "The new task title cannot have leading or trailing spaces."
+        );
+        changes += 1;
+      }
+      if (description) {
+        input.description = exactMultilineText(
+          description,
+          4096,
+          "The new task description is not valid bounded text."
+        );
+        changes += 1;
+      }
+      if (dueDate) {
+        input.dueDate = exactIsoDate(dueDate);
+        changes += 1;
+      }
+      if (completed === "true" || completed === "false") {
+        input.completed = completed === "true";
+        changes += 1;
+      }
+      if (changes === 0) {
+        throw new Error("Enter at least one exact task change.");
+      }
+      return { type: type, input: input };
+    }
+
+    if (type === "jobnimbus.update_status") {
+      const status = exactSingleLineText(
+        elements["action-status"].value,
+        128,
+        "Enter the requested JobNimbus status."
+      );
+      return { type: type, input: { status: status } };
+    }
+
+    const dateOfLoss = exactIsoDate(elements["action-date-of-loss"].value);
+    return { type: type, input: { dateOfLoss: dateOfLoss } };
+  }
+
+  function exactTitle(value, message) {
+    if (
+      typeof value !== "string"
+      || !value
+      || value !== value.trim()
+      || Array.from(value).length > 256
+      || /[\r\n\u2028\u2029\u0000-\u001f\u007f]/.test(value)
+    ) {
+      throw new Error(message);
+    }
+    return value;
+  }
+
+  function exactSingleLineText(value, maximum, message) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (
+      !text
+      || Array.from(text).length > maximum
+      || /[\r\n\u2028\u2029\u0000-\u001f\u007f]/.test(text)
+    ) {
+      throw new Error(message);
+    }
+    return text;
+  }
+
+  function exactMultilineText(value, maximumBytes, message) {
+    if (
+      typeof value !== "string"
+      || value.trim().length === 0
+      || new TextEncoder().encode(value).length > maximumBytes
+      || /[\u0000\u0008\u000b\u000c\u007f]/.test(value)
+    ) {
+      throw new Error(message);
+    }
+    return value;
+  }
+
+  function exactIsoDate(value) {
+    if (!ISO_DATE.test(String(value || ""))) {
+      throw new Error("Choose a real date in YYYY-MM-DD format.");
+    }
+    const date = new Date(value + "T00:00:00.000Z");
+    if (
+      Number.isNaN(date.getTime())
+      || date.toISOString().slice(0, 10) !== value
+    ) {
+      throw new Error("Choose a real date in YYYY-MM-DD format.");
+    }
+    return value;
+  }
+
+  function clearActionEntryFields(type) {
+    const ids = {
+      "jobnimbus.create_note": ["action-note"],
+      "jobnimbus.create_task": [
+        "create-task-title",
+        "create-task-description",
+        "create-task-due-date"
+      ],
+      "jobnimbus.update_task": [
+        "update-task-ref",
+        "update-task-title",
+        "update-task-description",
+        "update-task-due-date",
+        "update-task-completed"
+      ],
+      "jobnimbus.update_status": ["action-status"],
+      "jobnimbus.update_contact": ["action-date-of-loss"]
+    };
+    (ids[type] || []).forEach(function (id) {
+      elements[id].value = "";
+    });
+  }
+
+  function renderActionDraft() {
+    if (!state.actionDraft.length) {
+      renderRecentEmpty(
+        elements["action-draft-list"],
+        "No actions have been added."
+      );
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    state.actionDraft.forEach(function (operation, index) {
+      const card = document.createElement("article");
+      const heading = document.createElement("div");
+      const title = document.createElement("strong");
+      const number = document.createElement("span");
+      const remove = document.createElement("button");
+      card.className = "draft-action";
+      heading.className = "draft-action-heading";
+      setText(title, ACTION_LABELS[operation.type]);
+      setText(number, "Action " + (index + 1));
+      heading.append(title, number);
+      card.append(heading);
+      card.append(createMaterialList(operation.type, operation.input));
+      remove.type = "button";
+      remove.className = "text-button draft-remove";
+      remove.disabled = state.actionLoading;
+      setText(remove, "Remove action");
+      remove.addEventListener("click", function () {
+        state.actionDraft = state.actionDraft.filter(function (_item, itemIndex) {
+          return itemIndex !== index;
+        });
+        renderActionComposerState();
+      });
+      card.append(remove);
+      fragment.append(card);
+    });
+    elements["action-draft-list"].replaceChildren(fragment);
+  }
+
+  function createMaterialList(type, material) {
+    const list = document.createElement("dl");
+    list.className = "material-list";
+    materialRows(type, material).forEach(function (row) {
+      const wrapper = document.createElement("div");
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      setText(term, row[0]);
+      setText(detail, row[1]);
+      wrapper.append(term, detail);
+      list.append(wrapper);
+    });
+    return list;
+  }
+
+  function materialRows(type, material) {
+    const source = record(material);
+    if (type === "jobnimbus.create_note") {
+      return [["Exact note", source.note]];
+    }
+    if (type === "jobnimbus.create_task") {
+      return [
+        ["Title", source.title],
+        ["Description", source.description],
+        ["Due date", source.dueDate]
+      ].filter(function (row) {
+        return row[1] !== undefined && row[1] !== "";
+      });
+    }
+    if (type === "jobnimbus.update_task") {
+      return [
+        ["Task reference", source.taskRef],
+        ["New title", source.title],
+        ["New description", source.description],
+        ["New due date", source.dueDate],
+        [
+          "Completion",
+          source.completed === true
+            ? "Mark complete"
+            : source.completed === false
+              ? "Mark open"
+              : undefined
+        ]
+      ].filter(function (row) {
+        return row[1] !== undefined && row[1] !== "";
+      });
+    }
+    if (type === "jobnimbus.update_status") {
+      return [
+        ["Requested status", source.requestedStatus || source.status],
+        ["Resolved status", source.resolvedStatus]
+      ].filter(function (row) {
+        return row[1] !== undefined && row[1] !== "";
+      });
+    }
+    return [["Date of loss", source.dateOfLoss]];
+  }
+
+  async function prepareActionPlan() {
+    if (
+      state.actionLoading
+      || !hasActionPrepareAuthority()
+      || !state.selectedFileRef
+      || !state.fileReview
+      || state.actionDraft.length === 0
+    ) {
+      return;
+    }
+    const fileRef = state.selectedFileRef;
+    const operations = state.actionDraft.map(function (operation) {
+      return {
+        type: operation.type,
+        input: { ...operation.input }
+      };
+    });
+    const controller = new AbortController();
+    if (state.actionController) state.actionController.abort();
+    state.actionController = controller;
+    state.actionLoading = true;
+    renderActionComposerState();
+    badge(elements["approval-status"], "Preparing", "neutral");
+    notice(
+      elements["approval-alert"],
+      "Preparing a server-validated immutable dry run. No effects are running.",
+      "neutral"
+    );
+    let preparedPlanId = "";
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.actionPrepare,
+        { fileRef: fileRef, operations: operations },
+        controller.signal,
+        ACTION_PREPARE_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const plan = normalizePlanResponse(response, true);
+      preparedPlanId = plan.planId;
+      state.actionPlan = plan;
+      state.selectedPlanId = plan.planId;
+      state.actionPlans = upsertPlanSummary(state.actionPlans || [], plan);
+      state.actionDraft = [];
+      renderActionPlanList();
+      renderActionPlanDetail(plan);
+      notice(
+        elements["approval-alert"],
+        "Immutable review prepared. Nothing has been executed.",
+        "good"
+      );
+      document.getElementById("approvals").scrollIntoView({ block: "start" });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["approval-alert"],
+        actionPlanErrorMessage(error, "prepare"),
+        "bad"
+      );
+      notice(
+        elements["action-composer-alert"],
+        "The draft remains in memory because preparation did not complete.",
+        "warn"
+      );
+    } finally {
+      if (state.actionController === controller) {
+        state.actionController = null;
+        state.actionLoading = false;
+        renderActionPlanList();
+        renderActionComposerState();
+        syncExecutionControls();
+      }
+    }
+    if (preparedPlanId && hasActionReadAuthority()) {
+      await loadActionPlans({ selectPlanId: preparedPlanId });
+    }
+  }
+
+  async function loadActionPlans(options) {
+    if (state.actionLoading || !hasActionReadAuthority() || !navigator.onLine) {
+      return;
+    }
+    const requestedPlanId = PLAN_ID.test(String(options?.selectPlanId || ""))
+      ? options.selectPlanId
+      : state.selectedPlanId;
+    if (state.actionController) state.actionController.abort();
+    const controller = new AbortController();
+    state.actionController = controller;
+    state.actionLoading = true;
+    elements["approval-list"].setAttribute("aria-busy", "true");
+    elements["approval-refresh"].disabled = true;
+    badge(elements["approval-status"], "Loading", "neutral");
+    notice(elements["approval-alert"], "Loading current session action plans.", "neutral");
+    let detailPlanId = "";
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.actionList,
+        {},
+        controller.signal,
+        ACTION_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      state.actionPlans = normalizePlanListResponse(response);
+      const selected = state.actionPlans.find(function (plan) {
+        return plan.planId === requestedPlanId;
+      }) || state.actionPlans.find(function (plan) {
+        return plan.status === "pending";
+      }) || state.actionPlans[0];
+      state.selectedPlanId = selected ? selected.planId : null;
+      state.actionPlan = null;
+      renderActionPlanList();
+      if (selected) {
+        detailPlanId = selected.planId;
+      } else {
+        purgeApprovalDetailDom();
+      }
+      badge(
+        elements["approval-status"],
+        state.actionPlans.length + " plan" + (state.actionPlans.length === 1 ? "" : "s"),
+        "good"
+      );
+      notice(
+        elements["approval-alert"],
+        state.actionPlans.length
+          ? "Choose a plan to inspect its exact immutable material."
+          : "There are no action plans for this browser session.",
+        "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      state.actionPlans = null;
+      state.selectedPlanId = null;
+      state.actionPlan = null;
+      renderWorkspaceEmpty(
+        elements["approval-list"],
+        "Action plans could not be loaded. No stale list is shown."
+      );
+      purgeApprovalDetailDom();
+      badge(elements["approval-status"], "Unavailable", "bad");
+      notice(
+        elements["approval-alert"],
+        actionPlanErrorMessage(error, "list"),
+        "bad"
+      );
+    } finally {
+      if (state.actionController === controller) {
+        state.actionController = null;
+        state.actionLoading = false;
+        elements["approval-list"].setAttribute("aria-busy", "false");
+        elements["approval-refresh"].disabled = false;
+        renderActionPlanList();
+        renderActionComposerState();
+      }
+    }
+    if (detailPlanId && hasActionReadAuthority()) {
+      await loadActionPlanDetail(detailPlanId);
+    }
+  }
+
+  async function loadActionPlanDetail(planId) {
+    if (
+      state.actionLoading
+      || !hasActionReadAuthority()
+      || !PLAN_ID.test(String(planId || ""))
+    ) {
+      return;
+    }
+    if (state.actionController) state.actionController.abort();
+    const controller = new AbortController();
+    state.actionController = controller;
+    state.actionLoading = true;
+    state.selectedPlanId = planId;
+    state.actionPlan = null;
+    elements["approval-acknowledge"].checked = false;
+    renderActionPlanList();
+    purgeApprovalDetailDom();
+    notice(elements["approval-alert"], "Loading exact immutable plan detail.", "neutral");
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.actionDetail,
+        { planId: planId },
+        controller.signal,
+        ACTION_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const plan = normalizePlanResponse(response, true);
+      if (plan.planId !== planId) throw new Error("Plan detail did not match");
+      state.actionPlan = plan;
+      state.actionPlans = upsertPlanSummary(state.actionPlans || [], plan);
+      renderActionPlanList();
+      renderActionPlanDetail(plan);
+      notice(
+        elements["approval-alert"],
+        "Exact server-prepared plan loaded. Review every field before approval.",
+        "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      state.actionPlan = null;
+      purgeApprovalDetailDom();
+      notice(
+        elements["approval-alert"],
+        actionPlanErrorMessage(error, "detail"),
+        "bad"
+      );
+    } finally {
+      if (state.actionController === controller) {
+        state.actionController = null;
+        state.actionLoading = false;
+        renderActionPlanList();
+        syncExecutionControls();
+        renderActionComposerState();
+      }
+    }
+  }
+
+  function normalizePlanListResponse(value) {
+    assertNoStoreEnvelope(value);
+    if (!Array.isArray(value.plans)) {
+      throw new Error("Invalid action plan list");
+    }
+    return value.plans.slice(0, 50).map(function (plan) {
+      return normalizeActionPlan(plan, false);
+    });
+  }
+
+  function normalizePlanResponse(value, requireOperations) {
+    assertNoStoreEnvelope(value);
+    const plan = record(value.plan);
+    if (!Object.keys(plan).length) {
+      throw new Error("Invalid action plan response");
+    }
+    return normalizeActionPlan(plan, requireOperations);
+  }
+
+  function normalizeActionPlan(value, requireOperations) {
+    const plan = record(value);
+    const planId = boundedString(plan.planId, 80);
+    const fileRef = boundedString(plan.fileRef, 80);
+    const approvalDigest = boundedString(plan.approvalDigest, 80);
+    const approvalExpiresAt = boundedString(plan.approvalExpiresAt, 40);
+    const status = boundedString(plan.status, 64);
+    const file = record(plan.file);
+    let fileDisplayLabel = "";
+    if (Object.keys(file).length) {
+      if (
+        boundedString(file.reference, 80) !== fileRef
+        || !boundedString(file.displayLabel, 256)
+      ) {
+        throw new Error("Invalid action plan file");
+      }
+      fileDisplayLabel = boundedString(file.displayLabel, 256);
+    }
+    if (
+      !PLAN_ID.test(planId)
+      || !FILE_REF.test(fileRef)
+      || !APPROVAL_DIGEST.test(approvalDigest)
+      || !validIsoInstant(approvalExpiresAt)
+      || !PLAN_STATUSES.has(status)
+      || !Number.isInteger(plan.operationCount)
+      || plan.operationCount < 1
+      || plan.operationCount > MAX_ACTIONS
+      || !validIsoInstant(plan.createdAt)
+      || !validIsoInstant(plan.updatedAt)
+    ) {
+      throw new Error("Invalid action plan");
+    }
+    let operations = null;
+    if (Array.isArray(plan.operations)) {
+      if (plan.operations.length !== plan.operationCount) {
+        throw new Error("Invalid action plan operations");
+      }
+      operations = plan.operations.map(normalizePlanOperation);
+    } else if (requireOperations) {
+      throw new Error("Exact action plan material is unavailable");
+    }
+    return {
+      planId: planId,
+      fileRef: fileRef,
+      fileDisplayLabel: fileDisplayLabel,
+      approvalDigest: approvalDigest,
+      approvalExpiresAt: approvalExpiresAt,
+      status: status,
+      operationCount: plan.operationCount,
+      operations: operations,
+      createdAt: plan.createdAt,
+      updatedAt: plan.updatedAt
+    };
+  }
+
+  function normalizePlanOperation(value, arrayIndex) {
+    const operation = record(value);
+    const type = boundedString(operation.type, 128);
+    const action = boundedString(operation.action, 160);
+    const index = operation.index;
+    if (
+      !Object.hasOwn(ACTION_LABELS, type)
+      || !action
+      || !Number.isInteger(index)
+      || index !== arrayIndex
+    ) {
+      throw new Error("Invalid action plan operation");
+    }
+    const source = record(operation.material);
+    const material = {};
+    const allowed = {
+      "jobnimbus.create_note": ["note"],
+      "jobnimbus.create_task": ["title", "description", "dueDate"],
+      "jobnimbus.update_task": [
+        "taskRef",
+        "title",
+        "description",
+        "dueDate",
+        "completed"
+      ],
+      "jobnimbus.update_status": ["requestedStatus", "resolvedStatus"],
+      "jobnimbus.update_contact": ["dateOfLoss"]
+    }[type];
+    if (Object.keys(source).some(function (key) {
+      return !allowed.includes(key);
+    })) {
+      throw new Error("Invalid action material");
+    }
+    allowed.forEach(function (key) {
+      if (!Object.hasOwn(source, key)) return;
+      if (key === "completed") {
+        if (typeof source[key] !== "boolean") {
+          throw new Error("Invalid action material");
+        }
+        material[key] = source[key];
+        return;
+      }
+      if (typeof source[key] !== "string" || source[key].length > 8192) {
+        throw new Error("Invalid action material");
+      }
+      material[key] = source[key];
+    });
+    if (
+      (type === "jobnimbus.create_note" && !material.note)
+      || (type === "jobnimbus.create_task" && !material.title)
+      || (type === "jobnimbus.update_task" && !TASK_REF.test(material.taskRef || ""))
+      || (
+        type === "jobnimbus.update_status"
+        && (!material.requestedStatus || !material.resolvedStatus)
+      )
+      || (
+        type === "jobnimbus.update_contact"
+        && !ISO_DATE.test(material.dateOfLoss || "")
+      )
+    ) {
+      throw new Error("Incomplete action material");
+    }
+    return {
+      index: index,
+      type: type,
+      action: action,
+      material: material
+    };
+  }
+
+  function assertNoStoreEnvelope(value) {
+    const authority = record(record(value).authority);
+    if (
+      !isRecord(value)
+      || value.schema !== "hcn.console.actions.v1"
+      || !validIsoInstant(value.generatedAt)
+      || value.ephemeral !== true
+      || value.cachePolicy !== "no_store"
+      || authority.mode !== "explicit_chance_approval"
+      || authority.automaticExecution !== false
+      || authority.automaticRetry !== false
+      || authority.providerIdentifiersExposed !== false
+    ) {
+      throw new Error("Invalid no-store response");
+    }
+  }
+
+  function upsertPlanSummary(plans, plan) {
+    const summary = {
+      ...plan,
+      operations: null
+    };
+    return [summary].concat(plans.filter(function (candidate) {
+      return candidate.planId !== plan.planId;
+    })).slice(0, 50);
+  }
+
+  function renderActionPlanList() {
+    const plans = Array.isArray(state.actionPlans) ? state.actionPlans : [];
+    setText(elements["approval-count"], String(plans.length));
+    if (!plans.length) {
+      renderWorkspaceEmpty(elements["approval-list"], "No action plans are available.");
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    plans.forEach(function (plan) {
+      const button = document.createElement("button");
+      const title = document.createElement("strong");
+      const status = document.createElement("span");
+      const expiry = document.createElement("span");
+      button.type = "button";
+      button.className = "approval-list-item";
+      if (plan.planId === state.selectedPlanId) {
+        button.classList.add("is-selected");
+        button.setAttribute("aria-pressed", "true");
+      } else {
+        button.setAttribute("aria-pressed", "false");
+      }
+      button.disabled = state.actionLoading;
+      setText(
+        title,
+        plan.fileDisplayLabel
+          || plan.operationCount + " action" + (plan.operationCount === 1 ? "" : "s")
+      );
+      setText(status, humanize(plan.status) + " · " + plan.planId);
+      setText(expiry, "Expires " + readableDateTime(plan.approvalExpiresAt));
+      button.append(title, status, expiry);
+      button.addEventListener("click", function () {
+        loadActionPlanDetail(plan.planId);
+      });
+      fragment.append(button);
+    });
+    elements["approval-list"].replaceChildren(fragment);
+  }
+
+  function renderActionPlanDetail(plan) {
+    elements["approval-placeholder"].hidden = true;
+    elements["approval-detail"].hidden = false;
+    setText(
+      elements["approval-plan-title"],
+      plan.operationCount + " exact action" + (plan.operationCount === 1 ? "" : "s")
+    );
+    badge(
+      elements["approval-plan-state"],
+      humanize(plan.status),
+      planStatusTone(plan.status)
+    );
+    setText(elements["approval-plan-id"], plan.planId);
+    setText(
+      elements["approval-file-ref"],
+      plan.fileDisplayLabel
+        ? plan.fileDisplayLabel + " · " + plan.fileRef
+        : plan.fileRef
+    );
+    setText(
+      elements["approval-expires-at"],
+      readableDateTime(plan.approvalExpiresAt) + " · " + plan.approvalExpiresAt
+    );
+    setText(elements["approval-digest"], plan.approvalDigest);
+    const fragment = document.createDocumentFragment();
+    plan.operations.forEach(function (operation) {
+      const card = document.createElement("article");
+      const heading = document.createElement("div");
+      const title = document.createElement("strong");
+      const number = document.createElement("span");
+      card.className = "approval-operation";
+      heading.className = "approval-operation-heading";
+      setText(title, operation.action || ACTION_LABELS[operation.type]);
+      setText(number, "Action " + (operation.index + 1));
+      heading.append(title, number);
+      card.append(heading, createMaterialList(operation.type, operation.material));
+      fragment.append(card);
+    });
+    elements["approval-operations"].replaceChildren(fragment);
+    elements["approval-acknowledge"].checked = false;
+    syncExecutionControls();
+  }
+
+  function runtimeGateEnabled(key) {
+    return record(record(record(state.meta).runtime).gates)[key] === "enabled";
+  }
+
+  function canExecuteSelectedPlan() {
+    const plan = state.actionPlan;
+    return Boolean(
+      navigator.onLine
+      && hasActionReadAuthority()
+      && sessionCapabilities().includes(ACTION_EXECUTE_CAPABILITY)
+      && runtimeGateEnabled("externalWrites")
+      && runtimeGateEnabled("hcnActionExecution")
+      && plan
+      && plan.status === "pending"
+      && Date.parse(plan.approvalExpiresAt) > Date.now()
+      && !state.actionLoading
+    );
+  }
+
+  function syncExecutionControls() {
+    const plan = state.actionPlan;
+    const executable = canExecuteSelectedPlan();
+    const pending = Boolean(plan && plan.status === "pending");
+    const canInvalidate = Boolean(
+      navigator.onLine
+      && pending
+      && hasActionInvalidateAuthority()
+      && !state.actionLoading
+    );
+    elements["approval-invalidate"].disabled = !canInvalidate;
+    elements["approval-acknowledge"].disabled = !executable;
+    if (!executable) elements["approval-acknowledge"].checked = false;
+    elements["approval-execute"].disabled =
+      !executable || !elements["approval-acknowledge"].checked;
+
+    let message = "Choose one pending immutable plan before action-time approval.";
+    if (plan && plan.status !== "pending") {
+      message = "This plan is " + humanize(plan.status) + " and cannot be executed.";
+    } else if (plan && Date.parse(plan.approvalExpiresAt) <= Date.now()) {
+      message = "This approval expired. Prepare and review a fresh unchanged plan.";
+    } else if (plan && !sessionCapabilities().includes(ACTION_EXECUTE_CAPABILITY)) {
+      message = "This session does not have the exact action-execution capability.";
+    } else if (plan && !runtimeGateEnabled("externalWrites")) {
+      message = "The global external-writes gate is disabled.";
+    } else if (plan && !runtimeGateEnabled("hcnActionExecution")) {
+      message = "The separate HCN action-execution gate is disabled.";
+    } else if (plan && executable) {
+      message = "Both effect gates and the exact execution capability are enabled.";
+    }
+    setText(elements["execution-gate-message"], message);
+  }
+
+  async function invalidateSelectedPlan() {
+    const plan = state.actionPlan;
+    if (
+      state.actionLoading
+      || !plan
+      || plan.status !== "pending"
+      || !hasActionInvalidateAuthority()
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    if (state.actionController) state.actionController.abort();
+    state.actionController = controller;
+    state.actionLoading = true;
+    elements["approval-acknowledge"].checked = false;
+    syncExecutionControls();
+    notice(elements["approval-alert"], "Invalidating this pending plan.", "neutral");
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.actionInvalidate,
+        { planId: plan.planId },
+        controller.signal,
+        ACTION_INVALIDATE_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const updated = normalizePlanResponse(response, true);
+      if (updated.planId !== plan.planId) throw new Error("Plan did not match");
+      state.actionPlan = updated;
+      state.actionPlans = upsertPlanSummary(state.actionPlans || [], updated);
+      renderActionPlanList();
+      renderActionPlanDetail(updated);
+      notice(
+        elements["approval-alert"],
+        "The pending plan was invalidated. It cannot be executed.",
+        "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["approval-alert"],
+        actionPlanErrorMessage(error, "invalidate"),
+        "bad"
+      );
+    } finally {
+      if (state.actionController === controller) {
+        state.actionController = null;
+        state.actionLoading = false;
+        renderActionPlanList();
+        syncExecutionControls();
+      }
+    }
+  }
+
+  async function executeSelectedPlan() {
+    const plan = state.actionPlan;
+    if (state.actionLoading || !plan) {
+      return;
+    }
+    if (!canExecuteSelectedPlan()) {
+      syncExecutionControls();
+      notice(
+        elements["approval-alert"],
+        "This plan is no longer executable. Prepare and review a fresh plan if needed.",
+        "warn"
+      );
+      return;
+    }
+    if (elements["approval-acknowledge"].checked !== true) {
+      return;
+    }
+    const planId = plan.planId;
+    const controller = new AbortController();
+    if (state.actionController) state.actionController.abort();
+    state.actionController = controller;
+    state.actionLoading = true;
+    elements["approval-acknowledge"].checked = false;
+    syncExecutionControls();
+    badge(elements["approval-status"], "Executing", "neutral");
+    notice(
+      elements["approval-alert"],
+      "Executing the exact acknowledged plan once. Do not repeat this action.",
+      "warn"
+    );
+    let completed = false;
+
+    try {
+      await postOperationalJson(
+        ENDPOINTS.actionExecute,
+        { planId: planId },
+        controller.signal,
+        ACTION_EXECUTE_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      completed = true;
+      notice(
+        elements["approval-alert"],
+        "The execution request completed. Refreshing plan and receipt metadata.",
+        "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["approval-alert"],
+        "The outcome could not be confirmed. Do not retry. Refresh receipts and reconcile against fresh JobNimbus evidence.",
+        "bad"
+      );
+    } finally {
+      if (state.actionController === controller) {
+        state.actionController = null;
+        state.actionLoading = false;
+        renderActionPlanList();
+        syncExecutionControls();
+      }
+    }
+    if (completed) {
+      await Promise.all([
+        loadActionPlans({ selectPlanId: planId }),
+        loadReceipts({ selectPlanId: planId })
+      ]);
+    }
+  }
+
+  async function loadReceipts(options) {
+    if (state.receiptLoading || !hasReceiptReadAuthority() || !navigator.onLine) {
+      return;
+    }
+    const requestedPlanId = PLAN_ID.test(String(options?.selectPlanId || ""))
+      ? options.selectPlanId
+      : state.selectedReceiptPlanId;
+    if (state.receiptController) state.receiptController.abort();
+    const controller = new AbortController();
+    state.receiptController = controller;
+    state.receiptLoading = true;
+    elements["receipt-list"].setAttribute("aria-busy", "true");
+    elements["receipt-refresh"].disabled = true;
+    badge(elements["receipt-status"], "Loading", "neutral");
+    notice(elements["receipt-alert"], "Loading durable receipt metadata.", "neutral");
+    let detailPlanId = "";
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.receiptList,
+        {},
+        controller.signal,
+        RECEIPT_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      state.receipts = normalizeReceiptListResponse(response);
+      const selected = state.receipts.find(function (receipt) {
+        return receipt.planId === requestedPlanId;
+      }) || state.receipts[0];
+      state.selectedReceiptPlanId = selected ? selected.planId : null;
+      state.receipt = null;
+      renderReceiptList();
+      if (selected) {
+        detailPlanId = selected.planId;
+      } else {
+        purgeReceiptDetailDom();
+      }
+      badge(
+        elements["receipt-status"],
+        state.receipts.length + " receipt" + (state.receipts.length === 1 ? "" : "s"),
+        "good"
+      );
+      notice(
+        elements["receipt-alert"],
+        state.receipts.length
+          ? "Choose a receipt to inspect its bounded outcome metadata."
+          : "There are no durable receipts for this HCN operator.",
+        "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      state.receipts = null;
+      state.selectedReceiptPlanId = null;
+      state.receipt = null;
+      renderWorkspaceEmpty(
+        elements["receipt-list"],
+        "Receipt metadata could not be loaded. No stale list is shown."
+      );
+      purgeReceiptDetailDom();
+      badge(elements["receipt-status"], "Unavailable", "bad");
+      notice(elements["receipt-alert"], receiptErrorMessage(error), "bad");
+    } finally {
+      if (state.receiptController === controller) {
+        state.receiptController = null;
+        state.receiptLoading = false;
+        elements["receipt-list"].setAttribute("aria-busy", "false");
+        elements["receipt-refresh"].disabled = false;
+        renderReceiptList();
+      }
+    }
+    if (detailPlanId && hasReceiptReadAuthority()) {
+      await loadReceiptDetail(detailPlanId);
+    }
+  }
+
+  async function loadReceiptDetail(planId) {
+    if (
+      state.receiptLoading
+      || !hasReceiptReadAuthority()
+      || !PLAN_ID.test(String(planId || ""))
+    ) {
+      return;
+    }
+    if (state.receiptController) state.receiptController.abort();
+    const controller = new AbortController();
+    state.receiptController = controller;
+    state.receiptLoading = true;
+    state.selectedReceiptPlanId = planId;
+    state.receipt = null;
+    renderReceiptList();
+    purgeReceiptDetailDom();
+    notice(elements["receipt-alert"], "Loading exact receipt metadata.", "neutral");
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.receiptDetail,
+        { planId: planId },
+        controller.signal,
+        RECEIPT_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const receipt = normalizeReceiptResponse(response);
+      if (receipt.planId !== planId) throw new Error("Receipt did not match");
+      state.receipt = receipt;
+      state.receipts = upsertReceipt(state.receipts || [], receipt);
+      renderReceiptList();
+      renderReceiptDetail(receipt);
+      const receiptNotice = receiptOutcomeNotice(receipt.status);
+      notice(
+        elements["receipt-alert"],
+        receiptNotice.message,
+        receiptNotice.tone
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      state.receipt = null;
+      purgeReceiptDetailDom();
+      notice(elements["receipt-alert"], receiptErrorMessage(error), "bad");
+    } finally {
+      if (state.receiptController === controller) {
+        state.receiptController = null;
+        state.receiptLoading = false;
+        renderReceiptList();
+      }
+    }
+  }
+
+  function normalizeReceiptListResponse(value) {
+    assertNoStoreEnvelope(value);
+    if (!Array.isArray(value.receipts)) {
+      throw new Error("Invalid receipt list");
+    }
+    return value.receipts.slice(0, 100).map(normalizeReceipt);
+  }
+
+  function normalizeReceiptResponse(value) {
+    assertNoStoreEnvelope(value);
+    const receipt = record(value.receipt);
+    if (!Object.keys(receipt).length) throw new Error("Invalid receipt response");
+    return normalizeReceipt(receipt);
+  }
+
+  function normalizeReceipt(value) {
+    const receipt = record(value);
+    const fileRef = boundedString(receipt.fileRef, 80);
+    const planId = boundedString(receipt.planId, 80);
+    const digest = boundedString(receipt.digest, 80);
+    const batchRef = boundedString(receipt.batchRef, 80);
+    const status = boundedString(receipt.status, 64);
+    const counts = [
+      receipt.succeededCount,
+      receipt.failedCount,
+      receipt.blockedCount,
+      receipt.unknownCount
+    ];
+    if (
+      !FILE_REF.test(fileRef)
+      || !PLAN_ID.test(planId)
+      || !APPROVAL_DIGEST.test(digest)
+      || !BATCH_REF.test(batchRef)
+      || !RECEIPT_STATUSES.has(status)
+      || !Number.isInteger(receipt.operationCount)
+      || receipt.operationCount < 1
+      || receipt.operationCount > MAX_ACTIONS
+      || counts.some(function (count) {
+        return !Number.isInteger(count) || count < 0 || count > MAX_ACTIONS;
+      })
+      || counts.reduce(function (sum, count) {
+        return sum + count;
+      }, 0) !== receipt.operationCount
+      || !validIsoInstant(receipt.createdAt)
+      || !validIsoInstant(receipt.updatedAt)
+      || !validIsoInstant(receipt.executingAt)
+      || (
+        receipt.terminalAt !== undefined
+        && !validIsoInstant(receipt.terminalAt)
+      )
+    ) {
+      throw new Error("Invalid receipt metadata");
+    }
+    return {
+      fileRef: fileRef,
+      planId: planId,
+      digest: digest,
+      batchRef: batchRef,
+      status: status,
+      operationCount: receipt.operationCount,
+      succeededCount: receipt.succeededCount,
+      failedCount: receipt.failedCount,
+      blockedCount: receipt.blockedCount,
+      unknownCount: receipt.unknownCount,
+      createdAt: receipt.createdAt,
+      updatedAt: receipt.updatedAt,
+      executingAt: receipt.executingAt,
+      terminalAt: receipt.terminalAt || ""
+    };
+  }
+
+  function upsertReceipt(receipts, receipt) {
+    return [receipt].concat(receipts.filter(function (candidate) {
+      return candidate.planId !== receipt.planId;
+    })).slice(0, 100);
+  }
+
+  function renderReceiptList() {
+    const receipts = Array.isArray(state.receipts) ? state.receipts : [];
+    setText(elements["receipt-count"], String(receipts.length));
+    if (!receipts.length) {
+      renderWorkspaceEmpty(elements["receipt-list"], "No receipt metadata is available.");
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    receipts.forEach(function (receipt) {
+      const button = document.createElement("button");
+      const title = document.createElement("strong");
+      const status = document.createElement("span");
+      const updated = document.createElement("span");
+      button.type = "button";
+      button.className = "receipt-list-item";
+      if (receipt.planId === state.selectedReceiptPlanId) {
+        button.classList.add("is-selected");
+        button.setAttribute("aria-pressed", "true");
+      } else {
+        button.setAttribute("aria-pressed", "false");
+      }
+      button.disabled = state.receiptLoading;
+      setText(title, humanize(receipt.status));
+      setText(status, receipt.operationCount + " action outcome · " + receipt.planId);
+      setText(updated, "Updated " + readableDateTime(receipt.updatedAt));
+      button.append(title, status, updated);
+      button.addEventListener("click", function () {
+        loadReceiptDetail(receipt.planId);
+      });
+      fragment.append(button);
+    });
+    elements["receipt-list"].replaceChildren(fragment);
+  }
+
+  function renderReceiptDetail(receipt) {
+    elements["receipt-placeholder"].hidden = true;
+    elements["receipt-detail"].hidden = false;
+    setText(elements["receipt-detail-heading"], receipt.batchRef);
+    badge(
+      elements["receipt-detail-state"],
+      humanize(receipt.status),
+      planStatusTone(receipt.status)
+    );
+    const rows = [
+      ["Plan", receipt.planId, false],
+      ["File", receipt.fileRef, false],
+      ["Batch", receipt.batchRef, false],
+      ["Status", humanize(receipt.status), false],
+      ["Operation count", String(receipt.operationCount), false],
+      ["Succeeded", String(receipt.succeededCount), false],
+      ["Failed", String(receipt.failedCount), false],
+      ["Blocked", String(receipt.blockedCount), false],
+      ["Unknown", String(receipt.unknownCount), false],
+      ["Execution started", readableDateTime(receipt.executingAt), false],
+      [
+        receipt.terminalAt ? "Terminal at" : "Last updated",
+        readableDateTime(receipt.terminalAt || receipt.updatedAt),
+        false
+      ],
+      ["Approval digest", receipt.digest, true]
+    ];
+    const fragment = document.createDocumentFragment();
+    rows.forEach(function (row) {
+      const wrapper = document.createElement("div");
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      if (row[2]) wrapper.dataset.wide = "true";
+      setText(term, row[0]);
+      setText(detail, row[1]);
+      wrapper.append(term, detail);
+      fragment.append(wrapper);
+    });
+    elements["receipt-detail-fields"].replaceChildren(fragment);
+  }
+
+  function validIsoInstant(value) {
+    if (typeof value !== "string" || value.length > 40) return false;
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+  }
+
+  function planStatusTone(status) {
+    if (status === "executed") return "good";
+    if (
+      status === "completed_pending_verification"
+      || status === "executing"
+      || status === "blocked_duplicate"
+    ) return "warn";
+    if (
+      status === "failed"
+      || status === "partial_failure"
+      || status === "reconciliation_required"
+    ) {
+      return "bad";
+    }
+    return "neutral";
+  }
+
+  function receiptOutcomeNotice(status) {
+    if (status === "executed") {
+      return {
+        message: "Readback-confirmed execution metadata loaded.",
+        tone: "good"
+      };
+    }
+    if (status === "completed_pending_verification") {
+      return {
+        message:
+          "The actions were accepted, but fresh JobNimbus verification is still required. Do not repeat them.",
+        tone: "warn"
+      };
+    }
+    if (status === "executing") {
+      return {
+        message:
+          "Execution has no terminal receipt yet. Do not retry; reconcile against fresh source evidence.",
+        tone: "warn"
+      };
+    }
+    if (status === "reconciliation_required") {
+      return {
+        message:
+          "This outcome requires reconciliation against fresh source evidence. Do not retry it.",
+        tone: "warn"
+      };
+    }
+    if (status === "partial_failure" || status === "failed") {
+      return {
+        message:
+          "The batch did not fully complete. Review fresh evidence and its receipt before any new action.",
+        tone: "bad"
+      };
+    }
+    if (status === "blocked_duplicate") {
+      return {
+        message:
+          "A duplicate execution was blocked. Review the prior durable outcome before any new action.",
+        tone: "warn"
+      };
+    }
+    return {
+      message: "Durable outcome metadata loaded. No retry is assumed.",
+      tone: "neutral"
+    };
+  }
+
+  function actionPlanErrorMessage(error, action) {
+    const status = statusOf(error);
+    if (status === 409) {
+      return "The plan or exact file scope changed. Prepare and review a fresh plan.";
+    }
+    if (status === 429) {
+      return "The action control plane is busy. Wait before making a fresh request.";
+    }
+    if (status === 502 || status === 503 || status === 507) {
+      return "The action control plane is unavailable. No action is assumed.";
+    }
+    return "The action plan could not " + (
+      action === "prepare" ? "be prepared." : action + " safely."
+    );
+  }
+
+  function receiptErrorMessage(error) {
+    const status = statusOf(error);
+    if (status === 404) {
+      return "That receipt is not available for this HCN operator.";
+    }
+    if (status === 502 || status === 503 || status === 507) {
+      return "Durable receipt metadata is unavailable. No outcome is assumed.";
+    }
+    return "Receipt metadata could not be verified.";
+  }
+
   function handleOperationalAuthLoss() {
     clearOperationalData("The operational session is no longer authorized.");
     state.session = null;
@@ -1651,7 +3437,7 @@
       setText(elements["readiness-score"], sessionNeedsSignIn ? "1/2" : "2/2");
       setText(
         elements["readiness-label"],
-        sessionNeedsSignIn ? "Bridge ready · sign in next" : "Read-only operations ready"
+        sessionNeedsSignIn ? "Bridge ready · sign in next" : "Controlled operations ready"
       );
       setText(
         elements["readiness-summary"],

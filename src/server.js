@@ -121,6 +121,23 @@ import {
   createHcnReadAdmissionController
 } from "./hcn-console/read-admission.js";
 import {
+  HCN_BROWSER_ACTION_TYPES,
+  HcnBrowserActionContractError,
+  projectHcnBrowserActionDryRun,
+  translateHcnBrowserActionsToPrivateEngineRequest,
+  validateHcnBrowserActionDetailInput,
+  validateHcnBrowserActionExecuteInput,
+  validateHcnBrowserActionInvalidateInput,
+  validateHcnBrowserActionListInput,
+  validateHcnBrowserActionPrepareInput
+} from "./hcn-actions/browser-contracts.js";
+import {
+  createHcnPendingActionPlanStore
+} from "./hcn-actions/pending-plans.js";
+import {
+  createHcnActionReceiptIndex
+} from "./hcn-actions/receipt-index.js";
+import {
   mapJobNimbusFileEnvelope,
   mapJobNimbusIndexEnvelope,
   mapScopedGmailEnvelope,
@@ -137,6 +154,8 @@ const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
+const HCN_ACTION_EXECUTION_ENABLED =
+  RELEASE_GATES.HCN_ACTION_EXECUTION_ENABLED;
 const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://jobnimbus-chatgpt-bridge.onrender.com");
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
@@ -208,6 +227,7 @@ const MAX_CHATGPT_FILE_BYTES = Math.min(positiveIntegerEnv("MAX_CHATGPT_FILE_BYT
 const ARTIFACT_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("ARTIFACT_TTL_HOURS", 72), 168));
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
 const HCN_CONSOLE_API_BODY_BYTES = 4 * 1024;
+const HCN_ACTION_PREPARE_BODY_BYTES = 64 * 1024;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
 const OPENAI_OPERATIONAL_MODEL = process.env.OPENAI_OPERATIONAL_MODEL || "gpt-5.6-luna";
@@ -241,6 +261,7 @@ const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-approvals.json");
+const HCN_ACTION_RECEIPT_STORE_PATH = process.env.HCN_ACTION_RECEIPT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "hcn-action-receipts.json");
 const ACTION_APPROVAL_TTL_SECONDS = Math.max(1, Math.min(positiveIntegerEnv("ACTION_APPROVAL_TTL_SECONDS", 900), 3600));
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
 const QUO_LINE_LINK_STORE_PATH = process.env.QUO_LINE_LINK_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-links.json");
@@ -286,11 +307,31 @@ const USED_OAUTH_CODES = new Map();
 const HCN_CONSOLE_SESSION_STORE = createHcnConsoleSessionStore();
 const HCN_CONSOLE_LOGIN_ADMISSION = createHcnConsoleLoginAdmission();
 const HCN_CONSOLE_READ_ADMISSION = createHcnReadAdmissionController();
+const HCN_ACTION_PREPARE_ADMISSION = createHcnReadAdmissionController({
+  concurrentLimit: 1,
+  requestLimit: 10,
+  windowMs: 60_000,
+  maxTrackedSessions: 512,
+  idleTtlMs: 5 * 60_000,
+  failureRetryAfterSeconds: 1
+});
+const HCN_ACTION_EXECUTE_ADMISSION = createHcnReadAdmissionController({
+  concurrentLimit: 1,
+  requestLimit: 3,
+  windowMs: 60_000,
+  maxTrackedSessions: 512,
+  idleTtlMs: 5 * 60_000,
+  failureRetryAfterSeconds: 1
+});
+const HCN_PENDING_ACTION_PLANS = createHcnPendingActionPlanStore();
 const HCN_CONSOLE_STATE_CODEC = OAUTH_SESSION_SECRET
   ? createHcnConsoleStateCodec({ secret: OAUTH_SESSION_SECRET })
   : null;
 let hcnConsoleOAuthCoordinatorInstance = null;
 let hcnConsoleFreshReadServiceInstance = null;
+let hcnActionReceiptIndexInstance = null;
+let hcnActionExecutionInFlight = false;
+const HCN_ACTION_SESSION_IN_FLIGHT = new Set();
 let quoLineMutationQueue = Promise.resolve();
 let actionBatchMutationQueue = Promise.resolve();
 let actionApprovalMutationQueue = Promise.resolve();
@@ -311,6 +352,13 @@ const routes = new Map([
   ["POST /hcn/auth/logout", hcnBrowserLogout],
   ["POST /hcn/api/v1/work-center", hcnReadWorkCenter],
   ["POST /hcn/api/v1/file-review", hcnReadFile],
+  ["POST /hcn/api/v1/action-plans/prepare", hcnPrepareActionPlan],
+  ["POST /hcn/api/v1/action-plans/list", hcnListActionPlans],
+  ["POST /hcn/api/v1/action-plans/detail", hcnReadActionPlan],
+  ["POST /hcn/api/v1/action-plans/execute", hcnExecuteActionPlan],
+  ["POST /hcn/api/v1/action-plans/invalidate", hcnInvalidateActionPlan],
+  ["POST /hcn/api/v1/action-receipts/list", hcnListActionReceipts],
+  ["POST /hcn/api/v1/action-receipts/detail", hcnReadActionReceipt],
   ["GET /auth/whoami", authWhoAmI],
   ["POST /auth/quo-line", quoLineLink],
   ["GET /openapi.json", openapi],
@@ -435,7 +483,7 @@ const server = createServer(async (req, res) => {
       : await readJson(
           req,
           url.pathname.startsWith("/hcn/api/")
-            ? HCN_CONSOLE_API_BODY_BYTES
+            ? hcnApiBodyLimit(url.pathname)
             : MAX_JSON_BODY_BYTES
         );
     assertIdentityRequestScope(identity, req.method, url.pathname, body);
@@ -586,6 +634,22 @@ function health() {
       actualMessagesRemainApprovalGated: true
     },
     writesAllowed: ALLOW_WRITES,
+    hcnActions: {
+      preparationAvailable:
+        HCN_CONSOLE_ENABLED
+        && HCN_REFERENCE_CONFIGURATION.ready === true
+        && Boolean(API_KEY),
+      executionGateEnabled: HCN_ACTION_EXECUTION_ENABLED,
+      executionReady:
+        ALLOW_WRITES
+        && HCN_ACTION_EXECUTION_ENABLED,
+      browserApprovalChallengeExposed: false,
+      pendingPlanStore: "bounded_in_memory_session_scoped",
+      durableReceiptIndex: "metadata_only_atomic_disk",
+      automaticRetry: false,
+      prepareAdmission: HCN_ACTION_PREPARE_ADMISSION.stats(),
+      executeAdmission: HCN_ACTION_EXECUTE_ADMISSION.stats()
+    },
     releaseGates: RELEASE_GATES,
     outboundSafety: {
       automaticEmailOrTextSending: false,
@@ -1171,6 +1235,9 @@ function hcnBrowserLogout() {
     error.statusCode = 403;
     throw error;
   }
+  HCN_PENDING_ACTION_PLANS.invalidateSession({
+    sessionBinding: hcnActionSessionBinding()
+  });
   HCN_CONSOLE_SESSION_STORE.revokeSession(context.hcnSessionId);
   return httpResponse(200, {
     signedOut: true
@@ -1193,6 +1260,753 @@ async function hcnReadFile(input = {}) {
   return withHcnReadAdmission(
     () => hcnConsoleFreshReadService().readFile(input)
   );
+}
+
+async function hcnPrepareActionPlan(input = {}) {
+  assertChanceHcnReadSession();
+  const prepareInput = validateHcnBrowserActionPrepareInput(input);
+  assertHcnActionOperationConflicts(prepareInput.operations);
+  const sessionBinding = hcnActionSessionBinding();
+  return withHcnActionAdmission(
+    HCN_ACTION_PREPARE_ADMISSION,
+    async () => withHcnRestrictedEffects(async () => {
+      let approval = null;
+      try {
+        const scope = await resolveHcnActionScope({
+          fileRef: prepareInput.fileRef,
+          taskRefs: hcnTaskRefsFromPrepareInput(prepareInput)
+        });
+        const privateEngineRequest =
+          await translateHcnBrowserActionsToPrivateEngineRequest(
+            prepareInput,
+            {
+              resolveProviderJobId: ({ fileRef }) => {
+                if (fileRef !== scope.fileRef) throw hcnActionScopeChanged();
+                return scope.providerJobId;
+              },
+              resolveProviderTaskId: ({ fileRef, taskRef, providerJobId }) => {
+                if (
+                  fileRef !== scope.fileRef
+                  || providerJobId !== scope.providerJobId
+                ) {
+                  throw hcnActionScopeChanged();
+                }
+                const providerTaskId = scope.providerTaskIds.get(taskRef);
+                if (!providerTaskId) throw hcnActionScopeChanged();
+                return providerTaskId;
+              }
+            }
+          );
+        const preparedBatch = await prepareCanonicalActionBatch(
+          privateEngineRequest.operations
+        );
+        approval = await issueActionApprovalChallenge(
+          preparedBatch.approvalDigest,
+          preparedBatch.operations.length
+        );
+        const engineDryRun = {
+          mode: "dry_run",
+          operationCount: preparedBatch.operations.length,
+          operations: preparedBatch.plans,
+          approvalDigest: preparedBatch.approvalDigest,
+          approvalChallenge: approval.challenge,
+          approvalExpiresAt: approval.expiresAt
+        };
+        const presentation = projectHcnBrowserActionDryRun({
+          prepareInput,
+          privateEngineRequest,
+          engineDryRun,
+          fileDisplayLabel: scope.fileDisplayLabel
+        });
+        const plan = HCN_PENDING_ACTION_PLANS.create({
+          sessionBinding,
+          fileRef: scope.fileRef,
+          fileDisplayLabel: presentation.file.displayLabel,
+          fileScopeBinding: scope.fileScopeBinding,
+          operations: preparedBatch.operations,
+          dryRun: {
+            mode: "dry_run",
+            operationCount: preparedBatch.operations.length,
+            approvalDigest: preparedBatch.approvalDigest,
+            approvalChallenge: approval.challenge,
+            approvalExpiresAt: approval.expiresAt,
+            operations: presentation.operations
+          }
+        });
+        return hcnActionEnvelope({ plan });
+      } catch (error) {
+        if (approval?.id) {
+          await revokeActionApprovalChallenge(approval.id).catch(() => {});
+          HCN_PENDING_ACTION_PLANS.invalidateSession({ sessionBinding });
+        }
+        throw hcnPublicActionError(error, "prepare");
+      }
+    }),
+    { exclusiveSession: true }
+  );
+}
+
+function hcnListActionPlans(input = {}) {
+  assertChanceHcnReadSession();
+  validateHcnBrowserActionListInput(input);
+  const plans = HCN_PENDING_ACTION_PLANS.list({
+    sessionBinding: hcnActionSessionBinding(),
+    summary: true
+  });
+  return hcnActionEnvelope({ plans });
+}
+
+function hcnReadActionPlan(input = {}) {
+  assertChanceHcnReadSession();
+  const { planId } = validateHcnBrowserActionDetailInput(input);
+  const plan = HCN_PENDING_ACTION_PLANS.get({
+    sessionBinding: hcnActionSessionBinding(),
+    planId
+  });
+  return hcnActionEnvelope({ plan });
+}
+
+function hcnInvalidateActionPlan(input = {}) {
+  assertChanceHcnReadSession();
+  const { planId } = validateHcnBrowserActionInvalidateInput(input);
+  const plan = HCN_PENDING_ACTION_PLANS.invalidate({
+    sessionBinding: hcnActionSessionBinding(),
+    planId
+  });
+  return hcnActionEnvelope({ plan });
+}
+
+async function hcnExecuteActionPlan(input = {}) {
+  assertChanceHcnReadSession();
+  const { planId } = validateHcnBrowserActionExecuteInput(input);
+  if (!ALLOW_WRITES || !HCN_ACTION_EXECUTION_ENABLED) {
+    const error = new Error(
+      "HCN action execution is not enabled. The reviewed plan remains unexecuted."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const sessionBinding = hcnActionSessionBinding();
+  const sessionPrincipalRef = hcnActionReceiptPrincipalRef();
+  return withHcnActionAdmission(
+    HCN_ACTION_EXECUTE_ADMISSION,
+    async () => withHcnRestrictedEffects(async () => {
+      const receiptIndex = hcnActionReceiptIndex();
+      const pending = HCN_PENDING_ACTION_PLANS.get({
+        sessionBinding,
+        planId
+      });
+      const scope = await resolveHcnActionScope({
+        fileRef: pending.fileRef,
+        taskRefs: hcnTaskRefsFromPresentation(pending.operations)
+      });
+      const execution = HCN_PENDING_ACTION_PLANS.beginExecution({
+        sessionBinding,
+        planId,
+        fileScopeBinding: scope.fileScopeBinding,
+        approvalDigest: pending.approvalDigest
+      });
+
+      let executingReceipt;
+      try {
+        executingReceipt = receiptIndex.appendExecuting({
+          sessionPrincipalRef,
+          fileRef: execution.fileRef,
+          planId: execution.planId,
+          digest: execution.approvalDigest,
+          operationCount: execution.operationCount
+        });
+      } catch {
+        HCN_PENDING_ACTION_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "Execution did not begin because the durable receipt boundary was unavailable."
+        });
+        const error = new Error(
+          "The durable HCN receipt boundary is unavailable. Nothing was intentionally executed."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+
+      let engineResult;
+      try {
+        engineResult = await processActionBatch({
+          operations: execution.operations,
+          execute: true,
+          approvalDigest: execution.approvalDigest,
+          approvalChallenge: execution.approvalChallenge
+        });
+      } catch {
+        return reconcileHcnExecution({
+          receiptIndex,
+          executingReceipt,
+          execution,
+          sessionBinding,
+          sessionPrincipalRef,
+          succeededCount: 0
+        });
+      }
+
+      const outcome = hcnExecutionOutcome(
+        engineResult,
+        execution.operationCount
+      );
+      if (outcome.status === "reconciliation_required") {
+        return reconcileHcnExecution({
+          receiptIndex,
+          executingReceipt,
+          execution,
+          sessionBinding,
+          sessionPrincipalRef,
+          succeededCount: outcome.succeededCount
+        });
+      }
+
+      let receipt;
+      try {
+        receipt = receiptIndex.transition({
+          sessionPrincipalRef,
+          fileRef: execution.fileRef,
+          planId: execution.planId,
+          digest: execution.approvalDigest,
+          batchRef: executingReceipt.batchRef,
+          status: outcome.status,
+          succeededCount: outcome.succeededCount,
+          failedCount: outcome.failedCount,
+          blockedCount: outcome.blockedCount,
+          unknownCount: outcome.unknownCount
+        });
+      } catch {
+        HCN_PENDING_ACTION_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "The provider outcome could not be durably terminalized. Reconcile from fresh evidence."
+        });
+        const error = new Error(
+          "The HCN execution outcome requires reconciliation."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+      const plan = HCN_PENDING_ACTION_PLANS.finishExecution({
+        sessionBinding,
+        planId,
+        result: hcnPendingExecutionResult(outcome)
+      });
+      return hcnActionEnvelope({ plan, receipt });
+    }),
+    { exclusiveSession: true, globalExecution: true }
+  );
+}
+
+function hcnListActionReceipts(input = {}) {
+  assertChanceHcnReadSession();
+  validateHcnBrowserActionListInput(input);
+  const receipts = hcnActionReceiptIndex().list({
+    sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+    limit: 100
+  });
+  return hcnActionEnvelope({ receipts });
+}
+
+function hcnReadActionReceipt(input = {}) {
+  assertChanceHcnReadSession();
+  const { planId } = validateHcnBrowserActionDetailInput(input);
+  const receipt = hcnActionReceiptIndex().get({
+    sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+    planId
+  });
+  return hcnActionEnvelope({ receipt });
+}
+
+function hcnActionEnvelope(value) {
+  return {
+    schema: "hcn.console.actions.v1",
+    generatedAt: new Date().toISOString(),
+    ephemeral: true,
+    cachePolicy: "no_store",
+    authority: {
+      mode: "explicit_chance_approval",
+      automaticExecution: false,
+      automaticRetry: false,
+      providerIdentifiersExposed: false
+    },
+    ...value
+  };
+}
+
+function hcnActionSessionBinding() {
+  return hcnSessionDerivedHash("pending-action-plan:v1");
+}
+
+function hcnActionReceiptPrincipalRef() {
+  const context = currentRequestAuthentication();
+  const googleSubject = String(context?.hcnSession?.googleSubject || "");
+  if (
+    context?.authenticationMethod !== "hcn_cookie"
+    || !context.hcnSessionId
+    || !googleSubject
+  ) {
+    const error = new Error(
+      "Chance HCN browser session authentication is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const stableOperatorRef = references.sourceRecordRef(
+    "hcn_operator",
+    googleSubject
+  );
+  return `principal_${createHash("sha256")
+    .update("hcn-console:durable-receipt-principal:v2", "utf8")
+    .update("\0", "utf8")
+    .update(references.tenantId, "utf8")
+    .update("\0", "utf8")
+    .update(stableOperatorRef, "utf8")
+    .digest("hex")}`;
+}
+
+function hcnSessionDerivedHash(domain) {
+  const context = currentRequestAuthentication();
+  const sessionId = String(context?.hcnSessionId || "");
+  if (
+    context?.authenticationMethod !== "hcn_cookie"
+    || !sessionId
+  ) {
+    const error = new Error(
+      "Chance HCN browser session authentication is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  return createHash("sha256")
+    .update(`hcn-console:${domain}`, "utf8")
+    .update("\0", "utf8")
+    .update(sessionId, "utf8")
+    .digest("hex");
+}
+
+async function withHcnActionAdmission(
+  controller,
+  callback,
+  { exclusiveSession = false, globalExecution = false } = {}
+) {
+  const sessionBinding = hcnActionSessionBinding();
+  const release = controller.enter(sessionBinding);
+  let ownsSession = false;
+  let ownsGlobalExecution = false;
+  try {
+    if (exclusiveSession) {
+      if (HCN_ACTION_SESSION_IN_FLIGHT.has(sessionBinding)) {
+        const error = new Error(
+          "HCN action capacity is temporarily unavailable for this session."
+        );
+        error.statusCode = 429;
+        error.retryAfterSeconds = 1;
+        throw error;
+      }
+      HCN_ACTION_SESSION_IN_FLIGHT.add(sessionBinding);
+      ownsSession = true;
+    }
+    if (globalExecution) {
+      if (hcnActionExecutionInFlight) {
+        const error = new Error(
+          "HCN action execution capacity is temporarily unavailable."
+        );
+        error.statusCode = 429;
+        error.retryAfterSeconds = 1;
+        throw error;
+      }
+      hcnActionExecutionInFlight = true;
+      ownsGlobalExecution = true;
+    }
+    return await callback();
+  } finally {
+    if (ownsGlobalExecution) hcnActionExecutionInFlight = false;
+    if (ownsSession) HCN_ACTION_SESSION_IN_FLIGHT.delete(sessionBinding);
+    release();
+  }
+}
+
+function hcnActionReceiptIndex() {
+  if (hcnActionReceiptIndexInstance) return hcnActionReceiptIndexInstance;
+  try {
+    hcnActionReceiptIndexInstance = createHcnActionReceiptIndex({
+      filePath: HCN_ACTION_RECEIPT_STORE_PATH
+    });
+    return hcnActionReceiptIndexInstance;
+  } catch {
+    const error = new Error(
+      "The durable HCN action receipt service is unavailable."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+}
+
+async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  let page;
+  try {
+    page = await hcnCachedContactIndex({ maxRecords: 5000 });
+  } catch {
+    throw hcnActionScopeUnavailable();
+  }
+  if (!page?.complete || !Array.isArray(page.rows)) {
+    throw hcnActionScopeUnavailable();
+  }
+  const matches = page.rows.filter((contact) => {
+    const id = String(contact?.jnid || contact?.id || "");
+    return Boolean(
+      id
+      && isInsuranceFile(contact)
+      && assignedTo(contact, CHANCE_OWNER_ID)
+      && hcnContactIsExplicitlyActive(contact)
+      && references.subjectId("jobnimbus", id) === fileRef
+    );
+  });
+  if (matches.length !== 1) throw hcnActionScopeChanged();
+  const providerJobId = String(
+    matches[0].jnid || matches[0].id || ""
+  );
+  let contact;
+  try {
+    contact = await hcnCachedContact(providerJobId);
+  } catch {
+    throw hcnActionScopeUnavailable();
+  }
+  if (
+    String(contact?.jnid || contact?.id || "") !== providerJobId
+    || !isInsuranceFile(contact)
+    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || !hcnContactIsExplicitlyActive(contact)
+    || references.subjectId("jobnimbus", providerJobId) !== fileRef
+  ) {
+    throw hcnActionScopeChanged();
+  }
+
+  const uniqueTaskRefs = [...new Set(taskRefs)];
+  if (uniqueTaskRefs.length !== taskRefs.length) {
+    throw new HcnBrowserActionContractError(
+      "duplicate_task_action",
+      400,
+      "A task may be updated only once in an exact HCN action plan."
+    );
+  }
+  const providerTaskIds = new Map();
+  if (uniqueTaskRefs.length) {
+    let taskPage;
+    try {
+      taskPage = await listHcnResourceComplete("/tasks", {
+        maxRecords: 500,
+        relatedContactId: providerJobId
+      });
+    } catch {
+      throw hcnActionScopeUnavailable();
+    }
+    if (!taskPage.complete) throw hcnActionScopeUnavailable();
+    for (const taskRef of uniqueTaskRefs) {
+      const taskMatches = taskPage.rows.filter((task) => {
+        const id = String(task?.jnid || task?.id || "");
+        const recordType = String(
+          task?.record_type_name || task?.type_name || task?.type || ""
+        ).trim().toLowerCase();
+        return Boolean(
+          id
+          && recordType === "task"
+          && referencesContact(task, providerJobId)
+          && references.sourceRecordRef("jobnimbus", id) === taskRef
+        );
+      });
+      if (taskMatches.length !== 1) throw hcnActionScopeChanged();
+      providerTaskIds.set(
+        taskRef,
+        String(taskMatches[0].jnid || taskMatches[0].id)
+      );
+    }
+  }
+
+  const compact = compactContact(contact);
+  const rawLabel = `${compact.number || ""} ${compact.name || ""}`
+    .replace(/[\x00-\x1f\x7f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fileDisplayLabel = [...(rawLabel || "Selected HCN file")]
+    .slice(0, 256)
+    .join("");
+  const fileScopeBinding = createHash("sha256")
+    .update("hcn-console:action-file-scope:v1", "utf8")
+    .update("\0", "utf8")
+    .update(fileRef, "utf8")
+    .update("\0", "utf8")
+    .update(providerJobId, "utf8")
+    .update("\0", "utf8")
+    .update(
+      [...providerTaskIds.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([taskRef, providerTaskId]) => `${taskRef}:${providerTaskId}`)
+        .join("|"),
+      "utf8"
+    )
+    .digest("hex");
+  return {
+    fileRef,
+    providerJobId,
+    providerTaskIds,
+    fileDisplayLabel,
+    fileScopeBinding
+  };
+}
+
+function hcnTaskRefsFromPrepareInput(input) {
+  return input.operations
+    .filter((operation) => operation.type === "jobnimbus.update_task")
+    .map((operation) => operation.input.taskRef);
+}
+
+function hcnTaskRefsFromPresentation(operations) {
+  if (!Array.isArray(operations)) throw hcnActionScopeChanged();
+  return operations
+    .filter((operation) => operation?.type === "jobnimbus.update_task")
+    .map((operation) => String(operation?.material?.taskRef || ""))
+    .filter(Boolean);
+}
+
+function assertHcnActionOperationConflicts(operations) {
+  for (const singletonType of [
+    "jobnimbus.update_status",
+    "jobnimbus.update_contact"
+  ]) {
+    if (
+      operations.filter((operation) => operation.type === singletonType)
+        .length > 1
+    ) {
+      throw new HcnBrowserActionContractError(
+        "conflicting_actions",
+        400,
+        "An exact HCN plan may contain only one status or date-of-loss change."
+      );
+    }
+  }
+}
+
+function hcnActionScopeUnavailable() {
+  return new HcnBrowserActionContractError(
+    "fresh_scope_unavailable",
+    503,
+    "Fresh JobNimbus action scope is unavailable. Nothing was executed."
+  );
+}
+
+function hcnActionScopeChanged() {
+  return new HcnBrowserActionContractError(
+    "file_scope_changed",
+    409,
+    "The selected HCN file or task scope changed. Prepare and review a fresh plan."
+  );
+}
+
+function hcnPublicActionError(error, stage) {
+  if (
+    error
+    && [
+      "HcnBrowserActionContractError",
+      "HcnPendingActionPlanError",
+      "HcnActionReceiptIndexError"
+    ].includes(error.name)
+  ) {
+    return error;
+  }
+  const safe = new Error(
+    stage === "prepare"
+      ? "The action plan could not be prepared from fresh JobNimbus evidence."
+      : "The HCN action request could not be completed."
+  );
+  safe.statusCode = [502, 503, 504].includes(Number(error?.statusCode))
+    ? 503
+    : 409;
+  return safe;
+}
+
+function hcnExecutionOutcome(result, operationCount) {
+  const batchStatus = String(result?.batch?.status || "");
+  if (result?.mode === "blocked_duplicate") {
+    const completedCount = hcnValidatedCompletedBatchCount(
+      result?.batch,
+      operationCount
+    );
+    if (
+      batchStatus === "completed"
+      && completedCount === operationCount
+    ) {
+      return {
+        status: "blocked_duplicate",
+        succeededCount: 0,
+        failedCount: 0,
+        blockedCount: operationCount,
+        unknownCount: 0
+      };
+    }
+    if (
+      batchStatus === "completed_pending_verification"
+      && completedCount === operationCount
+    ) {
+      return {
+        status: "completed_pending_verification",
+        succeededCount: operationCount,
+        failedCount: 0,
+        blockedCount: 0,
+        unknownCount: 0
+      };
+    }
+    const succeededCount = Number.isInteger(completedCount)
+      ? completedCount
+      : 0;
+    return {
+      status: "reconciliation_required",
+      succeededCount,
+      failedCount: 0,
+      blockedCount: 0,
+      unknownCount: operationCount - succeededCount
+    };
+  }
+  if (batchStatus === "completed") {
+    return {
+      status: "executed",
+      succeededCount: operationCount,
+      failedCount: 0,
+      blockedCount: 0,
+      unknownCount: 0
+    };
+  }
+  if (batchStatus === "completed_pending_verification") {
+    return {
+      status: "completed_pending_verification",
+      succeededCount: operationCount,
+      failedCount: 0,
+      blockedCount: 0,
+      unknownCount: 0
+    };
+  }
+  const succeededCount = Math.min(
+    operationCount,
+    Array.isArray(result?.batch?.completed)
+      ? result.batch.completed.length
+      : 0
+  );
+  return {
+    status: "reconciliation_required",
+    succeededCount,
+    failedCount: 0,
+    blockedCount: 0,
+    unknownCount: operationCount - succeededCount
+  };
+}
+
+function hcnValidatedCompletedBatchCount(batch, operationCount) {
+  if (
+    !batch
+    || typeof batch !== "object"
+    || Array.isArray(batch)
+    || batch.operationCount !== operationCount
+    || !Array.isArray(batch.completed)
+    || batch.completed.length > operationCount
+  ) {
+    return null;
+  }
+  for (let index = 0; index < batch.completed.length; index += 1) {
+    const completed = batch.completed[index];
+    if (
+      !completed
+      || typeof completed !== "object"
+      || Array.isArray(completed)
+      || completed.index !== index
+      || completed.status !== "executed"
+      || !HCN_BROWSER_ACTION_TYPES.includes(completed.type)
+    ) {
+      return null;
+    }
+  }
+  return batch.completed.length;
+}
+
+function hcnPendingExecutionResult(outcome) {
+  if (outcome.status === "executed") {
+    return {
+      mode: "executed",
+      batch: {
+        status: "completed",
+        operationCount: outcome.succeededCount
+      }
+    };
+  }
+  if (outcome.status === "completed_pending_verification") {
+    return {
+      mode: "completed_pending_verification",
+      batch: {
+        status: "completed_pending_verification",
+        operationCount: outcome.succeededCount
+      }
+    };
+  }
+  return {
+    mode: outcome.status,
+    reason:
+      outcome.status === "blocked_duplicate"
+        ? "The exact approved batch was already reserved and was not repeated."
+        : "The provider outcome requires reconciliation from fresh evidence."
+  };
+}
+
+function reconcileHcnExecution({
+  receiptIndex,
+  executingReceipt,
+  execution,
+  sessionBinding,
+  sessionPrincipalRef,
+  succeededCount
+}) {
+  let receipt;
+  try {
+    receipt = receiptIndex.transition({
+      sessionPrincipalRef,
+      fileRef: execution.fileRef,
+      planId: execution.planId,
+      digest: execution.approvalDigest,
+      batchRef: executingReceipt.batchRef,
+      status: "reconciliation_required",
+      succeededCount,
+      failedCount: 0,
+      blockedCount: 0,
+      unknownCount: Math.max(0, execution.operationCount - succeededCount)
+    });
+  } catch {
+    HCN_PENDING_ACTION_PLANS.recoverExecution({
+      sessionBinding,
+      planId: execution.planId,
+      reason:
+        "The provider outcome and durable receipt both require reconciliation."
+    });
+    const error = new Error(
+      "The HCN execution outcome requires reconciliation."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const plan = HCN_PENDING_ACTION_PLANS.finishExecution({
+    sessionBinding,
+    planId: execution.planId,
+    result: {
+      mode: "reconciliation_required",
+      reason:
+        "The provider outcome is uncertain. Review fresh JobNimbus evidence before any new action."
+    }
+  });
+  return hcnActionEnvelope({ plan, receipt });
 }
 
 function assertChanceHcnReadSession() {
@@ -1300,6 +2114,36 @@ function clientMemoryEnvelope(snapshot) {
 
 function isCodexOperatorRequest() {
   return currentRequestIdentity()?.type === "codex_operator_token";
+}
+
+function isHcnRestrictedEffectRequest() {
+  return currentRequestAuthentication()?.hcnRestrictedEffects === true;
+}
+
+function isRestrictedEffectRequest() {
+  return isCodexOperatorRequest() || isHcnRestrictedEffectRequest();
+}
+
+async function withHcnRestrictedEffects(callback) {
+  const context = currentRequestAuthentication();
+  if (
+    typeof callback !== "function"
+    || context?.authenticationMethod !== "hcn_cookie"
+    || !context.hcnSessionId
+  ) {
+    const error = new Error(
+      "Chance HCN browser session authentication is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  return REQUEST_CONTEXT.run(
+    {
+      ...context,
+      hcnRestrictedEffects: true
+    },
+    callback
+  );
 }
 
 function operatorBrainBoundary() {
@@ -4486,7 +5330,7 @@ async function createTask(input) {
   const title = required(input.title || input.subject, "title");
   const { contact } = await findChanceContact(query);
   if (
-    currentRequestIdentity()?.type === "codex_operator_token"
+    isRestrictedEffectRequest()
     && input.recordTypeName !== undefined
     && String(input.recordTypeName).trim().toLowerCase() !== "task"
   ) {
@@ -4500,7 +5344,7 @@ async function createTask(input) {
     date_start: toUnixSeconds(input.dateStart || input.dueDate),
     date_end: toUnixSeconds(input.dateEnd || input.dueDate),
     is_completed: Boolean(input.completed || false),
-    record_type_name: currentRequestIdentity()?.type === "codex_operator_token"
+    record_type_name: isRestrictedEffectRequest()
       ? "Task"
       : input.recordTypeName || "Task",
     owners: [{ id: CHANCE_OWNER_ID }],
@@ -4618,7 +5462,7 @@ async function updateTask(input) {
   const body = normalizeDateFields(fields);
   assertCodexOperatorFields(body, CODEX_OPERATOR_TASK_FIELDS, "task");
   validateDateRange(body.date_start, body.date_end);
-  const scopedRecord = currentRequestIdentity()?.type === "codex_operator_token"
+  const scopedRecord = isRestrictedEffectRequest()
     ? await requireOperatorRelatedRecord({
         query: input.query,
         resource: "task",
@@ -4675,6 +5519,7 @@ async function updateTask(input) {
     ...(taskFile ? { file: taskFile } : {}),
     taskId,
     result,
+    verifiedByReadback: Boolean(scopedRecord),
     reconciledAfterApiError,
     memoryCloseout
   };
@@ -6472,11 +7317,8 @@ async function buildChanceEvidencePacket(contact, input) {
 }
 
 async function processActionBatch(input = {}) {
-  const operations = normalizeActionOperations(input.operations);
-  const plans = [];
-  for (const operation of operations) plans.push(await prepareActionOperation(operation));
-  assertOperatorBatchFileScope(plans);
-  const approvalDigest = digest({ version: 2, plans: stableApprovalPlans(plans) });
+  const preparedBatch = await prepareCanonicalActionBatch(input.operations);
+  const { operations, plans, approvalDigest } = preparedBatch;
   if (input.execute !== true) {
     const approval = await issueActionApprovalChallenge(approvalDigest, operations.length);
     return {
@@ -6525,6 +7367,23 @@ async function processActionBatch(input = {}) {
   return { mode: "executed", batch };
 }
 
+async function prepareCanonicalActionBatch(operationsInput) {
+  const operations = normalizeActionOperations(operationsInput);
+  const plans = [];
+  for (const operation of operations) {
+    plans.push(await prepareActionOperation(operation));
+  }
+  assertOperatorBatchFileScope(plans);
+  return {
+    operations,
+    plans,
+    approvalDigest: digest({
+      version: 2,
+      plans: stableApprovalPlans(plans)
+    })
+  };
+}
+
 function stableApprovalPlans(plans) {
   return JSON.parse(JSON.stringify(plans, (key, value) => {
     if (["date_created", "generatedAt", "instruction"].includes(key)) return undefined;
@@ -6553,7 +7412,14 @@ async function findChanceContact(query) {
 
   const selectedId = matches[0].contact.jnid || matches[0].contact.id;
   const contact = await jobNimbus(`/contacts/${encodeURIComponent(selectedId)}`);
-  if (!isInsuranceFile(contact) || !assignedTo(contact, CHANCE_OWNER_ID)) {
+  if (
+    !isInsuranceFile(contact)
+    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || (
+      isHcnRestrictedEffectRequest()
+      && !hcnContactIsExplicitlyActive(contact)
+    )
+  ) {
     badRequest(`Resolved record is not a Chance Pearson insurance file: ${needle}`);
   }
   const knownStatusNames = [...new Set(contacts
@@ -8170,7 +9036,7 @@ async function readJsonFile(filePath, fallback) {
 }
 
 function assertOperatorBatchFileScope(plans) {
-  if (!isCodexOperatorRequest()) return;
+  if (!isRestrictedEffectRequest()) return;
   const fileIds = plans.map((prepared, index) => {
     const id = String(
       prepared?.plan?.file?.id
@@ -8324,6 +9190,26 @@ async function hcnGmailApi(endpoint, options = {}) {
 
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
+  if (isHcnRestrictedEffectRequest()) {
+    return fetchBoundedJson(
+      fetch,
+      `${API_BASE}${endpoint}`,
+      {
+        method: options.method || "GET",
+        headers: {
+          authorization: `Bearer ${API_KEY}`,
+          accept: "application/json",
+          "content-type": "application/json"
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined
+      },
+      {
+        timeoutMs: 15_000,
+        maxBytes: 16 * 1024 * 1024,
+        errorCode: "HCN_JOBNIMBUS_EFFECT_FAILED"
+      }
+    );
+  }
   const response = await fetch(`${API_BASE}${endpoint}`, {
     method: options.method || "GET",
     headers: {
@@ -9245,7 +10131,17 @@ const CODEX_OPERATOR_EVENT_FIELDS = new Set([
 ]);
 
 function assertCodexOperatorFields(fields, allowed, label, options = {}) {
-  if (currentRequestIdentity()?.type !== "codex_operator_token") return;
+  if (!isRestrictedEffectRequest()) return;
+  if (isHcnRestrictedEffectRequest() && label === "contact") {
+    const unsupportedHcnField = Object.keys(fields).find(
+      (key) => key !== "cf_date_1"
+    );
+    if (unsupportedHcnField) {
+      badRequest(
+        `The HCN console cannot change contact field: ${unsupportedHcnField}.`
+      );
+    }
+  }
   for (const key of Object.keys(fields)) {
     const isContactCustomField = options.allowContactCustomFields === true
       && /^cf_(?:string|text|date|number|integer|decimal|currency|bool|boolean)_\d+$/i.test(key);
@@ -9257,8 +10153,15 @@ function assertCodexOperatorFields(fields, allowed, label, options = {}) {
 }
 
 function assertOperatorContactScope(contact) {
-  if (currentRequestIdentity()?.type !== "codex_operator_token") return;
-  if (!isInsuranceFile(contact) || !assignedTo(contact, CHANCE_OWNER_ID)) {
+  if (!isRestrictedEffectRequest()) return;
+  if (
+    !isInsuranceFile(contact)
+    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || (
+      isHcnRestrictedEffectRequest()
+      && !hcnContactIsExplicitlyActive(contact)
+    )
+  ) {
     conflictError("The refreshed JobNimbus record is no longer a Chance-assigned insurance file.");
   }
 }
@@ -9459,7 +10362,7 @@ function normalizeActionOperations(value) {
         badRequest(`operations[${index}].payload must not include ${forbidden}`);
       }
     }
-    if (isCodexOperatorRequest()) {
+    if (isRestrictedEffectRequest()) {
       if (type === "jobnimbus.process_update") {
         badRequest("The Codex HP operator must use separate contact/status and note operations so each completed mutation has its own durable batch receipt.");
       }
@@ -9469,6 +10372,12 @@ function normalizeActionOperations(value) {
       if (freeFormMemoryField) {
         badRequest(`operations[${index}].payload cannot persist free-form ${freeFormMemoryField} through the Codex HP operator.`);
       }
+    }
+    if (
+      isHcnRestrictedEffectRequest()
+      && !HCN_BROWSER_ACTION_TYPES.includes(type)
+    ) {
+      badRequest(`Unsupported HCN action type: ${type}`);
     }
     if (!ACTION_OPERATION_TYPES.has(type)) badRequest(`Unsupported action type: ${type}`);
     return { type, payload };
@@ -9537,6 +10446,23 @@ function withActionApprovalMutation(callback) {
 }
 
 function actionApprovalIdentityHash() {
+  if (isHcnRestrictedEffectRequest()) {
+    const sessionId = String(
+      currentRequestAuthentication()?.hcnSessionId || ""
+    );
+    if (!sessionId) {
+      const error = new Error(
+        "No authenticated HCN session is available for this approval."
+      );
+      error.statusCode = 401;
+      throw error;
+    }
+    return createHash("sha256")
+      .update("hcn-console:action-approval-identity:v1", "utf8")
+      .update("\0", "utf8")
+      .update(sessionId, "utf8")
+      .digest("hex");
+  }
   const identity = currentRequestIdentity();
   if (!identity) {
     const error = new Error("No authenticated identity is available for this approval.");
@@ -9583,6 +10509,21 @@ async function issueActionApprovalChallenge(approvalDigest, operationCount) {
     ledger.push(row);
     await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, ledger);
     return { id: row.id, challenge, expiresAt: row.expiresAt };
+  });
+}
+
+async function revokeActionApprovalChallenge(approvalId) {
+  return withActionApprovalMutation(async () => {
+    const ledger = await readSecurityLedger(
+      ACTION_APPROVAL_STORE_PATH,
+      "Action approval ledger"
+    );
+    const row = ledger.find((item) => item.id === approvalId);
+    if (!row || row.status !== "active") return false;
+    row.status = "revoked";
+    row.revokedAt = new Date().toISOString();
+    await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, ledger);
+    return true;
   });
 }
 
@@ -9748,6 +10689,10 @@ function summarizeOperationResult(result) {
   const deliveryStatus = String(result?.delivery?.status || "");
   const deliveryConfirmed = result?.delivery?.confirmed === true;
   const deliveryFailed = result?.delivery?.failed === true;
+  const hcnManualVerificationRequired = isHcnRestrictedEffectRequest()
+    && result?.mode === "executed"
+    && result?.verifiedByReadback !== true
+    && !deliveryStatus;
   return cleanObject({
     mode: result?.mode || "executed",
     fileId: result?.file?.id || "",
@@ -9756,7 +10701,9 @@ function summarizeOperationResult(result) {
     verifiedByReadback: result?.verifiedByReadback,
     deliveryStatus,
     deliveryConfirmed: deliveryStatus ? deliveryConfirmed : undefined,
-    manualVerificationRequired: deliveryStatus ? !deliveryConfirmed && !deliveryFailed : undefined,
+    manualVerificationRequired: deliveryStatus
+      ? !deliveryConfirmed && !deliveryFailed
+      : hcnManualVerificationRequired || undefined,
     sourceDraftId: result?.sourceDraftId || "",
     sourceDraftRetention: result?.sourceDraftRetention?.status || "",
     memoryReceiptId: result?.memoryCloseout?.receipt?.id || "",
@@ -9773,7 +10720,7 @@ function resultId(result) {
 }
 
 async function closeoutJobNimbusAction(file, action, result, summary) {
-  if (isCodexOperatorRequest()) {
+  if (isRestrictedEffectRequest()) {
     return {
       ...operatorMemoryCloseoutBoundary(),
       clientMemoryRefresh: {
@@ -9797,7 +10744,7 @@ async function closeoutJobNimbusAction(file, action, result, summary) {
 }
 
 async function safeRefreshClientSnapshot(subjectKey) {
-  if (isCodexOperatorRequest()) {
+  if (isRestrictedEffectRequest()) {
     return { refreshed: false, reason: "operator_privacy_boundary" };
   }
   if (!ALLOW_LEGACY_CLIENT_MEMORY_WRITES) {
@@ -9829,7 +10776,7 @@ async function optionalChanceFile(query) {
 }
 
 function closeoutGmailAction(input, file, action, externalId, summary, status = "executed") {
-  if (isCodexOperatorRequest()) return operatorMemoryCloseoutBoundary();
+  if (isRestrictedEffectRequest()) return operatorMemoryCloseoutBoundary();
   return safeCloseoutAction(MEMORY_CONFIG, {
     channel: "gmail",
     action,
@@ -10797,6 +11744,12 @@ async function readJson(req, maximumBytes = MAX_JSON_BODY_BYTES) {
   try { return JSON.parse(raw); } catch { badRequest("Request body must be valid JSON."); }
 }
 
+function hcnApiBodyLimit(pathname) {
+  return pathname === "/hcn/api/v1/action-plans/prepare"
+    ? HCN_ACTION_PREPARE_BODY_BYTES
+    : HCN_CONSOLE_API_BODY_BYTES;
+}
+
 async function readForm(req) {
   let raw = "";
   let bytes = 0;
@@ -11065,6 +12018,7 @@ const OPENAPI = {
               clientCoordinatorExpandedCalls: { $ref: "#/components/schemas/PlatformGateStatus" },
               externalWrites: { $ref: "#/components/schemas/PlatformGateStatus" },
               gmailSend: { $ref: "#/components/schemas/PlatformGateStatus" },
+              hcnActionExecution: { $ref: "#/components/schemas/PlatformGateStatus" },
               quoSend: { $ref: "#/components/schemas/PlatformGateStatus" },
               realtimeVoiceCalls: { $ref: "#/components/schemas/PlatformGateStatus" }
             },
@@ -11075,6 +12029,7 @@ const OPENAPI = {
               "clientCoordinatorExpandedCalls",
               "externalWrites",
               "gmailSend",
+              "hcnActionExecution",
               "quoSend",
               "realtimeVoiceCalls"
             ]
@@ -11132,7 +12087,8 @@ const OPENAPI = {
           "ALLOW_QUO_SEND",
           "ALLOW_RETELL_CALLS",
           "ALLOW_VOICE_CALLS",
-          "BRIDGE_ALLOW_WRITES"
+          "BRIDGE_ALLOW_WRITES",
+          "HCN_ACTION_EXECUTION_ENABLED"
         ]
       },
       PlatformMetadataResponse: {
@@ -12219,6 +13175,94 @@ const OPENAPI = {
         }
       }
     },
+    "/hcn/api/v1/action-plans/prepare": {
+      post: {
+        operationId: "prepareHcnActionPlan",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Prepares one exact, single-file JobNimbus action plan from fresh active Chance-assigned evidence. Provider identifiers and the server approval challenge never enter the browser response.",
+        requestBody: hcnActionRequestBody("prepare"),
+        responses: hcnActionOpenApiResponses({
+          success:
+            "An immutable pending plan with exact material, approval digest, and expiry. Nothing was executed.",
+          bodyLimit: "64 KiB"
+        })
+      }
+    },
+    "/hcn/api/v1/action-plans/list": {
+      post: {
+        operationId: "listHcnActionPlans",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Lists privacy-scoped pending and recent in-memory action-plan summaries for the current HCN browser session.",
+        requestBody: hcnActionRequestBody("empty"),
+        responses: hcnActionOpenApiResponses({
+          success: "Current-session action-plan summaries.",
+          bodyLimit: "4 KiB"
+        })
+      }
+    },
+    "/hcn/api/v1/action-plans/detail": {
+      post: {
+        operationId: "readHcnActionPlan",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Reads the exact public review material for one current-session action plan. No provider identifiers or approval challenge are returned.",
+        requestBody: hcnActionRequestBody("plan"),
+        responses: hcnActionOpenApiResponses({
+          success: "Exact public action-plan detail.",
+          bodyLimit: "4 KiB"
+        })
+      }
+    },
+    "/hcn/api/v1/action-plans/execute": {
+      post: {
+        operationId: "executeHcnActionPlan",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Consumes one unchanged pending plan after a separate explicit Chance approval. Both the global write gate and HCN execution gate must be enabled. Effects are single-flight, receipt-first, fail-stop, and never automatically retried.",
+        "x-openai-isConsequential": true,
+        requestBody: hcnActionRequestBody("plan"),
+        responses: hcnActionOpenApiResponses({
+          success:
+            "Terminal plan and metadata-only durable receipt, including reconciliation-required outcomes.",
+          bodyLimit: "4 KiB"
+        })
+      }
+    },
+    "/hcn/api/v1/action-plans/invalidate": {
+      post: {
+        operationId: "invalidateHcnActionPlan",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Explicitly invalidates one unexecuted current-session pending plan. Editing always requires invalidation and a fresh preparation.",
+        "x-openai-isConsequential": true,
+        requestBody: hcnActionRequestBody("plan"),
+        responses: hcnActionOpenApiResponses({
+          success: "Invalidated plan projection.",
+          bodyLimit: "4 KiB"
+        })
+      }
+    },
+    "/hcn/api/v1/action-receipts/list": {
+      post: {
+        operationId: "listHcnActionReceipts",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Lists bounded metadata-only action receipts for the stable pinned Chance HCN operator principal. No client bodies, provider identifiers, credentials, or challenges are stored.",
+        requestBody: hcnActionRequestBody("empty"),
+        responses: hcnActionOpenApiResponses({
+          success: "Stable Chance-operator durable receipt summaries.",
+          bodyLimit: "4 KiB"
+        })
+      }
+    },
+    "/hcn/api/v1/action-receipts/detail": {
+      post: {
+        operationId: "readHcnActionReceipt",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Reads one metadata-only durable action receipt by its action plan reference for the stable pinned Chance HCN operator principal.",
+        requestBody: hcnActionRequestBody("plan"),
+        responses: hcnActionOpenApiResponses({
+          success: "Exact metadata-only durable receipt.",
+          bodyLimit: "4 KiB"
+        })
+      }
+    },
     "/auth/whoami": {
       get: {
         operationId: "readSignedInWaveIdentity",
@@ -12722,6 +13766,149 @@ function jsonBody(schemaName) {
       "application/json": {
         schema: { $ref: `#/components/schemas/${schemaName}` }
       }
+    }
+  };
+}
+
+function hcnActionRequestBody(kind) {
+  const planIdSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      planId: {
+        type: "string",
+        pattern: "^plan_[a-f0-9]{32}$"
+      }
+    },
+    required: ["planId"]
+  };
+  let schema;
+  if (kind === "empty") {
+    schema = {
+      type: "object",
+      additionalProperties: false,
+      maxProperties: 0
+    };
+  } else if (kind === "plan") {
+    schema = planIdSchema;
+  } else {
+    const fileRef = {
+      type: "string",
+      pattern: "^subject_[a-f0-9]{32}$"
+    };
+    const taskRef = {
+      type: "string",
+      pattern: "^ref_[a-f0-9]{32}$"
+    };
+    const isoDate = {
+      type: "string",
+      format: "date",
+      pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+    };
+    const operation = (type, input) => ({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        type: { type: "string", const: type },
+        input
+      },
+      required: ["type", "input"]
+    });
+    schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        fileRef,
+        operations: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          items: {
+            oneOf: [
+              operation("jobnimbus.create_note", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  note: { type: "string", minLength: 1, maxLength: 8192 }
+                },
+                required: ["note"]
+              }),
+              operation("jobnimbus.create_task", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  title: { type: "string", minLength: 1, maxLength: 256 },
+                  description: { type: "string", maxLength: 4096 },
+                  dueDate: isoDate
+                },
+                required: ["title"]
+              }),
+              operation("jobnimbus.update_task", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  taskRef,
+                  title: { type: "string", minLength: 1, maxLength: 256 },
+                  description: { type: "string", maxLength: 4096 },
+                  dueDate: isoDate,
+                  completed: { type: "boolean" }
+                },
+                required: ["taskRef"],
+                minProperties: 2
+              }),
+              operation("jobnimbus.update_status", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  status: { type: "string", minLength: 1, maxLength: 128 }
+                },
+                required: ["status"]
+              }),
+              operation("jobnimbus.update_contact", {
+                type: "object",
+                additionalProperties: false,
+                properties: { dateOfLoss: isoDate },
+                required: ["dateOfLoss"]
+              })
+            ]
+          }
+        }
+      },
+      required: ["fileRef", "operations"]
+    };
+  }
+  return {
+    required: true,
+    content: {
+      "application/json": { schema }
+    }
+  };
+}
+
+function hcnActionOpenApiResponses({ success, bodyLimit }) {
+  return {
+    "200": { description: success },
+    "400": { description: "Strict browser action contract validation failed." },
+    "401": { description: "HCN browser session required." },
+    "403": {
+      description: "Chance-only session, exact Origin, or CSRF check failed."
+    },
+    "404": {
+      description:
+        "The session-scoped opaque plan or stable-operator receipt was not found."
+    },
+    "409": {
+      description:
+        "The file scope, digest, plan state, or approval state changed. Nothing was automatically retried."
+    },
+    "413": { description: `Request exceeds the ${bodyLimit} route limit.` },
+    "429": {
+      description:
+        "Per-session or process-wide action capacity is temporarily unavailable."
+    },
+    "503": {
+      description:
+        "A release gate, fresh evidence source, or durable receipt boundary is unavailable."
     }
   };
 }

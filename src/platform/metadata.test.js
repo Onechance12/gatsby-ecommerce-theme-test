@@ -37,7 +37,8 @@ test("public metadata proves the runtime without exposing environment contents",
         ALLOW_QUO_SEND: true,
         ALLOW_RETELL_CALLS: true,
         ALLOW_VOICE_CALLS: false,
-        BRIDGE_ALLOW_WRITES: true
+        BRIDGE_ALLOW_WRITES: true,
+        HCN_ACTION_EXECUTION_ENABLED: false
       }
     },
     nodeRuntime: NODE_RUNTIME,

@@ -91,13 +91,17 @@ Deliverables:
 - Approval Inbox showing every material recipient, field, status, note, date,
   body, and attachment before execution;
 - one-use approve-and-execute flow over the existing action-batch engine;
-- immutable receipts and fresh-provider readback;
+- durable metadata-only receipts bound to Chance's pinned Google subject so
+  reconciliation survives browser-session expiry, logout, and bridge restart;
+- fresh-provider readback with explicit pending-verification outcomes;
 - reconciliation workflow for partial or uncertain outcomes.
 
 Exit gate:
 
 - changing any material payload invalidates the plan and approval;
 - challenges and provider credentials never enter browser JavaScript;
+- an `executing` receipt is durably recorded before any provider effect, and
+  internal receipt-principal bindings never enter browser responses;
 - expired, consumed, partial, stale, and uncertain executions cannot be blindly
   retried;
 - all sends, writes, calendar changes, uploads, calls, and financial actions
@@ -147,4 +151,3 @@ Render environment changes, persistent-store provisioning, and legacy purge
 are separate action-time approvals. A production release is not complete until
 the deployed SHA, live capability manifest, authentication identity, connector
 readiness, and exact release gates match the reviewed build.
-

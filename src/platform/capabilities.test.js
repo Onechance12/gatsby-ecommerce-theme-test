@@ -63,7 +63,12 @@ test("Google roles are normalized to named capabilities without wildcard authori
   const chance = buildCapabilityDescriptor({
     identity: { type: "google_oauth", role: "chance" }
   });
-  assert.equal(chance.authorizedCapabilities.length, CAPABILITY_ROUTE_REGISTRY.length - 2);
+  const nonHcnCapabilityCount = new Set(
+    CAPABILITY_ROUTE_REGISTRY
+      .filter(({ route }) => !route.includes(" /hcn/"))
+      .map(({ name }) => name)
+  ).size;
+  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount);
   assert.equal(chance.authorizedCapabilities.includes("gmail.drafts.send"), true);
   assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), true);
   assert.equal(chance.authorizedCapabilities.includes("hcn.work_center.read"), false);
@@ -84,6 +89,11 @@ test("HCN browser capability metadata is intersected with the console surface", 
   });
 
   assert.deepEqual(browser.authorizedCapabilities, [
+    "hcn.action_plans.execute",
+    "hcn.action_plans.invalidate",
+    "hcn.action_plans.prepare",
+    "hcn.action_plans.read",
+    "hcn.action_receipts.read",
     "hcn.file.review",
     "hcn.work_center.read",
     "platform.session.read"
@@ -157,7 +167,11 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
       ALLOW_QUO_SEND: undefined,
       ALLOW_RETELL_CALLS: true,
       ALLOW_VOICE_CALLS: false,
-      BRIDGE_ALLOW_WRITES: true
+      BRIDGE_ALLOW_WRITES: true,
+      HCN_ACTION_EXECUTION_ENABLED: false
+    },
+    hcnActions: {
+      executionGateEnabled: false
     },
     userOAuth: {
       available: true,
@@ -195,6 +209,7 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.connectors.quo, "unknown");
   assert.equal(status.gates.externalWrites, "enabled");
   assert.equal(status.gates.gmailSend, "disabled");
+  assert.equal(status.gates.hcnActionExecution, "disabled");
   assert.equal(status.gates.quoSend, "unknown");
   assert.equal(status.controls.actionBatchOnly, "enabled");
   assert.equal(status.controls.directEffectRoutes, "disabled");
@@ -204,7 +219,7 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.brain.legacyClientMemoryWrites, "disabled");
   assert.equal(status.brain.snapshotSafety, "migration_required");
   assert.equal(status.configurationDrift.scope, "release_critical_effect_gates");
-  assert.equal(status.configurationDrift.monitoredKeys.length, 8);
+  assert.equal(status.configurationDrift.monitoredKeys.length, 9);
   assert.equal(status.configurationDrift.status, "detected");
   assert.deepEqual(status.configurationDrift.differences, [{
     key: "BRIDGE_ALLOW_WRITES",

@@ -22,6 +22,8 @@ services:
         sync: false
       - key: BRIDGE_ALLOW_WRITES
         value: "false"
+      - key: HCN_ACTION_EXECUTION_ENABLED
+        value: "false"
       - key: MEMORY_ROOT
         value: /var/data
       - key: MAX_ARTIFACT_BYTES
@@ -148,6 +150,8 @@ services:
         value: /var/data/bridge/action-batches.json
       - key: ACTION_APPROVAL_STORE_PATH
         value: /var/data/bridge/action-approvals.json
+      - key: HCN_ACTION_RECEIPT_STORE_PATH
+        value: /var/data/bridge/hcn-action-receipts.json
       - key: ACTION_APPROVAL_TTL_SECONDS
         value: "900"
       - key: OUTBOUND_SEND_STORE_PATH

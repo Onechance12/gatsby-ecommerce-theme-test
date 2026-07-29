@@ -1,9 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  createHash,
-  createHmac,
-  timingSafeEqual
-} from "node:crypto";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -18,6 +14,9 @@ import {
 import {
   createHcnConsoleSessionStore
 } from "./hcn-console-session-store.js";
+import {
+  createHcnConsoleStateCodec
+} from "./hcn-console-state-codec.js";
 
 const START = Date.parse("2026-07-28T18:00:00.000Z");
 const GOOGLE_ACCESS_SECRET = "provider-access-token-secret";
@@ -315,7 +314,12 @@ function createFixture({
   let timestamp = START;
   let randomCounter = 0;
   const now = () => timestamp;
-  const codec = createStateCodec("state-sealing-test-secret");
+  const codec = createHcnConsoleStateCodec({
+    secret: "state-sealing-test-secret-at-least-32-bytes",
+    randomBytes(length) {
+      return Buffer.alloc(length, 17);
+    }
+  });
   const baseStore = createHcnConsoleSessionStore({ now });
   const createdTransactions = [];
   const sessionInputs = [];
@@ -391,39 +395,6 @@ async function defaultAuthenticator(options) {
     ...candidate,
     role: approved.role,
     googleAccessToken: options.token
-  };
-}
-
-function createStateCodec(secret) {
-  return {
-    seal(payload) {
-      const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-      const signature = createHmac("sha256", secret)
-        .update(body)
-        .digest("base64url");
-      return `${body}.${signature}`;
-    },
-    open(value) {
-      const [body = "", signature = "", extra] =
-        String(value || "").split(".");
-      if (extra !== undefined) throw new Error("invalid state");
-      const expected = createHmac("sha256", secret)
-        .update(body)
-        .digest();
-      let provided;
-      try {
-        provided = Buffer.from(signature, "base64url");
-      } catch {
-        throw new Error("invalid state");
-      }
-      if (
-        provided.length !== expected.length ||
-        !timingSafeEqual(provided, expected)
-      ) {
-        throw new Error("invalid state");
-      }
-      return JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    }
   };
 }
 

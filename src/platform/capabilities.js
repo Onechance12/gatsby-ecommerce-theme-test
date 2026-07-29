@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-28.2";
+export const CAPABILITY_VERSION = "2026-07-28.3";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -23,6 +23,13 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("platform.session.read", "GET /api/v1/session"),
   capability("hcn.work_center.read", "POST /hcn/api/v1/work-center"),
   capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
+  capability("hcn.action_plans.prepare", "POST /hcn/api/v1/action-plans/prepare"),
+  capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/list"),
+  capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/detail"),
+  capability("hcn.action_plans.execute", "POST /hcn/api/v1/action-plans/execute"),
+  capability("hcn.action_plans.invalidate", "POST /hcn/api/v1/action-plans/invalidate"),
+  capability("hcn.action_receipts.read", "POST /hcn/api/v1/action-receipts/list"),
+  capability("hcn.action_receipts.read", "POST /hcn/api/v1/action-receipts/detail"),
   capability("quo.line.link", "POST /auth/quo-line"),
   capability("voice.call.place", "POST /voice/outbound-call"),
   capability("voice.transcript.create", "POST /voice/transcript"),
@@ -110,12 +117,12 @@ export function capabilitiesForIdentity(identity) {
       ? { type: "hcn_browser_session", role: safeIdentity.role }
       : { type: "google_oauth", role: safeIdentity.role };
 
-  return CAPABILITY_ROUTE_REGISTRY
+  return [...new Set(CAPABILITY_ROUTE_REGISTRY
     .filter(({ route }) => {
       const separator = route.indexOf(" ");
       return routeAllowed(policyIdentity, route.slice(0, separator), route.slice(separator + 1));
     })
-    .map(({ name }) => name)
+    .map(({ name }) => name))]
     .sort();
 }
 
@@ -130,6 +137,7 @@ export function buildRuntimeStatus(runtime = {}) {
   const carrierFollowUp = safeObject(source.carrierFollowUp);
   const scheduling = safeObject(source.schedulingAvailability);
   const brain = safeObject(source.brain);
+  const hcnActions = safeObject(source.hcnActions);
 
   return {
     brain: {
@@ -174,6 +182,7 @@ export function buildRuntimeStatus(runtime = {}) {
       clientCoordinatorExpandedCalls: gateStatus(clientCoordinator.expandedModesAllowed),
       externalWrites: gateStatus(source.writesAllowed),
       gmailSend: gateStatus(source.gmailSendAllowed),
+      hcnActionExecution: gateStatus(hcnActions.executionGateEnabled),
       quoSend: gateStatus(source.quoSendAllowed),
       realtimeVoiceCalls: gateStatus(voice.callsAllowed)
     },

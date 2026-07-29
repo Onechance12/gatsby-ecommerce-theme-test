@@ -424,6 +424,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(platformMeta.boundaries.hcnV2ChanceBrainDataFlow, "disconnected");
   assert.equal(platformMeta.boundaries.jobrolo, "disconnected");
   assert.equal(platformMeta.runtime.configurationDrift.status, "detected");
+  assert.equal(platformMeta.runtime.gates.hcnActionExecution, "disabled");
   const serializedPlatformMeta = JSON.stringify(platformMeta);
   assert.equal(serializedPlatformMeta.includes(PLATFORM_FIXTURE_SECRET), false);
   assert.equal(serializedPlatformMeta.includes("JOBNIMBUS_API_KEY"), false);
@@ -447,6 +448,21 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.components.schemas.PlatformMetadataResponse.additionalProperties, false);
   assert.equal(schema.components.schemas.PlatformSessionResponse.additionalProperties, false);
   assert.equal(schema.components.schemas.PlatformRuntimeStatus.additionalProperties, false);
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.gates
+      .properties.hcnActionExecution.$ref,
+    "#/components/schemas/PlatformGateStatus"
+  );
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.gates
+      .required.includes("hcnActionExecution"),
+    true
+  );
+  assert.equal(
+    schema.components.schemas.PlatformReleaseGateKey.enum
+      .includes("HCN_ACTION_EXECUTION_ENABLED"),
+    true
+  );
   assert.equal(
     schema.components.schemas.PlatformSessionResponse.properties.identity.additionalProperties,
     false
@@ -1722,6 +1738,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const origin = `http://127.0.0.1:${bridgePort}`;
   const providerRequests = [];
   const hcnProviderRequests = [];
+  const jobNimbusMutationRequests = [];
   const chanceOwnerId = "fixture-chance-owner";
   const exactFileId = "jn-fixture-active";
   const activeContact = {
@@ -1879,6 +1896,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(activeContact));
+      return;
+    }
+    if (url.pathname === "/activities" && req.method === "POST") {
+      jobNimbusMutationRequests.push({
+        method: req.method,
+        pathname: url.pathname
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jnid: "jn-created-note-must-not-run" }));
       return;
     }
     if (url.pathname === "/activities" && req.method === "GET") {
@@ -2166,6 +2192,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(platformSession.identity.role, "chance");
   assert.equal(platformSession.identity.jobNimbusScope, "assigned");
   assert.deepEqual(platformSession.authorizedCapabilities, [
+    "hcn.action_plans.execute",
+    "hcn.action_plans.invalidate",
+    "hcn.action_plans.prepare",
+    "hcn.action_plans.read",
+    "hcn.action_receipts.read",
     "hcn.file.review",
     "hcn.work_center.read",
     "platform.session.read"
@@ -2202,11 +2233,32 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     fullOpenApi.paths["/hcn/api/v1/file-review"].post.operationId,
     "readHcnExactFile"
   );
+  const hcnActionOpenApiPaths = [
+    "/hcn/api/v1/action-plans/prepare",
+    "/hcn/api/v1/action-plans/list",
+    "/hcn/api/v1/action-plans/detail",
+    "/hcn/api/v1/action-plans/execute",
+    "/hcn/api/v1/action-plans/invalidate",
+    "/hcn/api/v1/action-receipts/list",
+    "/hcn/api/v1/action-receipts/detail"
+  ];
+  for (const actionPath of hcnActionOpenApiPaths) {
+    assert.ok(fullOpenApi.paths[actionPath]?.post);
+  }
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/action-plans/execute"].post[
+      "x-openai-isConsequential"
+    ],
+    true
+  );
   const chatGptOpenApiResponse = await fetch(`${origin}/openapi-chatgpt.json`);
   assert.equal(chatGptOpenApiResponse.status, 200);
   const chatGptOpenApi = await chatGptOpenApiResponse.json();
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/work-center"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/file-review"], undefined);
+  for (const actionPath of hcnActionOpenApiPaths) {
+    assert.equal(chatGptOpenApi.paths[actionPath], undefined);
+  }
 
   const hcnReadHeaders = {
     cookie: sessionCookie,
@@ -2405,6 +2457,276 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     1
   );
 
+  const exactNote =
+    "Andrea needs to reach out for the declaration page or policy.";
+  const actionPrepareBody = {
+    fileRef,
+    operations: [{
+      type: "jobnimbus.create_note",
+      input: { note: exactNote }
+    }]
+  };
+  const invalidActionShapeResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        ...actionPrepareBody,
+        query: exactFileId
+      })
+    }
+  );
+  assert.equal(invalidActionShapeResponse.status, 400);
+  assert.doesNotMatch(
+    JSON.stringify(await invalidActionShapeResponse.json()),
+    new RegExp(exactFileId)
+  );
+
+  const oversizedActionPrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        ...actionPrepareBody,
+        padding: "x".repeat(66 * 1024)
+      })
+    }
+  );
+  assert.equal(oversizedActionPrepareResponse.status, 413);
+
+  const actionPrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify(actionPrepareBody)
+    }
+  );
+  assert.equal(actionPrepareResponse.status, 200);
+  assert.equal(
+    actionPrepareResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const preparedActionEnvelope = await actionPrepareResponse.json();
+  assert.equal(preparedActionEnvelope.schema, "hcn.console.actions.v1");
+  assert.equal(preparedActionEnvelope.ephemeral, true);
+  assert.equal(preparedActionEnvelope.cachePolicy, "no_store");
+  assert.deepEqual(preparedActionEnvelope.authority, {
+    mode: "explicit_chance_approval",
+    automaticExecution: false,
+    automaticRetry: false,
+    providerIdentifiersExposed: false
+  });
+  const preparedActionPlan = preparedActionEnvelope.plan;
+  assert.match(preparedActionPlan.planId, /^plan_[a-f0-9]{32}$/);
+  assert.equal(preparedActionPlan.fileRef, fileRef);
+  assert.match(preparedActionPlan.approvalDigest, /^[a-f0-9]{64}$/);
+  assert.match(preparedActionPlan.approvalExpiresAt, /Z$/);
+  assert.equal(preparedActionPlan.status, "pending");
+  assert.equal(preparedActionPlan.operationCount, 1);
+  assert.deepEqual(preparedActionPlan.operations, [{
+    index: 0,
+    type: "jobnimbus.create_note",
+    action: "Create JobNimbus note",
+    material: { note: exactNote }
+  }]);
+
+  const serializedActionPlan = JSON.stringify(preparedActionEnvelope);
+  for (const forbidden of [
+    exactFileId,
+    chanceOwnerId,
+    "/activities",
+    "/contacts/",
+    "approvalChallenge",
+    "providerJobId",
+    "hcn-jobnimbus-api-key",
+    "fixture-shared-bridge-token-for-ambiguity"
+  ]) {
+    assert.equal(
+      serializedActionPlan.includes(forbidden),
+      false,
+      `HCN browser action plan leaked ${forbidden}`
+    );
+  }
+
+  const actionListResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/list`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(actionListResponse.status, 200);
+  const actionList = await actionListResponse.json();
+  assert.equal(actionList.plans.length, 1);
+  assert.equal(actionList.plans[0].planId, preparedActionPlan.planId);
+  assert.equal(Object.hasOwn(actionList.plans[0], "operations"), false);
+  assert.equal(JSON.stringify(actionList).includes(exactNote), false);
+
+  const invalidActionListResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/list`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ unexpected: true })
+    }
+  );
+  assert.equal(invalidActionListResponse.status, 400);
+
+  const actionDetailResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/detail`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ planId: preparedActionPlan.planId })
+    }
+  );
+  assert.equal(actionDetailResponse.status, 200);
+  const actionDetail = await actionDetailResponse.json();
+  assert.deepEqual(actionDetail.plan, preparedActionPlan);
+  assert.equal(JSON.stringify(actionDetail).includes(exactFileId), false);
+
+  const secondLoginResponse = await fetch(`${origin}/hcn/auth/login`, {
+    redirect: "manual"
+  });
+  assert.equal(secondLoginResponse.status, 302);
+  const secondLoginCookie = secondLoginResponse.headers
+    .getSetCookie()[0]
+    .split(";", 1)[0];
+  const secondGoogleAuthorize = new URL(
+    secondLoginResponse.headers.get("location")
+  );
+  const secondCallbackResponse = await fetch(
+    `${origin}/oauth/google/callback?${new URLSearchParams({
+      code: "hcn-google-code-second-session",
+      state: secondGoogleAuthorize.searchParams.get("state")
+    })}`,
+    {
+      redirect: "manual",
+      headers: { cookie: secondLoginCookie }
+    }
+  );
+  assert.equal(secondCallbackResponse.status, 302);
+  const secondSessionCookie = secondCallbackResponse.headers
+    .getSetCookie()
+    .find((value) => value.startsWith("__Host-hcn_session="))
+    .split(";", 1)[0];
+  const secondBrowserSessionResponse = await fetch(
+    `${origin}/hcn/auth/session`,
+    { headers: { cookie: secondSessionCookie } }
+  );
+  assert.equal(secondBrowserSessionResponse.status, 200);
+  const secondBrowserSession = await secondBrowserSessionResponse.json();
+  const secondHcnHeaders = {
+    cookie: secondSessionCookie,
+    origin,
+    "x-hcn-csrf": secondBrowserSession.browserSession.csrfToken,
+    "content-type": "application/json"
+  };
+  const isolatedActionListResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/list`,
+    {
+      method: "POST",
+      headers: secondHcnHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(isolatedActionListResponse.status, 200);
+  assert.deepEqual((await isolatedActionListResponse.json()).plans, []);
+  const isolatedActionDetailResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/detail`,
+    {
+      method: "POST",
+      headers: secondHcnHeaders,
+      body: JSON.stringify({ planId: preparedActionPlan.planId })
+    }
+  );
+  assert.equal(isolatedActionDetailResponse.status, 404);
+  assert.equal(
+    JSON.stringify(await isolatedActionDetailResponse.json())
+      .includes(exactNote),
+    false
+  );
+
+  const receiptsBeforeExecutionResponse = await fetch(
+    `${origin}/hcn/api/v1/action-receipts/list`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(receiptsBeforeExecutionResponse.status, 200);
+  assert.deepEqual(
+    (await receiptsBeforeExecutionResponse.json()).receipts,
+    []
+  );
+
+  const disabledExecutionResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/execute`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ planId: preparedActionPlan.planId })
+    }
+  );
+  assert.equal(disabledExecutionResponse.status, 503);
+  assert.equal(jobNimbusMutationRequests.length, 0);
+  const stillPendingResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/detail`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ planId: preparedActionPlan.planId })
+    }
+  );
+  assert.equal(stillPendingResponse.status, 200);
+  assert.equal((await stillPendingResponse.json()).plan.status, "pending");
+
+  const invalidateActionResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/invalidate`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ planId: preparedActionPlan.planId })
+    }
+  );
+  assert.equal(invalidateActionResponse.status, 200);
+  assert.equal((await invalidateActionResponse.json()).plan.status, "invalidated");
+  const invalidatedExecutionResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/execute`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ planId: preparedActionPlan.planId })
+    }
+  );
+  assert.equal(invalidatedExecutionResponse.status, 503);
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  const logoutPendingPrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: "Pending plan must be invalidated by logout." }
+        }]
+      })
+    }
+  );
+  assert.equal(logoutPendingPrepareResponse.status, 200);
+  assert.equal(
+    (await logoutPendingPrepareResponse.json()).plan.status,
+    "pending"
+  );
+
   serveUnknownContactsWrapper = true;
   const unknownWrapperResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
@@ -2552,13 +2874,14 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(logoutResponse.status, 200);
   assert.match(logoutResponse.headers.get("set-cookie"), /^__Host-hcn_session=;/);
   assert.deepEqual(await logoutResponse.json(), { signedOut: true });
+  assert.equal(jobNimbusMutationRequests.length, 0);
 
   const revokedSessionResponse = await fetch(`${origin}/api/v1/session`, {
     headers: { cookie: sessionCookie }
   });
   assert.equal(revokedSessionResponse.status, 401);
 
-  for (let index = 0; index < 5; index += 1) {
+  for (let index = 0; index < 4; index += 1) {
     const retryLogin = await fetch(`${origin}/hcn/auth/login`, {
       redirect: "manual"
     });
@@ -2568,11 +2891,586 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     redirect: "manual"
   });
   assert.equal(rateLimitedLogin.status, 429);
-  assert.equal(rateLimitedLogin.headers.get("retry-after"), "600");
+  assert.ok(
+    Number(rateLimitedLogin.headers.get("retry-after")) >= 599
+    && Number(rateLimitedLogin.headers.get("retry-after")) <= 600
+  );
   assert.equal(
     (await rateLimitedLogin.json()).error,
     "rate_limited"
   );
+});
+
+test("HCN action execution is receipt-first, metadata-only, durable across Chance sessions, and Brain-disconnected", async (t) => {
+  const bridgePort = 18932;
+  const fakeProviderPort = 18933;
+  const origin = `http://127.0.0.1:${bridgePort}`;
+  const chanceOwnerId = "fixture-hcn-action-owner";
+  const providerJobId = "provider-hcn-action-job-private";
+  const providerCreatedNoteId = "provider-hcn-created-note-private";
+  const exactNote =
+    "Andrea needs to reach out for the declaration page or policy.";
+  const contact = {
+    jnid: providerJobId,
+    number: "HCN-ACTION-1001",
+    record_type_name: "Insurance",
+    owners: [{ id: chanceOwnerId }],
+    display_name: "Fixture Action Homeowner",
+    status_name: "Claim Filed",
+    is_active: true,
+    date_updated: "2026-07-28T14:00:00.000Z",
+    email: "hcn.action.homeowner@example.test",
+    mobile_phone: "2145552121",
+    "Claim #": "HCN-ACTION-CLAIM-1001",
+    "Policy #": "HCN-ACTION-POLICY-1001"
+  };
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-action-execution-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const receiptStorePath = path.join(
+    memoryRoot,
+    "bridge",
+    "hcn-action-receipts.json"
+  );
+  const actionBatchStorePath = path.join(
+    memoryRoot,
+    "bridge",
+    "action-batches.json"
+  );
+  const legacyCanaryPath = path.join(
+    memoryRoot,
+    "data",
+    "memory",
+    "files",
+    `${createHash("sha256").update(providerJobId).digest("hex")}.json`
+  );
+  const legacyCanaryBytes = Buffer.from(
+    `${JSON.stringify({
+      version: 1,
+      subjectKey: providerJobId,
+      canary: "legacy-v1-action-execution-must-not-change"
+    })}\n`
+  );
+  await mkdir(path.dirname(legacyCanaryPath), { recursive: true });
+  await writeFile(legacyCanaryPath, legacyCanaryBytes);
+  const legacyCanaryBefore = await stat(legacyCanaryPath);
+
+  let receiptFirstObservation = null;
+  const jobNimbusMutations = [];
+  const fakeProviderRequests = [];
+  const fakeProvider = createServer(async (req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${fakeProviderPort}`);
+    fakeProviderRequests.push(`${req.method} ${url.pathname}${url.search}`);
+    if (url.pathname === "/token" && req.method === "POST") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        access_token: "hcn-action-google-access-token",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }));
+      return;
+    }
+    if (url.pathname === "/tokeninfo" && req.method === "GET") {
+      assert.equal(
+        url.searchParams.get("access_token"),
+        "hcn-action-google-access-token"
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        audience: "hcn-action-google-client",
+        expires_in: 3600,
+        verified_email: true,
+        scope: "openid email profile"
+      }));
+      return;
+    }
+    if (url.pathname === "/userinfo" && req.method === "GET") {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-action-google-access-token"
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        sub: "hcn-action-google-subject",
+        email: "chance@wavepa.com",
+        email_verified: true,
+        hd: "wavepa.com",
+        name: "Chance Action Fixture"
+      }));
+      return;
+    }
+    if (url.pathname === "/contacts" && req.method === "GET") {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-action-jobnimbus-key"
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ contacts: [contact] }));
+      return;
+    }
+    if (
+      url.pathname === `/contacts/${encodeURIComponent(providerJobId)}`
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-action-jobnimbus-key"
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(contact));
+      return;
+    }
+    if (url.pathname === "/activities" && req.method === "POST") {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-action-jobnimbus-key"
+      );
+      receiptFirstObservation = JSON.parse(
+        await readFile(receiptStorePath, "utf8")
+      );
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      jobNimbusMutations.push({
+        method: req.method,
+        pathname: url.pathname,
+        body
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        jnid: providerCreatedNoteId,
+        record_type_name: "Note"
+      }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "fixture route not found" }));
+  });
+  await new Promise((resolve) =>
+    fakeProvider.listen(fakeProviderPort, "127.0.0.1", resolve)
+  );
+  t.after(() => fakeProvider.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      PUBLIC_BASE_URL: origin,
+      HCN_CONSOLE_ENABLED: "true",
+      HCN_CONSOLE_ORIGIN: origin,
+      HCN_TENANT_ID: "tenant_abcdef0123456789",
+      HCN_REFERENCE_KEY: Buffer.alloc(32, 0x6b).toString("base64url"),
+      ALLOW_GOOGLE_USER_AUTH: "true",
+      GOOGLE_CLIENT_ID: "hcn-action-google-client",
+      GOOGLE_CLIENT_SECRET: "hcn-action-google-secret",
+      GOOGLE_REFRESH_TOKEN: "",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeProviderPort}/token`,
+      GOOGLE_TOKENINFO_URL:
+        `http://127.0.0.1:${fakeProviderPort}/tokeninfo`,
+      GOOGLE_USERINFO_URL:
+        `http://127.0.0.1:${fakeProviderPort}/userinfo`,
+      GOOGLE_OAUTH_ALLOWED_DOMAIN: "wavepa.com",
+      CHANCE_GOOGLE_EMAIL: "chance@wavepa.com",
+      CHANCE_GOOGLE_SUBJECT: "hcn-action-google-subject",
+      CHANCE_JOBNIMBUS_OWNER_ID: chanceOwnerId,
+      OAUTH_SESSION_SECRET:
+        "hcn-action-session-sealing-secret-for-local-tests",
+      GPT_OAUTH_CLIENT_SECRET: "",
+      WAVE_AUTH_USERS_JSON: JSON.stringify([{
+        email: "chance@wavepa.com",
+        name: "Chance Action Fixture",
+        role: "chance",
+        enabled: true,
+        googleSubject: "hcn-action-google-subject",
+        jobNimbusScope: "assigned"
+      }]),
+      AUTO_ENROLL_WAVE_USERS: "false",
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "",
+      JOBNIMBUS_API_KEY: "hcn-action-jobnimbus-key",
+      JOBNIMBUS_API_BASE_URL:
+        `http://127.0.0.1:${fakeProviderPort}`,
+      MEMORY_ROOT: memoryRoot,
+      HCN_ACTION_RECEIPT_STORE_PATH: receiptStorePath,
+      ACTION_APPROVAL_STORE_PATH:
+        path.join(memoryRoot, "bridge", "action-approvals.json"),
+      ACTION_BATCH_STORE_PATH: actionBatchStorePath,
+      BRIDGE_ALLOW_WRITES: "true",
+      HCN_ACTION_EXECUTION_ENABLED: "true",
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      ALLOW_VOICE_CALLS: "false",
+      ALLOW_RETELL_CALLS: "false",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  async function createActionSession(code) {
+    const loginResponse = await fetch(`${origin}/hcn/auth/login`, {
+      redirect: "manual"
+    });
+    assert.equal(loginResponse.status, 302);
+    const loginCookie = loginResponse.headers
+      .getSetCookie()[0]
+      .split(";", 1)[0];
+    const googleAuthorize = new URL(loginResponse.headers.get("location"));
+    const callbackResponse = await fetch(
+      `${origin}/oauth/google/callback?${new URLSearchParams({
+        code,
+        state: googleAuthorize.searchParams.get("state")
+      })}`,
+      {
+        redirect: "manual",
+        headers: { cookie: loginCookie }
+      }
+    );
+    assert.equal(callbackResponse.status, 302);
+    const sessionCookie = callbackResponse.headers
+      .getSetCookie()
+      .find((value) => value.startsWith("__Host-hcn_session="))
+      .split(";", 1)[0];
+    const sessionResponse = await fetch(`${origin}/hcn/auth/session`, {
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(sessionResponse.status, 200);
+    const session = await sessionResponse.json();
+    return {
+      cookie: sessionCookie,
+      headers: {
+        cookie: sessionCookie,
+        origin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      }
+    };
+  }
+
+  const primarySession = await createActionSession(
+    "hcn-action-execution-code-primary"
+  );
+  const workCenterResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: primarySession.headers,
+      body: JSON.stringify({ offset: 0, limit: 10 })
+    }
+  );
+  assert.equal(
+    workCenterResponse.status,
+    200,
+    await workCenterResponse.clone().text()
+  );
+  const workCenter = await workCenterResponse.json();
+  assert.equal(workCenter.files.length, 1);
+  const fileRef = workCenter.files[0].fileRef;
+
+  const prepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: primarySession.headers,
+      body: JSON.stringify({
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: exactNote }
+        }]
+      })
+    }
+  );
+  assert.equal(
+    prepareResponse.status,
+    200,
+    `${await prepareResponse.clone().text()}\n${JSON.stringify(fakeProviderRequests)}`
+  );
+  const prepared = await prepareResponse.json();
+  assert.equal(prepared.plan.status, "pending");
+  assert.equal(jobNimbusMutations.length, 0);
+  await assert.rejects(
+    readFile(receiptStorePath, "utf8"),
+    (error) => error?.code === "ENOENT"
+  );
+
+  const executeResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/execute`,
+    {
+      method: "POST",
+      headers: primarySession.headers,
+      body: JSON.stringify({ planId: prepared.plan.planId })
+    }
+  );
+  assert.equal(executeResponse.status, 200);
+  assert.equal(
+    executeResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const execution = await executeResponse.json();
+  assert.equal(execution.plan.status, "completed_pending_verification");
+  assert.equal(execution.receipt.status, "completed_pending_verification");
+  assert.equal(execution.receipt.operationCount, 1);
+  assert.equal(execution.receipt.succeededCount, 1);
+  assert.equal(execution.receipt.unknownCount, 0);
+  assert.equal(
+    Object.hasOwn(execution.receipt, "sessionPrincipalRef"),
+    false
+  );
+  assert.equal(jobNimbusMutations.length, 1);
+  assert.deepEqual(jobNimbusMutations[0], {
+    method: "POST",
+    pathname: "/activities",
+    body: {
+      note: exactNote,
+      date_created: jobNimbusMutations[0].body.date_created,
+      record_type_name: "Note",
+      primary: { id: providerJobId }
+    }
+  });
+  assert.equal(
+    Number.isInteger(jobNimbusMutations[0].body.date_created),
+    true
+  );
+
+  assert.equal(receiptFirstObservation?.schemaVersion, 1);
+  assert.equal(receiptFirstObservation?.records?.length, 1);
+  assert.equal(receiptFirstObservation.records[0].status, "executing");
+  assert.equal(
+    receiptFirstObservation.records[0].planId,
+    prepared.plan.planId
+  );
+  const durableReceiptDocument = JSON.parse(
+    await readFile(receiptStorePath, "utf8")
+  );
+  assert.equal(durableReceiptDocument.schemaVersion, 1);
+  assert.equal(durableReceiptDocument.records.length, 1);
+  assert.equal(
+    durableReceiptDocument.records[0].status,
+    "completed_pending_verification"
+  );
+  const serializedReceipts = JSON.stringify({
+    executionReceipt: execution.receipt,
+    receiptFirstObservation,
+    durableReceiptDocument
+  });
+  for (const forbidden of [
+    providerJobId,
+    providerCreatedNoteId,
+    exactNote,
+    contact.display_name,
+    contact.email,
+    contact.mobile_phone,
+    contact["Claim #"],
+    contact["Policy #"],
+    "/activities",
+    "approvalChallenge",
+    "hcn-action-jobnimbus-key",
+    "hcn-action-google-access-token"
+  ]) {
+    assert.equal(
+      serializedReceipts.includes(forbidden),
+      false,
+      `HCN durable receipt leaked ${forbidden}`
+    );
+  }
+
+  const receiptListResponse = await fetch(
+    `${origin}/hcn/api/v1/action-receipts/list`,
+    {
+      method: "POST",
+      headers: primarySession.headers,
+      body: "{}"
+    }
+  );
+  assert.equal(receiptListResponse.status, 200);
+  const receiptList = await receiptListResponse.json();
+  assert.equal(receiptList.receipts.length, 1);
+  assert.equal(receiptList.receipts[0].planId, prepared.plan.planId);
+  const receiptDetailResponse = await fetch(
+    `${origin}/hcn/api/v1/action-receipts/detail`,
+    {
+      method: "POST",
+      headers: primarySession.headers,
+      body: JSON.stringify({ planId: prepared.plan.planId })
+    }
+  );
+  assert.equal(receiptDetailResponse.status, 200);
+  assert.deepEqual(
+    (await receiptDetailResponse.json()).receipt,
+    execution.receipt
+  );
+
+  const resumedChanceSession = await createActionSession(
+    "hcn-action-execution-code-resumed"
+  );
+  const resumedReceiptListResponse = await fetch(
+    `${origin}/hcn/api/v1/action-receipts/list`,
+    {
+      method: "POST",
+      headers: resumedChanceSession.headers,
+      body: "{}"
+    }
+  );
+  assert.equal(resumedReceiptListResponse.status, 200);
+  const resumedReceipts = (await resumedReceiptListResponse.json()).receipts;
+  assert.equal(resumedReceipts.length, 1);
+  assert.equal(
+    resumedReceipts[0].planId,
+    prepared.plan.planId
+  );
+  const resumedReceiptDetailResponse = await fetch(
+    `${origin}/hcn/api/v1/action-receipts/detail`,
+    {
+      method: "POST",
+      headers: resumedChanceSession.headers,
+      body: JSON.stringify({ planId: prepared.plan.planId })
+    }
+  );
+  assert.equal(resumedReceiptDetailResponse.status, 200);
+  assert.deepEqual(
+    (await resumedReceiptDetailResponse.json()).receipt,
+    execution.receipt
+  );
+
+  async function preparePlan(session, operations) {
+    const response = await fetch(
+      `${origin}/hcn/api/v1/action-plans/prepare`,
+      {
+        method: "POST",
+        headers: session.headers,
+        body: JSON.stringify({ fileRef, operations })
+      }
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+    return (await response.json()).plan;
+  }
+
+  async function executePlan(session, planId) {
+    const response = await fetch(
+      `${origin}/hcn/api/v1/action-plans/execute`,
+      {
+        method: "POST",
+        headers: session.headers,
+        body: JSON.stringify({ planId })
+      }
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  }
+
+  async function appendPriorBatch(row) {
+    const rows = JSON.parse(await readFile(actionBatchStorePath, "utf8"));
+    rows.push(row);
+    await writeFile(
+      actionBatchStorePath,
+      `${JSON.stringify(rows, null, 2)}\n`,
+      "utf8"
+    );
+  }
+
+  const duplicateVerificationPlan = await preparePlan(
+    resumedChanceSession,
+    [{
+      type: "jobnimbus.create_note",
+      input: { note: exactNote }
+    }]
+  );
+  const duplicateVerification = await executePlan(
+    resumedChanceSession,
+    duplicateVerificationPlan.planId
+  );
+  assert.equal(
+    duplicateVerification.receipt.status,
+    "completed_pending_verification"
+  );
+  assert.equal(duplicateVerification.receipt.succeededCount, 1);
+  assert.equal(duplicateVerification.receipt.unknownCount, 0);
+  assert.equal(jobNimbusMutations.length, 1);
+
+  const inProgressPlan = await preparePlan(
+    resumedChanceSession,
+    [{
+      type: "jobnimbus.create_note",
+      input: {
+        note: "In-progress duplicate must require fresh reconciliation."
+      }
+    }]
+  );
+  await appendPriorBatch({
+    id: "fixture-hcn-in-progress-batch",
+    approvalId: "fixture-hcn-in-progress-approval",
+    approvalDigest: inProgressPlan.approvalDigest,
+    status: "in_progress",
+    createdAt: "2026-07-28T15:00:00.000Z",
+    operationCount: 1,
+    completed: []
+  });
+  const inProgressDuplicate = await executePlan(
+    resumedChanceSession,
+    inProgressPlan.planId
+  );
+  assert.equal(
+    inProgressDuplicate.receipt.status,
+    "reconciliation_required"
+  );
+  assert.equal(inProgressDuplicate.receipt.succeededCount, 0);
+  assert.equal(inProgressDuplicate.receipt.unknownCount, 1);
+  assert.equal(jobNimbusMutations.length, 1);
+
+  const partialPlan = await preparePlan(
+    resumedChanceSession,
+    [
+      {
+        type: "jobnimbus.create_note",
+        input: {
+          note: "First partial-duplicate action is already recorded."
+        }
+      },
+      {
+        type: "jobnimbus.create_note",
+        input: {
+          note: "Second partial-duplicate action remains uncertain."
+        }
+      }
+    ]
+  );
+  await appendPriorBatch({
+    id: "fixture-hcn-partial-batch",
+    approvalId: "fixture-hcn-partial-approval",
+    approvalDigest: partialPlan.approvalDigest,
+    status: "partial_failure",
+    createdAt: "2026-07-28T15:01:00.000Z",
+    updatedAt: "2026-07-28T15:01:30.000Z",
+    operationCount: 2,
+    completed: [{
+      index: 0,
+      type: "jobnimbus.create_note",
+      status: "executed",
+      receipt: { mode: "executed" }
+    }],
+    failedAt: 1,
+    error: "fixture provider uncertainty"
+  });
+  const partialDuplicate = await executePlan(
+    resumedChanceSession,
+    partialPlan.planId
+  );
+  assert.equal(
+    partialDuplicate.receipt.status,
+    "reconciliation_required"
+  );
+  assert.equal(partialDuplicate.receipt.succeededCount, 1);
+  assert.equal(partialDuplicate.receipt.unknownCount, 1);
+  assert.equal(jobNimbusMutations.length, 1);
+
+  assert.deepEqual(await readFile(legacyCanaryPath), legacyCanaryBytes);
+  const legacyCanaryAfter = await stat(legacyCanaryPath);
+  assert.equal(legacyCanaryAfter.mtimeMs, legacyCanaryBefore.mtimeMs);
 });
 
 test("production startup rejects weak OAuth secrets and unreviewed Google endpoints", async () => {
