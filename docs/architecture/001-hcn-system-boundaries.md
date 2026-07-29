@@ -116,7 +116,7 @@ Legacy v1 client snapshots are untrusted. They are not a migration source for
 HCN Operations Brain v2. Until a separately reviewed privacy process exists:
 
 - no new legacy snapshot or advisory writes;
-- no HP operator access to legacy contents;
+- no Codex operator access to legacy contents;
 - no copying, indexing, embedding, replaying, or importing legacy contents;
 - metadata-only inventory may include path classification, counts, sizes, and
   timestamps, but no client content;

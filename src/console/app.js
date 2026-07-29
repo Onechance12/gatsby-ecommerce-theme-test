@@ -769,7 +769,7 @@
       ? "HCN browser session"
       : identityType === "google_oauth"
         ? "Google session"
-        : "HP operator";
+        : "Codex operator";
 
     elements["sign-in-action"].hidden = true;
     elements["sign-out-action"].hidden = false;

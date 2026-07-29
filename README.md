@@ -35,7 +35,7 @@ transport is unavailable.
 - Keep `JOBNIMBUS_API_KEY` only in Render environment variables.
 - Set `JOBNIMBUS_BRIDGE_TOKEN` and use it as the Custom GPT bearer token.
 - Set `CODEX_OPERATOR_TOKEN` to a different strong random value for the
-  dedicated Codex HP operator. This credential is a non-Google
+  dedicated Codex operator. This credential is a non-Google
   `codex_operator` identity, not an alias for the shared bridge token. It can
   read Chance-assigned JobNimbus client evidence and exact-file-correlated Gmail
   and Quo evidence, and use the consolidated action batch. Every operator Gmail
@@ -81,7 +81,7 @@ transport is unavailable.
   operating authority. A snapshot never authorizes a write, send, call, task,
   event, upload, or status change, and fresh JobNimbus/Gmail/Quo evidence wins.
 - Legacy v1 snapshots can retain raw client and communications data. The Codex
-  HP operator never reads or writes those snapshots, receipts, episodes, open
+  Codex operator never reads or writes those snapshots, receipts, episodes, open
   loops, or model advisories. Brain client memory remains unavailable to that
   operator until a reviewed v2 migration and separately approved legacy purge.
 - Legacy exact-file reconciliation and model-advisory writes remain disabled by
@@ -253,7 +253,7 @@ reconciliation, and bounded advisory behavior remains available only behind an
 explicit legacy opt-in while HCN Operations Brain v2 is built from fresh
 evidence in its own isolated domain.
 
-The dedicated Codex HP operator is a stricter exception: it never reads or
+The dedicated Codex operator is a stricter exception: it never reads or
 writes Chance Brain client snapshots, episodes, operational state, or action
 receipts, and it cannot request a model advisory. Exact-file reviews return
 fresh source evidence plus ephemeral metadata only. Query-less indexes omit

@@ -606,7 +606,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(protectedBrainResponse.status, 401);
 });
 
-test("Codex HP operator token is distinct, scoped, and keeps batch approval gates", async (t) => {
+test("Codex operator token is distinct, scoped, and keeps batch approval gates", async (t) => {
   const bridgePort = 18884;
   const fakeApiPort = 18886;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-auth-"));
@@ -660,7 +660,7 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
   assert.equal(identity.identity.subject, "codex-hp-operator");
   assert.equal(identity.identity.email, "");
   assert.deepEqual(identity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
-  assert.match(identity.instruction, /dedicated least-privilege Codex HP operator/i);
+  assert.match(identity.instruction, /dedicated least-privilege Codex operator/i);
 
   const macIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
     headers: {
@@ -1127,7 +1127,7 @@ test("Codex HP operator token is distinct, scoped, and keeps batch approval gate
   assert.equal(unknownTokenResponse.status, 401);
 });
 
-test("Codex HP operator action batches require the unchanged approval digest", async (t) => {
+test("Codex operator action batches require the unchanged approval digest", async (t) => {
   const bridgePort = 18885;
   const fakeApiPort = 18887;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-digest-"));
@@ -1255,7 +1255,7 @@ test("Codex HP operator action batches require the unchanged approval digest", a
   assert.equal(fixtureApi.getTaskUpdateCount(), 1);
 });
 
-test("Codex HP operator approval challenges expire before execution", async (t) => {
+test("Codex operator approval challenges expire before execution", async (t) => {
   const bridgePort = 18920;
   const fakeApiPort = 18921;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-expiry-"));
@@ -1315,7 +1315,7 @@ test("Codex HP operator approval challenges expire before execution", async (t) 
   assert.equal(fixtureApi.getTaskUpdateCount(), 0);
 });
 
-test("Codex HP operator security ledgers fail closed on corrupted JSON", async (t) => {
+test("Codex operator security ledgers fail closed on corrupted JSON", async (t) => {
   const bridgePort = 18922;
   const fakeApiPort = 18923;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-ledger-"));
@@ -1386,7 +1386,7 @@ test("Codex HP operator security ledgers fail closed on corrupted JSON", async (
   assert.equal(fixtureApi.getTaskUpdateCount(), 0);
 });
 
-test("Codex HP operator token fails closed when weak or malformed", async () => {
+test("Codex operator token fails closed when weak or malformed", async () => {
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
     env: {

@@ -2868,7 +2868,7 @@ async function completeArtifact(input) {
 async function searchContacts(input) {
   const query = required(input.query, "query").toLowerCase();
   if (isCodexOperatorRequest() && normalizeCompare(query).length < 3) {
-    badRequest("The Codex HP operator search query is too broad. Use at least three identifying characters, a JobNimbus number, claim number, or exact address.");
+    badRequest("The Codex operator search query is too broad. Use at least three identifying characters, a JobNimbus number, claim number, or exact address.");
   }
   const limit = clamp(Number(input.limit || 10), 1, 25);
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 10) });
@@ -5351,7 +5351,7 @@ async function createTask(input) {
     && input.recordTypeName !== undefined
     && String(input.recordTypeName).trim().toLowerCase() !== "task"
   ) {
-    badRequest("The Codex HP operator can create only JobNimbus Task records through this action.");
+    badRequest("The Codex operator can create only JobNimbus Task records through this action.");
   }
   const body = cleanObject({
     title,
@@ -5557,7 +5557,7 @@ async function createCalendarEvent(input) {
     && input.recordTypeName !== undefined
     && String(input.recordTypeName).trim().toLowerCase() !== "event"
   ) {
-    badRequest("The Codex HP operator can create only JobNimbus Event records through this action.");
+    badRequest("The Codex operator can create only JobNimbus Event records through this action.");
   }
   const body = cleanObject({
     title,
@@ -5959,7 +5959,7 @@ async function gmailSend(input) {
   const operatorFile = await operatorGmailActionFile(input, "Gmail send");
   if (draftId) return gmailSendExistingDraft(input, draftId, operatorFile);
   if (operatorFile) {
-    badRequest("The Codex HP operator may send only a bridge-created Gmail draft that was reviewed by exact draftId.");
+    badRequest("The Codex operator may send only a bridge-created Gmail draft that was reviewed by exact draftId.");
   }
 
   const to = validateEmailAddressList(required(input.to, "to"), "to", { required: true });
@@ -6191,7 +6191,7 @@ async function assertOperatorDraftProvenance(file, draftId) {
       && String(row.receipt?.externalId || "") === String(draftId)
     ));
   if (!receipt) {
-    operatorScopeError("The Codex HP operator may send only a Gmail draft created by this bridge for the resolved Chance-assigned file.");
+    operatorScopeError("The Codex operator may send only a Gmail draft created by this bridge for the resolved Chance-assigned file.");
   }
   return receipt;
 }
@@ -6385,7 +6385,7 @@ async function quoHistory(input = {}) {
   let file = null;
   let phone = String(input.phone || "").trim();
   if (currentRequestIdentity()?.type === "codex_operator_token") {
-    if (phone) badRequest("The Codex HP operator cannot query arbitrary Quo phone numbers.");
+    if (phone) badRequest("The Codex operator cannot query arbitrary Quo phone numbers.");
     const query = required(input.query, "query");
     file = compactContact((await findChanceContact(query)).contact);
     phone = file.phone;
@@ -6438,13 +6438,13 @@ async function quoSend(input = {}) {
   if (currentRequestIdentity()?.type === "codex_operator_token") {
     await assertUniqueChanceFilePhone(file, "Quo sending");
     if (input.userId !== undefined && String(input.userId || "").trim()) {
-      badRequest("The Codex HP operator cannot select an arbitrary Quo userId.");
+      badRequest("The Codex operator cannot select an arbitrary Quo userId.");
     }
     const allowedRecipients = new Set(
       [file.phone, file.adjusterPhone].map(normalizePhone).filter(Boolean)
     );
     if (!allowedRecipients.has(normalizePhone(to))) {
-      badRequest("The Codex HP operator may text only a freshly verified client or desk-adjuster phone on the resolved file.");
+      badRequest("The Codex operator may text only a freshly verified client or desk-adjuster phone on the resolved file.");
     }
   }
   const authorizedLine = await authorizedQuoLine();
@@ -6842,7 +6842,7 @@ async function reviewChanceFiles(input = {}) {
       assistantDirective: [
         "This is a lightweight, fresh JobNimbus index for prioritization only.",
         operatorRequest
-          ? "Chance Brain client memory is neither read nor written by the Codex HP operator."
+          ? "Chance Brain client memory is neither read nor written by the Codex operator."
           : "The company brain is included, but rich client snapshots are intentionally not overwritten by this lightweight index.",
         "Choose the highest-priority candidate using current status, missing claim facts, and last update.",
         "Then call this endpoint again with that exact file as query, limit 1, and Gmail/Quo enabled before proposing any action.",
@@ -7287,7 +7287,7 @@ async function buildChanceEvidencePacket(contact, input) {
       operational: operatorBrainBoundary(),
       operationalAdvisory: {
         status: "blocked_for_operator_privacy",
-        authority: "The Codex HP operator cannot send client evidence to an advisory model."
+        authority: "The Codex operator cannot send client evidence to an advisory model."
       }
     };
   }
@@ -9062,12 +9062,12 @@ function assertOperatorBatchFileScope(plans) {
       || ""
     ).trim();
     if (!id) {
-      badRequest(`The Codex HP operator could not bind action ${index + 1} to one exact Chance-assigned file.`);
+      badRequest(`The Codex operator could not bind action ${index + 1} to one exact Chance-assigned file.`);
     }
     return id;
   });
   if (new Set(fileIds).size !== 1) {
-    badRequest("A Codex HP action batch may contain operations for only one exact Chance-assigned file.");
+    badRequest("A Codex operator action batch may contain operations for only one exact Chance-assigned file.");
   }
 }
 
@@ -9464,7 +9464,7 @@ async function loadEmailAttachments(input = {}) {
   const isOperator = currentRequestIdentity()?.type === "codex_operator_token";
   const operatorFile = input?.[INTERNAL_GMAIL_ACTION_SCOPE]?.file || null;
   if (isOperator && !operatorFile?.id) {
-    operatorScopeError("The Codex HP operator requires an internally verified top-level file before loading Gmail attachments.");
+    operatorScopeError("The Codex operator requires an internally verified top-level file before loading Gmail attachments.");
   }
   const attachments = [];
   for (const [index, spec] of specs.entries()) {
@@ -9543,7 +9543,7 @@ async function loadEmailAttachments(input = {}) {
     }
     if (source === "base64") {
       if (isOperator) {
-        badRequest("The Codex HP operator cannot attach arbitrary base64 content. Use an exact JobNimbus document, generated LOR, or verified standard W-9.");
+        badRequest("The Codex operator cannot attach arbitrary base64 content. Use an exact JobNimbus document, generated LOR, or verified standard W-9.");
       }
       const contentBase64 = required(spec.contentBase64, `attachments[${index}].contentBase64`).replace(/\s+/g, "");
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) badRequest(`attachments[${index}].contentBase64 is not valid base64`);
@@ -10164,7 +10164,7 @@ function assertCodexOperatorFields(fields, allowed, label, options = {}) {
       && /^cf_(?:string|text|date|number|integer|decimal|currency|bool|boolean)_\d+$/i.test(key);
     const isResolvedStatus = options.allowResolvedStatus === true && key === "status_name";
     if (!allowed.has(key) && !isContactCustomField && !isResolvedStatus) {
-      badRequest(`The Codex HP operator cannot change ${label} field: ${key}.`);
+      badRequest(`The Codex operator cannot change ${label} field: ${key}.`);
     }
   }
 }
@@ -10381,13 +10381,13 @@ function normalizeActionOperations(value) {
     }
     if (isRestrictedEffectRequest()) {
       if (type === "jobnimbus.process_update") {
-        badRequest("The Codex HP operator must use separate contact/status and note operations so each completed mutation has its own durable batch receipt.");
+        badRequest("The Codex operator must use separate contact/status and note operations so each completed mutation has its own durable batch receipt.");
       }
       const freeFormMemoryField = Object.keys(payload).find((key) => (
         ["followups", "learning", "episode"].includes(key.toLowerCase())
       ));
       if (freeFormMemoryField) {
-        badRequest(`operations[${index}].payload cannot persist free-form ${freeFormMemoryField} through the Codex HP operator.`);
+        badRequest(`operations[${index}].payload cannot persist free-form ${freeFormMemoryField} through the Codex operator.`);
       }
     }
     if (
@@ -10915,7 +10915,7 @@ async function authenticateBearerRequest(req) {
       type: "codex_operator_token",
       subject: "codex-hp-operator",
       email: "",
-      name: "Codex HP Operator",
+      name: "Codex Operator",
       role: "codex_operator",
       hostedDomain: "",
       scopes: ["client_evidence:read", "approval_batches:prepare_execute"],
@@ -11223,7 +11223,7 @@ function bearerToken(req) {
 function assertIdentityRequestScope(identity, method, pathname, body = {}) {
   if (identity?.type !== "codex_operator_token") return;
   if (body.includeBrainAdvisory === true) {
-    const error = new Error("The Codex HP operator cannot send client evidence to an operational advisory model.");
+    const error = new Error("The Codex operator cannot send client evidence to an operational advisory model.");
     error.statusCode = 403;
     throw error;
   }
@@ -11231,7 +11231,7 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     pathname === "/jobnimbus/document-text"
     && !String(body.documentQuery || "").trim()
   ) {
-    const error = new Error("The Codex HP operator requires an exact documentQuery for document text review.");
+    const error = new Error("The Codex operator requires an exact documentQuery for document text review.");
     error.statusCode = 400;
     throw error;
   }
@@ -11240,7 +11240,7 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     && pathname === "/gmail/attachment-review"
     && body.uploadToJobNimbus === true
   ) {
-    const error = new Error("The Codex HP operator may review Gmail attachments but cannot upload them directly to JobNimbus. Use an authorized human workflow for the upload.");
+    const error = new Error("The Codex operator may review Gmail attachments but cannot upload them directly to JobNimbus. Use an authorized human workflow for the upload.");
     error.statusCode = 403;
     throw error;
   }
@@ -11248,18 +11248,18 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     pathname === "/ops/start-session"
     && String(body.focus || "").trim().toLowerCase() === "communications"
   ) {
-    const error = new Error("The Codex HP operator cannot run a broad unmatched communications sweep. Review an exact Chance-assigned file instead.");
+    const error = new Error("The Codex operator cannot run a broad unmatched communications sweep. Review an exact Chance-assigned file instead.");
     error.statusCode = 403;
     throw error;
   }
   if (pathname === "/ops/review-chance-files" && !String(body.query || "").trim()) {
     if (body.indexOnly !== true) {
-      const error = new Error("The Codex HP operator requires an exact-file query unless indexOnly:true is explicitly requested.");
+      const error = new Error("The Codex operator requires an exact-file query unless indexOnly:true is explicitly requested.");
       error.statusCode = 400;
       throw error;
     }
     if (body.includeGmail === true || body.includeQuo === true || body.includeQuoTranscripts === true) {
-      const error = new Error("A query-less Codex HP index cannot include Gmail, Quo, or transcripts.");
+      const error = new Error("A query-less Codex operator index cannot include Gmail, Quo, or transcripts.");
       error.statusCode = 400;
       throw error;
     }
@@ -11268,7 +11268,7 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     ["/gmail/search", "/gmail/thread", "/gmail/attachment-review"].includes(pathname)
     && !String(body.fileQuery || "").trim()
   ) {
-    const error = new Error("The Codex HP operator requires an exact Chance-assigned fileQuery for every Gmail read.");
+    const error = new Error("The Codex operator requires an exact Chance-assigned fileQuery for every Gmail read.");
     error.statusCode = 400;
     throw error;
   }
@@ -11276,12 +11276,12 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     ["/quo/history", "/quo/transcript"].includes(pathname)
     && !String(body.query || "").trim()
   ) {
-    const error = new Error("The Codex HP operator requires an exact Chance-assigned file query for every Quo read.");
+    const error = new Error("The Codex operator requires an exact Chance-assigned file query for every Quo read.");
     error.statusCode = 400;
     throw error;
   }
   if (pathname === "/quo/history" && String(body.phone || "").trim()) {
-    const error = new Error("The Codex HP operator cannot query an arbitrary Quo phone number.");
+    const error = new Error("The Codex operator cannot query an arbitrary Quo phone number.");
     error.statusCode = 400;
     throw error;
   }
@@ -12523,7 +12523,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Gmail search query. Use Gmail operators like from:, to:, subject:, newer_than:, older_than:, has:attachment, or plain client/claim terms." },
-          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex HP operator; its Gmail search is built server-side from current file facts." },
+          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex operator; its Gmail search is built server-side from current file facts." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           limit: { type: "integer", minimum: 1, maximum: 25, default: 10 }
         },
@@ -12536,7 +12536,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           threadId: { type: "string", description: "Gmail thread id returned by searchGmail." },
-          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex HP operator so the thread is strongly correlated before disclosure." }
+          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex operator so the thread is strongly correlated before disclosure." }
         },
         required: ["threadId"]
       },
@@ -12553,7 +12553,7 @@ const OPENAPI = {
           maxOcrPages: { type: "integer", minimum: 1, maximum: 20, default: 5 },
           uploadToJobNimbus: { type: "boolean", default: false, description: "When true, also prepares an upload to the exact Chance file." },
           query: { type: "string", description: "Required when uploadToJobNimbus is true." },
-          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for Codex HP operator read scope." },
+          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for Codex operator read scope." },
           description: { type: "string" },
           isPrivate: { type: "boolean", default: false },
           execute: { type: "boolean", default: false, description: "Only affects the optional JobNimbus upload. Attachment review itself is read-only." }
@@ -12605,7 +12605,7 @@ const OPENAPI = {
       QuoHistoryRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex HP operator; its current phone number is always used." },
+          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex operator; its current phone number is always used." },
           phone: { type: "string", description: "US phone number. Used when query is omitted or as an explicit override." },
           maxResults: { type: "integer", minimum: 1, maximum: 50, default: 25 },
           includeTranscripts: { type: "boolean", default: false, description: "Try to include transcripts for up to the three most recent recorded calls." }
@@ -12625,7 +12625,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           callId: { type: "string" },
-          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex HP operator so call membership is verified before transcript disclosure." }
+          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex operator so call membership is verified before transcript disclosure." }
         },
         required: ["callId"]
       },
