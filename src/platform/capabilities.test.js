@@ -63,9 +63,11 @@ test("Google roles are normalized to named capabilities without wildcard authori
   const chance = buildCapabilityDescriptor({
     identity: { type: "google_oauth", role: "chance" }
   });
-  assert.equal(chance.authorizedCapabilities.length, CAPABILITY_ROUTE_REGISTRY.length);
+  assert.equal(chance.authorizedCapabilities.length, CAPABILITY_ROUTE_REGISTRY.length - 2);
   assert.equal(chance.authorizedCapabilities.includes("gmail.drafts.send"), true);
   assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), true);
+  assert.equal(chance.authorizedCapabilities.includes("hcn.work_center.read"), false);
+  assert.equal(chance.authorizedCapabilities.includes("hcn.file.review"), false);
   assert.equal(JSON.stringify(chance).includes("allRoutes"), false);
   assert.equal(JSON.stringify(chance).includes('"*"'), false);
 });
@@ -81,15 +83,41 @@ test("HCN browser capability metadata is intersected with the console surface", 
     }
   });
 
-  assert.deepEqual(browser.authorizedCapabilities, ["platform.session.read"]);
+  assert.deepEqual(browser.authorizedCapabilities, [
+    "hcn.file.review",
+    "hcn.work_center.read",
+    "platform.session.read"
+  ]);
   assert.deepEqual(browser.identity, {
     authentication: "authenticated",
     type: "hcn_browser_session",
     role: "chance",
-    jobNimbusScope: "none",
-    gmailMode: "none"
+    jobNimbusScope: "assigned",
+    gmailMode: "exact_assigned_file_evidence"
   });
   assert.doesNotMatch(JSON.stringify(browser), /private-google-subject|private@example|private-provider-token/);
+});
+
+test("non-Chance HCN browser sessions retain foundation metadata without operational capabilities", () => {
+  for (const role of [
+    "administrator",
+    "employee",
+    "onboarding",
+    "client_coordinator",
+    "manager"
+  ]) {
+    const browser = buildCapabilityDescriptor({
+      identity: { type: "hcn_browser_session", role }
+    });
+    assert.deepEqual(browser.authorizedCapabilities, ["platform.session.read"], role);
+    assert.deepEqual(browser.identity, {
+      authentication: "authenticated",
+      type: "hcn_browser_session",
+      role,
+      jobNimbusScope: "none",
+      gmailMode: "none"
+    });
+  }
 });
 
 test("unsupported or spoofed identities fail closed", () => {

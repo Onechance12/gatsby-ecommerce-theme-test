@@ -30,7 +30,7 @@
       </a>
 
       <div class="topbar-actions">
-        <span class="environment-label">Foundation</span>
+        <span class="environment-label">Read-only operations</span>
         <button id="sign-out-action" class="topbar-signout" type="button" hidden>
           Sign out
         </button>
@@ -51,11 +51,11 @@
           </a>
 
           <p class="nav-label">Operations</p>
-          <span class="nav-item is-disabled" aria-disabled="true">
+          <a class="nav-item" href="#work-center">
             <span class="nav-glyph glyph-work" aria-hidden="true"></span>
             <span>Work Center</span>
-            <small>Next</small>
-          </span>
+            <small>Live</small>
+          </a>
           <span class="nav-item is-disabled" aria-disabled="true">
             <span class="nav-glyph glyph-files" aria-hidden="true"></span>
             <span>Files</span>
@@ -111,7 +111,9 @@
             </div>
             <div>
               <p id="readiness-label" class="readiness-label">Checking systems</p>
-              <p class="readiness-detail">No client records are loaded on this screen.</p>
+              <p class="readiness-detail">
+                Client records load only after fresh authorization.
+              </p>
             </div>
           </div>
         </section>
@@ -137,6 +139,202 @@
             <strong id="build-metric">—</strong>
             <span id="build-metric-detail">Checking deployment</span>
           </article>
+        </section>
+
+        <section
+          id="work-center"
+          class="work-center-section"
+          aria-labelledby="work-center-title"
+        >
+          <div class="work-center-heading">
+            <div>
+              <p class="eyebrow">Fresh read-only operations</p>
+              <h2 id="work-center-title">Work Center</h2>
+              <p id="work-center-summary">
+                Sign in with the authorized Chance account to load the current assigned-file queue.
+              </p>
+            </div>
+            <div class="work-center-actions">
+              <span id="work-center-status" class="card-status" data-tone="neutral">
+                Sign in required
+              </span>
+              <button
+                id="work-center-refresh"
+                class="button button-surface"
+                type="button"
+                hidden
+              >
+                Refresh queue
+              </button>
+            </div>
+          </div>
+
+          <div
+            id="work-center-alert"
+            class="operations-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
+          >
+            Client records stay unloaded until a fresh authorized session is verified.
+          </div>
+
+          <div id="work-center-locked" class="operations-locked">
+            <span class="operations-lock-mark" aria-hidden="true"></span>
+            <div>
+              <strong>Fresh evidence stays closed by default.</strong>
+              <p>
+                The Work Center opens only for Chance’s authenticated HCN browser session
+                with the exact read capability.
+              </p>
+            </div>
+          </div>
+
+          <div id="work-center-workspace" class="work-center-workspace" hidden>
+            <section class="queue-panel" aria-labelledby="queue-title">
+              <div class="workspace-panel-heading">
+                <div>
+                  <p class="eyebrow">Assigned to Chance</p>
+                  <h3 id="queue-title">Active files</h3>
+                </div>
+                <span id="work-center-count" class="queue-count">—</span>
+              </div>
+              <p id="work-center-freshness" class="workspace-freshness">
+                Waiting for a fresh JobNimbus read.
+              </p>
+              <div
+                id="work-center-list"
+                class="work-file-list"
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <p class="workspace-empty">Load the current queue to begin.</p>
+              </div>
+            </section>
+
+            <section class="file-workspace" aria-labelledby="file-workspace-title">
+              <div id="file-placeholder" class="file-placeholder">
+                <span class="file-placeholder-mark" aria-hidden="true"></span>
+                <div>
+                  <h3 id="file-workspace-title">Choose one exact file</h3>
+                  <p>
+                    The file workspace loads fresh JobNimbus, Gmail, and Quo evidence
+                    only after you select a current opaque file reference.
+                  </p>
+                </div>
+              </div>
+
+              <div id="file-review" hidden>
+                <div class="file-heading">
+                  <button id="file-back" class="file-back" type="button">
+                    Back to queue
+                  </button>
+                  <div class="file-title-row">
+                    <div>
+                      <p id="file-job-number" class="eyebrow">Exact file</p>
+                      <h3 id="file-name">Loading file</h3>
+                      <p id="file-stage" class="file-stage"></p>
+                    </div>
+                    <div class="file-heading-actions">
+                      <span id="file-evidence-status" class="card-status">Checking</span>
+                      <button
+                        id="file-refresh"
+                        class="button button-surface button-compact"
+                        type="button"
+                      >
+                        Refresh file
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  id="file-alert"
+                  class="operations-alert"
+                  data-tone="neutral"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading fresh file evidence.
+                </div>
+
+                <section class="file-block" aria-labelledby="source-health-title">
+                  <div class="file-block-heading">
+                    <h4 id="source-health-title">Source health</h4>
+                    <span id="file-freshness">Checking now</span>
+                  </div>
+                  <div id="source-health" class="source-health-grid"></div>
+                </section>
+
+                <section class="file-block" aria-labelledby="key-facts-title">
+                  <div class="file-block-heading">
+                    <h4 id="key-facts-title">Key facts</h4>
+                    <span>Fresh JobNimbus detail</span>
+                  </div>
+                  <div id="key-facts" class="key-facts-grid"></div>
+                </section>
+
+                <section class="file-block" aria-labelledby="operating-lanes-title">
+                  <div class="file-block-heading">
+                    <h4 id="operating-lanes-title">Operating lanes</h4>
+                    <span>Evidence-backed signals</span>
+                  </div>
+                  <div class="lane-grid">
+                    <article class="lane-card" data-lane="priority">
+                      <div class="lane-heading">
+                        <h5>Priority</h5>
+                        <span id="priority-count">0</span>
+                      </div>
+                      <div id="priority-lane" class="lane-list"></div>
+                    </article>
+                    <article class="lane-card" data-lane="today">
+                      <div class="lane-heading">
+                        <h5>Today</h5>
+                        <span id="today-count">0</span>
+                      </div>
+                      <div id="today-lane" class="lane-list"></div>
+                    </article>
+                    <article class="lane-card" data-lane="waiting">
+                      <div class="lane-heading">
+                        <h5>Waiting</h5>
+                        <span id="waiting-count">0</span>
+                      </div>
+                      <div id="waiting-lane" class="lane-list"></div>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="file-block" aria-labelledby="recent-evidence-title">
+                  <div class="file-block-heading">
+                    <h4 id="recent-evidence-title">Recent evidence</h4>
+                    <span>Up to 20 items per source</span>
+                  </div>
+                  <div class="recent-grid">
+                    <article class="recent-card">
+                      <h5>Tasks</h5>
+                      <div id="recent-tasks" class="recent-list"></div>
+                    </article>
+                    <article class="recent-card">
+                      <h5>Documents</h5>
+                      <div id="recent-documents" class="recent-list"></div>
+                    </article>
+                    <article class="recent-card">
+                      <h5>Gmail</h5>
+                      <div id="recent-gmail" class="recent-list"></div>
+                    </article>
+                    <article class="recent-card">
+                      <h5>Quo</h5>
+                      <div id="recent-quo" class="recent-list"></div>
+                    </article>
+                    <article class="recent-card recent-card-wide">
+                      <h5>JobNimbus activity</h5>
+                      <div id="recent-activities" class="recent-list"></div>
+                    </article>
+                  </div>
+                </section>
+              </div>
+            </section>
+          </div>
         </section>
 
         <div class="content-grid">
@@ -219,7 +417,7 @@
             </p>
             <div id="capability-groups" class="capability-groups" aria-live="polite"></div>
             <p class="privacy-note">
-              This view does not request or display passwords, bearer tokens, or client records.
+              This authority card never requests or displays passwords, bearer tokens, or client records.
             </p>
           </section>
         </div>
@@ -227,10 +425,10 @@
         <section class="next-section" aria-labelledby="next-title">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">Coming next</p>
-              <h2 id="next-title">From readiness to daily operations</h2>
+              <p class="eyebrow">Operating roadmap</p>
+              <h2 id="next-title">What is live and what comes next</h2>
             </div>
-            <p>These areas stay unavailable until their evidence and approval contracts are ready.</p>
+            <p>Fresh read-only review is live. Effectful areas stay unavailable until their approval contracts are ready.</p>
           </div>
 
           <div class="next-grid">
@@ -238,13 +436,13 @@
               <span class="next-number">01</span>
               <h3>Work Center</h3>
               <p>One fresh, prioritized operating queue across approved sources.</p>
-              <span class="coming-label">Planned</span>
+              <span class="coming-label">Live · read only</span>
             </article>
             <article class="next-card">
               <span class="next-number">02</span>
               <h3>Files</h3>
               <p>Resolve one exact client, then inspect source-backed file evidence.</p>
-              <span class="coming-label">Planned</span>
+              <span class="coming-label">Live · exact file</span>
             </article>
             <article class="next-card">
               <span class="next-number">03</span>
@@ -262,7 +460,7 @@
         </section>
 
         <footer class="console-footer">
-          <p>HCN Operations Console · Foundation release</p>
+          <p>HCN Operations Console · Read-only operations release</p>
           <p id="freshness-text">Awaiting fresh platform metadata.</p>
         </footer>
       </main>

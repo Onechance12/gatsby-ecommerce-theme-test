@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   CODEX_OPERATOR_ALLOWED_ROUTES,
+  HCN_BROWSER_ALLOWED_ROUTES,
+  HCN_BROWSER_CHANCE_ONLY_ROUTES,
   authenticateGoogleAccessToken,
   hcnConsoleChanceUserConfigured,
   hcnConsoleSessionMatchesApprovedUser,
@@ -187,7 +189,7 @@ test("verified Workspace employee can be resolved for first-use onboarding", asy
   assert.equal(routeAllowed(identity, "POST", "/jobnimbus/search"), false);
 });
 
-test("coordinator routes are read-focused while Chance retains full access", () => {
+test("coordinator routes are read-focused while Google roles cannot use HCN browser data routes", () => {
   const coordinator = { type: "google_oauth", role: "client_coordinator" };
   const chance = { type: "google_oauth", role: "chance" };
   const employee = { type: "google_oauth", role: "employee" };
@@ -197,6 +199,25 @@ test("coordinator routes are read-focused while Chance retains full access", () 
   assert.equal(routeAllowed(coordinator, "POST", "/quo/send"), false);
   assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), true);
   assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), true);
+  for (const role of [
+    "chance",
+    "administrator",
+    "employee",
+    "onboarding",
+    "client_coordinator",
+    "manager"
+  ]) {
+    assert.equal(
+      routeAllowed({ type: "google_oauth", role }, "POST", "/hcn/api/v1/work-center"),
+      false,
+      role
+    );
+    assert.equal(
+      routeAllowed({ type: "google_oauth", role }, "POST", "/hcn/api/v1/file-review"),
+      false,
+      role
+    );
+  }
 });
 
 test("dedicated Codex operator is a fail-closed non-Google role", () => {
@@ -290,7 +311,9 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
   for (const route of [
     "GET /api/v1/session",
     "GET /hcn/auth/session",
-    "POST /hcn/auth/logout"
+    "POST /hcn/auth/logout",
+    "POST /hcn/api/v1/work-center",
+    "POST /hcn/api/v1/file-review"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(routeAllowed(browser, method, pathname), true, route);
@@ -312,6 +335,35 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     routeAllowed({ type: "hcn_browser_session", role: "unsupported" }, "GET", "/api/v1/session"),
     false
   );
+
+  assert.deepEqual([...HCN_BROWSER_CHANCE_ONLY_ROUTES].sort(), [
+    "POST /hcn/api/v1/file-review",
+    "POST /hcn/api/v1/work-center"
+  ]);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 5);
+
+  for (const role of [
+    "administrator",
+    "employee",
+    "onboarding",
+    "client_coordinator",
+    "manager"
+  ]) {
+    const otherBrowser = { type: "hcn_browser_session", role };
+    assert.equal(routeAllowed(otherBrowser, "GET", "/api/v1/session"), true, role);
+    assert.equal(routeAllowed(otherBrowser, "GET", "/hcn/auth/session"), true, role);
+    assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/auth/logout"), true, role);
+    assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/api/v1/work-center"), false, role);
+    assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/api/v1/file-review"), false, role);
+  }
+
+  for (const otherIdentity of [
+    { type: "bridge_token", role: "chance" },
+    { type: "codex_operator_token", role: "codex_operator" }
+  ]) {
+    assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/work-center"), false);
+    assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/file-review"), false);
+  }
 });
 
 function fixtureFetch({ audience = clientId, email, roleDomain }) {

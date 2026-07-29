@@ -34,7 +34,14 @@ import {
   createZaiOperationalProvider,
   ZAI_OPERATIONAL_MODEL as DEFAULT_ZAI_OPERATIONAL_MODEL
 } from "./memory/operationalAdvisoryProvider.js";
-import { listQuoNumbers, readQuoHistory, readQuoInbox, readQuoTranscript, sendQuoText } from "./quo/client.js";
+import {
+  listQuoNumbers,
+  readQuoHistory,
+  readQuoHistoryStrict,
+  readQuoInbox,
+  readQuoTranscript,
+  sendQuoText
+} from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import {
@@ -103,6 +110,23 @@ import {
   HCN_CONSOLE_SECURITY_HEADERS,
   readHcnConsoleAsset
 } from "./console/static.js";
+import {
+  createHcnConsoleFreshReadService
+} from "./hcn-console/fresh-read.js";
+import {
+  loadHcnConsoleReferenceConfiguration,
+  projectHcnReferenceConfigurationReadiness
+} from "./hcn-console/reference-config.js";
+import {
+  createHcnReadAdmissionController
+} from "./hcn-console/read-admission.js";
+import {
+  mapJobNimbusFileEnvelope,
+  mapJobNimbusIndexEnvelope,
+  mapScopedGmailEnvelope,
+  mapScopedQuoEnvelope
+} from "./hcn-console/provider-mappers.js";
+import { fetchBoundedJson } from "./http/bounded-json.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -146,6 +170,8 @@ const HCN_CONSOLE_ENABLED = process.env.HCN_CONSOLE_ENABLED === "true";
 const HCN_CONSOLE_ORIGIN = resolveHcnConsoleOrigin(
   process.env.HCN_CONSOLE_ORIGIN || PUBLIC_BASE_URL
 );
+const HCN_REFERENCE_CONFIGURATION =
+  loadHcnConsoleReferenceConfiguration(process.env);
 const GOOGLE_OAUTH_SCOPES = [
   "openid",
   "email",
@@ -181,6 +207,7 @@ const MAX_ARTIFACT_BYTES = positiveIntegerEnv("MAX_ARTIFACT_BYTES", 5 * 1024 * 1
 const MAX_CHATGPT_FILE_BYTES = Math.min(positiveIntegerEnv("MAX_CHATGPT_FILE_BYTES", 8 * 1024 * 1024), 10 * 1024 * 1024);
 const ARTIFACT_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("ARTIFACT_TTL_HOURS", 72), 168));
 const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 * 1024);
+const HCN_CONSOLE_API_BODY_BYTES = 4 * 1024;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
 const OPENAI_OPERATIONAL_MODEL = process.env.OPENAI_OPERATIONAL_MODEL || "gpt-5.6-luna";
@@ -251,15 +278,19 @@ const INTERNAL_COMMUNICATION_SCOPE = Symbol("internalCommunicationScope");
 const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
 const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
+const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
+const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
 const USED_OAUTH_CODES = new Map();
 const HCN_CONSOLE_SESSION_STORE = createHcnConsoleSessionStore();
 const HCN_CONSOLE_LOGIN_ADMISSION = createHcnConsoleLoginAdmission();
+const HCN_CONSOLE_READ_ADMISSION = createHcnReadAdmissionController();
 const HCN_CONSOLE_STATE_CODEC = OAUTH_SESSION_SECRET
   ? createHcnConsoleStateCodec({ secret: OAUTH_SESSION_SECRET })
   : null;
 let hcnConsoleOAuthCoordinatorInstance = null;
+let hcnConsoleFreshReadServiceInstance = null;
 let quoLineMutationQueue = Promise.resolve();
 let actionBatchMutationQueue = Promise.resolve();
 let actionApprovalMutationQueue = Promise.resolve();
@@ -278,6 +309,8 @@ const routes = new Map([
   ["GET /api/v1/session", hcnPlatformSession],
   ["GET /hcn/auth/session", hcnBrowserSession],
   ["POST /hcn/auth/logout", hcnBrowserLogout],
+  ["POST /hcn/api/v1/work-center", hcnReadWorkCenter],
+  ["POST /hcn/api/v1/file-review", hcnReadFile],
   ["GET /auth/whoami", authWhoAmI],
   ["POST /auth/quo-line", quoLineLink],
   ["GET /openapi.json", openapi],
@@ -397,7 +430,14 @@ const server = createServer(async (req, res) => {
       }
       assertHcnCookieRequestSafety(req, authentication);
     }
-    const body = req.method === "GET" ? {} : await readJson(req);
+    const body = req.method === "GET"
+      ? {}
+      : await readJson(
+          req,
+          url.pathname.startsWith("/hcn/api/")
+            ? HCN_CONSOLE_API_BODY_BYTES
+            : MAX_JSON_BODY_BYTES
+        );
     assertIdentityRequestScope(identity, req.method, url.pathname, body);
     const result = await REQUEST_CONTEXT.run(
       authentication || { identity },
@@ -419,14 +459,28 @@ const server = createServer(async (req, res) => {
       authentication?.authenticationMethod === "hcn_cookie"
         ? {
             ...hcnNoStoreSecurityHeaders(),
-            vary: "Cookie, Authorization"
+            vary: "Cookie, Authorization",
+            "x-hcn-session-idle-expires-at":
+              authentication.hcnSession.idleExpiresAt,
+            "x-hcn-session-expires-at":
+              authentication.hcnSession.expiresAt
           }
         : {}
     );
   } catch (error) {
-    send(res, error.statusCode || 500, {
-      error: redactSensitiveText(error.message || String(error))
-    });
+    const retryAfterSeconds = Number(error?.retryAfterSeconds);
+    send(
+      res,
+      error.statusCode || 500,
+      {
+        error: redactSensitiveText(error.message || String(error))
+      },
+      Number.isSafeInteger(retryAfterSeconds)
+        && retryAfterSeconds >= 1
+        && retryAfterSeconds <= 3600
+        ? { "retry-after": String(retryAfterSeconds) }
+        : {}
+    );
   }
 });
 
@@ -492,8 +546,14 @@ function health() {
       sessionStore: "bounded_in_memory_single_instance",
       browserCredential: "secure_http_only_host_cookie",
       csrfProtection: "exact_origin_and_session_token",
-      authorizedSurface: "foundation_metadata_only",
-      clientDataLoaded: false,
+      authorizedSurface: hcnConsoleFreshReadConfigured()
+        ? "chance_assigned_fresh_read_only"
+        : "foundation_metadata_only",
+      clientDataPersistence: "none",
+      referenceConfiguration:
+        projectHcnReferenceConfigurationReadiness(
+          HCN_REFERENCE_CONFIGURATION
+        ),
       providerTokensExposedToBrowser: false,
       chanceBrainDataFlow: false,
       jobroloDataFlow: false,
@@ -1119,6 +1179,86 @@ function hcnBrowserLogout() {
     vary: "Cookie, Authorization",
     "set-cookie": clearHcnSessionCookie()
   });
+}
+
+async function hcnReadWorkCenter(input = {}) {
+  assertChanceHcnReadSession();
+  return withHcnReadAdmission(
+    () => hcnConsoleFreshReadService().readWorkCenter(input)
+  );
+}
+
+async function hcnReadFile(input = {}) {
+  assertChanceHcnReadSession();
+  return withHcnReadAdmission(
+    () => hcnConsoleFreshReadService().readFile(input)
+  );
+}
+
+function assertChanceHcnReadSession() {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  if (
+    context?.authenticationMethod !== "hcn_cookie"
+    || identity?.type !== "hcn_browser_session"
+    || identity.role !== "chance"
+    || String(context.hcnSession?.subject || "").trim().toLowerCase()
+      !== CHANCE_GOOGLE_EMAIL
+  ) {
+    const error = new Error(
+      "Chance HCN browser session authentication is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+function hcnConsoleFreshReadConfigured() {
+  return Boolean(
+    API_KEY
+    && HCN_REFERENCE_CONFIGURATION.ready === true
+  );
+}
+
+async function withHcnReadAdmission(callback) {
+  const context = currentRequestAuthentication();
+  const sessionId = String(context?.hcnSessionId || "");
+  if (!sessionId) {
+    const error = new Error(
+      "Chance HCN browser session authentication is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const sessionBinding = createHash("sha256")
+    .update("hcn-console:fresh-read:session:v1", "utf8")
+    .update("\0", "utf8")
+    .update(sessionId, "utf8")
+    .digest("hex");
+  const release = HCN_CONSOLE_READ_ADMISSION.enter(sessionBinding);
+  try {
+    return await callback();
+  } finally {
+    release();
+  }
+}
+
+function hcnConsoleFreshReadService() {
+  if (!API_KEY) {
+    const error = new Error("Fresh JobNimbus evidence is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  if (!hcnConsoleFreshReadServiceInstance) {
+    hcnConsoleFreshReadServiceInstance = createHcnConsoleFreshReadService({
+      referenceFactory: HCN_REFERENCE_CONFIGURATION.requireFactory(),
+      loadJobNimbusIndex: loadHcnJobNimbusIndex,
+      loadJobNimbusFile: loadHcnJobNimbusFile,
+      loadGmailFile: loadHcnGmailFile,
+      loadQuoFile: loadHcnQuoFile
+    });
+  }
+  return hcnConsoleFreshReadServiceInstance;
 }
 
 function brainContext(input = {}) {
@@ -4761,16 +4901,51 @@ async function operatorCommunicationFile(input, label) {
   const file = internalFile?.id
     ? internalFile
     : compactContact((await findChanceContact(required(input?.fileQuery, `${label} fileQuery`))).contact);
-  if (file[GMAIL_FILE_EMAIL_UNIQUE] === undefined) {
+  if (
+    file[GMAIL_FILE_EMAIL_UNIQUE] === undefined
+    || file[GMAIL_FILE_CLAIM_UNIQUE] === undefined
+  ) {
     const email = String(file.email || "").trim().toLowerCase();
-    const contacts = email ? await listContacts({ maxPages: 25 }) : [];
-    const matchingFileCount = contacts
-      .filter(isInsuranceFile)
-      .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
-      .filter((contact) => String(compactContact(contact).email || "").trim().toLowerCase() === email)
-      .length;
+    const claimNumber = normalizeCompare(file.claimNumber);
+    const contacts =
+      email || claimNumber.length >= 6
+        ? await listContacts({ maxPages: 25 })
+        : [];
+    const matchingEmailFiles = email
+      ? contacts.filter(
+          (contact) =>
+            String(compactContact(contact).email || "")
+              .trim()
+              .toLowerCase() === email
+        )
+      : [];
+    const matchingClaimFiles = claimNumber.length >= 6
+      ? contacts.filter(
+          (contact) =>
+            normalizeCompare(compactContact(contact).claimNumber)
+              === claimNumber
+        )
+      : [];
     Object.defineProperty(file, GMAIL_FILE_EMAIL_UNIQUE, {
-      value: Boolean(email) && matchingFileCount === 1,
+      value:
+        Boolean(email)
+        && matchingEmailFiles.length === 1
+        && String(
+          matchingEmailFiles[0]?.jnid
+            || matchingEmailFiles[0]?.id
+            || ""
+        ) === String(file.id || ""),
+      enumerable: false
+    });
+    Object.defineProperty(file, GMAIL_FILE_CLAIM_UNIQUE, {
+      value:
+        claimNumber.length >= 6
+        && matchingClaimFiles.length === 1
+        && String(
+          matchingClaimFiles[0]?.jnid
+            || matchingClaimFiles[0]?.id
+            || ""
+        ) === String(file.id || ""),
       enumerable: false
     });
   }
@@ -4812,7 +4987,8 @@ function gmailMessageMatchesFile(message, file) {
     ...(Array.isArray(message.attachments) ? message.attachments.map((row) => row.filename) : [])
   ].map((value) => String(value || "")).join("\n");
   const claimNumber = String(file.claimNumber || "").trim();
-  return normalizeCompare(claimNumber).length >= 6
+  return file[GMAIL_FILE_CLAIM_UNIQUE] === true
+    && normalizeCompare(claimNumber).length >= 6
     && contentContainsExactIdentifier(content, claimNumber);
 }
 
@@ -6542,6 +6718,614 @@ async function listContacts({ maxPages }) {
   return listResourcePages("/contacts", maxPages);
 }
 
+async function loadHcnJobNimbusIndex({
+  maxRecords,
+  requestedAt
+} = {}) {
+  const page = await hcnCachedContactIndex({
+    maxRecords
+  });
+  return mapJobNimbusIndexEnvelope({
+    contacts: page.rows,
+    contactsComplete: page.complete,
+    ...hcnFreshnessWindow(requestedAt)
+  }, {
+    chanceOwnerId: CHANCE_OWNER_ID
+  });
+}
+
+async function loadHcnJobNimbusFile({
+  providerFileId,
+  recentLimit,
+  requestedAt
+} = {}) {
+  const id = hcnProviderFileId(providerFileId);
+  const maximumRelated = Math.min(
+    500,
+    Math.max(50, Number(recentLimit || 20) * 5)
+  );
+  const [contact, activities, tasks, documents] = await Promise.all([
+    hcnCachedContact(id),
+    listHcnResourceComplete("/activities", {
+      maxRecords: maximumRelated,
+      relatedContactId: id
+    }),
+    listHcnResourceComplete("/tasks", {
+      maxRecords: maximumRelated,
+      relatedContactId: id
+    }),
+    listHcnResourceComplete("/files", {
+      maxRecords: 500,
+      relatedContactId: id
+    })
+  ]);
+
+  return mapJobNimbusFileEnvelope({
+    contact,
+    activities: activities.rows,
+    tasks: tasks.rows,
+    documents: documents.rows,
+    activitiesComplete: activities.complete,
+    tasksComplete: tasks.complete,
+    documentsComplete: documents.complete,
+    ...hcnFreshnessWindow(requestedAt)
+  }, {
+    chanceOwnerId: CHANCE_OWNER_ID,
+    expectedProviderFileId: id
+  });
+}
+
+async function loadHcnGmailFile({
+  providerFileId,
+  recentLimit,
+  requestedAt
+} = {}) {
+  if (
+    !GOOGLE_CLIENT_ID
+    || !GOOGLE_CLIENT_SECRET
+    || !GOOGLE_REFRESH_TOKEN
+  ) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  const id = hcnProviderFileId(providerFileId);
+  const scope = await hcnExactCommunicationScope(id);
+  const file = scope.file;
+  const query = buildFileGmailQuery(file, 365);
+  const maximumMessages = Math.min(
+    50,
+    Math.max(10, Number(recentLimit || 20) * 3)
+  );
+  if (
+    scope.file[GMAIL_FILE_EMAIL_UNIQUE] !== true
+    && scope.file[GMAIL_FILE_CLAIM_UNIQUE] !== true
+  ) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  const result = await hcnGmailApi(
+    `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages`
+      + `?q=${encodeURIComponent(query)}&maxResults=${maximumMessages}`
+  );
+  if (
+    !result
+    || typeof result !== "object"
+    || Array.isArray(result)
+  ) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  const rows = Array.isArray(result.messages)
+    ? result.messages
+    : result.messages === undefined
+      && Number(result.resultSizeEstimate) === 0
+      ? []
+      : null;
+  if (
+    !rows
+    || rows.length > maximumMessages
+    || rows.some(
+      (row) => {
+        const messageId = String(row?.id || "");
+        return !row
+          || typeof row !== "object"
+          || Array.isArray(row)
+          || !messageId
+          || messageId.length > 512
+          || /[\s\x00-\x1f\x7f]/.test(messageId);
+      }
+    )
+  ) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  if (
+    new Set(rows.map((row) => String(row.id))).size !== rows.length
+  ) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  const nextPageToken = result.nextPageToken;
+  if (
+    nextPageToken !== undefined
+    && nextPageToken !== null
+    && (
+      typeof nextPageToken !== "string"
+      || !nextPageToken.trim()
+      || nextPageToken.length > 2048
+    )
+  ) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  const items = [];
+  for (const row of rows) {
+    const message = compactGmailFullMessage(
+      await hcnGmailApi(
+        `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/`
+          + `${encodeURIComponent(row.id)}?format=full`
+      )
+    );
+    if (!gmailMessageMatchesFile(message, file)) continue;
+    items.push({
+      ...message,
+      providerFileId: id,
+      direction: hcnGmailDirection(message, file)
+    });
+  }
+  return mapScopedGmailEnvelope({
+    providerFileId: id,
+    items,
+    scope: {
+      providerFileId: id,
+      exactFileMatch: true
+    },
+    itemsComplete: !String(nextPageToken || ""),
+    ...hcnFreshnessWindow(requestedAt)
+  }, {
+    expectedProviderFileId: id
+  });
+}
+
+async function loadHcnQuoFile({
+  providerFileId,
+  recentLimit,
+  requestedAt
+} = {}) {
+  const id = hcnProviderFileId(providerFileId);
+  const scope = await hcnExactCommunicationScope(id);
+  if (!scope.file.phone) {
+    throw new Error("Quo evidence is unavailable.");
+  }
+  const history = await readQuoHistoryStrict(quoConfig(), {
+    phone: scope.file.phone,
+    maxResults: Math.min(50, Math.max(10, Number(recentLimit || 20))),
+    maxPages: 5
+  });
+  const items = (Array.isArray(history?.timeline)
+    ? history.timeline
+    : []).map((item) => ({
+      ...item,
+      providerFileId: id
+    }));
+  return mapScopedQuoEnvelope({
+    providerFileId: id,
+    items,
+    scope: {
+      providerFileId: id,
+      exactFileMatch: true
+    },
+    itemsComplete: history?.completeness?.complete === true,
+    ...hcnFreshnessWindow(requestedAt)
+  }, {
+    expectedProviderFileId: id
+  });
+}
+
+async function hcnExactCommunicationScope(providerFileId) {
+  const cache = hcnFreshProviderCache();
+  const existing = cache?.communicationScopePromises.get(providerFileId);
+  if (existing) return existing;
+  const pending = buildHcnExactCommunicationScope(providerFileId);
+  if (cache) cache.communicationScopePromises.set(providerFileId, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    cache?.communicationScopePromises.delete(providerFileId);
+    throw error;
+  }
+}
+
+async function buildHcnExactCommunicationScope(providerFileId) {
+  const [contact, index] = await Promise.all([
+    hcnCachedContact(providerFileId),
+    hcnCachedContactIndex({
+      maxRecords: 5000
+    })
+  ]);
+  if (!index.complete) {
+    throw new Error("Exact communication scope is unavailable.");
+  }
+  const exactId = String(contact?.jnid || contact?.id || "");
+  if (
+    exactId !== providerFileId
+    || !isInsuranceFile(contact)
+    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || !hcnContactIsExplicitlyActive(contact)
+  ) {
+    throw new Error("Exact communication scope is unavailable.");
+  }
+  const file = compactContact(contact);
+
+  const email = hcnNormalizeCorrelationEmail(
+    fieldValue(contact, [
+      "email",
+      "primary_email",
+      "primaryEmail"
+    ])
+  );
+  file.email = email;
+  const emailCorrelation = hcnGlobalScalarCorrelation(
+    index.rows,
+    email,
+    HCN_CONTACT_EMAIL_KEYS,
+    hcnNormalizeCorrelationEmail
+  );
+  Object.defineProperty(file, GMAIL_FILE_EMAIL_UNIQUE, {
+    value:
+      Boolean(email)
+      && emailCorrelation.complete
+      && emailCorrelation.matches.length === 1
+      && String(
+        emailCorrelation.matches[0]?.jnid
+          || emailCorrelation.matches[0]?.id
+          || ""
+      ) === providerFileId,
+    enumerable: false
+  });
+
+  const rawClaimNumber = fieldValue(contact, [
+    "Claim #",
+    "Claim Number",
+    "claim_number",
+    "claimNumber",
+    "cf_string_10",
+    "cf_string_2"
+  ]);
+  file.claimNumber = String(rawClaimNumber || "").trim();
+  const claimNumber = hcnNormalizeCorrelationClaim(rawClaimNumber);
+  const claimCorrelation = hcnGlobalScalarCorrelation(
+    index.rows,
+    claimNumber,
+    HCN_CONTACT_CLAIM_KEYS,
+    hcnNormalizeCorrelationClaim
+  );
+  Object.defineProperty(file, GMAIL_FILE_CLAIM_UNIQUE, {
+    value:
+      claimNumber.length >= 6
+      && claimCorrelation.complete
+      && claimCorrelation.matches.length === 1
+      && String(
+        claimCorrelation.matches[0]?.jnid
+          || claimCorrelation.matches[0]?.id
+          || ""
+      ) === providerFileId,
+    enumerable: false
+  });
+
+  const phone = normalizePhone(file.phone);
+  const phoneCorrelation = hcnGlobalPhoneCorrelation(
+    index.rows,
+    phone
+  );
+  if (
+    !phone
+    || !phoneCorrelation.complete
+    || (
+      phoneCorrelation.matches.length !== 1
+      || String(
+        phoneCorrelation.matches[0]?.jnid
+          || phoneCorrelation.matches[0]?.id
+          || ""
+      ) !== providerFileId
+    )
+  ) {
+    file.phone = "";
+  }
+  return { contact, file };
+}
+
+function hcnFreshProviderCache() {
+  const context = currentRequestAuthentication();
+  if (context?.authenticationMethod !== "hcn_cookie") return null;
+  if (!context[HCN_FRESH_PROVIDER_CACHE]) {
+    Object.defineProperty(context, HCN_FRESH_PROVIDER_CACHE, {
+      value: {
+        contactIndexPromise: null,
+        contactIndexMaximum: 0,
+        contactPromises: new Map(),
+        communicationScopePromises: new Map()
+      },
+      enumerable: false,
+      configurable: false,
+      writable: false
+    });
+  }
+  return context[HCN_FRESH_PROVIDER_CACHE];
+}
+
+async function hcnCachedContactIndex({ maxRecords } = {}) {
+  const maximum = Number(maxRecords);
+  const cache = hcnFreshProviderCache();
+  if (!cache) {
+    return listHcnResourceComplete("/contacts", {
+      maxRecords: maximum
+    });
+  }
+  if (
+    cache.contactIndexPromise
+    && cache.contactIndexMaximum >= maximum
+  ) {
+    return cache.contactIndexPromise;
+  }
+  const pending = listHcnResourceComplete("/contacts", {
+    maxRecords: maximum
+  });
+  cache.contactIndexPromise = pending;
+  cache.contactIndexMaximum = maximum;
+  try {
+    return await pending;
+  } catch (error) {
+    if (cache.contactIndexPromise === pending) {
+      cache.contactIndexPromise = null;
+      cache.contactIndexMaximum = 0;
+    }
+    throw error;
+  }
+}
+
+async function hcnCachedContact(providerFileId) {
+  const id = hcnProviderFileId(providerFileId);
+  const cache = hcnFreshProviderCache();
+  if (!cache) {
+    return hcnJobNimbus(`/contacts/${encodeURIComponent(id)}`);
+  }
+  const existing = cache.contactPromises.get(id);
+  if (existing) return existing;
+  const pending = hcnJobNimbus(`/contacts/${encodeURIComponent(id)}`);
+  cache.contactPromises.set(id, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    if (cache.contactPromises.get(id) === pending) {
+      cache.contactPromises.delete(id);
+    }
+    throw error;
+  }
+}
+
+function hcnContactIsExplicitlyActive(contact) {
+  if (!contact || typeof contact !== "object" || Array.isArray(contact)) {
+    return false;
+  }
+  const hasExplicitActive = ["is_active", "isActive", "active"]
+    .some(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(contact, key)
+        && contact[key] === true
+    );
+  if (!hasExplicitActive) return false;
+  if (
+    ["is_active", "isActive", "active"]
+      .some(
+        (key) =>
+          Object.prototype.hasOwnProperty.call(contact, key)
+          && contact[key] === false
+      )
+  ) {
+    return false;
+  }
+  return ![
+    "is_archived",
+    "isArchived",
+    "archived",
+    "is_closed",
+    "isClosed",
+    "closed"
+  ].some((key) => contact[key] === true);
+}
+
+function hcnGmailDirection(message, file) {
+  const clientEmail = String(file?.email || "").trim().toLowerCase();
+  if (!clientEmail) return "unknown";
+  const from = String(message?.from || "").toLowerCase();
+  const destinations = [
+    message?.to,
+    message?.cc,
+    message?.bcc
+  ].map((value) => String(value || "").toLowerCase()).join("\n");
+  if (from.includes(clientEmail)) return "inbound";
+  if (destinations.includes(clientEmail)) return "outbound";
+  return "unknown";
+}
+
+function hcnProviderFileId(value) {
+  const id = String(value || "");
+  if (
+    !id
+    || id.length > 512
+    || /[\s\x00-\x1f\x7f]/.test(id)
+  ) {
+    const error = new Error("Exact HCN file scope is invalid.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return id;
+}
+
+function hcnFreshnessWindow(requestedAt) {
+  const timestamp = new Date(String(requestedAt || ""));
+  if (Number.isNaN(timestamp.getTime())) {
+    const error = new Error("Fresh evidence timing is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  const checkedAt = timestamp.toISOString();
+  return {
+    asOf: checkedAt,
+    checkedAt,
+    validUntil: new Date(
+      timestamp.getTime() + 2 * 60 * 1000
+    ).toISOString()
+  };
+}
+
+async function listHcnResourceComplete(
+  endpoint,
+  {
+    maxRecords,
+    relatedContactId = ""
+  } = {}
+) {
+  const maximum = Number(maxRecords);
+  if (
+    !Number.isSafeInteger(maximum)
+    || maximum < 1
+    || maximum > 5000
+  ) {
+    throw new Error("HCN provider read bound is unavailable.");
+  }
+  const relatedId = relatedContactId
+    ? hcnProviderFileId(relatedContactId)
+    : "";
+  const filter = relatedId
+    ? JSON.stringify({
+        must: [{ term: { "related.id": relatedId } }]
+      })
+    : "";
+  const rows = [];
+  let offset = 0;
+  while (offset < maximum) {
+    const size = Math.min(500, maximum - offset);
+    const payload = await hcnJobNimbus(
+      hcnPagedEndpoint(endpoint, {
+        size,
+        offset,
+        filter
+      })
+    );
+    const batch = unwrapHcnList(
+      payload,
+      endpoint.replace(/^\//, "").split("?")[0]
+    );
+    if (batch.length > size) {
+      throw new Error("JobNimbus pagination is unavailable.");
+    }
+    if (
+      batch.some(
+        (item) =>
+          !item
+          || typeof item !== "object"
+          || Array.isArray(item)
+      )
+    ) {
+      throw new Error("JobNimbus pagination is unavailable.");
+    }
+    if (
+      endpoint.split("?", 1)[0] === "/contacts"
+      && batch.some(
+        (item) => {
+          const id = String(item?.jnid || item?.id || "");
+          return !id
+            || id.length > 512
+            || /[\s\x00-\x1f\x7f]/.test(id);
+        }
+      )
+    ) {
+      throw new Error("JobNimbus pagination is unavailable.");
+    }
+    if (
+      relatedId
+      && batch.some(
+        (item) => !referencesContact(item, relatedId)
+      )
+    ) {
+      throw new Error("JobNimbus exact-file pagination is unavailable.");
+    }
+    rows.push(...batch);
+    if (batch.length < size) {
+      return {
+        rows,
+        complete: true
+      };
+    }
+    offset += batch.length;
+  }
+
+  const probe = unwrapHcnList(
+    await hcnJobNimbus(
+      hcnPagedEndpoint(endpoint, {
+        size: 1,
+        offset,
+        filter
+      })
+    ),
+    endpoint.replace(/^\//, "").split("?")[0]
+  );
+  return {
+    rows,
+    complete: probe.length === 0
+  };
+}
+
+function hcnPagedEndpoint(
+  endpoint,
+  {
+    size,
+    offset,
+    filter
+  }
+) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+  const query = new URLSearchParams({
+    size: String(size),
+    from: String(offset)
+  });
+  if (filter) query.set("filter", filter);
+  return `${endpoint}${separator}${query.toString()}`;
+}
+
+function unwrapHcnList(payload, name) {
+  if (Array.isArray(payload)) return payload;
+  if (
+    !payload
+    || typeof payload !== "object"
+    || Array.isArray(payload)
+  ) {
+    throw new Error("JobNimbus pagination is unavailable.");
+  }
+  const candidates = [
+    name,
+    singular(name),
+    "results",
+    "data",
+    "items",
+    "contacts",
+    "contact",
+    "jobs",
+    "job",
+    "tasks",
+    "task",
+    "activities",
+    "activity",
+    "files",
+    "file"
+  ];
+  const present = [...new Set(candidates)]
+    .filter((key) => Object.prototype.hasOwnProperty.call(payload, key));
+  if (
+    present.length !== 1
+    || !Array.isArray(payload[present[0]])
+  ) {
+    throw new Error("JobNimbus pagination is unavailable.");
+  }
+  return payload[present[0]];
+}
+
 async function listResourcePages(endpoint, maxPages = 10) {
   const all = [];
   const pageSize = 1000;
@@ -6599,7 +7383,9 @@ function singular(name) {
 
 function referencesContact(item, contactId) {
   const ids = [];
-  for (const key of ["primary", "related", "customer", "contact"]) collectIds(item?.[key], ids);
+  for (const key of ["primary", "related", "customer", "contact", "parent"]) {
+    collectIds(item?.[key], ids);
+  }
   return ids.includes(contactId);
 }
 
@@ -7485,6 +8271,57 @@ async function markHandoffComplete(id, completionNote = "") {
   return handoff;
 }
 
+async function hcnJobNimbus(endpoint, options = {}) {
+  if (!API_KEY) {
+    const error = new Error("Fresh JobNimbus evidence is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  return fetchBoundedJson(
+    fetch,
+    `${API_BASE}${endpoint}`,
+    {
+      method: options.method || "GET",
+      headers: {
+        authorization: `Bearer ${API_KEY}`,
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined
+    },
+    {
+      timeoutMs: 15_000,
+      maxBytes: 16 * 1024 * 1024,
+      errorCode: "HCN_JOBNIMBUS_READ_FAILED"
+    }
+  );
+}
+
+async function hcnGmailApi(endpoint, options = {}) {
+  if (!googleAccessConfiguredForRequest()) {
+    throw new Error("Gmail evidence is unavailable.");
+  }
+  const token = await getGoogleAccessToken();
+  return fetchBoundedJson(
+    fetch,
+    `${GMAIL_API_BASE_URL}${endpoint}`,
+    {
+      method: options.method || "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined
+    },
+    {
+      timeoutMs: 15_000,
+      maxBytes: 4 * 1024 * 1024,
+      errorCode: "HCN_GMAIL_READ_FAILED"
+    }
+  );
+}
+
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
   const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -8148,6 +8985,168 @@ function compactContact(contact) {
     adjusterPhone: fieldValue(contact, ["Carrier DA Contact #", "Adjuster Phone", "cf_string_8"]),
     adjusterEmail: fieldValue(contact, ["Carrier DA Email", "Adjuster Email", "cf_string_9"])
   };
+}
+
+const HCN_CONTACT_PHONE_KEYS = new Set([
+  "cellphone",
+  "homephone",
+  "mobilephone",
+  "phone",
+  "phone1",
+  "phone2",
+  "phone3",
+  "phonenumber",
+  "primaryphone",
+  "telephone",
+  "workphone"
+]);
+const HCN_CONTACT_EMAIL_KEYS = new Set([
+  "email",
+  "primaryemail"
+]);
+const HCN_CONTACT_CLAIM_KEYS = new Set([
+  "cfstring10",
+  "cfstring2",
+  "claim",
+  "claimnumber"
+]);
+
+function hcnGlobalScalarCorrelation(
+  contacts,
+  expectedValue,
+  acceptedKeys,
+  normalizeValue
+) {
+  if (
+    !Array.isArray(contacts)
+    || !expectedValue
+    || !(acceptedKeys instanceof Set)
+    || typeof normalizeValue !== "function"
+  ) {
+    return { complete: false, matches: [] };
+  }
+  const matches = [];
+  for (const contact of contacts) {
+    const inventory = hcnContactScalarInventory(
+      contact,
+      acceptedKeys,
+      normalizeValue
+    );
+    if (!inventory.complete) {
+      return { complete: false, matches: [] };
+    }
+    if (inventory.values.has(expectedValue)) matches.push(contact);
+  }
+  return { complete: true, matches };
+}
+
+function hcnContactScalarInventory(
+  contact,
+  acceptedKeys,
+  normalizeValue
+) {
+  if (
+    !contact
+    || typeof contact !== "object"
+    || Array.isArray(contact)
+  ) {
+    return { complete: false, values: new Set() };
+  }
+  const values = new Set();
+  for (const [key, rawValue] of Object.entries(contact)) {
+    const normalizedKey = hcnCorrelationKey(key);
+    if (!acceptedKeys.has(normalizedKey)) continue;
+    if (rawValue === undefined || rawValue === null || rawValue === "") {
+      continue;
+    }
+    if (
+      typeof rawValue !== "string"
+      && typeof rawValue !== "number"
+    ) {
+      return { complete: false, values: new Set() };
+    }
+    const value = normalizeValue(rawValue);
+    if (!value) {
+      return { complete: false, values: new Set() };
+    }
+    values.add(value);
+  }
+  return { complete: true, values };
+}
+
+function hcnNormalizeCorrelationEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  if (
+    !email
+    || Buffer.byteLength(email, "utf8") > 254
+    || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  ) {
+    return "";
+  }
+  return email;
+}
+
+function hcnNormalizeCorrelationClaim(value) {
+  const claimNumber = normalizeCompare(value);
+  return claimNumber && claimNumber.length <= 160
+    ? claimNumber
+    : "";
+}
+
+function hcnCorrelationKey(value) {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function hcnGlobalPhoneCorrelation(contacts, expectedPhone) {
+  if (
+    !Array.isArray(contacts)
+    || !/^\+[1-9]\d{7,14}$/.test(String(expectedPhone || ""))
+  ) {
+    return { complete: false, matches: [] };
+  }
+  const matches = [];
+  for (const contact of contacts) {
+    const inventory = hcnContactPhoneInventory(contact);
+    if (!inventory.complete) {
+      return { complete: false, matches: [] };
+    }
+    if (inventory.phones.has(expectedPhone)) matches.push(contact);
+  }
+  return { complete: true, matches };
+}
+
+function hcnContactPhoneInventory(contact) {
+  if (
+    !contact
+    || typeof contact !== "object"
+    || Array.isArray(contact)
+  ) {
+    return { complete: false, phones: new Set() };
+  }
+  const phones = new Set();
+  for (const [key, rawValue] of Object.entries(contact)) {
+    const normalizedKey = hcnCorrelationKey(key);
+    if (!HCN_CONTACT_PHONE_KEYS.has(normalizedKey)) continue;
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+    for (const value of values) {
+      if (value === undefined || value === null || value === "") continue;
+      if (
+        typeof value !== "string"
+        && typeof value !== "number"
+      ) {
+        return { complete: false, phones: new Set() };
+      }
+      const phone = normalizePhone(value);
+      if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+        return { complete: false, phones: new Set() };
+      }
+      phones.add(phone);
+    }
+  }
+  return { complete: true, phones };
 }
 
 function compactActivity(activity) {
@@ -9777,13 +10776,18 @@ function parseSocketJson(raw) {
   }
 }
 
-async function readJson(req) {
+async function readJson(req, maximumBytes = MAX_JSON_BODY_BYTES) {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
+    const error = new Error("Request body limit is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
   let raw = "";
   let bytes = 0;
   for await (const chunk of req) {
     bytes += chunk.length;
-    if (bytes > MAX_JSON_BODY_BYTES) {
-      const error = new Error(`Request body too large. Limit is ${MAX_JSON_BODY_BYTES} bytes.`);
+    if (bytes > maximumBytes) {
+      const error = new Error(`Request body too large. Limit is ${maximumBytes} bytes.`);
       error.statusCode = 413;
       throw error;
     }
@@ -9918,7 +10922,14 @@ const OPENAPI = {
   servers: [{ url: "https://jobnimbus-chatgpt-bridge.onrender.com" }],
   security: [{ bearerAuth: [] }],
   components: {
-    securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
+    securitySchemes: {
+      bearerAuth: { type: "http", scheme: "bearer" },
+      hcnBrowserSession: {
+        type: "apiKey",
+        in: "cookie",
+        name: "__Host-hcn_session"
+      }
+    },
     schemas: {
       PlatformBuildInfo: {
         type: "object",
@@ -11121,6 +12132,90 @@ const OPENAPI = {
               }
             }
           }
+        }
+      }
+    },
+    "/hcn/api/v1/work-center": {
+      post: {
+        operationId: "readHcnWorkCenter",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Chance-only fresh, read-only index of active Chance-assigned insurance files. Requires the same-origin HCN session CSRF header. Returns opaque file references and minimized operational flags with no persistence.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  offset: {
+                    type: "integer",
+                    minimum: 0,
+                    maximum: 5000
+                  },
+                  limit: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 50
+                  }
+                },
+                required: ["offset", "limit"]
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Fresh ephemeral HCN Work Center page."
+          },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN browser session required." },
+          "403": { description: "Chance-only session, Origin, or CSRF check failed." },
+          "413": { description: "Request exceeds the 4 KiB console limit." },
+          "502": { description: "Fresh JobNimbus evidence could not be proven." },
+          "503": { description: "HCN read-only reference configuration is unavailable." }
+        }
+      }
+    },
+    "/hcn/api/v1/file-review": {
+      post: {
+        operationId: "readHcnExactFile",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Chance-only fresh exact-file review selected by opaque HCN file reference. JobNimbus is required; Gmail and Quo failures are explicit partial states. No Brain, Jobrolo, legacy-memory, advisory, write, send, call, upload, or persistence path is used.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  fileRef: {
+                    type: "string",
+                    pattern: "^subject_[a-f0-9]{32}$"
+                  },
+                  recentLimit: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 20
+                  }
+                },
+                required: ["fileRef", "recentLimit"]
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Fresh ephemeral exact-file workspace with source freshness and coded operational lanes."
+          },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN browser session required." },
+          "403": { description: "Chance-only session, Origin, or CSRF check failed." },
+          "404": { description: "Opaque reference is not a current active Chance-assigned file." },
+          "413": { description: "Request exceeds the 4 KiB console limit." },
+          "502": { description: "Required fresh JobNimbus evidence could not be proven." },
+          "503": { description: "HCN read-only reference configuration is unavailable." }
         }
       }
     },

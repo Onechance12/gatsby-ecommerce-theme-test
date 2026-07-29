@@ -1,7 +1,7 @@
 "use strict";
 
 const CACHE_PREFIX = "hcn-console-shell-";
-const CACHE_NAME = CACHE_PREFIX + "v2";
+const CACHE_NAME = CACHE_PREFIX + "v4";
 const SHELL_PATHS = Object.freeze([
   "/hcn/",
   "/hcn/app.css",
@@ -12,7 +12,8 @@ const SHELL_PATH_SET = new Set(SHELL_PATHS);
 const BYPASS_PREFIXES = Object.freeze([
   "/api/",
   "/auth/",
-  "/hcn/auth/"
+  "/hcn/auth/",
+  "/hcn/api/"
 ]);
 
 self.addEventListener("install", function (event) {

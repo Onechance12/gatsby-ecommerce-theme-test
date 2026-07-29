@@ -66,4 +66,42 @@ test("console shell contains no client records, bearer-token field, or browser s
   assert.match(source, /\/api\/v1\/meta/);
   assert.match(source, /\/hcn\/auth\/session/);
   assert.match(source, /\/hcn\/auth\/logout/);
+  assert.match(source, /\/hcn\/api\/v1\/work-center/);
+  assert.match(source, /\/hcn\/api\/v1\/file-review/);
+  assert.doesNotMatch(source, /\.innerHTML\s*=/);
+});
+
+test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-only", async () => {
+  const [scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v4";/);
+  assert.match(script, /identity\.type === "hcn_browser_session"/);
+  assert.match(script, /identity\.role === "chance"/);
+  assert.match(script, /hcn\.work_center\.read/);
+  assert.match(script, /"X-HCN-CSRF": csrfToken/);
+  assert.match(script, /credentials: "same-origin"/);
+  assert.match(script, /cache: "no-store"/);
+  assert.match(script, /x-hcn-session-idle-expires-at/);
+  assert.match(script, /x-hcn-session-expires-at/);
+  assert.match(script, /scheduleSessionExpiry/);
+  assert.match(script, /visibilitychange/);
+  assert.match(script, /function purgeFileReviewDom\(\)/);
+  assert.match(script, /purgeFileReviewDom\(\);/);
+  assert.match(script, /resetFileEvidenceContainers\("No client data is retained\."\)/);
+  assert.match(
+    script,
+    /The HCN session expired\. Client data was cleared from this page\./
+  );
+  assert.match(script, /\{ offset: 0, limit: 25 \}/);
+  assert.match(script, /\{ fileRef: fileRef, recentLimit: 20 \}/);
+  assert.match(script, /clearOperationalData\("Client data was cleared when the connection went offline\."/);
+
+  assert.match(worker, /"\/hcn\/api\/"/);
+  assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
+  assert.doesNotMatch(worker, /work-center|file-review/);
 });

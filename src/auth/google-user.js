@@ -79,7 +79,14 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /api/v1/session",
   "GET /hcn/auth/session",
-  "POST /hcn/auth/logout"
+  "POST /hcn/auth/logout",
+  "POST /hcn/api/v1/work-center",
+  "POST /hcn/api/v1/file-review"
+]);
+
+export const HCN_BROWSER_CHANCE_ONLY_ROUTES = new Set([
+  "POST /hcn/api/v1/work-center",
+  "POST /hcn/api/v1/file-review"
 ]);
 
 export function parseWaveUsers(raw, defaults = []) {
@@ -230,21 +237,25 @@ export async function authenticateGoogleAccessToken({
 
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
+  const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (HCN_BROWSER_CHANCE_ONLY_ROUTES.has(route)) {
+    return identity.type === "hcn_browser_session" && identity.role === "chance";
+  }
   if (identity.type === "bridge_token") {
-    return `${String(method || "").toUpperCase()} ${pathname}` !== "GET /api/v1/session";
+    return route !== "GET /api/v1/session";
   }
   if (identity.type === "codex_operator_token") {
     return identity.role === "codex_operator"
-      && CODEX_OPERATOR_ALLOWED_ROUTES.has(`${String(method || "").toUpperCase()} ${pathname}`);
+      && CODEX_OPERATOR_ALLOWED_ROUTES.has(route);
   }
   if (identity.type === "hcn_browser_session") {
     return Boolean(WAVE_ROLE_POLICIES[identity.role])
-      && HCN_BROWSER_ALLOWED_ROUTES.has(`${String(method || "").toUpperCase()} ${pathname}`);
+      && HCN_BROWSER_ALLOWED_ROUTES.has(route);
   }
   const policy = WAVE_ROLE_POLICIES[identity.role];
   if (!policy) return false;
   if (policy.allRoutes) return true;
-  return policy.allowedRoutes.includes(`${String(method || "").toUpperCase()} ${pathname}`);
+  return policy.allowedRoutes.includes(route);
 }
 
 export function publicIdentity(identity) {

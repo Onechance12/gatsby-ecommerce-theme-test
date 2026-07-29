@@ -2,6 +2,8 @@
 // because a homeowner or adjuster may have communicated through any of them.
 // Sending remains approval-gated by both execute:true and ALLOW_QUO_SEND=true.
 
+import { fetchBoundedJson } from "../http/bounded-json.js";
+
 const MIN_REQUEST_INTERVAL_MS = 140;
 let requestQueue = Promise.resolve();
 let nextRequestAt = 0;
@@ -43,6 +45,135 @@ export async function readQuoHistory(config, input = {}) {
     callCount: calls.length,
     timeline: [...messages, ...calls].sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc))),
     transcripts
+  };
+}
+
+export async function readQuoHistoryStrict(config, input = {}) {
+  requireConfigured(config);
+  const phone = toE164(input.phone || "");
+  if (!phone) throw new Error("Quo history requires a valid US phone number");
+  const maxResults = boundedInteger(input.maxResults, 25, 1, 50);
+  const maxPages = boundedInteger(input.maxPages, 5, 1, 10);
+  let lineInventory;
+  try {
+    lineInventory = await listQuoNumbersStrict(config, {
+      maxPages
+    });
+  } catch {
+    throw quoHistoryProviderFailure();
+  }
+  const numbers = lineInventory.numbers;
+
+  const nameById = Object.fromEntries(numbers.map((row) => [row.id, row.name || row.number]));
+  const byId = new Map();
+  const incompleteReasons = new Set(lineInventory.incompleteReasons);
+  let pagesScanned = 0;
+  let restrictedStreamCount = 0;
+  let duplicatesDropped = 0;
+
+  for (const line of numbers) {
+    for (const kind of ["messages", "calls"]) {
+      let pageToken = "";
+      const seenPageTokens = new Set();
+      for (let page = 0; page < maxPages; page += 1) {
+        const query = new URLSearchParams({
+          phoneNumberId: line.id,
+          maxResults: String(maxResults)
+        });
+        query.append("participants[]", phone);
+        if (pageToken) query.set("pageToken", pageToken);
+
+        let payload;
+        try {
+          payload = await requestStrict(
+            config,
+            "GET",
+            `/${kind}?${query}`
+          );
+        } catch (error) {
+          if (isRestrictedLineError(error)) {
+            restrictedStreamCount += 1;
+            incompleteReasons.add("restricted_line");
+            break;
+          }
+          throw quoHistoryProviderFailure();
+        }
+        pagesScanned += 1;
+        if (!payload || typeof payload !== "object" || !Array.isArray(payload.data)) {
+          throw quoHistoryProviderFailure();
+        }
+
+        for (const row of payload.data) {
+          if (!row || typeof row !== "object" || Array.isArray(row)) {
+            throw quoHistoryProviderFailure();
+          }
+          const item = strictTimelineItem(
+            row,
+            line,
+            nameById,
+            kind,
+            phone
+          );
+          const key = `${kind}:${item.id}`;
+          if (byId.has(key)) {
+            duplicatesDropped += 1;
+            continue;
+          }
+          byId.set(key, item);
+        }
+
+        const next = strictNextPageToken(payload);
+        if (next.malformed) {
+          incompleteReasons.add("malformed_pagination");
+          break;
+        }
+        if (!next.value) break;
+        if (seenPageTokens.has(next.value)) {
+          incompleteReasons.add("malformed_pagination");
+          break;
+        }
+        seenPageTokens.add(next.value);
+        if (page + 1 >= maxPages) {
+          incompleteReasons.add("pagination_ceiling");
+          break;
+        }
+        pageToken = next.value;
+      }
+    }
+  }
+
+  const matchedTimeline = [...byId.values()]
+    .sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)) || String(a.id).localeCompare(String(b.id)));
+  if (matchedTimeline.length > maxResults) incompleteReasons.add("result_truncated");
+  const timeline = matchedTimeline.slice(Math.max(0, matchedTimeline.length - maxResults));
+  const reasons = [
+    "restricted_line",
+    "line_inventory_ceiling",
+    "malformed_line_pagination",
+    "pagination_ceiling",
+    "malformed_pagination",
+    "result_truncated"
+  ].filter((reason) => incompleteReasons.has(reason));
+
+  return {
+    phone,
+    messageCount: timeline.filter((item) => item.type === "text").length,
+    callCount: timeline.filter((item) => item.type === "call").length,
+    timeline,
+    completeness: {
+      complete: reasons.length === 0,
+      reasons,
+      lineCount: numbers.length,
+      lineInventoryPagesScanned: lineInventory.pagesScanned,
+      streamCount: numbers.length * 2,
+      restrictedStreamCount,
+      pagesScanned,
+      maximumPagesPerStream: maxPages,
+      resultLimit: maxResults,
+      matchedCount: matchedTimeline.length,
+      returnedCount: timeline.length,
+      duplicatesDropped
+    }
   };
 }
 
@@ -293,6 +424,223 @@ async function collectAcrossLines(config, numbers, nameById, phone, kind, maxRes
   return [...byId.values()].sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)));
 }
 
+function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
+  assertStrictTimelineScope(row, line, kind, expectedPhone);
+  const atUtc = String(row.createdAt || row.startedAt || "");
+  const id = String(row.id || `${line.id}:${atUtc}:${kind}`);
+  if (kind === "messages") {
+    return {
+      id,
+      type: "text",
+      line: nameById[line.id] || line.number,
+      at: toCentral(atUtc),
+      atUtc,
+      direction: row.direction || "",
+      status: row.status || "",
+      text: String(row.text || row.content || "").replace(/\s+/g, " ").trim()
+    };
+  }
+  return {
+    id,
+    type: "call",
+    line: nameById[line.id] || line.number,
+    at: toCentral(atUtc),
+    atUtc,
+    direction: row.direction || "",
+    status: row.status || "",
+    durationSec: row.duration || 0,
+    aiHandled: Boolean(row.aiHandled)
+  };
+}
+
+function assertStrictTimelineScope(row, line, kind, expectedPhone) {
+  const providerLineId = String(row.phoneNumberId || "");
+  if (!providerLineId || providerLineId !== line.id) {
+    throw quoHistoryProviderFailure();
+  }
+
+  if (kind === "calls") {
+    if (
+      !Array.isArray(row.participants)
+      || row.participants.length !== 1
+      || toE164(row.participants[0]) !== expectedPhone
+    ) {
+      throw quoHistoryProviderFailure();
+    }
+    return;
+  }
+
+  const providerLineNumber = toE164(line.number || "");
+  const from = toE164(row.from || "");
+  const to = Array.isArray(row.to)
+    ? row.to.map((value) => toE164(value || ""))
+    : [];
+  if (
+    !providerLineNumber
+    || !from
+    || !to.length
+    || to.some((value) => !value)
+  ) {
+    throw quoHistoryProviderFailure();
+  }
+  const participants = new Set(
+    [from, ...to].filter((value) => value !== providerLineNumber)
+  );
+  if (
+    ![from, ...to].includes(providerLineNumber)
+    || participants.size !== 1
+    || !participants.has(expectedPhone)
+  ) {
+    throw quoHistoryProviderFailure();
+  }
+}
+
+function strictNextPageToken(payload) {
+  const raw = payload.nextPageToken;
+  if (raw === undefined || raw === null || raw === "") {
+    return { malformed: false, value: "" };
+  }
+  if (typeof raw !== "string") return { malformed: true, value: "" };
+  const value = raw.trim();
+  if (!value || value.length > 2048) return { malformed: true, value: "" };
+  return { malformed: false, value };
+}
+
+function isRestrictedLineError(error) {
+  return Number(error?.statusCode) === 403;
+}
+
+function quoHistoryProviderFailure() {
+  const error = new Error("Quo history provider request failed");
+  error.code = "QUO_HISTORY_PROVIDER_FAILURE";
+  return error;
+}
+
+async function listQuoNumbersStrict(
+  config,
+  {
+    maxPages = 5,
+    maximumLines = 250
+  } = {}
+) {
+  const boundedPages = boundedInteger(maxPages, 5, 1, 10);
+  const boundedLines = boundedInteger(maximumLines, 250, 1, 500);
+  const numbers = [];
+  const ids = new Set();
+  const seenPageTokens = new Set();
+  const incompleteReasons = new Set();
+  let pageToken = "";
+  let pagesScanned = 0;
+
+  for (let page = 0; page < boundedPages; page += 1) {
+    const query = new URLSearchParams();
+    if (pageToken) query.set("pageToken", pageToken);
+    const payload = await requestStrict(
+      config,
+      "GET",
+      `/phone-numbers${query.size ? `?${query}` : ""}`
+    );
+    pagesScanned += 1;
+    if (
+      !payload
+      || typeof payload !== "object"
+      || Array.isArray(payload)
+      || !Array.isArray(payload.data)
+    ) {
+      throw quoHistoryProviderFailure();
+    }
+    for (const row of payload.data) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) {
+        throw quoHistoryProviderFailure();
+      }
+      const id = String(row.id || "").trim();
+      if (
+        !id
+        || id.length > 512
+        || /[\s\x00-\x1f\x7f]/.test(id)
+        || ids.has(id)
+      ) {
+        throw quoHistoryProviderFailure();
+      }
+      ids.add(id);
+      numbers.push({
+        id,
+        name: String(row.name || "").slice(0, 120),
+        number: String(row.number || "").slice(0, 32)
+      });
+      if (numbers.length > boundedLines) {
+        throw quoHistoryProviderFailure();
+      }
+    }
+
+    const next = strictNextPageToken(payload);
+    if (next.malformed) {
+      incompleteReasons.add("malformed_line_pagination");
+      break;
+    }
+    if (!next.value) break;
+    if (seenPageTokens.has(next.value)) {
+      incompleteReasons.add("malformed_line_pagination");
+      break;
+    }
+    seenPageTokens.add(next.value);
+    if (page + 1 >= boundedPages) {
+      incompleteReasons.add("line_inventory_ceiling");
+      break;
+    }
+    pageToken = next.value;
+  }
+
+  if (!numbers.length) throw quoHistoryProviderFailure();
+  return {
+    numbers,
+    pagesScanned,
+    incompleteReasons: [...incompleteReasons]
+  };
+}
+
+async function requestStrict(
+  config,
+  method,
+  endpoint,
+  body,
+  attempt = 0
+) {
+  await waitForRequestSlot();
+  try {
+    return await fetchBoundedJson(
+      fetch,
+      `${config.baseUrl}${endpoint}`,
+      {
+        method,
+        headers: {
+          authorization: config.apiKey,
+          accept: "application/json",
+          "content-type": "application/json"
+        },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      },
+      {
+        timeoutMs: 15_000,
+        maxBytes: 2 * 1024 * 1024,
+        errorCode: "QUO_HISTORY_PROVIDER_FAILURE"
+      }
+    );
+  } catch (error) {
+    if (Number(error?.statusCode) === 429 && attempt < 2) {
+      await delay(1000);
+      return requestStrict(
+        config,
+        method,
+        endpoint,
+        body,
+        attempt + 1
+      );
+    }
+    throw error;
+  }
+}
+
 async function request(config, method, endpoint, body, attempt = 0) {
   await waitForRequestSlot();
   const response = await fetch(`${config.baseUrl}${endpoint}`, {
@@ -373,6 +721,13 @@ function toCentral(isoUtc) {
 
 function clamp(value, min, max) {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : min;
+}
+
+function boundedInteger(value, fallback, min, max) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.max(min, Math.min(max, Math.trunc(parsed)))
+    : fallback;
 }
 
 function otherPartyNumber(row, ownNumber) {

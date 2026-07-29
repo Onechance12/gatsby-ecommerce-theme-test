@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-28.1";
+export const CAPABILITY_VERSION = "2026-07-28.2";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -21,6 +21,8 @@ const GOOGLE_ROLES = new Set([
 export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("identity.read", "GET /auth/whoami"),
   capability("platform.session.read", "GET /api/v1/session"),
+  capability("hcn.work_center.read", "POST /hcn/api/v1/work-center"),
+  capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
   capability("quo.line.link", "POST /auth/quo-line"),
   capability("voice.call.place", "POST /voice/outbound-call"),
   capability("voice.transcript.create", "POST /voice/transcript"),
@@ -248,12 +250,13 @@ function normalizeIdentity(identity) {
     && candidate.type === "hcn_browser_session"
     && GOOGLE_ROLES.has(role)
   ) {
+    const isChance = role === "chance";
     return {
       authentication: "authenticated",
       type: "hcn_browser_session",
       role,
-      jobNimbusScope: "none",
-      gmailMode: "none"
+      jobNimbusScope: isChance ? "assigned" : "none",
+      gmailMode: isChance ? "exact_assigned_file_evidence" : "none"
     };
   }
 

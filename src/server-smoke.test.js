@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1716,17 +1716,114 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   assert.equal(brokerIdentity.identity.email, "andrea@wavepa.com");
 });
 
-test("HCN console uses a cookie-bound Google session with foundation-only authority", async (t) => {
+test("HCN console uses a cookie-bound Google session for isolated fresh read-only operations", async (t) => {
   const bridgePort = 18930;
   const fakeGooglePort = 18931;
   const origin = `http://127.0.0.1:${bridgePort}`;
   const providerRequests = [];
+  const hcnProviderRequests = [];
+  const chanceOwnerId = "fixture-chance-owner";
+  const exactFileId = "jn-fixture-active";
+  const activeContact = {
+    jnid: exactFileId,
+    number: "HCN-1001",
+    record_type_name: "Insurance",
+    owners: [{ id: chanceOwnerId }],
+    display_name: "Fixture Active Homeowner",
+    status_name: "Claim Filed",
+    stage_name: "Carrier Review",
+    is_active: true,
+    date_updated: "2026-07-27T15:00:00.000Z",
+    next_appointment_at: "2026-07-29T14:00:00.000Z",
+    email: "active.homeowner@example.test",
+    mobile_phone: "2145551212",
+    address_line1: "100 Fixture Way",
+    city: "Dallas",
+    state_text: "TX",
+    zip: "75001",
+    "Insurance Company": "Fixture Mutual",
+    "Claim #": "HCN-CLAIM-1001",
+    "Policy #": "HCN-POLICY-1001",
+    "Date of Loss": "2026-05-18",
+    "Carrier DA": "Fixture Adjuster"
+  };
+  const inactiveChanceContact = {
+    ...activeContact,
+    jnid: "jn-fixture-inactive",
+    number: "HCN-1002",
+    display_name: "Fixture Inactive Homeowner",
+    is_active: false,
+    email: "inactive.homeowner@example.test",
+    mobile_phone: "2145551213",
+    "Claim #": "HCN-CLAIM-1002",
+    "Policy #": "HCN-POLICY-1002"
+  };
+  const otherOwnerContact = {
+    ...activeContact,
+    jnid: "jn-fixture-other-owner",
+    number: "HCN-1003",
+    display_name: "Fixture Other Owner",
+    owners: [{ id: "fixture-other-owner" }],
+    email: "other.owner@example.test",
+    mobile_phone: "2145551214",
+    "Claim #": "HCN-CLAIM-1003",
+    "Policy #": "HCN-POLICY-1003"
+  };
+  const nonInsuranceContact = {
+    ...activeContact,
+    jnid: "jn-fixture-non-insurance",
+    number: "HCN-1004",
+    display_name: "Fixture Retail Contact",
+    record_type_name: "Retail",
+    email: "retail.contact@example.test",
+    mobile_phone: "2145551215",
+    "Claim #": "HCN-CLAIM-1004",
+    "Policy #": "HCN-POLICY-1004"
+  };
+  const allContacts = [
+    activeContact,
+    inactiveChanceContact,
+    otherOwnerContact,
+    nonInsuranceContact
+  ];
+  let serveUnknownContactsWrapper = false;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-console-memory-canary-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const legacyCanaryPath = path.join(
+    memoryRoot,
+    "data",
+    "memory",
+    "files",
+    `${createHash("sha256").update(exactFileId).digest("hex")}.json`
+  );
+  const legacyCanaryBytes = Buffer.from(
+    `${JSON.stringify({
+      version: 1,
+      subjectKey: exactFileId,
+      canary: "legacy-v1-must-remain-byte-identical"
+    })}\n`
+  );
+  await mkdir(path.dirname(legacyCanaryPath), { recursive: true });
+  await writeFile(legacyCanaryPath, legacyCanaryBytes);
+  const legacyCanaryBefore = await stat(legacyCanaryPath);
+  const hcnReferenceKey = Buffer.alloc(32, 0x5a).toString("base64url");
+
   const fakeGoogle = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
     if (url.pathname === "/token" && req.method === "POST") {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      if (form.get("grant_type") === "refresh_token") {
+        assert.equal(form.get("refresh_token"), "hcn-gmail-refresh-token");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          access_token: "hcn-gmail-access-token",
+          expires_in: 3600,
+          token_type: "Bearer"
+        }));
+        return;
+      }
       providerRequests.push({
         code: form.get("code"),
         verifier: form.get("code_verifier"),
@@ -1763,6 +1860,176 @@ test("HCN console uses a cookie-bound Google session with foundation-only author
       }));
       return;
     }
+    if (url.pathname === "/contacts" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(
+        serveUnknownContactsWrapper
+          ? { unknownWrapper: allContacts }
+          : { contacts: allContacts }
+      ));
+      return;
+    }
+    if (
+      url.pathname === `/contacts/${encodeURIComponent(exactFileId)}`
+      && req.method === "GET"
+    ) {
+      assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(activeContact));
+      return;
+    }
+    if (url.pathname === "/activities" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        activities: [{
+          jnid: "jn-activity-1",
+          related: { id: exactFileId },
+          record_type_name: "Note",
+          status_name: "Recorded",
+          date_created: "2026-07-27T14:00:00.000Z",
+          actor_role: "adjuster",
+          note: "Fresh synthetic carrier activity"
+        }]
+      }));
+      return;
+    }
+    if (url.pathname === "/tasks" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        tasks: [{
+          jnid: "jn-task-1",
+          related: { id: exactFileId },
+          record_type_name: "Follow Up",
+          status_name: "Open",
+          priority_name: "High",
+          date_start: "2020-01-02T15:00:00.000Z",
+          assigned_role: "coordinator",
+          title: "Fresh synthetic overdue task"
+        }]
+      }));
+      return;
+    }
+    if (url.pathname === "/files" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        files: [{
+          jnid: "jn-document-1",
+          related: { id: exactFileId },
+          name: "Settlement Estimate.pdf",
+          record_type_name: "Carrier Document",
+          content_type: "application/pdf",
+          status_name: "New",
+          date_created: "2026-07-27T13:00:00.000Z"
+        }]
+      }));
+      return;
+    }
+    if (
+      url.pathname === "/gmail/v1/users/me/messages"
+      && req.method === "GET"
+    ) {
+      assert.equal(req.headers.authorization, "Bearer hcn-gmail-access-token");
+      assert.match(url.searchParams.get("q"), /HCN-CLAIM-1001/);
+      hcnProviderRequests.push(`gmail:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }]
+      }));
+      return;
+    }
+    if (
+      url.pathname === "/gmail/v1/users/me/messages/gmail-message-1"
+      && req.method === "GET"
+    ) {
+      assert.equal(req.headers.authorization, "Bearer hcn-gmail-access-token");
+      assert.equal(url.searchParams.get("format"), "full");
+      hcnProviderRequests.push(`gmail:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "gmail-message-1",
+        threadId: "gmail-thread-1",
+        internalDate: String(Date.parse("2026-07-27T16:00:00.000Z")),
+        snippet: "Fresh synthetic homeowner reply",
+        payload: {
+          mimeType: "text/plain",
+          headers: [
+            {
+              name: "From",
+              value: "Fixture Active Homeowner <active.homeowner@example.test>"
+            },
+            { name: "To", value: "claims@wavepa.com" },
+            { name: "Subject", value: "Re: HCN-CLAIM-1001" },
+            { name: "Date", value: "Mon, 27 Jul 2026 11:00:00 -0500" }
+          ],
+          body: {
+            data: Buffer.from("Fresh synthetic homeowner reply")
+              .toString("base64url")
+          }
+        }
+      }));
+      return;
+    }
+    if (url.pathname === "/quo/phone-numbers" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "hcn-quo-api-key");
+      hcnProviderRequests.push(`quo:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        data: [{
+          id: "quo-line-1",
+          name: "Fixture HCN line",
+          number: "+12145559999"
+        }]
+      }));
+      return;
+    }
+    if (url.pathname === "/quo/messages" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "hcn-quo-api-key");
+      assert.equal(url.searchParams.get("phoneNumberId"), "quo-line-1");
+      assert.equal(url.searchParams.get("participants[]"), "+12145551212");
+      hcnProviderRequests.push(`quo:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        data: [{
+          id: "quo-message-1",
+          phoneNumberId: "quo-line-1",
+          from: "+12145551212",
+          to: ["+12145559999"],
+          createdAt: "2026-07-27T17:00:00.000Z",
+          direction: "incoming",
+          status: "delivered",
+          content: "Fresh synthetic text reply"
+        }]
+      }));
+      return;
+    }
+    if (url.pathname === "/quo/calls" && req.method === "GET") {
+      assert.equal(req.headers.authorization, "hcn-quo-api-key");
+      assert.equal(url.searchParams.get("phoneNumberId"), "quo-line-1");
+      assert.equal(url.searchParams.get("participants[]"), "+12145551212");
+      hcnProviderRequests.push(`quo:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        data: [{
+          id: "quo-call-1",
+          phoneNumberId: "quo-line-1",
+          participants: ["+12145551212"],
+          createdAt: "2026-07-27T18:00:00.000Z",
+          direction: "outgoing",
+          status: "completed",
+          duration: 45
+        }]
+      }));
+      return;
+    }
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
   });
@@ -1778,16 +2045,21 @@ test("HCN console uses a cookie-bound Google session with foundation-only author
       PUBLIC_BASE_URL: origin,
       HCN_CONSOLE_ENABLED: "true",
       HCN_CONSOLE_ORIGIN: origin,
+      HCN_TENANT_ID: "tenant_0123456789abcdef",
+      HCN_REFERENCE_KEY: hcnReferenceKey,
       ALLOW_GOOGLE_USER_AUTH: "true",
       GOOGLE_CLIENT_ID: "hcn-google-client",
       GOOGLE_CLIENT_SECRET: "hcn-google-secret",
-      GOOGLE_REFRESH_TOKEN: "",
+      GOOGLE_REFRESH_TOKEN: "hcn-gmail-refresh-token",
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeGooglePort}/token`,
       GOOGLE_TOKENINFO_URL: `http://127.0.0.1:${fakeGooglePort}/tokeninfo`,
       GOOGLE_USERINFO_URL: `http://127.0.0.1:${fakeGooglePort}/userinfo`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
+      GMAIL_USER: "me",
       GOOGLE_OAUTH_ALLOWED_DOMAIN: "wavepa.com",
       CHANCE_GOOGLE_EMAIL: "chance@wavepa.com",
       CHANCE_GOOGLE_SUBJECT: "hcn-google-subject",
+      CHANCE_JOBNIMBUS_OWNER_ID: chanceOwnerId,
       OAUTH_SESSION_SECRET: "hcn-session-sealing-secret-for-tests",
       GPT_OAUTH_CLIENT_SECRET: "",
       WAVE_AUTH_USERS_JSON: JSON.stringify([{
@@ -1801,9 +2073,13 @@ test("HCN console uses a cookie-bound Google session with foundation-only author
       AUTO_ENROLL_WAVE_USERS: "false",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-for-ambiguity",
       CODEX_OPERATOR_TOKEN: "",
-      JOBNIMBUS_API_KEY: "",
+      JOBNIMBUS_API_KEY: "hcn-jobnimbus-api-key",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
       RETELL_API_KEY: "",
-      QUO_API_KEY: "",
+      QUO_API_KEY: "hcn-quo-api-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/quo`,
+      QUO_DEFAULT_FROM_NUMBER: "",
+      MEMORY_ROOT: memoryRoot,
       BRIDGE_ALLOW_WRITES: "false",
       ALLOW_GMAIL_SEND: "false",
       ALLOW_QUO_SEND: "false",
@@ -1888,8 +2164,12 @@ test("HCN console uses a cookie-bound Google session with foundation-only author
   assert.equal(platformSession.authenticated, true);
   assert.equal(platformSession.identity.type, "hcn_browser_session");
   assert.equal(platformSession.identity.role, "chance");
-  assert.equal(platformSession.identity.jobNimbusScope, "none");
-  assert.deepEqual(platformSession.authorizedCapabilities, ["platform.session.read"]);
+  assert.equal(platformSession.identity.jobNimbusScope, "assigned");
+  assert.deepEqual(platformSession.authorizedCapabilities, [
+    "hcn.file.review",
+    "hcn.work_center.read",
+    "platform.session.read"
+  ]);
 
   const browserSessionResponse = await fetch(`${origin}/hcn/auth/session`, {
     headers: { cookie: sessionCookie }
@@ -1898,20 +2178,347 @@ test("HCN console uses a cookie-bound Google session with foundation-only author
   const browserSession = await browserSessionResponse.json();
   assert.match(browserSession.browserSession.csrfToken, /^[A-Za-z0-9_-]{43}$/);
   assert.match(browserSession.browserSession.expiresAt, /Z$/);
+  assert.equal(
+    browserSessionResponse.headers.get(
+      "x-hcn-session-idle-expires-at"
+    ),
+    browserSession.browserSession.idleExpiresAt
+  );
+  assert.equal(
+    browserSessionResponse.headers.get("x-hcn-session-expires-at"),
+    browserSession.browserSession.expiresAt
+  );
   const serializedBrowserSession = JSON.stringify(browserSession);
   assert.doesNotMatch(serializedBrowserSession, /chance@wavepa|hcn-google-subject|hcn-google-access-token/);
 
+  const fullOpenApiResponse = await fetch(`${origin}/openapi.json`);
+  assert.equal(fullOpenApiResponse.status, 200);
+  const fullOpenApi = await fullOpenApiResponse.json();
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/work-center"].post.operationId,
+    "readHcnWorkCenter"
+  );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/file-review"].post.operationId,
+    "readHcnExactFile"
+  );
+  const chatGptOpenApiResponse = await fetch(`${origin}/openapi-chatgpt.json`);
+  assert.equal(chatGptOpenApiResponse.status, 200);
+  const chatGptOpenApi = await chatGptOpenApiResponse.json();
+  assert.equal(chatGptOpenApi.paths["/hcn/api/v1/work-center"], undefined);
+  assert.equal(chatGptOpenApi.paths["/hcn/api/v1/file-review"], undefined);
+
+  const hcnReadHeaders = {
+    cookie: sessionCookie,
+    origin,
+    "x-hcn-csrf": browserSession.browserSession.csrfToken,
+    "content-type": "application/json"
+  };
   const directRouteResponse = await fetch(`${origin}/jobnimbus/search`, {
     method: "POST",
-    headers: {
-      cookie: sessionCookie,
-      origin,
-      "x-hcn-csrf": browserSession.browserSession.csrfToken,
-      "content-type": "application/json"
-    },
+    headers: hcnReadHeaders,
     body: JSON.stringify({ query: "fixture" })
   });
   assert.equal(directRouteResponse.status, 403);
+
+  const sharedBearerHcnResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer fixture-shared-bridge-token-for-ambiguity",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ offset: 0, limit: 10 })
+    }
+  );
+  assert.equal(sharedBearerHcnResponse.status, 403);
+
+  const directGoogleBearerHcnResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: {
+        authorization: "Bearer hcn-google-access-token",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ offset: 0, limit: 10 })
+    }
+  );
+  assert.equal(directGoogleBearerHcnResponse.status, 403);
+
+  const workCenterResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ offset: 0, limit: 10 })
+    }
+  );
+  assert.equal(workCenterResponse.status, 200);
+  assert.equal(workCenterResponse.headers.get("cache-control"), "no-store, max-age=0");
+  assert.match(
+    workCenterResponse.headers.get("x-hcn-session-idle-expires-at"),
+    /Z$/
+  );
+  assert.match(
+    workCenterResponse.headers.get("x-hcn-session-expires-at"),
+    /Z$/
+  );
+  const workCenter = await workCenterResponse.json();
+  assert.equal(workCenter.schema, "hcn.console.work-center.v1");
+  assert.equal(workCenter.ephemeral, true);
+  assert.equal(workCenter.cachePolicy, "no_store");
+  assert.deepEqual(workCenter.authority, {
+    mode: "read_only",
+    canWrite: false,
+    canSend: false,
+    canCall: false,
+    canApprove: false
+  });
+  assert.equal(workCenter.source.source, "jobnimbus");
+  assert.equal(workCenter.source.status, "fresh");
+  assert.equal(workCenter.source.completeness, "complete");
+  assert.equal(workCenter.page.total, 1);
+  assert.equal(workCenter.files.length, 1);
+  assert.equal(workCenter.files[0].jobNumber, "HCN-1001");
+  assert.equal(workCenter.files[0].displayName, "Fixture Active Homeowner");
+  assert.match(workCenter.files[0].fileRef, /^subject_[a-f0-9]{32}$/);
+  const fileRef = workCenter.files[0].fileRef;
+  const serializedWorkCenter = JSON.stringify(workCenter);
+  for (const forbidden of [
+    exactFileId,
+    "jn-fixture-inactive",
+    "jn-fixture-other-owner",
+    "jn-fixture-non-insurance",
+    chanceOwnerId,
+    "Fixture Inactive Homeowner",
+    "Fixture Other Owner",
+    "Fixture Retail Contact"
+  ]) {
+    assert.equal(serializedWorkCenter.includes(forbidden), false);
+  }
+
+  const exactFileResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    }
+  );
+  assert.equal(exactFileResponse.status, 200);
+  assert.equal(exactFileResponse.headers.get("cache-control"), "no-store, max-age=0");
+  const exactFile = await exactFileResponse.json();
+  assert.equal(exactFile.schema, "hcn.console.file.v1");
+  assert.equal(exactFile.ephemeral, true);
+  assert.equal(exactFile.cachePolicy, "no_store");
+  assert.equal(exactFile.evidenceStatus, "complete");
+  assert.equal(exactFile.file.fileRef, fileRef);
+  assert.equal(exactFile.file.jobNumber, "HCN-1001");
+  assert.equal(exactFile.file.displayName, "Fixture Active Homeowner");
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(exactFile.sources)
+        .map(([source, value]) => [
+          source,
+          [value.status, value.completeness]
+        ])
+    ),
+    {
+      jobnimbus: ["fresh", "complete"],
+      gmail: ["fresh", "complete"],
+      quo: ["fresh", "complete"]
+    }
+  );
+  assert.equal(exactFile.recent.activities.length, 1);
+  assert.equal(exactFile.recent.tasks.length, 1);
+  assert.equal(exactFile.recent.documents.length, 1);
+  assert.equal(exactFile.recent.gmail.length, 1);
+  assert.equal(exactFile.recent.quo.length, 2);
+  assert.equal(exactFile.recent.gmail[0].direction, "inbound");
+  assert.equal(exactFile.recent.quo.some((item) => item.direction === "inbound"), true);
+  assert.equal(exactFile.recent.quo.some((item) => item.direction === "outbound"), true);
+  assert.equal(
+    exactFile.lanes.priority.some(
+      (item) => item.reasonCode === "overdue_task"
+    ),
+    true
+  );
+  assert.equal(
+    exactFile.lanes.priority.some(
+      (item) => item.reasonCode === "document_review_required"
+    ),
+    true
+  );
+  assert.equal(
+    exactFile.lanes.priority.some(
+      (item) => item.reasonCode === "reply_required"
+    ),
+    true
+  );
+  assert.equal(
+    exactFile.lanes.waiting.some(
+      (item) => item.reasonCode === "awaiting_response"
+    ),
+    true
+  );
+  const serializedExactFile = JSON.stringify(exactFile);
+  for (const forbidden of [
+    exactFileId,
+    "jn-activity-1",
+    "jn-task-1",
+    "jn-document-1",
+    "gmail-message-1",
+    "gmail-thread-1",
+    "quo-message-1",
+    "quo-call-1",
+    "quo-line-1",
+    chanceOwnerId
+  ]) {
+    assert.equal(serializedExactFile.includes(forbidden), false);
+  }
+  assert.equal(
+    hcnProviderRequests.some((request) => request.startsWith("jobnimbus:")),
+    true
+  );
+  assert.equal(
+    hcnProviderRequests.some((request) => request.startsWith("gmail:")),
+    true
+  );
+  assert.equal(
+    hcnProviderRequests.some((request) => request.startsWith("quo:")),
+    true
+  );
+  assert.equal(
+    hcnProviderRequests.filter(
+      (request) => request === "jobnimbus:/contacts"
+    ).length,
+    2
+  );
+  assert.equal(
+    hcnProviderRequests.filter(
+      (request) =>
+        request === `jobnimbus:/contacts/${exactFileId}`
+    ).length,
+    1
+  );
+
+  serveUnknownContactsWrapper = true;
+  const unknownWrapperResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ offset: 0, limit: 10 })
+    }
+  );
+  serveUnknownContactsWrapper = false;
+  assert.equal(unknownWrapperResponse.status, 502);
+  const unknownWrapperBody = await unknownWrapperResponse.json();
+  assert.equal(unknownWrapperBody.error, "Fresh JobNimbus evidence is unavailable.");
+  assert.doesNotMatch(JSON.stringify(unknownWrapperBody), /unknownWrapper/);
+
+  allContacts.push({
+    ...activeContact,
+    jnid: "jn-fixture-duplicate-correlation",
+    number: "HCN-1005",
+    display_name: "Fixture Duplicate Correlation",
+    email: "duplicate.alias@example.test",
+    primary_email: activeContact.email,
+    mobile_phone: "+12145550005",
+    home_phone: activeContact.mobile_phone,
+    "Claim #": "HCN-CLAIM-1005",
+    claimNumber: activeContact["Claim #"],
+    owners: [{ id: "fixture-other-owner" }]
+  });
+  const requestsBeforeAmbiguousCorrelation = hcnProviderRequests.length;
+  const ambiguousCorrelationResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    }
+  );
+  allContacts.pop();
+  assert.equal(ambiguousCorrelationResponse.status, 200);
+  const ambiguousCorrelationFile = await ambiguousCorrelationResponse.json();
+  assert.equal(ambiguousCorrelationFile.evidenceStatus, "partial");
+  for (const source of ["gmail", "quo"]) {
+    assert.deepEqual(
+      {
+        status: ambiguousCorrelationFile.sources[source].status,
+        completeness: ambiguousCorrelationFile.sources[source].completeness,
+        failureCode: ambiguousCorrelationFile.sources[source].failureCode
+      },
+      {
+        status: "incomplete",
+        completeness: "none",
+        failureCode: "source_unavailable"
+      }
+    );
+    assert.deepEqual(ambiguousCorrelationFile.recent[source], []);
+  }
+  const requestsAfterAmbiguousCorrelation = hcnProviderRequests.slice(
+    requestsBeforeAmbiguousCorrelation
+  );
+  assert.equal(
+    requestsAfterAmbiguousCorrelation.some(
+      (request) => request.startsWith("gmail:")
+    ),
+    false
+  );
+  assert.equal(
+    requestsAfterAmbiguousCorrelation.some(
+      (request) =>
+        request === "quo:/quo/messages"
+        || request === "quo:/quo/calls"
+    ),
+    false
+  );
+
+  const forgedFileResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        fileRef: `subject_${"0".repeat(32)}`,
+        recentLimit: 10
+      })
+    }
+  );
+  assert.equal(forgedFileResponse.status, 404);
+
+  const unknownKeyResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ offset: 0, limit: 10, unexpected: true })
+    }
+  );
+  assert.equal(unknownKeyResponse.status, 400);
+
+  const oversizedBodyResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        offset: 0,
+        limit: 10,
+        padding: "x".repeat(5000)
+      })
+    }
+  );
+  assert.equal(oversizedBodyResponse.status, 413);
+
+  assert.deepEqual(await readFile(legacyCanaryPath), legacyCanaryBytes);
+  const legacyCanaryAfter = await stat(legacyCanaryPath);
+  assert.equal(legacyCanaryAfter.mtimeMs, legacyCanaryBefore.mtimeMs);
 
   const ambiguousResponse = await fetch(`${origin}/api/v1/session`, {
     headers: {

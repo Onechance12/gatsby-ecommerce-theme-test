@@ -144,12 +144,14 @@ OPERATIONAL_LLM_FALLBACK_PROVIDER=
 
 ## HCN Operations Console
 
-The first HCN console release is a responsive, installable foundation shell at
-`/hcn/`. It reports fresh bridge/build readiness, connector and release-gate
-status, explicit Chance Brain/HCN Operations Brain/Jobrolo boundaries, and the
-signed-in employee's exact console capabilities. It does not display client
-records and its browser session currently has no JobNimbus, Gmail, Quo, upload,
-send, call, or action-batch authority.
+The HCN console is a responsive, installable operating surface at `/hcn/`. It
+reports fresh bridge/build readiness, connector and release-gate status,
+explicit Chance Brain/HCN Operations Brain/Jobrolo boundaries, and the signed-in
+user's exact console capabilities. When the HCN reference configuration is
+ready, Chance's pinned browser session can also open a fresh, read-only Work
+Center and review one exact Chance-assigned insurance file. That read path can
+use current JobNimbus evidence plus exactly correlated Gmail and Quo evidence.
+It has no upload, write, send, call, approval, or action-batch authority.
 
 The console is disabled by default. To enable it for one exact HTTPS origin,
 configure:
@@ -163,6 +165,8 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 CHANCE_GOOGLE_SUBJECT=
 OAUTH_SESSION_SECRET=
+HCN_TENANT_ID=
+HCN_REFERENCE_KEY=
 WAVE_AUTH_USERS_JSON=
 ```
 
@@ -183,6 +187,15 @@ Provider access and refresh tokens are discarded after the callback; the
 browser receives only host-only, Secure, HttpOnly opaque cookies plus a
 session-scoped CSRF value.
 
+`HCN_TENANT_ID` is an HCN-only identifier in the form
+`tenant_` followed by 16 lowercase hexadecimal characters.
+`HCN_REFERENCE_KEY` is the canonical, unpadded base64url encoding of 32 to 128
+random bytes. Generate both once with a cryptographically secure secret
+generator and store them only in the production secret manager. They must not
+be copied from Chance Brain, Jobrolo, a provider credential, or the shared
+bridge token. The console fails closed when either value is missing or
+malformed, and readiness responses never reveal either value.
+
 Generate `OAUTH_SESSION_SECRET` from at least 32 random bytes and store its
 base64url encoding. The bridge rejects weak values. HCN state uses a dedicated,
 purpose-derived authenticated-encryption key and envelope, so it is not
@@ -196,10 +209,31 @@ the client address forwarded by Render; outside Render it uses the direct
 socket peer. Denied requests receive `429` and a bounded `Retry-After` value.
 
 Console login transactions and sessions are intentionally bounded and
-in-memory in this foundation phase. A restart or deployment signs everyone
-out, and horizontal instances do not share sessions. Move those opaque,
+in-memory. A restart or deployment signs everyone out, and horizontal instances
+do not share sessions. Move those opaque,
 short-lived records to a reviewed server-side shared session store before
 scaling beyond one instance; never persist them in browser storage.
+
+### Fresh Work Center contracts
+
+The browser uses two same-origin, Chance-only JSON routes:
+
+- `POST /hcn/api/v1/work-center` with exactly `offset` and `limit` returns a
+  fresh ephemeral page of active Chance-assigned insurance files. It exposes
+  HCN opaque references, safe display fields, missing-fact flags, attention
+  codes, and source timing; it never exposes raw provider identifiers.
+- `POST /hcn/api/v1/file-review` with exactly `fileRef` and `recentLimit`
+  resolves the opaque reference against a new JobNimbus index read and returns
+  one minimized file workspace. JobNimbus is required. Gmail and Quo failures
+  remain visible as coded partial evidence instead of being silently treated as
+  complete.
+
+Both routes require the secure HCN browser cookie, the exact configured origin,
+the session CSRF value, and `application/json`; request bodies are limited to
+4 KiB. Their responses are `no-store` and remain in memory/DOM only. An opaque
+reference that no longer resolves to one current, active, Chance-assigned file
+returns `404`. The routes do not call Chance Brain, Jobrolo, legacy client
+memory, model advisories, or any persistence layer.
 
 ## Fresh Review And Approval
 
