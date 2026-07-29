@@ -499,9 +499,24 @@ const server = createServer(async (req, res) => {
             ? hcnApiBodyLimit(url.pathname)
             : MAX_JSON_BODY_BYTES
         );
-    assertIdentityRequestScope(identity, req.method, url.pathname, body);
+    const operatorScope = resolveCodexOperatorRequestScope(
+      identity,
+      req.method,
+      url.pathname,
+      body
+    );
+    assertIdentityRequestScope(
+      identity,
+      req.method,
+      url.pathname,
+      body,
+      operatorScope
+    );
     const result = await REQUEST_CONTEXT.run(
-      authentication || { identity },
+      {
+        ...(authentication || { identity }),
+        operatorScope
+      },
       () => handler(body)
     );
     if (result?.[HTTP_RESPONSE]) {
@@ -627,7 +642,11 @@ function health() {
         CODEX_MAC_OPERATOR_TOKEN ? "mac" : ""
       ].filter(Boolean),
       role: "codex_operator",
-      assignedJobNimbusFilesOnly: true,
+      assignedJobNimbusFilesOnly: !CODEX_MAC_OPERATOR_TOKEN,
+      hpAssignedJobNimbusFilesOnly: true,
+      defaultScope: "chance_assigned",
+      macCompanyExactFileScope: Boolean(CODEX_MAC_OPERATOR_TOKEN),
+      companyWideIndexOrSweep: false,
       gmailReadsRequireExactAssignedFile: true,
       quoReadsRequireExactAssignedFile: true,
       broadUnmatchedCommunicationsSweep: false,
@@ -1200,6 +1219,15 @@ async function authWhoAmI() {
   return {
     authenticated: true,
     identity: publicEmployee,
+    operatorAccess: identity.type === "codex_operator_token"
+      ? {
+          defaultScope: "chance_assigned",
+          companyExactFileScope:
+            identity.subject === "codex-mac-operator",
+          companyWideIndexOrSweep: false,
+          actionPath: "approval_batch_only"
+        }
+      : null,
     gmailMode: identity.type === "google_oauth" ? "signed_in_employee_mailbox" : "legacy_chance_mailbox",
     instruction: identity.type === "google_oauth"
       ? "The bridge will use this signed-in employee's Google token for Gmail and enforce this employee's Wave Ops role."
@@ -2133,6 +2161,38 @@ function isCodexOperatorRequest() {
   return currentRequestIdentity()?.type === "codex_operator_token";
 }
 
+function isMacCodexOperatorRequest() {
+  const identity = currentRequestIdentity();
+  return identity?.type === "codex_operator_token"
+    && identity.subject === "codex-mac-operator";
+}
+
+function currentOperatorScope() {
+  return currentRequestAuthentication()?.operatorScope === "company"
+    ? "company"
+    : "assigned";
+}
+
+function operatorCompanyScopeActive() {
+  return isMacCodexOperatorRequest() && currentOperatorScope() === "company";
+}
+
+function operatorFileScopeLabel() {
+  return operatorCompanyScopeActive()
+    ? "explicit_company_file"
+    : "chance_assigned_file";
+}
+
+function operatorFileDescription() {
+  return operatorCompanyScopeActive()
+    ? "explicit company insurance file"
+    : "Chance-assigned file";
+}
+
+function operatorShortFileDescription() {
+  return operatorCompanyScopeActive() ? "company file" : "Chance file";
+}
+
 function isHcnRestrictedEffectRequest() {
   return currentRequestAuthentication()?.hcnRestrictedEffects === true;
 }
@@ -2866,16 +2926,29 @@ async function completeArtifact(input) {
 }
 
 async function searchContacts(input) {
-  const query = required(input.query, "query").toLowerCase();
+  const rawQuery = required(input.query, "query");
+  const query = rawQuery.toLowerCase();
   if (isCodexOperatorRequest() && normalizeCompare(query).length < 3) {
     badRequest("The Codex operator search query is too broad. Use at least three identifying characters, a JobNimbus number, claim number, or exact address.");
   }
   const limit = clamp(Number(input.limit || 10), 1, 25);
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 10) });
-  const matches = contacts
+  const eligible = contacts
     .filter(isInsuranceFile)
-    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
-    .filter((contact) => contactMatches(contact, query))
+    .filter((contact) => (
+      operatorCompanyScopeActive()
+      || assignedTo(contact, CHANCE_OWNER_ID)
+    ));
+  const matches = eligible
+    .filter((contact) => (
+      operatorCompanyScopeActive()
+        ? chanceMatchScore(contact, rawQuery) >= 85
+        : contactMatches(contact, query)
+    ))
+    .sort((a, b) => (
+      chanceMatchScore(b, rawQuery) - chanceMatchScore(a, rawQuery)
+      || fileSort(a, b)
+    ))
     .slice(0, limit);
   const compactMatches = matches.map((contact) => {
     const file = compactContact(contact);
@@ -2890,6 +2963,7 @@ async function searchContacts(input) {
   });
   return {
     query,
+    ...(isCodexOperatorRequest() ? { scope: operatorFileScopeLabel() } : {}),
     count: compactMatches.length,
     matches: compactMatches,
     contacts: compactMatches,
@@ -2944,6 +3018,7 @@ async function reviewFile(input) {
       : operationalState(MEMORY_CONFIG, file.id, { quarantineCorrupt: false });
   return {
     file,
+    ...(operatorRequest ? { scope: operatorFileScopeLabel() } : {}),
     rawContact: contact,
     recentActivities: liveJobNimbus.recentActivities,
     openTasks: liveJobNimbus.openTasks,
@@ -5353,6 +5428,7 @@ async function createTask(input) {
   ) {
     badRequest("The Codex operator can create only JobNimbus Task records through this action.");
   }
+  const ownerId = operatorActionOwnerId(contact);
   const body = cleanObject({
     title,
     subject: title,
@@ -5364,7 +5440,7 @@ async function createTask(input) {
     record_type_name: isRestrictedEffectRequest()
       ? "Task"
       : input.recordTypeName || "Task",
-    owners: [{ id: CHANCE_OWNER_ID }],
+    owners: [{ id: ownerId }],
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
   });
@@ -5426,7 +5502,7 @@ function jobNimbusUploadPlan(contact, input) {
 
 function assertOperatorRelatedRecord(record, contact, resource, allowedRecordTypes) {
   if (!referencesContact(record, String(contact.jnid || contact.id || ""))) {
-    badRequest(`The requested ${resource} does not belong to the resolved Chance Pearson JobNimbus file.`);
+    badRequest(`The requested ${resource} does not belong to the resolved ${operatorFileDescription()}.`);
   }
   const recordType = String(record.record_type_name || record.type_name || record.type || "").trim().toLowerCase();
   if (!allowedRecordTypes.includes(recordType)) {
@@ -5559,6 +5635,7 @@ async function createCalendarEvent(input) {
   ) {
     badRequest("The Codex operator can create only JobNimbus Event records through this action.");
   }
+  const ownerId = operatorActionOwnerId(contact);
   const body = cleanObject({
     title,
     subject: title,
@@ -5569,7 +5646,7 @@ async function createCalendarEvent(input) {
     record_type_name: currentRequestIdentity()?.type === "codex_operator_token"
       ? "Event"
       : input.recordTypeName || "Event",
-    owners: [{ id: CHANCE_OWNER_ID }],
+    owners: [{ id: ownerId }],
     primary: { id: contact.jnid },
     related: [{ id: contact.jnid }]
   });
@@ -5657,7 +5734,7 @@ async function gmailSearch(input) {
   }
   return {
     query,
-    ...(operatorFile ? { file: operatorFile, scope: "chance_assigned_file" } : {}),
+    ...(operatorFile ? { file: operatorFile, scope: operatorFileScopeLabel() } : {}),
     count: hydrated.length,
     messages: hydrated,
     threads: groupGmailMessagesByThread(hydrated)
@@ -5670,11 +5747,11 @@ async function gmailThread(input) {
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
   const messages = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
   if (operatorFile && !messages.some((message) => gmailMessageMatchesFile(message, operatorFile))) {
-    operatorScopeError("That Gmail thread is not strongly correlated to the resolved Chance-assigned file.");
+    operatorScopeError(`That Gmail thread is not strongly correlated to the resolved ${operatorFileDescription()}.`);
   }
   return {
     id: thread.id || threadId,
-    ...(operatorFile ? { file: operatorFile, scope: "chance_assigned_file" } : {}),
+    ...(operatorFile ? { file: operatorFile, scope: operatorFileScopeLabel() } : {}),
     historyId: thread.historyId || "",
     messageCount: messages.length,
     messages,
@@ -5692,7 +5769,7 @@ async function gmailAttachmentReview(input) {
     const message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageId)}?format=full`);
     const compact = compactGmailFullMessage(message);
     if (!gmailMessageMatchesFile(compact, operatorFile)) {
-      operatorScopeError("That Gmail message is not strongly correlated to the resolved Chance-assigned file.");
+      operatorScopeError(`That Gmail message is not strongly correlated to the resolved ${operatorFileDescription()}.`);
     }
     const verifiedAttachment = compact.attachments.find((row) => String(row.attachmentId || "") === attachmentId);
     if (!verifiedAttachment) {
@@ -6191,7 +6268,7 @@ async function assertOperatorDraftProvenance(file, draftId) {
       && String(row.receipt?.externalId || "") === String(draftId)
     ));
   if (!receipt) {
-    operatorScopeError("The Codex operator may send only a Gmail draft created by this bridge for the resolved Chance-assigned file.");
+    operatorScopeError(`The Codex operator may send only a Gmail draft created by this bridge for the resolved ${operatorFileDescription()}.`);
   }
   return receipt;
 }
@@ -6370,14 +6447,17 @@ async function quoNumbers() {
 
 async function assertUniqueChanceFilePhone(file, label) {
   const phone = normalizePhone(file?.phone);
-  if (!phone) badRequest(`The resolved Chance file has no phone number for ${label}.`);
+  if (!phone) badRequest(`The resolved ${operatorFileDescription()} has no phone number for ${label}.`);
   const contacts = await listContacts({ maxPages: 25 });
   const matchingFiles = contacts
     .filter(isInsuranceFile)
-    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter((contact) => (
+      operatorCompanyScopeActive()
+      || assignedTo(contact, CHANCE_OWNER_ID)
+    ))
     .filter((contact) => normalizePhone(compactContact(contact).phone) === phone);
   if (matchingFiles.length !== 1 || String(compactContact(matchingFiles[0]).id) !== String(file.id)) {
-    badRequest(`The resolved phone is shared across multiple Chance-assigned files, so ${label} is ambiguous and blocked.`);
+    badRequest(`The resolved phone is shared across multiple files in the authorized scope, so ${label} is ambiguous and blocked.`);
   }
 }
 
@@ -6401,7 +6481,12 @@ async function quoHistory(input = {}) {
     maxResults: input.maxResults,
     includeTranscripts: input.includeTranscripts === true
   });
-  return { generatedAt: new Date().toISOString(), file, ...history };
+  return {
+    generatedAt: new Date().toISOString(),
+    file,
+    ...(isCodexOperatorRequest() ? { scope: operatorFileScopeLabel() } : {}),
+    ...history
+  };
 }
 
 async function quoTranscript(input = {}) {
@@ -6419,13 +6504,13 @@ async function quoTranscript(input = {}) {
   });
   const call = history.timeline.find((row) => row.type === "call" && String(row.id || "") === callId);
   if (!call) {
-    operatorScopeError("That Quo call id is not present in the current history for the resolved Chance-assigned file.");
+    operatorScopeError(`That Quo call id is not present in the current history for the resolved ${operatorFileDescription()}.`);
   }
   return {
     file,
     call,
     transcript: await readQuoTranscript(quoConfig(), callId),
-    scope: "chance_assigned_file"
+    scope: operatorFileScopeLabel()
   };
 }
 
@@ -6818,6 +6903,7 @@ async function authorizedQuoLine(identity = currentRequestIdentity()) {
 
 async function reviewChanceFiles(input = {}) {
   const operatorRequest = isCodexOperatorRequest();
+  const companyScope = operatorCompanyScopeActive();
   const page = clamp(Number(input.page || 1), 1, 1000);
   const limit = clamp(Number(input.limit || (input.query ? 1 : 5)), 1, 10);
   let contacts;
@@ -6835,6 +6921,7 @@ async function reviewChanceFiles(input = {}) {
     return {
       generatedAt: new Date().toISOString(),
       owner: { id: CHANCE_OWNER_ID, name: "Chance Pearson" },
+      scope: "chance_assigned_file_index",
       mode: "index",
       total,
       files: contacts.map(compactChanceIndexContact),
@@ -6862,7 +6949,12 @@ async function reviewChanceFiles(input = {}) {
   const exactSubjectKey = input.query && packets.length === 1 ? packets[0].file.id : "";
   return {
     generatedAt: new Date().toISOString(),
-    owner: { id: CHANCE_OWNER_ID, name: "Chance Pearson" },
+    owner: companyScope
+      ? { id: "", name: "Explicit company file" }
+      : { id: CHANCE_OWNER_ID, name: "Chance Pearson" },
+    scope: companyScope
+      ? "explicit_company_file"
+      : "chance_assigned_file",
     query: String(input.query || ""),
     page,
     limit,
@@ -6873,7 +6965,9 @@ async function reviewChanceFiles(input = {}) {
     brain: operatorRequest ? operatorBrainBoundary() : reviewBrainContext(exactSubjectKey, input.maxPerSection),
     assistantDirective: [
       operatorRequest
-        ? "These are fresh exact-file evidence packets with ephemeral continuity metadata; no Chance Brain client memory was read or written."
+        ? `These are fresh ${
+          companyScope ? "company" : "Chance-assigned"
+        } exact-file evidence packets with ephemeral continuity metadata; no Chance Brain client memory was read or written.`
         : ALLOW_LEGACY_CLIENT_MEMORY_WRITES
           ? "These are fresh evidence packets joined with durable client continuity, not automatic decisions."
           : "These are fresh evidence packets. Existing legacy continuity is read-only while HCN Operations Brain v2 is established.",
@@ -7413,31 +7507,41 @@ async function findChanceContact(query) {
   if (!needle) badRequest("query is required");
   const lower = needle.toLowerCase();
   const contacts = await listContacts({ maxPages: 25 });
+  const companyScope = operatorCompanyScopeActive();
   const matches = contacts
     .filter(isInsuranceFile)
-    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter((contact) => (
+      companyScope
+      || assignedTo(contact, CHANCE_OWNER_ID)
+    ))
     .filter((contact) => contactMatches(contact, lower))
     .map((contact) => ({ contact, score: chanceMatchScore(contact, needle) }))
     .filter(({ score }) => score >= 85)
     .sort((a, b) => b.score - a.score || fileSort(a.contact, b.contact));
 
-  if (!matches.length) badRequest(`No Chance Pearson JobNimbus insurance file found for: ${needle}`);
+  if (!matches.length) {
+    badRequest(
+      `No ${
+        companyScope ? "company" : "Chance Pearson"
+      } JobNimbus insurance file found for: ${needle}`
+    );
+  }
   if (matches.length > 1 && matches[0].score === matches[1].score) {
     const choices = matches.slice(0, 5).map(({ contact }) => `${contact.number || contact.recid || "?"}: ${contact.display_name || contact.name || "Unnamed"}`);
-    badRequest(`Ambiguous Chance file query: ${needle}. Use the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
+    badRequest(`Ambiguous ${companyScope ? "company" : "Chance"} file query: ${needle}. Use the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
   }
 
   const selectedId = matches[0].contact.jnid || matches[0].contact.id;
   const contact = await jobNimbus(`/contacts/${encodeURIComponent(selectedId)}`);
   if (
     !isInsuranceFile(contact)
-    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
     || (
       isHcnRestrictedEffectRequest()
       && !hcnContactIsExplicitlyActive(contact)
     )
   ) {
-    badRequest(`Resolved record is not a Chance Pearson insurance file: ${needle}`);
+    badRequest(`Resolved record is not ${companyScope ? "a company" : "a Chance Pearson"} insurance file: ${needle}`);
   }
   const knownStatusNames = [...new Set(contacts
     .filter(isInsuranceFile)
@@ -7491,11 +7595,15 @@ async function findDocumentReadContact(query, { documentQuery = "" } = {}) {
     .filter(({ score }) => score >= 85)
     .sort((a, b) => b.score - a.score || fileSort(a.contact, b.contact));
   const chanceMatches = ranked.filter(({ contact }) => assignedTo(contact, CHANCE_OWNER_ID));
+  const companyScope = operatorCompanyScopeActive();
 
-  let matches = chanceMatches;
-  let readScope = "chance_assigned";
+  let matches = companyScope ? ranked : chanceMatches;
+  let readScope = companyScope ? "explicit_company_file" : "chance_assigned";
   if (!matches.length) {
-    if (currentRequestIdentity()?.type === "codex_operator_token") {
+    if (
+      currentRequestIdentity()?.type === "codex_operator_token"
+      && !companyScope
+    ) {
       badRequest(`No Chance Pearson JobNimbus insurance file found for document review: ${needle}.`);
     }
     matches = ranked.filter(({ score }) => score >= 85);
@@ -8878,6 +8986,19 @@ function assignedTo(contact, ownerId) {
   return (Array.isArray(contact.owners) ? contact.owners : []).some((owner) => String(owner?.id || owner?.jnid || owner) === ownerId);
 }
 
+function operatorActionOwnerId(contact) {
+  if (!operatorCompanyScopeActive()) return CHANCE_OWNER_ID;
+  const ownerId = (Array.isArray(contact?.owners) ? contact.owners : [])
+    .map((owner) => String(owner?.id || owner?.jnid || owner || "").trim())
+    .find(Boolean);
+  if (!ownerId) {
+    conflictError(
+      "The explicit company file has no verified JobNimbus owner. Assign an owner in JobNimbus before creating a task or calendar event."
+    );
+  }
+  return ownerId;
+}
+
 function isOpenActive(contact) {
   return contact.is_active !== false && contact.is_archived !== true && contact.is_closed !== true;
 }
@@ -9062,12 +9183,12 @@ function assertOperatorBatchFileScope(plans) {
       || ""
     ).trim();
     if (!id) {
-      badRequest(`The Codex operator could not bind action ${index + 1} to one exact Chance-assigned file.`);
+      badRequest(`The Codex operator could not bind action ${index + 1} to one exact ${operatorFileDescription()}.`);
     }
     return id;
   });
   if (new Set(fileIds).size !== 1) {
-    badRequest("A Codex operator action batch may contain operations for only one exact Chance-assigned file.");
+    badRequest(`A Codex operator action batch may contain operations for only one exact ${operatorFileDescription()}.`);
   }
 }
 
@@ -9565,7 +9686,7 @@ async function loadEmailAttachments(input = {}) {
 function assertOperatorAttachmentFile(operatorFile, sourceFile, index) {
   if (!operatorFile) return;
   if (String(sourceFile?.id || "") !== String(operatorFile.id || "")) {
-    operatorScopeError(`Gmail attachment ${index + 1} resolves to a different Chance file than the approved top-level query.`);
+    operatorScopeError(`Gmail attachment ${index + 1} resolves to a different ${operatorShortFileDescription()} than the approved top-level query.`);
   }
 }
 
@@ -10171,15 +10292,16 @@ function assertCodexOperatorFields(fields, allowed, label, options = {}) {
 
 function assertOperatorContactScope(contact) {
   if (!isRestrictedEffectRequest()) return;
+  const companyScope = operatorCompanyScopeActive();
   if (
     !isInsuranceFile(contact)
-    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
     || (
       isHcnRestrictedEffectRequest()
       && !hcnContactIsExplicitlyActive(contact)
     )
   ) {
-    conflictError("The refreshed JobNimbus record is no longer a Chance-assigned insurance file.");
+    conflictError(`The refreshed JobNimbus record is no longer an authorized ${operatorFileDescription()}.`);
   }
 }
 
@@ -10933,7 +11055,11 @@ async function authenticateBearerRequest(req) {
       name: "Codex Mac Operator",
       role: "codex_operator",
       hostedDomain: "",
-      scopes: ["client_evidence:read", "approval_batches:prepare_execute"],
+      scopes: [
+        "client_evidence:read",
+        "company_exact_file:read",
+        "approval_batches:prepare_execute"
+      ],
       googleAccessToken: "",
       jobNimbusOwnerId: CHANCE_OWNER_ID,
       jobNimbusScope: "assigned",
@@ -11220,7 +11346,135 @@ function bearerToken(req) {
   return match ? match[1].trim() : "";
 }
 
-function assertIdentityRequestScope(identity, method, pathname, body = {}) {
+function resolveCodexOperatorRequestScope(
+  identity,
+  method,
+  pathname,
+  body = {}
+) {
+  if (identity?.type !== "codex_operator_token") return "identity";
+  const requestedScopes = [];
+  if (body.operatorScope !== undefined) {
+    requestedScopes.push(
+      String(body.operatorScope || "").trim().toLowerCase()
+    );
+  }
+  if (pathname === "/ops/action-batch") {
+    for (const operation of Array.isArray(body.operations) ? body.operations : []) {
+      if (operation?.payload?.operatorScope !== undefined) {
+        requestedScopes.push(
+          String(operation.payload.operatorScope || "").trim().toLowerCase()
+        );
+      }
+    }
+  }
+  const scopes = [...new Set(requestedScopes.filter(Boolean))];
+  if (scopes.some((scope) => !["assigned", "company"].includes(scope))) {
+    const error = new Error("operatorScope must be assigned or company.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (scopes.length > 1) {
+    const error = new Error(
+      "A Codex operator request cannot mix assigned and company scope."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+  const scope = scopes[0] || "assigned";
+  if (
+    scope === "company"
+    && identity.subject !== "codex-mac-operator"
+  ) {
+    const error = new Error(
+      "Company exact-file scope is available only to the dedicated Mac operator."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (scope === "company") {
+    assertCompanyOperatorRequestShape(method, pathname, body);
+  }
+  return scope;
+}
+
+function assertCompanyOperatorRequestShape(method, pathname, body = {}) {
+  const supportedRoutes = new Set([
+    "POST /jobnimbus/search",
+    "POST /jobnimbus/review-file",
+    "POST /ops/review-chance-files",
+    "POST /jobnimbus/document-text",
+    "POST /jobnimbus/document-review",
+    "POST /jobnimbus/document-file",
+    "POST /gmail/search",
+    "POST /gmail/thread",
+    "POST /gmail/attachment-review",
+    "POST /quo/history",
+    "POST /quo/transcript",
+    "POST /ops/action-batch"
+  ]);
+  const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (!supportedRoutes.has(route)) {
+    const error = new Error(
+      "Company scope is limited to explicit exact-file review and approval-batch routes."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (pathname === "/ops/action-batch") {
+    const operations = Array.isArray(body.operations) ? body.operations : [];
+    if (!operations.length) return;
+    for (const [index, operation] of operations.entries()) {
+      if (
+        String(operation?.payload?.operatorScope || "")
+          .trim()
+          .toLowerCase() !== "company"
+      ) {
+        const error = new Error(
+          `operations[${index}].payload.operatorScope must be company for a company action batch.`
+        );
+        error.statusCode = 400;
+        throw error;
+      }
+      if (
+        !String(
+          operation?.payload?.query
+          || operation?.payload?.fileQuery
+          || ""
+        ).trim()
+      ) {
+        const error = new Error(
+          `operations[${index}] requires an exact file query for company scope.`
+        );
+        error.statusCode = 400;
+        throw error;
+      }
+    }
+    return;
+  }
+  const query = [
+    "/gmail/search",
+    "/gmail/thread",
+    "/gmail/attachment-review"
+  ].includes(pathname)
+    ? body.fileQuery
+    : body.query;
+  if (!String(query || "").trim()) {
+    const error = new Error(
+      "Company scope requires an exact JobNimbus number, claim number, full client name, or exact address."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+function assertIdentityRequestScope(
+  identity,
+  method,
+  pathname,
+  body = {},
+  operatorScope = "assigned"
+) {
   if (identity?.type !== "codex_operator_token") return;
   if (body.includeBrainAdvisory === true) {
     const error = new Error("The Codex operator cannot send client evidence to an operational advisory model.");
@@ -11248,7 +11502,7 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     pathname === "/ops/start-session"
     && String(body.focus || "").trim().toLowerCase() === "communications"
   ) {
-    const error = new Error("The Codex operator cannot run a broad unmatched communications sweep. Review an exact Chance-assigned file instead.");
+    const error = new Error("The Codex operator cannot run a broad unmatched communications sweep. Review one exact file instead.");
     error.statusCode = 403;
     throw error;
   }
@@ -11268,7 +11522,11 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     ["/gmail/search", "/gmail/thread", "/gmail/attachment-review"].includes(pathname)
     && !String(body.fileQuery || "").trim()
   ) {
-    const error = new Error("The Codex operator requires an exact Chance-assigned fileQuery for every Gmail read.");
+    const error = new Error(
+      `The Codex operator requires an exact ${
+        operatorScope === "company" ? "company" : "Chance-assigned"
+      } fileQuery for every Gmail read.`
+    );
     error.statusCode = 400;
     throw error;
   }
@@ -11276,7 +11534,11 @@ function assertIdentityRequestScope(identity, method, pathname, body = {}) {
     ["/quo/history", "/quo/transcript"].includes(pathname)
     && !String(body.query || "").trim()
   ) {
-    const error = new Error("The Codex operator requires an exact Chance-assigned file query for every Quo read.");
+    const error = new Error(
+      `The Codex operator requires an exact ${
+        operatorScope === "company" ? "company" : "Chance-assigned"
+      } file query for every Quo read.`
+    );
     error.statusCode = 400;
     throw error;
   }
@@ -12227,6 +12489,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Name, JobNimbus number, claim number, policy number, phone, email, or address to search for." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Defaults to assigned. Company requires one strong exact-file match and never permits a broad company sweep." },
           limit: { type: "integer", minimum: 1, maximum: 25, default: 10 },
           maxPages: { type: "integer", minimum: 1, maximum: 25, default: 10 }
         },
@@ -12235,7 +12498,8 @@ const OPENAPI = {
       ReviewFileRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Name, JobNimbus number, claim number, policy number, phone, email, or address for the file to review." }
+          query: { type: "string", description: "Name, JobNimbus number, claim number, policy number, phone, email, or address for the file to review." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company scope must resolve one exact company insurance file." }
         },
         required: ["query"]
       },
@@ -12265,6 +12529,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "File/client identifier. Chance-assigned files are preferred. An exact, unambiguous JobNimbus number, claim number, client name, or address may be used for an explicitly named company-file read; this never expands write access." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company scope remains exact-file and read-only on this route." },
           documentQuery: { type: "string", description: "Document id, name, or partial filename. If omitted, the first related document is used." },
           maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 12000 },
           forceOcr: { type: "boolean", default: false, description: "When true, OCR is attempted even if PDF text extraction finds text." },
@@ -12276,6 +12541,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "File/client identifier. Chance-assigned files are preferred. An exact, unambiguous JobNimbus number, claim number, client name, or address may be used for an explicitly named company-file read; this never expands write access." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company scope remains exact-file and read-only on this route." },
           documentQuery: { type: "string", description: "Exact document id/name or a unique partial filename. Use this when a specific filename is known." },
           documentPurpose: {
             type: "string",
@@ -12317,7 +12583,8 @@ const OPENAPI = {
       DocumentFileRequest: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Exact file/client identifier, preferably JobNimbus number, claim number, exact client name, or exact address. Read-only document retrieval may resolve an explicitly named company file; all write actions remain Chance-only." },
+          query: { type: "string", description: "Exact file/client identifier, preferably JobNimbus number, claim number, exact client name, or exact address." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company scope remains exact-file and read-only on this route." },
           documentQuery: { type: "string", description: "Required exact document id/name or a unique partial filename. Ambiguous matches are rejected." },
           documentId: { type: "string", description: "Alias for documentQuery." }
         },
@@ -12338,7 +12605,7 @@ const OPENAPI = {
           file: { type: "object", additionalProperties: true },
           readScope: {
             type: "string",
-            enum: ["chance_assigned", "explicit_company_read"],
+            enum: ["chance_assigned", "explicit_company_read", "explicit_company_file", "explicit_company_document_read"],
             description: "Shows whether the read resolved inside Chance's assigned files or through an exact, unambiguous company-file lookup. This does not grant write access."
           },
           document: { type: "object", additionalProperties: true },
@@ -12524,6 +12791,7 @@ const OPENAPI = {
         properties: {
           query: { type: "string", description: "Gmail search query. Use Gmail operators like from:, to:, subject:, newer_than:, older_than:, has:attachment, or plain client/claim terms." },
           fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex operator; its Gmail search is built server-side from current file facts." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires fileQuery and exact-file correlation." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           limit: { type: "integer", minimum: 1, maximum: 25, default: 10 }
         },
@@ -12536,7 +12804,8 @@ const OPENAPI = {
         type: "object",
         properties: {
           threadId: { type: "string", description: "Gmail thread id returned by searchGmail." },
-          fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex operator so the thread is strongly correlated before disclosure." }
+          fileQuery: { type: "string", description: "Exact JobNimbus file identifier. Required for the Codex operator so the thread is strongly correlated before disclosure." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires exact-file correlation." }
         },
         required: ["threadId"]
       },
@@ -12554,6 +12823,7 @@ const OPENAPI = {
           uploadToJobNimbus: { type: "boolean", default: false, description: "When true, also prepares an upload to the exact Chance file." },
           query: { type: "string", description: "Required when uploadToJobNimbus is true." },
           fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for Codex operator read scope." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires exact-file correlation and does not permit direct upload." },
           description: { type: "string" },
           isPrivate: { type: "boolean", default: false },
           execute: { type: "boolean", default: false, description: "Only affects the optional JobNimbus upload. Attachment review itself is read-only." }
@@ -12606,6 +12876,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Exact Chance file identifier. Required for the Codex operator; its current phone number is always used." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires an exact file query; arbitrary phone lookup remains blocked." },
           phone: { type: "string", description: "US phone number. Used when query is omitted or as an explicit override." },
           maxResults: { type: "integer", minimum: 1, maximum: 50, default: 25 },
           includeTranscripts: { type: "boolean", default: false, description: "Try to include transcripts for up to the three most recent recorded calls." }
@@ -12625,7 +12896,8 @@ const OPENAPI = {
         type: "object",
         properties: {
           callId: { type: "string" },
-          query: { type: "string", description: "Exact Chance file identifier. Required for the Codex operator so call membership is verified before transcript disclosure." }
+          query: { type: "string", description: "Exact JobNimbus file identifier. Required for the Codex operator so call membership is verified before transcript disclosure." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires exact-file call membership verification." }
         },
         required: ["callId"]
       },
@@ -12668,6 +12940,7 @@ const OPENAPI = {
         type: "object",
         properties: {
           query: { type: "string", description: "Optional exact Chance file. Omit for a paginated Chance-only sweep." },
+          operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires query and always reviews exactly one file; queryless company indexes are blocked." },
           indexOnly: { type: "boolean", default: false, description: "Use true first for a lightweight current index of every active Chance file. Then deep-review one selected file using query and limit 1." },
           page: { type: "integer", minimum: 1, default: 1 },
           limit: { type: "integer", minimum: 1, maximum: 10, default: 1, description: "Use 1 for full evidence reviews so JobNimbus, Gmail, Quo, documents, tasks, and receipts fit within connector response limits." },

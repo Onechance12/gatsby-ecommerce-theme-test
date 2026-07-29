@@ -39,7 +39,18 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     mobile_phone: options.duplicatePhone ? chance.mobile_phone : "2145553434",
     cf_string_2: "XYZ-999"
   };
+  const companyOther = {
+    ...chance,
+    jnid: "contact-company-other",
+    number: 3901,
+    owners: [{ id: "richard-owner-id" }],
+    display_name: "Richard Fixture Homeowner",
+    email: "company-client@example.test",
+    mobile_phone: "2145559090",
+    cf_string_2: "COMP-321"
+  };
   let taskUpdateCount = 0;
+  let companyNoteCreateCount = 0;
   let taskCompleted = false;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -57,6 +68,9 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
           { id: "email-prefix-message", threadId: "email-prefix-thread" },
           { id: "claim-prefix-message", threadId: "claim-prefix-thread" },
           { id: "claim-suffix-message", threadId: "claim-suffix-thread" },
+          ...(options.companyOther
+            ? [{ id: "company-claim-message", threadId: "company-claim-thread" }]
+            : []),
           { id: "unrelated-message", threadId: "unrelated-thread" }
         ]
       }));
@@ -76,6 +90,24 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
             { name: "Subject", value: "Claim ABC-123" }
           ],
           body: { data: Buffer.from("Claim ABC-123").toString("base64url") }
+        }
+      }));
+      return;
+    }
+    if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages/company-claim-message" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "company-claim-message",
+        threadId: "company-claim-thread",
+        snippet: "Claim COMP-321",
+        payload: {
+          mimeType: "text/plain",
+          headers: [
+            { name: "From", value: "carrier@example.test" },
+            { name: "To", value: "company-client@example.test" },
+            { name: "Subject", value: "Claim COMP-321" }
+          ],
+          body: { data: Buffer.from("Claim COMP-321").toString("base64url") }
         }
       }));
       return;
@@ -191,6 +223,27 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       }));
       return;
     }
+    if (options.communicationScope && url.pathname === "/gmail/v1/users/me/threads/company-claim-thread" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "company-claim-thread",
+        messages: [{
+          id: "company-claim-message",
+          threadId: "company-claim-thread",
+          snippet: "Claim COMP-321",
+          payload: {
+            mimeType: "text/plain",
+            headers: [
+              { name: "From", value: "carrier@example.test" },
+              { name: "To", value: "company-client@example.test" },
+              { name: "Subject", value: "Claim COMP-321" }
+            ],
+            body: { data: Buffer.from("Claim COMP-321").toString("base64url") }
+          }
+        }]
+      }));
+      return;
+    }
     if (options.communicationScope && url.pathname === "/phone-numbers" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ data: [{ id: "line-1", name: "Chance", number: "+19725550100" }] }));
@@ -220,7 +273,8 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       const contacts = [
         chance,
         ...(options.duplicateName ? [duplicate] : []),
-        ...(options.secondAssigned ? [secondAssigned] : [])
+        ...(options.secondAssigned ? [secondAssigned] : []),
+        ...(options.companyOther ? [companyOther] : [])
       ];
       res.end(JSON.stringify({ contacts }));
       return;
@@ -238,6 +292,30 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     if (url.pathname === "/contacts/contact-chance-second") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(secondAssigned));
+      return;
+    }
+    if (url.pathname === "/contacts/contact-company-other") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(companyOther));
+      return;
+    }
+    if (
+      options.companyOther
+      && url.pathname === "/activities"
+      && req.method === "POST"
+    ) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      assert.equal(body.primary?.id, companyOther.jnid);
+      companyNoteCreateCount += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        jnid: "company-note-created",
+        record_type_name: "Note",
+        primary: { id: companyOther.jnid },
+        note: body.note
+      }));
       return;
     }
     if (url.pathname === "/activities" && req.method === "GET") {
@@ -295,7 +373,10 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   });
   await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
   t.after(() => server.close());
-  return { getTaskUpdateCount: () => taskUpdateCount };
+  return {
+    getTaskUpdateCount: () => taskUpdateCount,
+    getCompanyNoteCreateCount: () => companyNoteCreateCount
+  };
 }
 
 test("server exposes claim actions and protects them when auth is unconfigured", async (t) => {
@@ -674,7 +755,14 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(macIdentity.identity.role, "codex_operator");
   assert.equal(macIdentity.identity.subject, "codex-mac-operator");
   assert.equal(macIdentity.identity.name, "Codex Mac Operator");
-  assert.deepEqual(macIdentity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
+  assert.deepEqual(macIdentity.identity.scopes, [
+    "client_evidence:read",
+    "company_exact_file:read",
+    "approval_batches:prepare_execute"
+  ]);
+  assert.equal(macIdentity.operatorAccess.defaultScope, "chance_assigned");
+  assert.equal(macIdentity.operatorAccess.companyExactFileScope, true);
+  assert.equal(macIdentity.operatorAccess.companyWideIndexOrSweep, false);
   assert.match(macIdentity.instruction, /dedicated least-privilege Codex Mac Operator/i);
 
   const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
@@ -1125,6 +1213,215 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     body: "{}"
   });
   assert.equal(unknownTokenResponse.status, 401);
+});
+
+test("Mac operator supports one explicit company file while HP and broad company access stay blocked", async (t) => {
+  const bridgePort = 18934;
+  const fakeApiPort = 18935;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-mac-company-scope-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    companyOther: true,
+    communicationScope: true
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      NODE_ENV: "test",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      MEMORY_ROOT: memoryRoot,
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const hpHeaders = {
+    authorization: "Bearer fixture-codex-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const macHeaders = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const hpCompanyResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/review-file`, {
+    method: "POST",
+    headers: hpHeaders,
+    body: JSON.stringify({ query: "3901", operatorScope: "company" })
+  });
+  assert.equal(hpCompanyResponse.status, 403);
+  assert.match((await hpCompanyResponse.json()).error, /dedicated Mac operator/i);
+
+  const macDefaultResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/review-file`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ query: "3901" })
+  });
+  assert.equal(macDefaultResponse.status, 400);
+  assert.match((await macDefaultResponse.json()).error, /No Chance Pearson/i);
+
+  const companySearchResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/search`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ query: "3901", operatorScope: "company" })
+  });
+  assert.equal(companySearchResponse.status, 200);
+  const companySearch = await companySearchResponse.json();
+  assert.equal(companySearch.scope, "explicit_company_file");
+  assert.deepEqual(companySearch.matches, [{
+    id: "contact-company-other",
+    number: 3901,
+    name: "Richard Fixture Homeowner",
+    status: "Active"
+  }]);
+
+  const broadCompanyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ operatorScope: "company", indexOnly: true })
+  });
+  assert.equal(broadCompanyResponse.status, 400);
+  assert.match((await broadCompanyResponse.json()).error, /requires an exact JobNimbus/i);
+
+  const companyReviewResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      query: "3901",
+      operatorScope: "company",
+      includeGmail: true,
+      includeQuo: true,
+      limit: 1
+    })
+  });
+  assert.equal(companyReviewResponse.status, 200);
+  const companyReview = await companyReviewResponse.json();
+  assert.equal(companyReview.scope, "explicit_company_file");
+  assert.equal(companyReview.owner.name, "Explicit company file");
+  assert.equal(companyReview.packets[0].file.id, "contact-company-other");
+  assert.deepEqual(
+    companyReview.packets[0].gmail.messages.map((row) => row.id),
+    ["company-claim-message"]
+  );
+  assert.deepEqual(
+    companyReview.packets[0].quo.timeline.map((row) => row.id),
+    ["client-call"]
+  );
+
+  const companyTaskBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      operations: [{
+        type: "jobnimbus.create_task",
+        payload: {
+          query: "3901",
+          title: "Company exact-file fixture task plan.",
+          dueDate: "2026-07-30T14:30:00-05:00",
+          operatorScope: "company"
+        }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(companyTaskBatchResponse.status, 200);
+  const companyTaskBatch = await companyTaskBatchResponse.json();
+  assert.equal(companyTaskBatch.mode, "dry_run");
+  assert.deepEqual(
+    companyTaskBatch.operations[0].plan.plan.body.owners,
+    [{ id: "richard-owner-id" }]
+  );
+
+  const companyBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      operations: [{
+        type: "jobnimbus.create_note",
+        payload: {
+          query: "3901",
+          note: "Company exact-file fixture dry run.",
+          operatorScope: "company"
+        }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(companyBatchResponse.status, 200);
+  const companyBatch = await companyBatchResponse.json();
+  assert.equal(companyBatch.mode, "dry_run");
+  assert.equal(companyBatch.operations[0].plan.file.id, "contact-company-other");
+  assert.ok(companyBatch.approvalDigest);
+  assert.ok(companyBatch.approvalChallenge);
+
+  const companyBatchExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      operations: [{
+        type: "jobnimbus.create_note",
+        payload: {
+          query: "3901",
+          note: "Company exact-file fixture dry run.",
+          operatorScope: "company"
+        }
+      }],
+      execute: true,
+      approvalDigest: companyBatch.approvalDigest,
+      approvalChallenge: companyBatch.approvalChallenge
+    })
+  });
+  assert.equal(companyBatchExecuteResponse.status, 200);
+  const companyBatchExecute = await companyBatchExecuteResponse.json();
+  assert.equal(companyBatchExecute.mode, "executed");
+  assert.equal(fixtureApi.getCompanyNoteCreateCount(), 1);
+
+  const mixedScopeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      operations: [
+        {
+          type: "jobnimbus.create_note",
+          payload: {
+            query: "3901",
+            note: "Company scope.",
+            operatorScope: "company"
+          }
+        },
+        {
+          type: "jobnimbus.create_note",
+          payload: {
+            query: "2739",
+            note: "Assigned scope.",
+            operatorScope: "assigned"
+          }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(mixedScopeResponse.status, 400);
+  assert.match((await mixedScopeResponse.json()).error, /cannot mix assigned and company/i);
 });
 
 test("Codex operator action batches require the unchanged approval digest", async (t) => {
@@ -3958,6 +4255,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       JOBNIMBUS_API_KEY: "fixture-key",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-token",
       CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
       CENSUS_GEOCODER_URL: `http://127.0.0.1:${fakeApiPort}/geocoder`,
       HAIL_REPORTS_URL: `http://127.0.0.1:${fakeApiPort}/lsr`,
       RETELL_AGENT_ID: "fixture-agent",
@@ -4179,6 +4477,24 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   });
   assert.equal(operatorCompanyDocumentResponse.status, 400);
   assert.match((await operatorCompanyDocumentResponse.json()).error, /No Chance Pearson JobNimbus insurance file/i);
+
+  const macCompanyDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      query: "Other Owner",
+      documentQuery: "Other Owner - TDI.pdf",
+      operatorScope: "company"
+    })
+  });
+  assert.equal(macCompanyDocumentResponse.status, 200);
+  const macCompanyDocument = await macCompanyDocumentResponse.json();
+  assert.equal(macCompanyDocument.file.id, other.jnid);
+  assert.equal(macCompanyDocument.readScope, "explicit_company_file");
+  assert.equal(macCompanyDocument.openaiFileResponse[0].name, "Other Owner - TDI.pdf");
 
   const catalogDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {
     method: "POST",
