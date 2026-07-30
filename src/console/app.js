@@ -445,7 +445,6 @@
       elements[id] = document.getElementById(id);
     });
 
-    renderAuthCallbackOutcome();
     elements["retry-action"].addEventListener("click", loadPlatformState);
     elements["sign-out-action"].addEventListener("click", signOut);
     elements["management-sweep-refresh"].addEventListener(
@@ -551,30 +550,53 @@
 
   function renderAuthCallbackOutcome() {
     const outcome = state.authCallbackOutcome;
-    if (!outcome) return;
     state.authCallbackOutcome = "";
-    elements["home-auth-alert"].hidden = false;
-    if (outcome === "access_denied" || outcome === "cancelled") {
-      notice(
-        elements["home-auth-alert"],
-        "Sign-in was canceled. Choose the Google account tied to your active JobNimbus employee profile.",
-        "warn"
-      );
-      return;
-    }
-    if (outcome === "temporarily_unavailable") {
-      notice(
-        elements["home-auth-alert"],
-        "HCN sign-in is temporarily unavailable. Try again in a moment.",
-        "warn"
-      );
-      return;
-    }
+    const message = authCallbackMessage(
+      outcome,
+      hasBrowserAuthority()
+    );
+    elements["home-auth-alert"].hidden = !message;
+    if (!message) return;
     notice(
       elements["home-auth-alert"],
-      "HCN could not verify that Google account. Choose the Google account tied to your active JobNimbus employee profile, or ask an HCN manager to check the email on that JobNimbus user.",
-      "bad"
+      message.text,
+      message.tone
     );
+  }
+
+  function authCallbackMessage(outcome, authenticated) {
+    if (!outcome || authenticated) return null;
+    if (outcome === "cancelled") {
+      return {
+        text: "Sign-in was canceled. Try again when you are ready.",
+        tone: "warn"
+      };
+    }
+    if (outcome === "access_denied") {
+      return {
+        text: "HCN could not sign you in. Choose the Google account tied to your active JobNimbus employee profile. If that is the right account, ask an HCN manager to check the email on your JobNimbus user.",
+        tone: "bad"
+      };
+    }
+    if (outcome === "invalid_request") {
+      return {
+        text: "That sign-in attempt expired or could not be verified. Start sign-in again.",
+        tone: "warn"
+      };
+    }
+    if (outcome === "provider_error") {
+      return {
+        text: "Google sign-in did not finish. Try again.",
+        tone: "warn"
+      };
+    }
+    if (outcome === "temporarily_unavailable") {
+      return {
+        text: "HCN sign-in is temporarily unavailable. Try again in a moment.",
+        tone: "warn"
+      };
+    }
+    return null;
   }
 
   function consumeGoogleCallbackOutcome() {
@@ -843,6 +865,7 @@
       renderSessionError(state.sessionError);
     }
 
+    renderAuthCallbackOutcome();
     state.loading = false;
     elements["retry-action"].disabled = false;
     renderOverallState();

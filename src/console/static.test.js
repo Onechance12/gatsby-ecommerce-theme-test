@@ -1,11 +1,66 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 import {
   HCN_CONSOLE_SECURITY_HEADERS,
   hcnConsoleAssetDescriptor,
   readHcnConsoleAsset
 } from "./static.js";
+
+function extractConsoleFunction(script, name) {
+  const start = script.indexOf(`  function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const next = script.indexOf("\n  function ", start + 1);
+  assert.notEqual(next, -1, `${name} must be followed by another function`);
+  return script.slice(start, next);
+}
+
+function evaluateAuthOutcome(functionSource, href) {
+  const replacements = [];
+  const context = {
+    AUTH_CALLBACK_OUTCOMES: new Set([
+      "access_denied",
+      "cancelled",
+      "invalid_request",
+      "provider_error",
+      "temporarily_unavailable"
+    ]),
+    URL,
+    window: {
+      location: { href },
+      history: {
+        replaceState(_state, _title, path) {
+          replacements.push(path);
+        }
+      }
+    },
+    result: null
+  };
+  runInNewContext(
+    `${functionSource}\nresult = consumeAuthCallbackOutcome();`,
+    context
+  );
+  return {
+    outcome: context.result,
+    replacements
+  };
+}
+
+function evaluateAuthMessage(functionSource, outcome, authenticated) {
+  const context = {
+    outcome,
+    authenticated,
+    result: null
+  };
+  runInNewContext(
+    `${functionSource}\nresult = authCallbackMessage(outcome, authenticated);`,
+    context
+  );
+  return context.result
+    ? JSON.parse(JSON.stringify(context.result))
+    : null;
+}
 
 test("console serves only its fixed application-shell allowlist", async () => {
   const expected = new Map([
@@ -107,7 +162,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v7";/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v8";/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   const browserAuthority = script.slice(
     script.indexOf("function hasBrowserAuthority()"),
@@ -211,6 +266,10 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(script, /AUTH_CALLBACK_OUTCOMES\.has\(outcomes\[0\]\)/);
   assert.match(script, /current\.searchParams\.delete\("auth"\)/);
   assert.match(script, /renderAuthCallbackOutcome\(\)/);
+  assert.match(script, /authCallbackMessage\(\s*outcome,\s*hasBrowserAuthority\(\)/);
+  assert.match(script, /if \(!outcome \|\| authenticated\) return null/);
+  assert.match(script, /That sign-in attempt expired or could not be verified/);
+  assert.match(script, /Google sign-in did not finish/);
   assert.match(script, /active JobNimbus employee profile/);
   assert.match(script, /const outcomes = current\.searchParams\.getAll\("google"\)/);
   assert.match(script, /GOOGLE_CALLBACK_OUTCOMES\.has\(outcomes\[0\]\)/);
@@ -259,6 +318,107 @@ test("Connections links each authenticated employee to safe, memory-only work ac
     script.indexOf("function hasActionPrepareAuthority()")
   );
   assert.match(actionAccess, /ACTION_READ_CAPABILITY/);
+});
+
+test("employee sign-in outcomes are consumed once without disturbing other URL state", async () => {
+  const asset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = asset.body.toString("utf8");
+  const consume = extractConsoleFunction(
+    script,
+    "consumeAuthCallbackOutcome"
+  );
+
+  assert.deepEqual(
+    evaluateAuthOutcome(
+      consume,
+      "https://hcn.example/hcn/?auth=cancelled&keep=1#connections"
+    ),
+    {
+      outcome: "cancelled",
+      replacements: ["/hcn/?keep=1#connections"]
+    }
+  );
+  assert.deepEqual(
+    evaluateAuthOutcome(
+      consume,
+      "https://hcn.example/hcn/?auth=cancelled&auth=cancelled&keep=1#overview"
+    ),
+    {
+      outcome: "",
+      replacements: ["/hcn/?keep=1#overview"]
+    }
+  );
+  assert.deepEqual(
+    evaluateAuthOutcome(
+      consume,
+      "https://hcn.example/hcn/?auth=unknown&keep=1"
+    ),
+    {
+      outcome: "",
+      replacements: ["/hcn/?keep=1"]
+    }
+  );
+  assert.deepEqual(
+    evaluateAuthOutcome(
+      consume,
+      "https://hcn.example/hcn/?auth=access_denied&google=connected&keep=1#connections"
+    ),
+    {
+      outcome: "access_denied",
+      replacements: ["/hcn/?google=connected&keep=1#connections"]
+    }
+  );
+  assert.deepEqual(
+    evaluateAuthOutcome(
+      consume,
+      "https://hcn.example/hcn/?google=connected#connections"
+    ),
+    {
+      outcome: "",
+      replacements: []
+    }
+  );
+});
+
+test("employee sign-in guidance is accurate and suppressed for valid sessions", async () => {
+  const asset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = asset.body.toString("utf8");
+  const message = extractConsoleFunction(
+    script,
+    "authCallbackMessage"
+  );
+
+  assert.equal(
+    evaluateAuthMessage(message, "access_denied", true),
+    null
+  );
+  assert.deepEqual(
+    evaluateAuthMessage(message, "cancelled", false),
+    {
+      text: "Sign-in was canceled. Try again when you are ready.",
+      tone: "warn"
+    }
+  );
+  assert.match(
+    evaluateAuthMessage(message, "access_denied", false).text,
+    /active JobNimbus employee profile/
+  );
+  assert.match(
+    evaluateAuthMessage(message, "invalid_request", false).text,
+    /expired or could not be verified/
+  );
+  assert.match(
+    evaluateAuthMessage(message, "provider_error", false).text,
+    /did not finish/
+  );
+  assert.match(
+    evaluateAuthMessage(message, "temporarily_unavailable", false).text,
+    /temporarily unavailable/
+  );
+  assert.equal(
+    evaluateAuthMessage(message, "unknown", false),
+    null
+  );
 });
 
 test("employee home stays simple while the 10 by 3 sweep remains capability-gated", async () => {

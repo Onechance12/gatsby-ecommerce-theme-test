@@ -2414,6 +2414,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/tokeninfo") {
       const accessToken = url.searchParams.get("access_token");
       const acceptedTokens = [
+        "legacy-google-access-token",
         "hcn-google-access-token",
         "hcn-google-connector-access-token",
         "hcn-google-connector-refreshed-access-token",
@@ -2424,7 +2425,9 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       assert.equal(acceptedTokens.includes(accessToken), true);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        audience: "hcn-employee-connector-client",
+        audience: accessToken === "legacy-google-access-token"
+          ? "hcn-google-client"
+          : "hcn-employee-connector-client",
         expires_in: 3600,
         verified_email: true,
         scope: accessToken.includes("connector")
@@ -2441,6 +2444,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         accessToken.startsWith("hcn-employee-");
       assert.equal(
         [
+          "legacy-google-access-token",
           "hcn-google-access-token",
           "hcn-google-connector-access-token",
           "hcn-google-connector-refreshed-access-token",
@@ -3301,13 +3305,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     {
       method: "POST",
       headers: {
-        authorization: "Bearer hcn-google-access-token",
+        authorization: "Bearer legacy-google-access-token",
         "content-type": "application/json"
       },
       body: JSON.stringify({ offset: 0, limit: 10 })
     }
   );
-  assert.equal(directGoogleBearerHcnResponse.status, 401);
+  assert.equal(directGoogleBearerHcnResponse.status, 403);
 
   const workCenterResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
@@ -5251,6 +5255,18 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
 });
 
 test("production startup rejects weak OAuth secrets and unreviewed Google endpoints", async () => {
+  await expectBridgeStartupFailure({
+    GOOGLE_CLIENT_ID: "reused-google-client",
+    HCN_GOOGLE_CLIENT_ID: "reused-google-client"
+  }, /HCN_GOOGLE_CLIENT_ID must identify a dedicated employee connector client/);
+
+  await expectBridgeStartupFailure({
+    GOOGLE_CLIENT_ID: "legacy-google-client",
+    HCN_GOOGLE_CLIENT_ID: "hcn-google-client",
+    GOOGLE_CLIENT_SECRET: "reused-google-client-secret",
+    HCN_GOOGLE_CLIENT_SECRET: "reused-google-client-secret"
+  }, /HCN_GOOGLE_CLIENT_SECRET must be different from GOOGLE_CLIENT_SECRET/);
+
   await expectBridgeStartupFailure({
     OAUTH_SESSION_SECRET: "weak",
     GOOGLE_TOKEN_URL: "",
