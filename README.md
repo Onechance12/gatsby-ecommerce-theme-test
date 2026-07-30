@@ -469,14 +469,19 @@ ranking after each bounded worker completes.
 Completeness is proven per eligible file. The bridge fully paginates both
 `primary.id=<file>` and `related.id=<file>` JobNimbus activity queries,
 validates that every page actually matches the exact field requested,
-revalidates each activity against the complete JobNimbus contact index, and
+revalidates each activity against the complete management-eligible file set, and
 deduplicates the two collections by activity identifier only when their
 provider records are consistent. It fails closed for incomplete pagination,
-wrong-field results, inconsistent duplicate provenance, or an activity linked
-to more than one indexed file. Files must be active insurance records assigned
-to exactly one of the three configured owners. Inactive, non-insurance,
-unconfigured-owner, and ambiguous-owner files are explicitly excluded. The
-browser receives opaque HCN references rather than provider identifiers.
+wrong-field results, or inconsistent duplicate provenance. A reference to an
+inactive, non-insurance, or unconfigured-owner contact does not make an
+otherwise exact eligible-file activity ambiguous. An activity linked to more
+than one management-eligible file is never assigned by inference: it is
+conservatively excluded from every affected file's gap calculation and makes
+the file and report explicitly partial. Files must be active insurance records
+assigned to exactly one of the three configured owners. Inactive,
+non-insurance, unconfigured-owner, and ambiguous-owner files are explicitly
+excluded. The browser receives opaque HCN references rather than provider
+identifiers.
 
 The response includes canonical `asOf`, `checkedAt`, and `validUntil` values.
 The server refuses to return an expired report. The browser rejects a response

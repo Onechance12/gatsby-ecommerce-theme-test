@@ -2548,8 +2548,19 @@ async function readHcnManagementSweep(input = {}) {
         total + Number(file.eventSummary?.unsupportedEventCount || 0),
       0
     );
+  const ambiguousActivityReferenceCount =
+    snapshot.data.files.reduce(
+      (total, file) =>
+        total
+        + Number(
+          file.eventSummary?.ambiguousReferenceEventCount || 0
+        ),
+      0
+    );
   const completenessStatus =
-    ambiguousOwnerCount > 0 || unsupportedActivityRecordCount > 0
+    ambiguousOwnerCount > 0
+    || unsupportedActivityRecordCount > 0
+    || ambiguousActivityReferenceCount > 0
       ? "partial"
       : "complete";
   const completenessDetails = [];
@@ -2563,6 +2574,13 @@ async function readHcnManagementSweep(input = {}) {
       `${unsupportedActivityRecordCount} JobNimbus activity record`
       + (unsupportedActivityRecordCount === 1 ? "" : "s")
       + " used an unsupported type or state and could not reset a gap"
+    );
+  }
+  if (ambiguousActivityReferenceCount > 0) {
+    completenessDetails.push(
+      `${ambiguousActivityReferenceCount} per-file JobNimbus activity reference`
+      + (ambiguousActivityReferenceCount === 1 ? "" : "s")
+      + " pointed to multiple eligible files and were conservatively excluded"
     );
   }
   const completenessSummary = completenessDetails.length
@@ -2583,7 +2601,8 @@ async function readHcnManagementSweep(input = {}) {
     criteria: sweep.criteria,
     summary: {
       ...sweep.summary,
-      unsupportedActivityRecordCount
+      unsupportedActivityRecordCount,
+      ambiguousActivityReferenceCount
     },
     sourceHealth: [
       {
@@ -2716,6 +2735,26 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
   const lastAt = item.gaps.operationalActivity.lastAt;
   const unsupportedEventCount =
     Number(display.eventSummary?.unsupportedEventCount || 0);
+  const ambiguousReferenceEventCount =
+    Number(
+      display.eventSummary?.ambiguousReferenceEventCount || 0
+    );
+  const evidenceIssues = [];
+  if (unsupportedEventCount > 0) {
+    evidenceIssues.push(
+      `${unsupportedEventCount} unsupported record`
+      + (unsupportedEventCount === 1 ? "" : "s")
+      + " did not reset this gap"
+    );
+  }
+  if (ambiguousReferenceEventCount > 0) {
+    evidenceIssues.push(
+      `${ambiguousReferenceEventCount} cross-file activity reference`
+      + (ambiguousReferenceEventCount === 1 ? " was" : "s were")
+      + " conservatively excluded"
+    );
+  }
+  const hasEvidenceIssues = evidenceIssues.length > 0;
   return {
     ...item,
     display: {
@@ -2745,19 +2784,17 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
     evidenceHealth: {
       ...item.evidenceHealth,
       status:
-        unsupportedEventCount > 0
+        hasEvidenceIssues
           ? "partial"
           : item.evidenceHealth.status,
       completeness:
-        unsupportedEventCount > 0
+        hasEvidenceIssues
           ? "partial"
           : item.evidenceHealth.completeness,
       summary:
-        unsupportedEventCount > 0
+        hasEvidenceIssues
           ? "All JobNimbus activity pages were read, but "
-            + `${unsupportedEventCount} unsupported record`
-            + (unsupportedEventCount === 1 ? "" : "s")
-            + " did not reset this gap; Gmail, Quo, and calendar were not evaluated."
+            + `${evidenceIssues.join("; ")}; Gmail, Quo, and calendar were not evaluated.`
           : "All JobNimbus activity pages were read; ranking uses only allowlisted activity types, and Gmail, Quo, and calendar were not evaluated."
     },
     eventSummary: display.eventSummary
@@ -10252,7 +10289,9 @@ async function loadHcnManagementJobNimbusSnapshot({
       contact
     ])
   );
-  const indexedContactIds = new Set(contactsById.keys());
+  const managementFileIds = new Set(
+    initial.data.files.map((file) => file.providerFileId)
+  );
   const fileEvidence = await mapWithBoundedConcurrency(
     initial.data.files,
     HCN_MANAGEMENT_READ_CONCURRENCY,
@@ -10274,20 +10313,26 @@ async function loadHcnManagementJobNimbusSnapshot({
           "One or more JobNimbus activity histories are incomplete."
         );
       }
+      const unambiguousRows = [];
+      let ambiguousReferenceEventCount = 0;
       for (const activity of result.rows) {
-        const indexedReferences =
+        const managementReferences =
           hcnManagementIndexedFileReferences(
             activity,
-            indexedContactIds
+            managementFileIds
           );
         if (
-          indexedReferences.length !== 1
-          || indexedReferences[0] !== file.providerFileId
+          !managementReferences.includes(file.providerFileId)
         ) {
           throw hcnManagementSourceUnavailable(
             "One or more JobNimbus activities have ambiguous file scope."
           );
         }
+        if (managementReferences.length > 1) {
+          ambiguousReferenceEventCount += 1;
+          continue;
+        }
+        unambiguousRows.push(activity);
       }
       const contact = contactsById.get(file.providerFileId);
       if (!contact) {
@@ -10298,7 +10343,7 @@ async function loadHcnManagementJobNimbusSnapshot({
       try {
         const mapped = mapManagementJobNimbusEnvelope({
           contacts: [contact],
-          activities: result.rows,
+          activities: unambiguousRows,
           tasks: [],
           contactsComplete: true,
           activitiesComplete: true,
@@ -10331,6 +10376,7 @@ async function loadHcnManagementJobNimbusSnapshot({
           eventSummary: {
             fetchedEventCount: result.rows.length,
             acceptedEventCount: accepted.length,
+            ambiguousReferenceEventCount,
             communicationActivityCount: mapped.data.events.filter(
               (event) =>
                 event.classification === "successful_communication"
@@ -10384,6 +10430,7 @@ async function loadHcnManagementJobNimbusSnapshot({
           || {
             fetchedEventCount: 0,
             acceptedEventCount: 0,
+            ambiguousReferenceEventCount: 0,
             communicationActivityCount: 0,
             operationalActivityCount: 0,
             noiseCount: 0,
