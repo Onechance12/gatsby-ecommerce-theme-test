@@ -447,6 +447,36 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.match(consoleHtml, /HCN Work Center/);
   assert.doesNotMatch(consoleHtml, /type=["']password["']/i);
 
+  for (const [pathname, contentType] of [
+    ["/hcn/?shell=v9", "text/html"],
+    ["/hcn/app.css?shell=v9", "text/css"],
+    ["/hcn/app.js?shell=v9", "text/javascript"],
+    [
+      "/hcn/manifest.webmanifest?shell=v9",
+      "application/manifest+json"
+    ],
+    ["/hcn/sw.js?shell=v9", "text/javascript"]
+  ]) {
+    const response = await fetch(
+      `http://127.0.0.1:${port}${pathname}`
+    );
+    assert.equal(response.status, 200);
+    assert.match(
+      response.headers.get("content-type"),
+      new RegExp(`^${contentType.replace("+", "\\+")}`)
+    );
+    assert.equal(
+      response.headers.get("cache-control"),
+      "no-store, max-age=0"
+    );
+    if (pathname.startsWith("/hcn/sw.js")) {
+      assert.equal(
+        response.headers.get("service-worker-allowed"),
+        "/hcn/"
+      );
+    }
+  }
+
   const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
   assert.equal(healthResponse.status, 200);
   const health = await healthResponse.json();

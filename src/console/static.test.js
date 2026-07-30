@@ -177,6 +177,11 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const worker = workerAsset.body.toString("utf8");
 
   assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v9";/);
+  assert.match(worker, /"\/hcn\/\?shell=v9"/);
+  assert.match(worker, /"\/hcn\/app\.css\?shell=v9"/);
+  assert.match(worker, /"\/hcn\/app\.js\?shell=v9"/);
+  assert.match(worker, /"\/hcn\/manifest\.webmanifest\?shell=v9"/);
+  assert.match(worker, /const SHELL_PATH_SET = new Set\(SHELL_PATHNAMES\)/);
   assert.match(script, /\/hcn\/sw\.js\?shell=v9/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   const browserAuthority = script.slice(
