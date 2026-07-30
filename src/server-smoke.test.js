@@ -403,6 +403,8 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       ALLOW_GMAIL_SEND: "false",
       ALLOW_QUO_SEND: "false",
       BRIDGE_ALLOW_WRITES: "false",
+      HCN_ACTION_EXECUTION_ENABLED: "false",
+      HCN_SERVICE_NAME: "hcn-operations-platform",
       RENDER_GIT_COMMIT: PHASE_ZERO_BUILD_SHA,
       PLATFORM_FIXTURE_SECRET
     },
@@ -410,6 +412,18 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, port);
+
+  const rootRedirectResponse = await fetch(`http://127.0.0.1:${port}/`, {
+    redirect: "manual"
+  });
+  assert.equal(rootRedirectResponse.status, 308);
+  assert.equal(rootRedirectResponse.headers.get("location"), "/hcn/");
+  assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
+  assert.match(
+    rootRedirectResponse.headers.get("content-security-policy"),
+    /default-src 'self'/
+  );
+  assert.equal(rootRedirectResponse.headers.get("set-cookie"), null);
 
   const consoleRedirectResponse = await fetch(`http://127.0.0.1:${port}/hcn`, {
     redirect: "manual"
@@ -505,10 +519,31 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     health.platform.boundaries.legacyClientMemory,
     "quarantined_unreachable"
   );
-  assert.equal(health.platform.runtime.configurationDrift.status, "aligned");
+  assert.equal(health.platform.runtime.configurationDrift.status, "detected");
   assert.deepEqual(
     health.platform.runtime.configurationDrift.differences,
-    []
+    [
+      {
+        key: "ALLOW_GMAIL_SEND",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "ALLOW_QUO_SEND",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "BRIDGE_ALLOW_WRITES",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "HCN_ACTION_EXECUTION_ENABLED",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      }
+    ]
   );
   assert.equal(JSON.stringify(health.platform).includes(PLATFORM_FIXTURE_SECRET), false);
 
@@ -521,7 +556,16 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(platformMeta.boundaries.chanceBrain, "disconnected_no_route");
   assert.equal(platformMeta.boundaries.hcnChanceBrainDataFlow, "none");
   assert.equal(platformMeta.boundaries.jobrolo, "disconnected");
-  assert.equal(platformMeta.runtime.configurationDrift.status, "aligned");
+  assert.equal(platformMeta.runtime.configurationDrift.status, "detected");
+  assert.deepEqual(
+    platformMeta.runtime.configurationDrift.differences.map((item) => item.key),
+    [
+      "ALLOW_GMAIL_SEND",
+      "ALLOW_QUO_SEND",
+      "BRIDGE_ALLOW_WRITES",
+      "HCN_ACTION_EXECUTION_ENABLED"
+    ]
+  );
   assert.equal(platformMeta.runtime.gates.hcnActionExecution, "disabled");
   const serializedPlatformMeta = JSON.stringify(platformMeta);
   assert.equal(serializedPlatformMeta.includes(PLATFORM_FIXTURE_SECRET), false);
@@ -533,6 +577,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
   assert.equal(schemaResponse.status, 200);
   const schema = await schemaResponse.json();
+  assert.equal(schema.info.title, "HCN Operations Platform API");
+  assert.equal(
+    schema.info.description,
+    "Authenticated HCN operations API for fresh JobNimbus, Gmail, Quo, calendar, and document evidence. Isolated Thresher AI operational state never authorizes external actions; consequential work remains approval-gated."
+  );
   assert.equal(schema.paths["/api/v1/meta"].get.operationId, "readHcnPlatformMetadata");
   assert.equal(schema.paths["/api/v1/session"].get.operationId, "readHcnPlatformSession");
   assert.equal(
@@ -601,6 +650,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
+  assert.equal(chatgptSchema.info.title, "HCN Thresher Operations Assistant");
+  assert.match(chatgptSchema.info.description, /HCN Operations Platform/);
+  assert.match(chatgptSchema.info.description, /isolated operational state/);
+  assert.match(chatgptSchema.info.description, /approval-gated/);
   assert.deepEqual(chatgptSchema.security, [{ googleOAuth: [] }]);
   assert.equal(chatgptSchema.components.securitySchemes.googleOAuth.type, "oauth2");
   assert.equal(

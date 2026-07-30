@@ -732,7 +732,11 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/hcn/auth/login") {
       return hcnConsoleLogin(req, res, url);
     }
-    if (HCN_CONSOLE_ENABLED && req.method === "GET" && url.pathname === "/hcn") {
+    if (
+      HCN_CONSOLE_ENABLED &&
+      req.method === "GET" &&
+      (url.pathname === "/" || url.pathname === "/hcn")
+    ) {
       res.writeHead(308, {
         ...HCN_CONSOLE_SECURITY_HEADERS,
         location: "/hcn/"
@@ -4156,8 +4160,8 @@ function chatgptOpenapi() {
     ...OPENAPI,
     info: {
       ...OPENAPI.info,
-      title: "Chance JobNimbus Ops Assistant",
-      description: "Consolidated 30-operation workflow schema for role-aware HCN/Wave Custom GPTs. Employee identity comes from approved Google OAuth or the temporary Chance bridge-token fallback. All external writes and calls remain exact and approval-gated."
+      title: "HCN Thresher Operations Assistant",
+      description: "Curated, role-aware workflow schema for the HCN Operations Platform. Employee identity comes from approved Google OAuth or the temporary HCN bridge-token fallback. Thresher AI uses isolated operational state, and every external write or call remains exact and approval-gated."
     },
     servers: [{ url: PUBLIC_BASE_URL }],
     security: [{ googleOAuth: [] }],
@@ -14544,9 +14548,12 @@ const OPENAPI = {
   openapi: "3.1.0",
   info: {
     title: SERVICE_NAME === "hcn-operations-platform"
-      ? "HCN Operations Platform"
+      ? "HCN Operations Platform API"
       : "JobNimbus ChatGPT Bridge",
-    version: "0.1.0"
+    version: "0.1.0",
+    description: SERVICE_NAME === "hcn-operations-platform"
+      ? "Authenticated HCN operations API for fresh JobNimbus, Gmail, Quo, calendar, and document evidence. Isolated Thresher AI operational state never authorizes external actions; consequential work remains approval-gated."
+      : "Authenticated compatibility API for JobNimbus operations."
   },
   servers: [{ url: PUBLIC_BASE_URL }],
   security: [{ bearerAuth: [] }],

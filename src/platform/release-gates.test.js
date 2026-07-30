@@ -85,6 +85,19 @@ test("release gate parsing is exact and fails closed", () => {
   assert.equal(Object.isFrozen(gates), true);
 });
 
+test("missing runtime gate values stay disabled even when the reviewed production profile enables them", () => {
+  assert.deepEqual(readReleaseGates({}), {
+    ALLOW_CARRIER_FOLLOWUP_CALLS: false,
+    ALLOW_CLIENT_COORDINATOR_CALLS: false,
+    ALLOW_GMAIL_SEND: false,
+    ALLOW_QUO_SEND: false,
+    ALLOW_RETELL_CALLS: false,
+    ALLOW_VOICE_CALLS: false,
+    BRIDGE_ALLOW_WRITES: false,
+    HCN_ACTION_EXECUTION_ENABLED: false
+  });
+});
+
 test("release gate reader ignores arbitrary environment secrets", () => {
   const secretMarker = "must-not-leak";
   const accessedKeys = [];

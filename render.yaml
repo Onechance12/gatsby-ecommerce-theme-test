@@ -20,16 +20,17 @@ services:
       - key: JOBNIMBUS_API_KEY
         sync: false
 
-      # Every external effect starts fail-closed. Exact-plan approval remains
-      # mandatory if a gate is enabled in a later controlled rollout.
+      # The core action plane is live only behind exact-plan approval,
+      # unchanged digests, short-lived single-use challenges, fresh file
+      # revalidation, and durable receipts. Call paths remain disabled.
       - key: BRIDGE_ALLOW_WRITES
-        value: "false"
+        value: "true"
       - key: HCN_ACTION_EXECUTION_ENABLED
-        value: "false"
+        value: "true"
       - key: ALLOW_GMAIL_SEND
-        value: "false"
+        value: "true"
       - key: ALLOW_QUO_SEND
-        value: "false"
+        value: "true"
       - key: ALLOW_VOICE_CALLS
         value: "false"
       - key: ALLOW_RETELL_CALLS

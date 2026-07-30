@@ -71,10 +71,8 @@ test("public metadata proves the runtime without exposing environment contents",
     meta.runtime.configurationDrift.differences.map((item) => item.key),
     [
       "ALLOW_CARRIER_FOLLOWUP_CALLS",
-      "ALLOW_GMAIL_SEND",
-      "ALLOW_QUO_SEND",
       "ALLOW_RETELL_CALLS",
-      "BRIDGE_ALLOW_WRITES"
+      "HCN_ACTION_EXECUTION_ENABLED"
     ]
   );
   assert.equal(JSON.stringify(meta).includes(secret), false);

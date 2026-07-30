@@ -313,14 +313,19 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
       runtime: "enabled"
     },
     {
+      key: "ALLOW_GMAIL_SEND",
+      checkedIn: "enabled",
+      runtime: "disabled"
+    },
+    {
       key: "ALLOW_RETELL_CALLS",
       checkedIn: "disabled",
       runtime: "enabled"
     },
     {
-      key: "BRIDGE_ALLOW_WRITES",
-      checkedIn: "disabled",
-      runtime: "enabled"
+      key: "HCN_ACTION_EXECUTION_ENABLED",
+      checkedIn: "enabled",
+      runtime: "disabled"
     }
   ]);
   assert.deepEqual(status.configurationDrift.unknown, ["ALLOW_QUO_SEND"]);
