@@ -313,6 +313,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "GET /hcn/auth/session",
     "POST /hcn/auth/logout",
     "POST /hcn/api/v1/work-center",
+    "POST /hcn/api/v1/management-sweep",
     "POST /hcn/api/v1/file-review",
     "POST /hcn/api/v1/action-plans/prepare",
     "POST /hcn/api/v1/action-plans/list",
@@ -352,9 +353,10 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-receipts/detail",
     "POST /hcn/api/v1/action-receipts/list",
     "POST /hcn/api/v1/file-review",
+    "POST /hcn/api/v1/management-sweep",
     "POST /hcn/api/v1/work-center"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 12);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 13);
 
   for (const role of [
     "administrator",

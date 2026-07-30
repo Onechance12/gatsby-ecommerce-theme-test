@@ -2074,8 +2074,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const origin = `http://127.0.0.1:${bridgePort}`;
   const providerRequests = [];
   const hcnProviderRequests = [];
+  const hcnManagementActivityFilters = [];
   const jobNimbusMutationRequests = [];
   const chanceOwnerId = "fixture-chance-owner";
+  const otherOwnerId = "fixture-other-owner";
+  const thirdOwnerId = "fixture-third-owner";
   const exactFileId = "jn-fixture-active";
   const activeContact = {
     jnid: exactFileId,
@@ -2086,6 +2089,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     status_name: "Claim Filed",
     stage_name: "Carrier Review",
     is_active: true,
+    date_created: "2026-07-20T15:00:00.000Z",
     date_updated: "2026-07-27T15:00:00.000Z",
     next_appointment_at: "2026-07-29T14:00:00.000Z",
     email: "active.homeowner@example.test",
@@ -2116,11 +2120,22 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     jnid: "jn-fixture-other-owner",
     number: "HCN-1003",
     display_name: "Fixture Other Owner",
-    owners: [{ id: "fixture-other-owner" }],
+    owners: [{ id: otherOwnerId }],
     email: "other.owner@example.test",
     mobile_phone: "2145551214",
     "Claim #": "HCN-CLAIM-1003",
     "Policy #": "HCN-POLICY-1003"
+  };
+  const thirdOwnerContact = {
+    ...activeContact,
+    jnid: "jn-fixture-third-owner",
+    number: "HCN-1005",
+    display_name: "Fixture Third Owner",
+    owners: [{ id: thirdOwnerId }],
+    email: "third.owner@example.test",
+    mobile_phone: "2145551216",
+    "Claim #": "HCN-CLAIM-1005",
+    "Policy #": "HCN-POLICY-1005"
   };
   const nonInsuranceContact = {
     ...activeContact,
@@ -2133,13 +2148,29 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "Claim #": "HCN-CLAIM-1004",
     "Policy #": "HCN-POLICY-1004"
   };
+  const unconfiguredOwnerContact = {
+    ...activeContact,
+    jnid: "jn-fixture-unconfigured-owner",
+    number: "HCN-1007",
+    display_name: "Fixture Unconfigured Owner",
+    owners: [{ id: "fixture-unconfigured-owner" }],
+    email: "unconfigured.owner@example.test",
+    mobile_phone: "2145551218",
+    "Claim #": "HCN-CLAIM-1007",
+    "Policy #": "HCN-POLICY-1007"
+  };
   const allContacts = [
     activeContact,
     inactiveChanceContact,
     otherOwnerContact,
-    nonInsuranceContact
+    thirdOwnerContact,
+    nonInsuranceContact,
+    unconfiguredOwnerContact
   ];
   let serveUnknownContactsWrapper = false;
+  let ambiguousManagementReferenceId = "";
+  let managementActivityOverride = null;
+  let serveWrongManagementReferenceField = false;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-console-memory-canary-"));
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   const legacyCanaryPath = path.join(
@@ -2246,14 +2277,58 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/activities" && req.method === "GET") {
       assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      const filter = JSON.parse(url.searchParams.get("filter") || "{}");
+      const term = filter?.must?.[0]?.term || {};
+      const referenceField = Object.keys(term)[0] || "related.id";
+      const referencedFileId = String(
+        term[referenceField] || exactFileId
+      );
+      hcnManagementActivityFilters.push({
+        referenceField,
+        referencedFileId
+      });
+      const activityNumber = new Map([
+        [exactFileId, "1"],
+        [otherOwnerContact.jnid, "2"],
+        [thirdOwnerContact.jnid, "3"]
+      ]).get(referencedFileId) || "unknown";
       res.writeHead(200, { "content-type": "application/json" });
+      const activityOverride =
+        referencedFileId === exactFileId && managementActivityOverride
+          ? managementActivityOverride
+          : {};
       res.end(JSON.stringify({
         activities: [{
-          jnid: "jn-activity-1",
-          related: { id: exactFileId },
-          record_type_name: "Note",
-          status_name: "Recorded",
-          date_created: "2026-07-27T14:00:00.000Z",
+          jnid: `jn-activity-${activityNumber}`,
+          primary: {
+            id:
+              serveWrongManagementReferenceField
+              && referenceField === "primary.id"
+              && referencedFileId === exactFileId
+                ? nonInsuranceContact.jnid
+                : referencedFileId
+          },
+          related:
+            ambiguousManagementReferenceId
+            && referencedFileId === exactFileId
+              ? [
+                  { id: referencedFileId },
+                  { id: ambiguousManagementReferenceId }
+                ]
+              : { id: referencedFileId },
+          record_type_name:
+            activityOverride.record_type_name || "Note",
+          status_name:
+            activityOverride.status_name || "Recorded",
+          date_created:
+            activityOverride.date_created
+            || (
+              activityNumber === "1"
+                ? "2026-07-27T14:00:00.000Z"
+                : activityNumber === "2"
+                  ? "2026-07-26T14:00:00.000Z"
+                  : "2026-07-25T14:00:00.000Z"
+            ),
           actor_role: "adjuster",
           note: "Fresh synthetic carrier activity"
         }]
@@ -2422,6 +2497,21 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       CHANCE_GOOGLE_EMAIL: "chance@wavepa.com",
       CHANCE_GOOGLE_SUBJECT: "hcn-google-subject",
       CHANCE_JOBNIMBUS_OWNER_ID: chanceOwnerId,
+      HCN_MANAGEMENT_ADJUSTERS_JSON: JSON.stringify([
+        {
+          ownerId: chanceOwnerId,
+          displayName: "Chance Fixture"
+        },
+        {
+          ownerId: otherOwnerId,
+          displayName: "Second Fixture Adjuster"
+        },
+        {
+          ownerId: thirdOwnerId,
+          displayName: "Third Fixture Adjuster"
+        }
+      ]),
+      HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET: "7",
       OAUTH_SESSION_SECRET: "hcn-session-sealing-secret-for-tests",
       GPT_OAUTH_CLIENT_SECRET: "",
       WAVE_AUTH_USERS_JSON: JSON.stringify([{
@@ -2455,6 +2545,25 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
+
+  const managementHealthResponse = await fetch(`${origin}/health`);
+  assert.equal(managementHealthResponse.status, 200);
+  const managementHealth = await managementHealthResponse.json();
+  assert.deepEqual(managementHealth.hcnConsole.managementSweep, {
+    configured: true,
+    ready: true,
+    configuredAdjusterCount: 3,
+    rankingMode: "jobnimbus_activity_only",
+    companyCommunicationCoverage: "not_evaluated"
+  });
+  assert.equal(
+    managementHealth.hcnConsole.authorizedSurface,
+    "chance_management_and_assigned_fresh_read_only"
+  );
+  assert.doesNotMatch(
+    JSON.stringify(managementHealth),
+    /fixture-(?:chance|other|third)-owner/
+  );
 
   const loginResponse = await fetch(
     `${origin}/hcn/auth/login?returnTo=${encodeURIComponent("/hcn")}`,
@@ -2527,6 +2636,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(platformSession.identity.type, "hcn_browser_session");
   assert.equal(platformSession.identity.role, "chance");
   assert.equal(platformSession.identity.jobNimbusScope, "assigned");
+  assert.equal(
+    platformSession.runtime.connectors.managementSweep,
+    "configured"
+  );
   assert.deepEqual(platformSession.authorizedCapabilities, [
     "hcn.action_plans.execute",
     "hcn.action_plans.invalidate",
@@ -2534,6 +2647,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
     "hcn.file.review",
+    "hcn.management_sweep.read",
     "hcn.work_center.read",
     "platform.session.read"
   ]);
@@ -2569,6 +2683,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     fullOpenApi.paths["/hcn/api/v1/file-review"].post.operationId,
     "readHcnExactFile"
   );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/management-sweep"].post.operationId,
+    "readHcnManagementSweep"
+  );
   const hcnActionOpenApiPaths = [
     "/hcn/api/v1/action-plans/prepare",
     "/hcn/api/v1/action-plans/list",
@@ -2592,6 +2710,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const chatGptOpenApi = await chatGptOpenApiResponse.json();
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/work-center"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/file-review"], undefined);
+  assert.equal(chatGptOpenApi.paths["/hcn/api/v1/management-sweep"], undefined);
   for (const actionPath of hcnActionOpenApiPaths) {
     assert.equal(chatGptOpenApi.paths[actionPath], undefined);
   }
@@ -2792,6 +2911,276 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     ).length,
     1
   );
+
+  const managementRequestsBefore = hcnProviderRequests.length;
+  hcnManagementActivityFilters.length = 0;
+  const managementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  assert.equal(managementSweepResponse.status, 200);
+  assert.equal(
+    managementSweepResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const managementSweep = await managementSweepResponse.json();
+  assert.equal(
+    managementSweep.schema,
+    "hcn.console.management-sweep.v1"
+  );
+  assert.equal(managementSweep.ephemeral, true);
+  assert.equal(managementSweep.cachePolicy, "no_store");
+  assert.equal(
+    Date.parse(managementSweep.asOf)
+      <= Date.parse(managementSweep.checkedAt),
+    true
+  );
+  assert.equal(
+    Date.parse(managementSweep.checkedAt)
+      < Date.parse(managementSweep.validUntil),
+    true
+  );
+  assert.equal(managementSweep.criteria.rankingMode, "activity_only");
+  assert.equal(managementSweep.adjusters.length, 3);
+  assert.deepEqual(
+    managementSweep.adjusters.map((adjuster) => adjuster.name),
+    [
+      "Chance Fixture",
+      "Second Fixture Adjuster",
+      "Third Fixture Adjuster"
+    ]
+  );
+  assert.deepEqual(
+    managementSweep.adjusters.map((adjuster) => adjuster.eligibleCount),
+    [1, 1, 1]
+  );
+  assert.deepEqual(
+    managementSweep.adjusters.map((adjuster) => adjuster.items.length),
+    [1, 1, 1]
+  );
+  assert.equal(managementSweep.companyWorst.length, 3);
+  assert.deepEqual(
+    managementSweep.adjusters.flatMap(
+      (adjuster) => adjuster.items.map((item) => item.eventSummary)
+    ),
+    Array.from({ length: 3 }, () => ({
+      fetchedEventCount: 1,
+      acceptedEventCount: 1,
+      communicationActivityCount: 0,
+      operationalActivityCount: 1,
+      noiseCount: 0,
+      unsupportedEventCount: 0,
+      ignoredUnfreshEventCount: 0
+    }))
+  );
+  assert.equal(managementSweep.completeness.status, "complete");
+  assert.deepEqual(
+    managementSweep.sourceHealth.map((source) => [
+      source.key,
+      source.status
+    ]),
+    [
+      ["jobnimbus", "complete"],
+      ["gmail", "not_evaluated"],
+      ["quo", "not_evaluated"],
+      ["google_calendar", "not_evaluated"]
+    ]
+  );
+  assert.equal(
+    managementSweep.adjusters.every(
+      (adjuster) =>
+        /^adjuster_[a-f0-9]{32}$/.test(adjuster.adjusterRef)
+        && adjuster.items.every(
+          (item) => /^subject_[a-f0-9]{32}$/.test(item.fileRef)
+        )
+    ),
+    true
+  );
+  const serializedManagementSweep = JSON.stringify(managementSweep);
+  for (const forbidden of [
+    exactFileId,
+    otherOwnerContact.jnid,
+    thirdOwnerContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    chanceOwnerId,
+    otherOwnerId,
+    thirdOwnerId,
+    "jn-activity-1",
+    "jn-activity-2",
+    "jn-activity-3",
+    "active.homeowner@example.test",
+    "2145551212",
+    "Fresh synthetic carrier activity"
+  ]) {
+    assert.equal(
+      serializedManagementSweep.includes(forbidden),
+      false,
+      `HCN management sweep leaked ${forbidden}`
+    );
+  }
+  assert.deepEqual(
+    hcnManagementActivityFilters
+      .map(({ referenceField }) => referenceField)
+      .sort(),
+    [
+      "primary.id",
+      "primary.id",
+      "primary.id",
+      "related.id",
+      "related.id",
+      "related.id"
+    ]
+  );
+  assert.equal(
+    new Set(
+      hcnManagementActivityFilters.map(
+        ({ referencedFileId }) => referencedFileId
+      )
+    ).size,
+    3
+  );
+  const managementProviderRequests = hcnProviderRequests.slice(
+    managementRequestsBefore
+  );
+  assert.equal(
+    managementProviderRequests.every(
+      (request) => request.startsWith("jobnimbus:")
+    ),
+    true
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  const invalidManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        limitPerAdjuster: 10,
+        unexpected: true
+      })
+    }
+  );
+  assert.equal(invalidManagementSweepResponse.status, 400);
+
+  serveWrongManagementReferenceField = true;
+  const wrongReferenceFieldResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  serveWrongManagementReferenceField = false;
+  assert.equal(wrongReferenceFieldResponse.status, 503);
+  assert.equal(
+    (await wrongReferenceFieldResponse.json()).error,
+    "One or more JobNimbus activity histories are unavailable."
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  for (const secondFileId of [
+    inactiveChanceContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    nonInsuranceContact.jnid
+  ]) {
+    ambiguousManagementReferenceId = secondFileId;
+    const ambiguousManagementSweepResponse = await fetch(
+      `${origin}/hcn/api/v1/management-sweep`,
+      {
+        method: "POST",
+        headers: hcnReadHeaders,
+        body: JSON.stringify({ limitPerAdjuster: 10 })
+      }
+    );
+    ambiguousManagementReferenceId = "";
+    assert.equal(ambiguousManagementSweepResponse.status, 503);
+    const ambiguousManagementSweepBody =
+      await ambiguousManagementSweepResponse.json();
+    assert.equal(
+      ambiguousManagementSweepBody.error,
+      "One or more JobNimbus activities have ambiguous file scope."
+    );
+    assert.doesNotMatch(
+      JSON.stringify(ambiguousManagementSweepBody),
+      /jn-fixture|fixture-(?:chance|other|third|unconfigured)-owner/
+    );
+    assert.equal(jobNimbusMutationRequests.length, 0);
+  }
+
+  managementActivityOverride = {
+    record_type_name: "Email",
+    status_name: "Draft",
+    date_created: "2026-07-29T10:00:00.000Z"
+  };
+  const unsupportedManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  managementActivityOverride = null;
+  assert.equal(unsupportedManagementSweepResponse.status, 200);
+  const unsupportedManagementSweep =
+    await unsupportedManagementSweepResponse.json();
+  assert.equal(unsupportedManagementSweep.completeness.status, "partial");
+  assert.equal(
+    unsupportedManagementSweep.sourceHealth[0].status,
+    "partial"
+  );
+  assert.equal(
+    unsupportedManagementSweep.summary.unsupportedActivityRecordCount,
+    1
+  );
+  const chanceManagementItem =
+    unsupportedManagementSweep.adjusters[0].items[0];
+  assert.equal(chanceManagementItem.eventSummary.fetchedEventCount, 1);
+  assert.equal(chanceManagementItem.eventSummary.acceptedEventCount, 0);
+  assert.equal(chanceManagementItem.eventSummary.unsupportedEventCount, 1);
+  assert.equal(chanceManagementItem.evidenceHealth.status, "partial");
+  assert.match(
+    chanceManagementItem.evidenceHealth.summary,
+    /unsupported record/
+  );
+  assert.equal(chanceManagementItem.gaps.operationalActivity.lastAt, null);
+  assert.equal(
+    chanceManagementItem.lastTouch.summary,
+    "No verified JobNimbus activity was found"
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  allContacts.push({
+    ...activeContact,
+    jnid: "jn-fixture-budget-extra",
+    number: "HCN-1006",
+    display_name: "Fixture Budget Extra",
+    email: "budget.extra@example.test",
+    mobile_phone: "2145551217",
+    "Claim #": "HCN-CLAIM-1006",
+    "Policy #": "HCN-POLICY-1006"
+  });
+  const budgetExceededResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  allContacts.pop();
+  assert.equal(budgetExceededResponse.status, 503);
+  assert.equal(
+    (await budgetExceededResponse.json()).error,
+    "The JobNimbus management provider-read budget was exceeded."
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
 
   const exactNote =
     "Andrea needs to reach out for the declaration page or policy.";

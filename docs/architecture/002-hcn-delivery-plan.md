@@ -83,6 +83,69 @@ Exit gate:
   the console API;
 - seeded legacy canaries remain byte-for-byte and timestamp unchanged.
 
+### Phase 2 management tranche — three-adjuster activity-gap sweep
+
+This tranche adds Richard's management view without broadening the Work
+Center's client-action scope. It is a Chance-only, read-only JobNimbus report,
+not a general employee report and not a company-wide communications archive.
+
+Deliverables:
+
+- `POST /hcn/api/v1/management-sweep`, protected by Chance's pinned HCN browser
+  session, exact-origin and CSRF checks, and
+  `hcn.management_sweep.read`;
+- an exact `HCN_MANAGEMENT_ADJUSTERS_JSON` allowlist containing three unique
+  JobNimbus owner identifiers and display names, configured outside Git;
+- a deterministic top-one-through-ten ranking per configured adjuster and a
+  company-wide ranking of active insurance files by verified JobNimbus activity
+  gap;
+- complete per-file pagination for both JobNimbus `primary.id` and
+  `related.id` activity references, exact requested-field validation,
+  full-contact-index scope validation, and provenance-consistent cross-query
+  deduplication;
+- one shared bounded provider-request budget across the contact index and all
+  per-file activity pages;
+- explicit user-triggered execution rather than an automatic sweep on page
+  load;
+- a canonical response freshness deadline that purges the in-memory browser
+  report when it expires;
+- explicit exclusion counts for inactive, non-insurance, unconfigured-owner,
+  and ambiguous-owner files;
+- explicit `not_evaluated` source health for Gmail, Quo, and Google Calendar
+  until those connectors can prove company-wide exact-file coverage;
+- opaque HCN file and evidence references, ephemeral `no-store` responses, and
+  no provider identifiers in the browser DTO.
+
+The ranking is activity-only. JobNimbus tasks, reminders, drafts, and
+system/automation activity are not touch evidence. The report does not inspect
+note-body meaning and must never be described as a verified successful-client-
+communication report. Only reviewed activity kind/state combinations reset a
+gap. Unsupported records are counted, excluded from ranking, and make the
+affected evidence and report visibly partial.
+
+Exit gate:
+
+- the configuration fails closed unless exactly three unique owners and three
+  unique display names are present and both JobNimbus and HCN opaque references
+  are ready;
+- every eligible file has complete, validated primary-and-related JobNimbus
+  activity reads, or the whole report fails closed;
+- the configured eligible-file and per-file activity bounds cannot be exceeded
+  silently;
+- owner ambiguity is visible as a partial report and an explicit exclusion;
+- unsupported activity semantics are visible as partial evidence rather than
+  being promoted to a verified touch;
+- no expired management report remains rendered in the browser;
+- Chance Brain, HCN Operations Brain client state, Jobrolo, legacy snapshots,
+  advisories, receipts, and all client persistence remain untouched;
+- the route has no send, write, call, upload, action-plan, approval, or
+  execution authority;
+- server syntax, focused management/config/provider/core tests, console static
+  tests, and the full `npm run check` suite pass;
+- production release remains separately approved and verifies the reviewed
+  SHA, live capability manifest, Chance-only route authorization, JobNimbus
+  readiness, and `no-store` behavior.
+
 ## Phase 3 — Approval control plane
 
 Deliverables:

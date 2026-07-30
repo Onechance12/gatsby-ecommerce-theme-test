@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-28.3";
+export const CAPABILITY_VERSION = "2026-07-29.1";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -22,6 +22,7 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("identity.read", "GET /auth/whoami"),
   capability("platform.session.read", "GET /api/v1/session"),
   capability("hcn.work_center.read", "POST /hcn/api/v1/work-center"),
+  capability("hcn.management_sweep.read", "POST /hcn/api/v1/management-sweep"),
   capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
   capability("hcn.action_plans.prepare", "POST /hcn/api/v1/action-plans/prepare"),
   capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/list"),
@@ -138,6 +139,8 @@ export function buildRuntimeStatus(runtime = {}) {
   const scheduling = safeObject(source.schedulingAvailability);
   const brain = safeObject(source.brain);
   const hcnActions = safeObject(source.hcnActions);
+  const hcnConsole = safeObject(source.hcnConsole);
+  const managementSweep = safeObject(hcnConsole.managementSweep);
 
   return {
     brain: {
@@ -158,6 +161,9 @@ export function buildRuntimeStatus(runtime = {}) {
       googleCalendar: configurationStatus(scheduling.googleCalendarConfigured),
       googleOAuth: configurationStatus(userOAuth.available),
       jobNimbus: configurationStatus(source.jobNimbusConfigured),
+      managementSweep: configurationStatus(
+        managementSweep.ready
+      ),
       quo: configurationStatus(source.quoConfigured),
       realtimeVoice: configurationStatus(voice.available)
     },

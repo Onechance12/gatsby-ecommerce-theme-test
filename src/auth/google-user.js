@@ -81,6 +81,7 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /hcn/auth/session",
   "POST /hcn/auth/logout",
   "POST /hcn/api/v1/work-center",
+  "POST /hcn/api/v1/management-sweep",
   "POST /hcn/api/v1/file-review",
   "POST /hcn/api/v1/action-plans/prepare",
   "POST /hcn/api/v1/action-plans/list",
@@ -93,6 +94,7 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
 
 export const HCN_BROWSER_CHANCE_ONLY_ROUTES = new Set([
   "POST /hcn/api/v1/work-center",
+  "POST /hcn/api/v1/management-sweep",
   "POST /hcn/api/v1/file-review",
   "POST /hcn/api/v1/action-plans/prepare",
   "POST /hcn/api/v1/action-plans/list",

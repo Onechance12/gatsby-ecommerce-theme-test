@@ -79,7 +79,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v5";/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v6";/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   assert.match(script, /identity\.role === "chance"/);
   assert.match(script, /hcn\.work_center\.read/);
@@ -104,6 +104,122 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.match(worker, /"\/hcn\/api\/"/);
   assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
   assert.doesNotMatch(worker, /work-center|file-review/);
+});
+
+test("Company Today centers the fresh read-only 10 by 3 management sweep", async () => {
+  const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(html, /id="overview" class="company-today-hero"/);
+  assert.match(html, /Richard’s 10 × 3 Sweep/);
+  assert.match(html, /id="management-sweep-refresh"/);
+  assert.match(html, /id="company-worst-list"/);
+  assert.match(html, /id="adjuster-sweep-list"/);
+  assert.match(html, /id="management-sweep-source-health"/);
+  assert.match(html, /id="system-health"/);
+  assert.match(html, /This first report uses JobNimbus activity only/);
+  assert.match(html, /On demand/);
+  assert.match(html, /longest JobNimbus-recorded activity gaps/);
+  assert.match(html, /Company-wide Gmail,[\s\S]*Quo,[\s\S]*calendar communication evidence is not available/);
+
+  assert.match(script, /managementSweep: "\/hcn\/api\/v1\/management-sweep"/);
+  assert.match(script, /const MANAGEMENT_SWEEP_CAPABILITY = "hcn\.management_sweep\.read"/);
+  assert.match(script, /connectors\)\.managementSweep/);
+  assert.match(script, /runtimeStatus !== "configured"/);
+  assert.match(script, /\{ limitPerAdjuster: 10 \}/);
+  assert.match(script, /"hcn\.console\.management-sweep\.v1"/);
+  assert.match(script, /value\.schemaVersion \|\| value\.schema/);
+  assert.match(script, /value\.cachePolicy !== "no_store"/);
+  assert.match(script, /function clearManagementSweepData\(message\)/);
+  assert.match(script, /state\.managementSweep = null/);
+  assert.match(script, /clearManagementSweepData\(message\);/);
+  assert.match(script, /elements\["management-sweep-refresh"\]\.disabled = true/);
+  assert.match(script, /No stale report is shown\./);
+  assert.match(script, /communication gaps remain unverified/);
+  assert.match(script, /"fetchedEventCount"/);
+  assert.match(script, /"unsupportedEventCount"/);
+  assert.match(script, /unsupported excluded/);
+  assert.match(script, /setText\(value, "N\/A"\)/);
+  const managementAccessSource = script.slice(
+    script.indexOf("function syncManagementSweepAccess()"),
+    script.indexOf("function renderManagementSweepLocked")
+  );
+  assert.doesNotMatch(managementAccessSource, /loadManagementSweep\(\)/);
+  assert.match(managementAccessSource, /Run the sweep when you want a fresh company ranking/);
+  assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
+
+  assert.match(worker, /"\/hcn\/api\/"/);
+  assert.doesNotMatch(worker, /management-sweep/);
+
+  const sweepShell = html.slice(
+    html.indexOf('id="management-sweep"'),
+    html.indexOf('id="work-center"')
+  );
+  assert.doesNotMatch(sweepShell, />\s*(?:Send|Export)\b/i);
+});
+
+test("management sweep responses expire in memory on their canonical freshness deadline", async () => {
+  const scriptAsset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = scriptAsset.body.toString("utf8");
+  const normalizer = script.slice(
+    script.indexOf("function normalizeManagementSweepResponse"),
+    script.indexOf("function normalizeSweepItem")
+  );
+  const loader = script.slice(
+    script.indexOf("async function loadManagementSweep"),
+    script.indexOf("function normalizeManagementSweepResponse")
+  );
+  const clearer = script.slice(
+    script.indexOf("function clearManagementSweepData"),
+    script.indexOf("async function loadManagementSweep")
+  );
+  const networkHandler = script.slice(
+    script.indexOf("function handleNetworkChange"),
+    script.indexOf("function readableTime")
+  );
+  const platformLoader = script.slice(
+    script.indexOf("async function loadPlatformState"),
+    script.indexOf("function setLoadingView")
+  );
+  const signOutHandler = script.slice(
+    script.indexOf("async function signOut"),
+    script.indexOf("function sessionCapabilities")
+  );
+
+  assert.match(script, /managementSweepExpiryTimer: null/);
+  assert.match(normalizer, /const checkedAt = boundedString\(value && value\.checkedAt, 40\)/);
+  assert.match(normalizer, /const validUntil = boundedString\(value && value\.validUntil, 40\)/);
+  assert.match(normalizer, /new Date\(milliseconds\)\.toISOString\(\) === value/);
+  assert.match(normalizer, /generatedAtMs > checkedAtMs/);
+  assert.match(normalizer, /checkedAtMs >= validUntilMs/);
+  assert.match(normalizer, /receivedAtMs >= validUntilMs/);
+  assert.match(normalizer, /checkedAt: checkedAt/);
+  assert.match(normalizer, /validUntil: validUntil/);
+
+  assert.match(loader, /const receivedAtMs = Date\.now\(\)/);
+  assert.match(loader, /normalizeManagementSweepResponse\(\s*response,\s*receivedAtMs\s*\)/);
+  assert.match(loader, /scheduleManagementSweepExpiry\(state\.managementSweep\)/);
+  assert.match(loader, /cancelManagementSweepExpiryTimer\(\)/);
+  assert.match(clearer, /cancelManagementSweepExpiryTimer\(\)/);
+  assert.match(networkHandler, /cancelManagementSweepExpiryTimer\(\)/);
+  assert.match(platformLoader, /cancelManagementSweepExpiryTimer\(\)/);
+  assert.match(signOutHandler, /cancelManagementSweepExpiryTimer\(\)/);
+  assert.match(script, /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/);
+  assert.match(
+    script,
+    /function handleVisibilityChange\(\) \{\s*enforceSessionDeadline\(\);\s*enforceManagementSweepExpiry\(\);/
+  );
+  assert.match(script, /window\.setTimeout\(\s*enforceManagementSweepExpiry/);
+  assert.match(script, /Date\.now\(\) >= validUntilMs/);
+  assert.match(script, /function expireManagementSweep\(\)/);
+  assert.match(script, /No expired company ranking is retained or shown\./);
 });
 
 test("approval composer exposes only the bounded HCN v1 JobNimbus actions", async () => {

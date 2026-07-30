@@ -4,8 +4,10 @@ Small authenticated bridge that lets a ChatGPT Custom GPT Action read and, when 
 It also supports Gmail search/thread/attachment review, verified PDF attachments,
 Quo messages/calls/transcripts, durable private action receipts, a unified
 Chance-only review/approval transaction, and the isolated HCN Operations v2
-contract foundation. Legacy per-client snapshots and operational advisories are
-read-only by default while the v2 operational state layer is built.
+contract foundation. The HCN console also includes a Chance-only, read-only
+three-adjuster JobNimbus activity-gap management sweep. Legacy per-client
+snapshots and operational advisories are read-only by default while the v2
+operational state layer is built.
 Scanned or visually complex JobNimbus documents can be returned as native
 ChatGPT conversation files so the GPT inspects the original pages instead of
 guessing from a filename or relying only on server-side OCR.
@@ -172,6 +174,7 @@ CHANCE_GOOGLE_SUBJECT=
 OAUTH_SESSION_SECRET=
 HCN_TENANT_ID=
 HCN_REFERENCE_KEY=
+HCN_MANAGEMENT_ADJUSTERS_JSON=
 WAVE_AUTH_USERS_JSON=
 ```
 
@@ -239,6 +242,129 @@ the session CSRF value, and `application/json`; request bodies are limited to
 reference that no longer resolves to one current, active, Chance-assigned file
 returns `404`. The routes do not call Chance Brain, Jobrolo, legacy client
 memory, model advisories, or any persistence layer.
+
+### Three-adjuster JobNimbus activity-gap sweep
+
+`POST /hcn/api/v1/management-sweep` returns a fresh, ephemeral report containing
+up to ten active insurance files with the longest verified JobNimbus activity
+gap for each of exactly three configured adjusters, plus a company-wide
+ranking. Its request body may contain only:
+
+```json
+{
+  "limitPerAdjuster": 10
+}
+```
+
+`limitPerAdjuster` defaults to `10` and must be an integer from `1` through
+`10`. The route requires Chance's pinned HCN browser session, the exact console
+origin, the session CSRF value, and the
+`hcn.management_sweep.read` capability. It is not exposed as a general employee
+or operator report. The console runs this high-cost report only after Chance
+presses **Run fresh 10 × 3 sweep**; it does not auto-run on page load.
+
+The report is ready only when JobNimbus, the HCN opaque-reference
+configuration, and `HCN_MANAGEMENT_ADJUSTERS_JSON` are all ready. The JSON
+allowlist must contain exactly three unique JobNimbus owner identifiers and
+three unique display names. Each entry must contain only `ownerId` and
+`displayName`. Configure the real owner identifiers only in the production
+secret manager; do not commit them. The console reads this combined readiness
+state and does not label the report ready from route authorization alone. This
+synthetic example shows the exact shape:
+
+```json
+[
+  {
+    "ownerId": "jn-owner-id-a",
+    "displayName": "Adjuster One"
+  },
+  {
+    "ownerId": "jn-owner-id-b",
+    "displayName": "Adjuster Two"
+  },
+  {
+    "ownerId": "jn-owner-id-c",
+    "displayName": "Adjuster Three"
+  }
+]
+```
+
+The bounded-read defaults are `HCN_MANAGEMENT_MAX_FILES=300`,
+`HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS=1000`, and
+`HCN_MANAGEMENT_READ_CONCURRENCY=4`, with a shared
+`HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET=750`. They are safety limits, not pagination
+shortcuts: exceeding a bound fails the report instead of returning an
+apparently complete ranking. Review and test any limit change as a release
+change.
+
+The ranking is deliberately an **activity-gap report**, not a complete
+communication-gap report. It uses JobNimbus only. Gmail, Quo, and Google
+Calendar are returned as `not_evaluated` because the current connections do
+not prove company-wide, exact-file coverage. JobNimbus tasks, reminders,
+drafts, and system/automation records do not reset the gap. The sweep also does
+not inspect or infer the meaning of a note body; it ranks the latest eligible
+JobNimbus activity metadata it can verify.
+
+Only reviewed activity kind/state combinations are allowlisted. Unknown,
+queued, draft, task-created, file-view, and other unsupported records never
+reset a gap. Their bounded aggregate counts remain visible, and any unsupported
+record makes the relevant file and the report explicitly partial even when all
+provider pages were fetched. Event counts describe the complete fetched
+history for that exact file; only the newest allowlisted event is retained for
+ranking after each bounded worker completes.
+
+Completeness is proven per eligible file. The bridge fully paginates both
+`primary.id=<file>` and `related.id=<file>` JobNimbus activity queries,
+validates that every page actually matches the exact field requested,
+revalidates each activity against the complete JobNimbus contact index, and
+deduplicates the two collections by activity identifier only when their
+provider records are consistent. It fails closed for incomplete pagination,
+wrong-field results, inconsistent duplicate provenance, or an activity linked
+to more than one indexed file. Files must be active insurance records assigned
+to exactly one of the three configured owners. Inactive, non-insurance,
+unconfigured-owner, and ambiguous-owner files are explicitly excluded. The
+browser receives opaque HCN references rather than provider identifiers.
+
+The response includes canonical `asOf`, `checkedAt`, and `validUntil` values.
+The server refuses to return an expired report. The browser rejects a response
+that is already expired and purges the in-memory report at `validUntil`, on
+logout, offline transition, session recheck, or visibility-time expiry check.
+
+This route is read-only and `no-store`. It does not read or write Chance Brain,
+HCN Operations Brain client state, Jobrolo, legacy snapshots, advisories,
+receipts, or any client persistence. It cannot prepare or execute an action,
+send an email or text, place a call, upload a file, create a note or task, or
+change JobNimbus. Any future management-report delivery or file action requires
+its own reviewed approval-gated contract; this read route must not be expanded
+into one.
+
+Focused local checks for this feature are:
+
+```bash
+node --check src/server.js
+node --test src/hcn-console/management-config.test.js
+node --test src/hcn-console/management-provider.test.js
+node --test src/hcn-ops/management-sweep/core.test.js
+node --test src/console/static.test.js
+npm run check
+```
+
+Before a production release, run the repository readiness check from the HP
+workspace:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check-readiness.ps1
+```
+
+Review the complete diff and confirm the local branch is aligned with
+`origin/jobnimbus-bridge`. Push, merge, deployment, the Render
+`HCN_MANAGEMENT_ADJUSTERS_JSON` value, or any other Render environment change
+each requires specific action-time approval. After deployment, verify the
+attested build SHA, live capability manifest, Chance-only session
+authorization, connector health, `no-store` response behavior, and an exact
+three-adjuster synthetic or approved production smoke test. Never place the
+management allowlist's real owner identifiers in a test fixture, log,
+screenshot, chat, or repository.
 
 ## Fresh Review And Approval
 

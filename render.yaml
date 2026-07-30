@@ -146,6 +146,16 @@ services:
         value: "72"
       - key: CHANCE_JOBNIMBUS_OWNER_ID
         value: fc95a213f70e4c9daddc5fa366be9941
+      - key: HCN_MANAGEMENT_ADJUSTERS_JSON
+        sync: false
+      - key: HCN_MANAGEMENT_MAX_FILES
+        value: "300"
+      - key: HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS
+        value: "1000"
+      - key: HCN_MANAGEMENT_READ_CONCURRENCY
+        value: "4"
+      - key: HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET
+        value: "750"
       - key: CLAIM_CALL_STORE_PATH
         value: /var/data/bridge/claim-call-ledger.json
       - key: ACTION_BATCH_STORE_PATH

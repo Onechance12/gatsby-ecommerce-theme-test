@@ -10,9 +10,9 @@
     >
     <meta
       name="description"
-      content="Home Claim Network operational readiness console."
+      content="Home Claim Network company operations and controlled file-work console."
     >
-    <title>HCN Operations Console</title>
+    <title>HCN Company Today</title>
     <link rel="manifest" href="/hcn/manifest.webmanifest">
     <link rel="stylesheet" href="/hcn/app.css">
     <script src="/hcn/app.js" defer></script>
@@ -47,18 +47,18 @@
           <p class="nav-label">Today</p>
           <a class="nav-item is-active" href="#overview" aria-current="page">
             <span class="nav-glyph glyph-overview" aria-hidden="true"></span>
-            <span>Overview</span>
+            <span>Company Today</span>
+          </a>
+          <a class="nav-item" href="#management-sweep">
+            <span class="nav-glyph glyph-files" aria-hidden="true"></span>
+            <span>10 × 3 Sweep</span>
+            <small>On demand</small>
           </a>
 
           <p class="nav-label">Operations</p>
           <a class="nav-item" href="#work-center">
             <span class="nav-glyph glyph-work" aria-hidden="true"></span>
             <span>Work Center</span>
-            <small>Live</small>
-          </a>
-          <a class="nav-item" href="#work-center">
-            <span class="nav-glyph glyph-files" aria-hidden="true"></span>
-            <span>Files</span>
             <small>Live</small>
           </a>
           <a class="nav-item" href="#approvals">
@@ -71,22 +71,30 @@
             <span>Receipts</span>
             <small>Live</small>
           </a>
+
+          <p class="nav-label">Platform</p>
+          <a class="nav-item" href="#system-health">
+            <span class="nav-glyph glyph-health" aria-hidden="true"></span>
+            <span>System Health</span>
+          </a>
         </nav>
 
         <div class="sidebar-note">
           <span class="sidebar-note-mark" aria-hidden="true"></span>
-          <p><strong>Safe by design</strong></p>
-          <p>Fresh source checks. Exact approvals. Separate systems.</p>
+          <p><strong>Work from fresh evidence</strong></p>
+          <p>See the gap. Open the file. Approve the exact next move.</p>
         </div>
       </aside>
 
       <main id="main-content" class="main-content" tabindex="-1">
-        <section id="overview" class="readiness-hero" aria-labelledby="readiness-title">
-          <div class="hero-copy">
-            <p class="eyebrow">Operational readiness</p>
-            <h1 id="readiness-title">Know what’s ready before the work begins.</h1>
-            <p id="readiness-summary" class="hero-summary">
-              Checking the bridge, controls, and your working permissions.
+        <section id="overview" class="company-today-hero" aria-labelledby="company-today-title">
+          <div class="company-hero-copy">
+            <p class="eyebrow">Company Today</p>
+            <h1 id="company-today-title">See the files that need a decision.</h1>
+            <p class="hero-summary">
+              Richard’s 10 × 3 sweep ranks the longest verified JobNimbus activity
+              gaps for each adjuster. Every result shows the fresh JobNimbus evidence
+              behind the ranking and why the file needs attention.
             </p>
             <div class="hero-actions">
               <a
@@ -95,50 +103,152 @@
                 href="/hcn/auth/login?returnTo=%2Fhcn"
                 hidden
               >Sign in to HCN</a>
-              <button id="retry-action" class="button button-secondary" type="button">
-                Check again
+              <button
+                id="management-sweep-refresh"
+                class="button button-primary"
+                type="button"
+                hidden
+              >
+                Run fresh 10 × 3 sweep
               </button>
+              <a class="button button-secondary" href="#work-center">Work a file</a>
             </div>
-            <p id="load-message" class="load-message" role="status" aria-live="polite">
-              Establishing a fresh connection…
+            <p
+              id="management-sweep-hero-message"
+              class="load-message"
+              role="status"
+              aria-live="polite"
+            >
+              Verifying your session before loading company records.
             </p>
           </div>
 
-          <div class="readiness-panel" aria-label="Readiness summary">
-            <div class="readiness-emblem" aria-hidden="true">
-              <span class="emblem-ring"></span>
-              <span id="readiness-score" class="emblem-value">—</span>
+          <div class="company-hero-summary" aria-label="Management sweep summary">
+            <div class="company-hero-status">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span id="management-sweep-status">Waiting for sign-in</span>
             </div>
-            <div>
-              <p id="readiness-label" class="readiness-label">Checking systems</p>
-              <p class="readiness-detail">
-                Client records load only after fresh authorization.
-              </p>
+            <div class="company-metrics">
+              <div>
+                <span>Adjusters</span>
+                <strong id="management-sweep-adjuster-count">—</strong>
+              </div>
+              <div>
+                <span>Ranked files</span>
+                <strong id="management-sweep-file-count">—</strong>
+              </div>
+              <div>
+                <span>Evidence</span>
+                <strong id="management-sweep-completeness">JobNimbus only</strong>
+              </div>
             </div>
+            <p id="management-sweep-generated" class="company-hero-generated">
+              No client records are loaded yet.
+            </p>
           </div>
         </section>
 
-        <section class="metric-row" aria-label="Platform summary">
-          <article class="metric">
-            <span class="metric-kicker">Connectors</span>
-            <strong id="connector-metric">—</strong>
-            <span id="connector-metric-detail">Checking configuration</span>
-          </article>
-          <article class="metric">
-            <span class="metric-kicker">Effect gates</span>
-            <strong id="gate-metric">—</strong>
-            <span id="gate-metric-detail">Checking runtime</span>
-          </article>
-          <article class="metric">
-            <span class="metric-kicker">Authority</span>
-            <strong id="capability-metric">—</strong>
-            <span id="capability-metric-detail">Session not checked</span>
-          </article>
-          <article class="metric">
-            <span class="metric-kicker">Build proof</span>
-            <strong id="build-metric">—</strong>
-            <span id="build-metric-detail">Checking deployment</span>
-          </article>
+        <section
+          id="management-sweep"
+          class="management-sweep-section"
+          aria-labelledby="management-sweep-title"
+        >
+          <div class="operations-section-heading">
+            <div>
+              <p class="eyebrow">Management accountability</p>
+              <h2 id="management-sweep-title">Richard’s 10 × 3 Sweep</h2>
+              <p>
+                Ten files per adjuster with the longest verified JobNimbus activity
+                gap. Records explicitly typed as reminders, automation, or system
+                noise are excluded. Generic note meaning is not inferred, and
+                communication categories that JobNimbus cannot verify remain N/A.
+              </p>
+            </div>
+            <span
+              id="management-sweep-section-status"
+              class="card-status"
+              data-tone="neutral"
+            >
+              Sign in required
+            </span>
+          </div>
+
+          <div
+            id="management-sweep-alert"
+            class="operations-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
+          >
+            Company records stay unloaded until fresh operating authority is verified.
+          </div>
+          <div class="coverage-boundary" role="note">
+            <strong>Coverage boundary</strong>
+            <span>
+              This first report uses JobNimbus activity only. Company-wide Gmail,
+              Quo, and calendar communication evidence is not available here, so it
+              cannot prove that no off-platform communication occurred.
+            </span>
+          </div>
+          <div
+            id="management-sweep-source-health"
+            class="sweep-source-health"
+            aria-label="Management sweep source health"
+          ></div>
+
+          <div id="management-sweep-locked" class="operations-locked">
+            <span class="operations-lock-mark" aria-hidden="true"></span>
+            <div>
+              <strong>The company sweep is closed by default.</strong>
+              <p>Sign in with the authorized HCN session to request a fresh report.</p>
+            </div>
+          </div>
+
+          <div id="management-sweep-workspace" class="management-sweep-workspace" hidden>
+            <section class="company-worst-panel" aria-labelledby="company-worst-title">
+              <div class="workspace-panel-heading">
+                <div>
+                  <p class="eyebrow">Across the company</p>
+                  <h3 id="company-worst-title">Highest JobNimbus activity gaps</h3>
+                </div>
+                <span id="company-worst-count" class="queue-count">0</span>
+              </div>
+              <div
+                id="company-worst-list"
+                class="sweep-file-list"
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <p class="workspace-empty">Run a fresh sweep to see company priorities.</p>
+              </div>
+            </section>
+
+            <section class="adjuster-sweep-panel" aria-labelledby="adjuster-sweep-title">
+              <div class="workspace-panel-heading">
+                <div>
+                  <p class="eyebrow">Assigned accountability</p>
+                  <h3 id="adjuster-sweep-title">Ten per adjuster</h3>
+                </div>
+                <span class="queue-count">10 × 3</span>
+              </div>
+              <div
+                id="adjuster-sweep-list"
+                class="adjuster-sweep-list"
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <p class="workspace-empty">No management report has been loaded.</p>
+              </div>
+            </section>
+          </div>
+
+          <details id="management-sweep-exclusions" class="sweep-exclusions" hidden>
+            <summary>
+              Report boundaries and exclusions
+              <span id="management-sweep-exclusion-count">0</span>
+            </summary>
+            <div id="management-sweep-exclusion-list" class="exclusion-list"></div>
+          </details>
         </section>
 
         <section
@@ -731,7 +841,77 @@
           </div>
         </section>
 
-        <div class="content-grid">
+        <section
+          id="system-health"
+          class="system-health-section"
+          aria-labelledby="system-health-title"
+        >
+          <div class="section-heading system-health-heading">
+            <div>
+              <p class="eyebrow">Platform</p>
+              <h2 id="system-health-title">System Health</h2>
+            </div>
+            <p>
+              Connector, execution-gate, build, and authority details stay available
+              here without competing with today’s client work.
+            </p>
+          </div>
+
+          <div class="readiness-hero readiness-hero-compact" aria-labelledby="readiness-title">
+            <div class="hero-copy">
+              <p class="eyebrow">Operational readiness</p>
+              <h3 id="readiness-title">Verify the platform before taking action.</h3>
+              <p id="readiness-summary" class="hero-summary">
+                Checking the bridge, controls, and your working permissions.
+              </p>
+              <div class="hero-actions">
+                <button id="retry-action" class="button button-secondary" type="button">
+                  Check systems again
+                </button>
+              </div>
+              <p id="load-message" class="load-message" role="status" aria-live="polite">
+                Establishing a fresh connection…
+              </p>
+            </div>
+
+            <div class="readiness-panel" aria-label="Readiness summary">
+              <div class="readiness-emblem" aria-hidden="true">
+                <span class="emblem-ring"></span>
+                <span id="readiness-score" class="emblem-value">—</span>
+              </div>
+              <div>
+                <p id="readiness-label" class="readiness-label">Checking systems</p>
+                <p class="readiness-detail">
+                  Client records load only after fresh authorization.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="metric-row" aria-label="Platform summary">
+            <article class="metric">
+              <span class="metric-kicker">Connectors</span>
+              <strong id="connector-metric">—</strong>
+              <span id="connector-metric-detail">Checking configuration</span>
+            </article>
+            <article class="metric">
+              <span class="metric-kicker">Effect gates</span>
+              <strong id="gate-metric">—</strong>
+              <span id="gate-metric-detail">Checking runtime</span>
+            </article>
+            <article class="metric">
+              <span class="metric-kicker">Authority</span>
+              <strong id="capability-metric">—</strong>
+              <span id="capability-metric-detail">Session not checked</span>
+            </article>
+            <article class="metric">
+              <span class="metric-kicker">Build proof</span>
+              <strong id="build-metric">—</strong>
+              <span id="build-metric-detail">Checking deployment</span>
+            </article>
+          </div>
+
+          <div class="content-grid">
           <section class="console-card connectors-card" aria-labelledby="connectors-title">
             <div class="card-heading">
               <div>
@@ -814,41 +994,42 @@
               This authority card never requests or displays passwords, bearer tokens, or client records.
             </p>
           </section>
-        </div>
+          </div>
+        </section>
 
         <section class="next-section" aria-labelledby="next-title">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">Operating roadmap</p>
-              <h2 id="next-title">What is live and what comes next</h2>
+              <p class="eyebrow">One controlled workflow</p>
+              <h2 id="next-title">From attention gap to verified result</h2>
             </div>
-            <p>Fresh review, exact approvals, and durable receipt metadata now share one controlled workflow.</p>
+            <p>Find the neglected file, understand the evidence, approve the exact next move, and verify the outcome.</p>
           </div>
 
           <div class="next-grid">
             <article class="next-card">
               <span class="next-number">01</span>
-              <h3>Work Center</h3>
-              <p>One fresh, prioritized operating queue across approved sources.</p>
-              <span class="coming-label">Live · read only</span>
+              <h3>Surface the gap</h3>
+              <p>Run the management sweep to find the longest JobNimbus-recorded activity gaps.</p>
+              <span class="coming-label">Company Today</span>
             </article>
             <article class="next-card">
               <span class="next-number">02</span>
-              <h3>Files</h3>
-              <p>Resolve one exact client, then inspect source-backed file evidence.</p>
-              <span class="coming-label">Live · exact file</span>
+              <h3>Review one file</h3>
+              <p>Resolve the exact client and inspect fresh source-backed evidence.</p>
+              <span class="coming-label">Work Center</span>
             </article>
             <article class="next-card">
               <span class="next-number">03</span>
-              <h3>Approvals</h3>
-              <p>Review every material action before an unchanged batch can run.</p>
-              <span class="coming-label">Live · exact review</span>
+              <h3>Approve the move</h3>
+              <p>Review every material field before the unchanged action batch can run.</p>
+              <span class="coming-label">Approval Inbox</span>
             </article>
             <article class="next-card">
               <span class="next-number">04</span>
-              <h3>Receipts</h3>
+              <h3>Verify the result</h3>
               <p>Verify exactly what changed, what did not, and what remains open.</p>
-              <span class="coming-label">Live · metadata only</span>
+              <span class="coming-label">Receipts</span>
             </article>
           </div>
         </section>

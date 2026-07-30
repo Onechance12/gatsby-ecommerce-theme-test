@@ -5,6 +5,7 @@
     meta: "/api/v1/meta",
     session: "/hcn/auth/session",
     logout: "/hcn/auth/logout",
+    managementSweep: "/hcn/api/v1/management-sweep",
     workCenter: "/hcn/api/v1/work-center",
     fileReview: "/hcn/api/v1/file-review",
     actionPrepare: "/hcn/api/v1/action-plans/prepare",
@@ -17,6 +18,7 @@
   });
 
   const WORK_CENTER_CAPABILITY = "hcn.work_center.read";
+  const MANAGEMENT_SWEEP_CAPABILITY = "hcn.management_sweep.read";
   const FILE_REVIEW_CAPABILITY = "hcn.file.review";
   const ACTION_PREPARE_CAPABILITY = "hcn.action_plans.prepare";
   const ACTION_READ_CAPABILITY = "hcn.action_plans.read";
@@ -73,6 +75,14 @@
     missing_policy_number: "Policy number missing"
   });
 
+  const SWEEP_SOURCE_LABELS = Object.freeze({
+    gmail: "Gmail",
+    google_calendar: "Google Calendar",
+    jobnimbus: "JobNimbus",
+    quo: "Quo",
+    retell: "Retell"
+  });
+
   const LANE_LABELS = Object.freeze({
     awaiting_response: "Waiting for a response",
     document_review_required: "Document needs review",
@@ -96,6 +106,7 @@
     googleCalendar: "Google Calendar",
     googleOAuth: "Google sign-in",
     jobNimbus: "JobNimbus",
+    managementSweep: "10 × 3 sweep",
     quo: "Quo",
     realtimeVoice: "Realtime voice"
   });
@@ -169,6 +180,10 @@
     session: null,
     metaError: null,
     sessionError: null,
+    managementSweep: null,
+    managementSweepLoading: false,
+    managementSweepController: null,
+    managementSweepExpiryTimer: null,
     workCenter: null,
     selectedFileRef: null,
     fileReview: null,
@@ -226,6 +241,24 @@
       "capability-summary",
       "capability-groups",
       "freshness-text",
+      "management-sweep-refresh",
+      "management-sweep-hero-message",
+      "management-sweep-status",
+      "management-sweep-adjuster-count",
+      "management-sweep-file-count",
+      "management-sweep-completeness",
+      "management-sweep-generated",
+      "management-sweep-section-status",
+      "management-sweep-alert",
+      "management-sweep-source-health",
+      "management-sweep-locked",
+      "management-sweep-workspace",
+      "company-worst-count",
+      "company-worst-list",
+      "adjuster-sweep-list",
+      "management-sweep-exclusions",
+      "management-sweep-exclusion-count",
+      "management-sweep-exclusion-list",
       "work-center-summary",
       "work-center-status",
       "work-center-refresh",
@@ -316,6 +349,10 @@
 
     elements["retry-action"].addEventListener("click", loadPlatformState);
     elements["sign-out-action"].addEventListener("click", signOut);
+    elements["management-sweep-refresh"].addEventListener(
+      "click",
+      loadManagementSweep
+    );
     elements["work-center-refresh"].addEventListener("click", function () {
       loadWorkCenter({ resetFile: true });
     });
@@ -349,7 +386,7 @@
     });
     window.addEventListener("online", handleNetworkChange);
     window.addEventListener("offline", handleNetworkChange);
-    document.addEventListener("visibilitychange", enforceSessionDeadline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     loadPlatformState();
     registerServiceWorker();
@@ -358,6 +395,7 @@
   async function loadPlatformState() {
     if (state.loading) return;
     cancelSessionExpiryTimer();
+    cancelManagementSweepExpiryTimer();
     state.loading = true;
     state.metaError = null;
     state.sessionError = null;
@@ -817,6 +855,7 @@
     cancelSessionExpiryTimer();
     elements["sign-in-action"].hidden = false;
     elements["sign-out-action"].hidden = true;
+    renderManagementSweepLocked("Sign in required", message);
     badge(elements["identity-badge"], "Sign in required", "neutral");
     setText(elements["capability-metric"], "Sign in");
     setText(elements["capability-metric-detail"], "Authority not assumed");
@@ -834,6 +873,7 @@
     }
 
     cancelSessionExpiryTimer();
+    cancelManagementSweepExpiryTimer();
     clearOperationalData("Signing out and clearing client records from this page.");
     elements["sign-out-action"].disabled = true;
     try {
@@ -903,6 +943,21 @@
     );
   }
 
+  function hasManagementSweepAuthority() {
+    return (
+      hasChanceBrowserAuthority()
+      && sessionCapabilities().includes(MANAGEMENT_SWEEP_CAPABILITY)
+    );
+  }
+
+  function managementSweepRuntimeStatus() {
+    const runtime = record(record(state.session).runtime);
+    return boundedString(
+      record(runtime.connectors).managementSweep,
+      32
+    ) || "unknown";
+  }
+
   function hasFileReviewAuthority() {
     return (
       hasWorkCenterAuthority() &&
@@ -950,6 +1005,8 @@
       return;
     }
 
+    syncManagementSweepAccess();
+
     if (!hasWorkCenterAuthority()) {
       const session = record(state.session);
       const identity = record(session.identity);
@@ -977,6 +1034,65 @@
     }
   }
 
+  function syncManagementSweepAccess() {
+    if (!hasManagementSweepAuthority()) {
+      const session = record(state.session);
+      const identity = record(session.identity);
+      const authenticated = session.authenticated === true
+        && identity.authentication === "authenticated";
+      renderManagementSweepLocked(
+        authenticated ? "Not authorized" : "Sign in required",
+        authenticated
+          ? "This HCN session does not have the company management-sweep capability."
+          : "Sign in with the authorized Chance account to request a fresh company report."
+      );
+      return;
+    }
+    const runtimeStatus = managementSweepRuntimeStatus();
+    if (runtimeStatus !== "configured") {
+      renderManagementSweepLocked(
+        runtimeStatus === "unconfigured"
+          ? "Setup required"
+          : "Readiness unknown",
+        runtimeStatus === "unconfigured"
+          ? "The three-adjuster allowlist, JobNimbus connection, and HCN reference configuration must all be ready before this report can run."
+          : "The console could not verify the management-sweep configuration. Recheck platform status."
+      );
+      return;
+    }
+
+    elements["management-sweep-locked"].hidden = true;
+    elements["management-sweep-workspace"].hidden = false;
+    elements["management-sweep-refresh"].hidden = false;
+    badge(elements["management-sweep-section-status"], "Ready to run", "good");
+    if (!state.managementSweep && !state.managementSweepLoading) {
+      setText(elements["management-sweep-status"], "Ready to run");
+      setText(
+        elements["management-sweep-hero-message"],
+        "Run the sweep when you want a fresh company ranking."
+      );
+      notice(
+        elements["management-sweep-alert"],
+        "The report runs only when requested and does not change any client record.",
+        "neutral"
+      );
+    }
+  }
+
+  function renderManagementSweepLocked(status, message) {
+    elements["management-sweep-locked"].hidden = false;
+    elements["management-sweep-workspace"].hidden = true;
+    elements["management-sweep-refresh"].hidden = true;
+    badge(elements["management-sweep-section-status"], status, "neutral");
+    setText(elements["management-sweep-status"], status);
+    setText(elements["management-sweep-hero-message"], message);
+    notice(
+      elements["management-sweep-alert"],
+      "Company records are not loaded in this view.",
+      "neutral"
+    );
+  }
+
   function renderOperationsLocked(status, message) {
     elements["work-center-locked"].hidden = false;
     elements["work-center-workspace"].hidden = true;
@@ -991,6 +1107,7 @@
   }
 
   function clearOperationalData(message) {
+    clearManagementSweepData(message);
     if (state.workCenterController) state.workCenterController.abort();
     if (state.fileController) state.fileController.abort();
     if (state.actionController) state.actionController.abort();
@@ -1015,6 +1132,1164 @@
     clearActionControlData(
       message || "Action plans and receipt metadata are not retained on this page."
     );
+  }
+
+  function clearManagementSweepData(message) {
+    cancelManagementSweepExpiryTimer();
+    if (state.managementSweepController) {
+      state.managementSweepController.abort();
+    }
+    state.managementSweepController = null;
+    state.managementSweepLoading = false;
+    state.managementSweep = null;
+    elements["management-sweep-refresh"].disabled = false;
+    elements["company-worst-list"].setAttribute("aria-busy", "false");
+    elements["adjuster-sweep-list"].setAttribute("aria-busy", "false");
+    setText(elements["management-sweep-adjuster-count"], "—");
+    setText(elements["management-sweep-file-count"], "—");
+    setText(elements["management-sweep-completeness"], "JobNimbus only");
+    setText(elements["management-sweep-generated"], "No client records are retained on this page.");
+    setText(elements["company-worst-count"], "0");
+    elements["management-sweep-source-health"].replaceChildren();
+    renderWorkspaceEmpty(
+      elements["company-worst-list"],
+      message || "Run a fresh sweep to see company priorities."
+    );
+    renderWorkspaceEmpty(
+      elements["adjuster-sweep-list"],
+      message || "No management report is loaded."
+    );
+    elements["management-sweep-exclusions"].hidden = true;
+    elements["management-sweep-exclusions"].open = false;
+    setText(elements["management-sweep-exclusion-count"], "0");
+    elements["management-sweep-exclusion-list"].replaceChildren();
+    renderManagementSweepLocked(
+      "Checking authority",
+      message || "Verifying the signed-in session before loading company records."
+    );
+  }
+
+  async function loadManagementSweep() {
+    if (
+      !hasManagementSweepAuthority()
+      || managementSweepRuntimeStatus() !== "configured"
+    ) {
+      syncManagementSweepAccess();
+      return;
+    }
+    if (!navigator.onLine) {
+      clearOperationalData("Reconnect to request a fresh company management sweep.");
+      syncOperationalAccess();
+      return;
+    }
+
+    cancelManagementSweepExpiryTimer();
+    if (state.managementSweepController) {
+      state.managementSweepController.abort();
+    }
+    const controller = new AbortController();
+    state.managementSweepController = controller;
+    state.managementSweepLoading = true;
+    state.managementSweep = null;
+
+    elements["management-sweep-locked"].hidden = true;
+    elements["management-sweep-workspace"].hidden = false;
+    elements["management-sweep-refresh"].hidden = false;
+    elements["management-sweep-refresh"].disabled = true;
+    elements["company-worst-list"].setAttribute("aria-busy", "true");
+    elements["adjuster-sweep-list"].setAttribute("aria-busy", "true");
+    badge(elements["management-sweep-section-status"], "Running fresh sweep", "neutral");
+    setText(elements["management-sweep-status"], "Checking company files");
+    setText(
+      elements["management-sweep-hero-message"],
+      "Reviewing fresh JobNimbus activity for the configured adjusters."
+    );
+    notice(
+      elements["management-sweep-alert"],
+      "Building a fresh read-only management report. No client record will be changed.",
+      "neutral"
+    );
+    setText(elements["management-sweep-adjuster-count"], "—");
+    setText(elements["management-sweep-file-count"], "—");
+    setText(elements["management-sweep-completeness"], "Checking JobNimbus");
+    setText(elements["management-sweep-generated"], "Fresh read in progress.");
+    setText(elements["company-worst-count"], "0");
+    elements["management-sweep-source-health"].replaceChildren();
+    renderWorkspaceEmpty(
+      elements["company-worst-list"],
+      "Finding the company’s highest verified attention gaps…"
+    );
+    renderWorkspaceEmpty(
+      elements["adjuster-sweep-list"],
+      "Ranking up to ten eligible files for each adjuster…"
+    );
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.managementSweep,
+        { limitPerAdjuster: 10 },
+        controller.signal,
+        MANAGEMENT_SWEEP_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const receivedAtMs = Date.now();
+      state.managementSweep = normalizeManagementSweepResponse(
+        response,
+        receivedAtMs
+      );
+      renderManagementSweep(state.managementSweep);
+      scheduleManagementSweepExpiry(state.managementSweep);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      cancelManagementSweepExpiryTimer();
+      state.managementSweep = null;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      const message = managementSweepErrorMessage(error);
+      badge(elements["management-sweep-section-status"], "Unavailable", "bad");
+      setText(elements["management-sweep-status"], "Report unavailable");
+      setText(elements["management-sweep-completeness"], "JobNimbus unavailable");
+      setText(elements["management-sweep-generated"], "No stale report is shown.");
+      setText(elements["management-sweep-hero-message"], message);
+      notice(elements["management-sweep-alert"], message, "bad");
+      renderWorkspaceEmpty(elements["company-worst-list"], "No company ranking is shown.");
+      renderWorkspaceEmpty(elements["adjuster-sweep-list"], "No adjuster ranking is shown.");
+      elements["management-sweep-source-health"].replaceChildren();
+    } finally {
+      if (state.managementSweepController === controller) {
+        state.managementSweepController = null;
+        state.managementSweepLoading = false;
+        elements["management-sweep-refresh"].disabled = false;
+        elements["company-worst-list"].setAttribute("aria-busy", "false");
+        elements["adjuster-sweep-list"].setAttribute("aria-busy", "false");
+      }
+    }
+  }
+
+  function normalizeManagementSweepResponse(value, receivedAtMs) {
+    const schemaVersion = boundedString(
+      value && (value.schemaVersion || value.schema),
+      80
+    );
+    const generatedAt = boundedString(value && value.generatedAt, 40);
+    const checkedAt = boundedString(value && value.checkedAt, 40);
+    const validUntil = boundedString(value && value.validUntil, 40);
+    const generatedAtMs = canonicalTimestampMs(generatedAt);
+    const checkedAtMs = canonicalTimestampMs(checkedAt);
+    const validUntilMs = canonicalTimestampMs(validUntil);
+    if (
+      !isRecord(value)
+      || schemaVersion !== "hcn.console.management-sweep.v1"
+      || value.cachePolicy !== "no_store"
+      || !Array.isArray(value.adjusters)
+      || value.adjusters.length !== 3
+      || !Number.isFinite(receivedAtMs)
+      || !Number.isFinite(generatedAtMs)
+      || !Number.isFinite(checkedAtMs)
+      || !Number.isFinite(validUntilMs)
+      || generatedAtMs > checkedAtMs
+      || checkedAtMs >= validUntilMs
+      || receivedAtMs >= validUntilMs
+    ) {
+      throw new Error("Invalid management sweep response");
+    }
+
+    const adjusters = value.adjusters.map(function (candidate, index) {
+      const adjuster = record(candidate);
+      const id = boundedString(
+        adjuster.id || adjuster.adjusterRef || adjuster.ownerRef,
+        96
+      );
+      const name = boundedString(
+        adjuster.name || adjuster.displayName || adjuster.adjusterName,
+        96
+      );
+      if (!id || !name) {
+        throw new Error(
+          "Management sweep adjuster " + String(index + 1) + " is incomplete"
+        );
+      }
+      if (!Array.isArray(adjuster.items) || adjuster.items.length > 10) {
+        throw new Error("Invalid management sweep adjuster items");
+      }
+      const items = adjuster.items.map(function (item, itemIndex) {
+        return normalizeSweepItem(item, itemIndex, "adjuster");
+      });
+      return {
+        id: id,
+        name: name,
+        eligibleCount: Number.isInteger(adjuster.eligibleCount)
+          && adjuster.eligibleCount >= 0
+          ? adjuster.eligibleCount
+          : items.length,
+        requestedCount: Number.isInteger(adjuster.requestedCount)
+          && adjuster.requestedCount > 0
+          && adjuster.requestedCount <= 10
+          ? adjuster.requestedCount
+          : 10,
+        shortage: {
+          isShort: record(adjuster.shortage).isShort === true,
+          missingCount: Number.isInteger(record(adjuster.shortage).missingCount)
+            && record(adjuster.shortage).missingCount >= 0
+            ? record(adjuster.shortage).missingCount
+            : 0,
+          reasonCode: boundedString(record(adjuster.shortage).reasonCode, 96)
+        },
+        items: items
+      };
+    });
+
+    const companyWorstSource = Array.isArray(value.companyWorst)
+      ? value.companyWorst
+      : Array.isArray(record(value.companyWorst).items)
+        ? value.companyWorst.items
+        : [];
+    if (companyWorstSource.length > 10) {
+      throw new Error("Invalid company management ranking");
+    }
+    const companyWorst = companyWorstSource.map(function (item, itemIndex) {
+      return normalizeSweepItem(item, itemIndex, "company");
+    });
+    const completeness = normalizeSweepCompleteness(
+      value.completeness,
+      value.summary,
+      value.criteria
+    );
+    const rankingMode = boundedString(
+      record(value.criteria).rankingMode || value.rankingMode,
+      64
+    );
+    const sourceHealth = normalizeSweepSourceHealth(value.sourceHealth);
+    if (!sourceHealth.length && rankingMode === "activity_only") {
+      sourceHealth.push({
+        key: "jobnimbus",
+        label: "JobNimbus",
+        status: completeness.status === "complete"
+          ? "fresh"
+          : completeness.status === "insufficient"
+            ? "unavailable"
+            : "partial",
+        detail: completeness.summary
+      });
+    }
+
+    return {
+      schema: schemaVersion,
+      generatedAt: generatedAt,
+      checkedAt: checkedAt,
+      validUntil: validUntil,
+      sourceHealth: sourceHealth,
+      completeness: completeness,
+      rankingMode: rankingMode,
+      adjusters: adjusters,
+      companyWorst: companyWorst,
+      exclusions: normalizeSweepExclusions(value.exclusions)
+    };
+  }
+
+  function canonicalTimestampMs(value) {
+    if (typeof value !== "string" || !value || value.length > 40) return NaN;
+    const milliseconds = Date.parse(value);
+    if (!Number.isFinite(milliseconds)) return NaN;
+    return new Date(milliseconds).toISOString() === value
+      ? milliseconds
+      : NaN;
+  }
+
+  function scheduleManagementSweepExpiry(sweep) {
+    cancelManagementSweepExpiryTimer();
+    const validUntilMs = canonicalTimestampMs(record(sweep).validUntil);
+    if (!Number.isFinite(validUntilMs) || Date.now() >= validUntilMs) {
+      expireManagementSweep();
+      return false;
+    }
+    state.managementSweepExpiryTimer = window.setTimeout(
+      enforceManagementSweepExpiry,
+      Math.min(
+        MAX_TIMER_DELAY_MS,
+        Math.max(1, validUntilMs - Date.now())
+      )
+    );
+    return true;
+  }
+
+  function cancelManagementSweepExpiryTimer() {
+    if (state.managementSweepExpiryTimer !== null) {
+      window.clearTimeout(state.managementSweepExpiryTimer);
+    }
+    state.managementSweepExpiryTimer = null;
+  }
+
+  function enforceManagementSweepExpiry() {
+    if (!state.managementSweep) {
+      cancelManagementSweepExpiryTimer();
+      return;
+    }
+    const validUntilMs = canonicalTimestampMs(
+      record(state.managementSweep).validUntil
+    );
+    if (!Number.isFinite(validUntilMs) || Date.now() >= validUntilMs) {
+      expireManagementSweep();
+      return;
+    }
+    scheduleManagementSweepExpiry(state.managementSweep);
+  }
+
+  function expireManagementSweep() {
+    if (!state.managementSweep) {
+      cancelManagementSweepExpiryTimer();
+      return;
+    }
+    const message =
+      "The management sweep expired and was cleared. Run a fresh sweep to continue.";
+    clearManagementSweepData(message);
+    if (!navigator.onLine) {
+      renderManagementSweepLocked("Offline", message);
+      return;
+    }
+    if (!hasManagementSweepAuthority()) {
+      syncManagementSweepAccess();
+      return;
+    }
+    elements["management-sweep-locked"].hidden = true;
+    elements["management-sweep-workspace"].hidden = false;
+    elements["management-sweep-refresh"].hidden = false;
+    badge(elements["management-sweep-section-status"], "Report expired", "warn");
+    setText(elements["management-sweep-status"], "Fresh report required");
+    setText(elements["management-sweep-hero-message"], message);
+    notice(
+      elements["management-sweep-alert"],
+      "No expired company ranking is retained or shown.",
+      "warn"
+    );
+  }
+
+  function normalizeSweepItem(candidate, index, rankingScope) {
+    const item = record(candidate);
+    const fileRef = boundedString(item.fileRef, 80);
+    if (!FILE_REF.test(fileRef)) {
+      throw new Error("Invalid management sweep file reference");
+    }
+    const display = isRecord(item.display)
+      ? item.display
+      : isRecord(item.fileDisplay)
+        ? item.fileDisplay
+        : {};
+    const status = isRecord(item.status) ? item.status : {};
+    const attention = normalizeSweepAttention(item.attention);
+    const gaps = normalizeSweepGaps(item.gaps);
+    const meaningfulTouch = gaps.find(function (gap) {
+      return gap.key === "anyMeaningfulTouch";
+    });
+    const operationalTouch = gaps.find(function (gap) {
+      return gap.key === "operationalActivity";
+    });
+    const explicitLastTouch = normalizeSweepNarrative(item.lastTouch);
+    const lastTouch = explicitLastTouch.summary || explicitLastTouch.at
+      ? explicitLastTouch
+      : meaningfulTouch && meaningfulTouch.lastAt
+        ? {
+            summary: "Meaningful JobNimbus activity",
+            at: meaningfulTouch.lastAt,
+            source: meaningfulTouch.source || "jobnimbus",
+            actor: ""
+          }
+        : operationalTouch && operationalTouch.basis === "active_since"
+          ? {
+              summary: "No verified JobNimbus operational event",
+              at: operationalTouch.sinceAt,
+              source: "jobnimbus",
+              actor: ""
+            }
+        : explicitLastTouch;
+    const explicitRiskFlags = Array.isArray(item.riskFlags)
+      ? item.riskFlags
+      : [];
+    return {
+      rank: rankingScope === "adjuster"
+        && Number.isInteger(item.adjusterRank)
+        && item.adjusterRank > 0
+        ? item.adjusterRank
+        : rankingScope === "company"
+          && Number.isInteger(item.companyRank)
+          && item.companyRank > 0
+          ? item.companyRank
+          : Number.isInteger(item.rank) && item.rank > 0
+            ? item.rank
+            : Number(index) + 1,
+      fileRef: fileRef,
+      displayName: boundedString(
+        typeof item.display === "string"
+          ? item.display
+          : display.name || display.displayName || item.displayName,
+        120
+      ),
+      jobNumber: boundedString(
+        display.jobNumber || item.jobNumber,
+        64
+      ),
+      status: boundedString(
+        display.status
+          || display.statusLabel
+          || (
+            typeof item.status === "string"
+              ? item.status
+              : status.label
+            || status.code
+            || status.statusCode
+            || item.statusCode
+          ),
+        96
+      ),
+      attention: attention,
+      gaps: gaps,
+      lastTouch: lastTouch,
+      blocker: normalizeSweepNarrative(item.blocker),
+      nextAction: normalizeSweepNarrative(item.nextAction),
+      riskFlags: explicitRiskFlags.concat(attention.reasonCodes)
+        .slice(0, 10).map(function (flag) {
+            return boundedString(
+              typeof flag === "string"
+                ? flag
+                : record(flag).label || record(flag).code,
+              96
+            );
+          }).filter(Boolean),
+      evidenceHealth: normalizeSweepEvidenceHealth(
+        item.evidenceHealth,
+        item.eventSummary
+      ),
+      eventSummary: normalizeSweepEventSummary(item.eventSummary)
+    };
+  }
+
+  function normalizeSweepAttention(value) {
+    const source = record(value);
+    return {
+      days: normalizeGapDays(
+        source.unresolvedGapDays !== undefined
+          ? source.unresolvedGapDays
+          : source.days
+      ),
+      reasonCodes: Array.isArray(source.reasonCodes)
+        ? source.reasonCodes.slice(0, 10).map(function (reason) {
+            return boundedString(reason, 96);
+          }).filter(Boolean)
+        : []
+    };
+  }
+
+  function normalizeSweepGaps(value) {
+    const source = record(value);
+    const preferredOrder = [
+      ["successfulCommunication", "JobNimbus communication record"],
+      ["contactAttempt", "Recorded contact attempt"],
+      ["operationalActivity", "JobNimbus activity"],
+      ["assignedAdjusterActivity", "Assigned-adjuster activity"],
+      ["anyMeaningfulTouch", "JobNimbus activity"],
+      ["communicationDays", "JobNimbus communication record"],
+      ["activityDays", "JobNimbus activity"],
+      ["assignedAdjusterDays", "Assigned-adjuster activity"],
+      ["adjusterDays", "Assigned-adjuster activity"],
+      ["companyDays", "Company JobNimbus activity"],
+      ["contactAttemptDays", "Recorded contact attempt"],
+      ["lastMeaningfulTouchDays", "JobNimbus activity"]
+    ];
+    const seenLabels = new Set();
+    const gaps = [];
+
+    preferredOrder.forEach(function (definition) {
+      const normalized = normalizeSweepGap(
+        source[definition[0]],
+        definition[0],
+        definition[1]
+      );
+      if (!normalized || seenLabels.has(definition[1])) return;
+      seenLabels.add(definition[1]);
+      gaps.push(normalized);
+    });
+
+    Object.keys(source).slice(0, 16).forEach(function (key) {
+      if (preferredOrder.some(function (definition) {
+          return definition[0] === key;
+      })) return;
+      const label = humanize(key.replace(/Days$/i, ""));
+      const normalized = normalizeSweepGap(source[key], key, label);
+      if (!normalized || normalized.days === null) return;
+      if (seenLabels.has(label)) return;
+      seenLabels.add(label);
+      gaps.push(normalized);
+    });
+    return gaps.slice(0, 8);
+  }
+
+  function normalizeSweepGap(value, key, label) {
+    if (value === undefined || value === null) return null;
+    const source = record(value);
+    const days = normalizeGapDays(value);
+    const basis = boundedString(source.basis || source.status || source.state, 96);
+    const explicitlyUnavailable = source.available === false
+      || /\bunavailable|unsupported|not[_ ]available\b/i.test(basis);
+    if (days === null && !isRecord(value)) return null;
+    return {
+      key: boundedString(key, 64),
+      label: label,
+      days: days,
+      available: days !== null && !explicitlyUnavailable,
+      lastAt: boundedString(source.lastAt, 40),
+      sinceAt: boundedString(source.sinceAt, 40),
+      source: boundedString(source.lastSource || source.source, 64),
+      basis: basis
+    };
+  }
+
+  function normalizeGapDays(value) {
+    const candidate = isRecord(value) ? value.days : value;
+    return Number.isInteger(candidate) && candidate >= 0 && candidate <= 36500
+      ? candidate
+      : null;
+  }
+
+  function normalizeSweepNarrative(value) {
+    if (typeof value === "string") {
+      return {
+        summary: boundedString(value, 320),
+        at: "",
+        source: "",
+        actor: ""
+      };
+    }
+    const source = record(value);
+    return {
+      summary: boundedString(
+        source.summary || source.label || source.reason || source.description,
+        320
+      ),
+      at: boundedString(source.at || source.occurredAt || source.timestamp, 40),
+      source: boundedString(source.source || source.provider, 64),
+      actor: boundedString(source.actor || source.owner, 96)
+    };
+  }
+
+  function normalizeSweepEvidenceHealth(value, eventSummary) {
+    if (typeof value === "string") {
+      return {
+        status: boundedString(value, 64),
+        summary: ""
+      };
+    }
+    const source = record(value);
+    const events = record(eventSummary);
+    const sourceSummary = [
+      sweepSourceListSummary("Fresh", source.freshSources),
+      sweepSourceListSummary("Partial", source.partialSources),
+      sweepSourceListSummary("Stale", source.staleSources),
+      sweepSourceListSummary("Unavailable", source.unavailableSources)
+    ].filter(Boolean).join(" · ");
+    return {
+      status: boundedString(
+        source.status || source.completeness || source.state,
+        64
+      ),
+      summary: boundedString(
+        source.summary || source.message || events.summary || sourceSummary,
+        240
+      )
+    };
+  }
+
+  function sweepSourceListSummary(label, value) {
+    if (!Array.isArray(value) || !value.length) return "";
+    return label + ": " + value.slice(0, 8).map(function (source) {
+      return sweepSourceLabel(source);
+    }).filter(Boolean).join(", ");
+  }
+
+  function normalizeSweepEventSummary(value) {
+    const source = record(value);
+    const normalized = {};
+    [
+      "fetchedEventCount",
+      "acceptedEventCount",
+      "ignoredUnfreshEventCount",
+      "communicationActivityCount",
+      "operationalActivityCount",
+      "noiseCount",
+      "unsupportedEventCount"
+    ].forEach(function (key) {
+      normalized[key] = Number.isInteger(source[key]) && source[key] >= 0
+        ? source[key]
+        : null;
+    });
+    return normalized;
+  }
+
+  function normalizeSweepSourceHealth(value) {
+    const entries = [];
+    if (Array.isArray(value)) {
+      value.slice(0, 16).forEach(function (candidate, index) {
+        const source = record(candidate);
+        entries.push({
+          key: boundedString(source.key || source.source || "source_" + String(index + 1), 64),
+          label: boundedString(source.label || source.source || source.key, 96),
+          status: boundedString(source.status || source.state, 64),
+          detail: boundedString(source.detail || source.summary || source.message, 200)
+        });
+      });
+      return entries;
+    }
+
+    const sources = record(value);
+    Object.keys(sources).slice(0, 16).forEach(function (key) {
+      const candidate = sources[key];
+      const source = isRecord(candidate) ? candidate : {};
+      entries.push({
+        key: boundedString(key, 64),
+        label: boundedString(source.label || sweepSourceLabel(key), 96),
+        status: boundedString(
+          typeof candidate === "string"
+            ? candidate
+            : source.status || source.state,
+          64
+        ),
+        detail: boundedString(source.detail || source.summary || source.message, 200)
+      });
+    });
+    return entries;
+  }
+
+  function normalizeSweepCompleteness(value, summaryValue, criteriaValue) {
+    if (typeof value === "string") {
+      return { status: boundedString(value, 64), summary: "" };
+    }
+    const source = record(value);
+    const summary = record(summaryValue);
+    const criteria = record(criteriaValue);
+    const evidence = record(summary.evidence);
+    const eligibleCount = Number.isInteger(summary.eligibleFileCount)
+      && summary.eligibleFileCount >= 0
+      ? summary.eligibleFileCount
+      : null;
+    const completeFiles = Number.isInteger(evidence.completeFiles)
+      && evidence.completeFiles >= 0
+      ? evidence.completeFiles
+      : null;
+    const partialFiles = Number.isInteger(evidence.partialFiles)
+      && evidence.partialFiles >= 0
+      ? evidence.partialFiles
+      : null;
+    const insufficientFiles = Number.isInteger(evidence.insufficientFiles)
+      && evidence.insufficientFiles >= 0
+      ? evidence.insufficientFiles
+      : null;
+    const summarizedStatus = insufficientFiles !== null && insufficientFiles > 0
+      ? (
+          eligibleCount !== null && insufficientFiles === eligibleCount
+            ? "insufficient"
+            : "partial"
+        )
+      : partialFiles !== null && partialFiles > 0
+        ? "partial"
+        : eligibleCount !== null
+          && completeFiles !== null
+          && completeFiles === eligibleCount
+          ? "complete"
+          : "";
+    const countSummary = [
+      completeFiles === null ? "" : String(completeFiles) + " complete",
+      partialFiles === null ? "" : String(partialFiles) + " partial",
+      insufficientFiles === null ? "" : String(insufficientFiles) + " insufficient"
+    ].filter(Boolean).join(" · ");
+    return {
+      status: boundedString(
+        source.status
+          || source.state
+          || summary.completenessStatus
+          || summarizedStatus
+          || (
+          source.complete === true ? "complete" : source.complete === false ? "partial" : ""
+          ),
+        64
+      ),
+      summary: boundedString(
+        source.summary
+          || source.message
+          || countSummary
+          || (
+            criteria.rankingMode === "activity_only"
+              ? "Ranking mode: JobNimbus activity only."
+              : ""
+          ),
+        240
+      )
+    };
+  }
+
+  function normalizeSweepExclusions(value) {
+    if (Array.isArray(value)) {
+      const grouped = new Map();
+      value.forEach(function (candidate) {
+        const exclusion = record(candidate);
+        const rawLabel = typeof candidate === "string"
+          ? candidate
+          : exclusion.label
+            || exclusion.reason
+            || exclusion.reasonCode
+            || exclusion.code;
+        const label = boundedString(rawLabel, 160);
+        if (!label) return;
+        const existing = grouped.get(label) || {
+          label: label,
+          count: 0,
+          detail: ""
+        };
+        existing.count += Number.isInteger(exclusion.count)
+          && exclusion.count >= 0
+          ? exclusion.count
+          : 1;
+        if (!existing.detail) {
+          existing.detail = boundedString(
+            exclusion.detail || exclusion.summary,
+            240
+          );
+        }
+        grouped.set(label, existing);
+      });
+      return Array.from(grouped.values()).slice(0, 32);
+    }
+
+    return Object.keys(record(value)).slice(0, 32).map(function (key) {
+      const candidate = value[key];
+      const exclusion = isRecord(candidate) ? candidate : {};
+      return {
+        label: boundedString(exclusion.label || humanize(key), 160),
+        count: Number.isInteger(candidate)
+          ? candidate
+          : Number.isInteger(exclusion.count)
+            ? exclusion.count
+            : null,
+        detail: boundedString(exclusion.detail || exclusion.summary, 240)
+      };
+    });
+  }
+
+  function renderManagementSweep(sweep) {
+    const adjusterFileCount = sweep.adjusters.reduce(function (total, adjuster) {
+      return total + adjuster.items.length;
+    }, 0);
+    const completenessTone = sweepCompletenessTone(sweep.completeness.status);
+    const completenessLabel = completenessTone === "good"
+      ? "JobNimbus complete"
+      : completenessTone === "bad"
+        ? "JobNimbus unavailable"
+        : "JobNimbus limited";
+    const generatedAt = readableDateTime(sweep.generatedAt);
+
+    setText(elements["management-sweep-adjuster-count"], String(sweep.adjusters.length));
+    setText(elements["management-sweep-file-count"], String(adjusterFileCount));
+    setText(elements["management-sweep-completeness"], completenessLabel);
+    setText(
+      elements["management-sweep-generated"],
+      generatedAt
+        ? "Fresh report generated " + generatedAt + "."
+        : "Fresh report received; generation time was not reported."
+    );
+    setText(elements["management-sweep-status"], "Report ready");
+    setText(
+      elements["management-sweep-hero-message"],
+      adjusterFileCount
+        ? adjusterFileCount + " ranked file" + (adjusterFileCount === 1 ? "" : "s")
+          + " across " + sweep.adjusters.length + " adjuster"
+          + (sweep.adjusters.length === 1 ? "" : "s") + "."
+        : "The fresh report contains no eligible files."
+    );
+    badge(
+      elements["management-sweep-section-status"],
+      completenessTone === "good" ? "JobNimbus report ready" : "JobNimbus data limited",
+      completenessTone
+    );
+    notice(
+      elements["management-sweep-alert"],
+      (
+        completenessTone === "good"
+          ? "The JobNimbus activity sweep completed. "
+          : "The JobNimbus activity sweep is partial or unavailable. "
+      )
+        + "Company-wide Gmail, Quo, and calendar communication evidence was not checked, so communication gaps remain unverified."
+        + (
+          sweep.completeness.summary
+            ? " JobNimbus detail: " + sweep.completeness.summary
+            : ""
+        ),
+      completenessTone === "good" ? "warn" : completenessTone
+    );
+
+    renderSweepSourceHealth(sweep.sourceHealth);
+    renderCompanyWorst(sweep.companyWorst);
+    renderAdjusterSweeps(sweep.adjusters);
+    renderSweepExclusions(sweep.exclusions);
+  }
+
+  function renderSweepSourceHealth(sources) {
+    if (!sources.length) {
+      elements["management-sweep-source-health"].replaceChildren();
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    sources.forEach(function (source) {
+      const item = document.createElement("span");
+      const dot = document.createElement("span");
+      const copy = document.createElement("span");
+      const status = source.status || "unknown";
+      item.className = "sweep-source";
+      item.dataset.tone = sweepCompletenessTone(status);
+      item.title = source.detail || "";
+      dot.className = "sweep-source-dot";
+      dot.setAttribute("aria-hidden", "true");
+      setText(
+        copy,
+        (
+          SWEEP_SOURCE_LABELS[String(source.key || "").toLowerCase()]
+          || source.label
+          || humanize(source.key)
+        ) + " · " + humanize(status)
+      );
+      item.append(dot, copy);
+      fragment.append(item);
+    });
+    elements["management-sweep-source-health"].replaceChildren(fragment);
+  }
+
+  function renderCompanyWorst(items) {
+    setText(elements["company-worst-count"], String(items.length));
+    if (!items.length) {
+      renderWorkspaceEmpty(
+        elements["company-worst-list"],
+        "No company-wide attention gaps were returned."
+      );
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    items.forEach(function (item) {
+      fragment.append(createSweepItem(item, { compact: true }));
+    });
+    elements["company-worst-list"].replaceChildren(fragment);
+  }
+
+  function renderAdjusterSweeps(adjusters) {
+    if (!adjusters.length) {
+      renderWorkspaceEmpty(
+        elements["adjuster-sweep-list"],
+        "No eligible adjuster groups were returned."
+      );
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    adjusters.forEach(function (adjuster) {
+      const group = document.createElement("section");
+      const heading = document.createElement("div");
+      const titleWrap = document.createElement("div");
+      const kicker = document.createElement("span");
+      const title = document.createElement("h4");
+      const count = document.createElement("span");
+      const list = document.createElement("div");
+
+      group.className = "adjuster-sweep";
+      heading.className = "adjuster-sweep-heading";
+      kicker.className = "adjuster-sweep-kicker";
+      title.className = "adjuster-sweep-name";
+      count.className = "queue-count";
+      list.className = "sweep-file-list";
+      setText(kicker, "Assigned adjuster");
+      setText(title, adjuster.name || "Adjuster");
+      setText(
+        count,
+        String(adjuster.items.length) + " / " + String(adjuster.requestedCount)
+      );
+      titleWrap.append(kicker, title);
+      heading.append(titleWrap, count);
+      group.append(heading);
+
+      if (!adjuster.items.length) {
+        renderWorkspaceEmpty(list, "No eligible files were returned for this adjuster.");
+      } else {
+        const itemFragment = document.createDocumentFragment();
+        adjuster.items.forEach(function (item) {
+          itemFragment.append(createSweepItem(item, { compact: false }));
+        });
+        list.replaceChildren(itemFragment);
+      }
+      group.append(list);
+      if (adjuster.shortage.isShort) {
+        const shortage = document.createElement("p");
+        shortage.className = "adjuster-shortage";
+        setText(
+          shortage,
+          String(adjuster.shortage.missingCount) + " slot"
+            + (adjuster.shortage.missingCount === 1 ? "" : "s")
+            + " unfilled"
+            + (
+              adjuster.shortage.reasonCode
+                ? " · " + humanize(adjuster.shortage.reasonCode)
+                : ""
+            )
+            + "."
+        );
+        group.append(shortage);
+      }
+      fragment.append(group);
+    });
+    elements["adjuster-sweep-list"].replaceChildren(fragment);
+  }
+
+  function createSweepItem(item, options) {
+    const article = document.createElement("article");
+    const heading = document.createElement("div");
+    const rank = document.createElement("span");
+    const identity = document.createElement("div");
+    const title = document.createElement("strong");
+    const meta = document.createElement("span");
+    const primaryGap = document.createElement("div");
+    const primaryDays = document.createElement("strong");
+    const primaryLabel = document.createElement("span");
+    const gapList = document.createElement("div");
+    const riskList = document.createElement("div");
+    const details = document.createElement("dl");
+    const largestGap = item.gaps.reduce(function (largest, gap) {
+      if (gap.days === null || gap.available === false) return largest;
+      return !largest || gap.days > largest.days ? gap : largest;
+    }, null);
+    const primaryGapDays = item.attention.days !== null
+      ? item.attention.days
+      : largestGap
+        ? largestGap.days
+        : null;
+
+    article.className = "sweep-file";
+    if (options && options.compact) article.classList.add("is-compact");
+    heading.className = "sweep-file-heading";
+    rank.className = "sweep-rank";
+    identity.className = "sweep-identity";
+    title.className = "sweep-file-name";
+    meta.className = "sweep-file-meta";
+    primaryGap.className = "sweep-primary-gap";
+    primaryDays.className = "sweep-primary-days";
+    primaryLabel.className = "sweep-primary-label";
+    gapList.className = "sweep-gap-list";
+    riskList.className = "sweep-risk-list";
+    details.className = "sweep-detail-list";
+
+    setText(rank, String(item.rank).padStart(2, "0"));
+    setText(title, item.displayName || item.jobNumber || "Exact file");
+    setText(
+      meta,
+      [item.jobNumber, item.status].filter(Boolean).join(" · ") || "Status not reported"
+    );
+    setText(primaryDays, primaryGapDays === null ? "—" : String(primaryGapDays));
+    setText(
+      primaryLabel,
+      item.attention.days !== null
+        ? "Unresolved JobNimbus gap · days"
+        : largestGap
+          ? largestGap.label + " · days"
+          : "Gap not reported"
+    );
+    identity.append(title, meta);
+    primaryGap.append(primaryDays, primaryLabel);
+    heading.append(rank, identity, primaryGap);
+    article.append(heading);
+
+    item.gaps.forEach(function (gap) {
+      const chip = document.createElement("span");
+      const value = document.createElement("strong");
+      const label = document.createElement("span");
+      if (gap.available === false || gap.days === null) {
+        chip.dataset.tone = "unavailable";
+        setText(value, "N/A");
+      } else {
+        setText(value, String(gap.days) + "d");
+      }
+      setText(label, gap.label);
+      chip.append(value, label);
+      gapList.append(chip);
+    });
+    if (item.gaps.length) article.append(gapList);
+
+    item.riskFlags.forEach(function (flag) {
+      const badgeItem = document.createElement("span");
+      badgeItem.className = "sweep-risk";
+      setText(badgeItem, humanize(flag));
+      riskList.append(badgeItem);
+    });
+    if (item.evidenceHealth.status) {
+      const health = document.createElement("span");
+      health.className = "sweep-risk";
+      health.dataset.tone = sweepCompletenessTone(item.evidenceHealth.status);
+      setText(health, "Evidence · " + humanize(item.evidenceHealth.status));
+      riskList.append(health);
+    }
+    if (riskList.childNodes.length) article.append(riskList);
+
+    appendSweepDetail(
+      details,
+      "Last JobNimbus touch",
+      sweepNarrativeText(item.lastTouch)
+    );
+    appendSweepDetail(details, "Current blocker", item.blocker.summary);
+    appendSweepDetail(details, "Recommended next", item.nextAction.summary);
+    if (item.evidenceHealth.summary) {
+      appendSweepDetail(details, "Evidence note", item.evidenceHealth.summary);
+    }
+    appendSweepDetail(
+      details,
+      "JobNimbus event summary",
+      sweepEventSummaryText(item.eventSummary)
+    );
+    if (details.childNodes.length) article.append(details);
+
+    const matchingFile = record(state.workCenter).files?.find(function (file) {
+      return file.fileRef === item.fileRef;
+    });
+    if (matchingFile) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "sweep-open-file";
+      setText(action, "Open exact file");
+      action.addEventListener("click", function () {
+        loadFileReview(item.fileRef);
+        document.getElementById("work-center").scrollIntoView({ block: "start" });
+      });
+      article.append(action);
+    }
+
+    return article;
+  }
+
+  function appendSweepDetail(container, labelValue, contentValue) {
+    if (!contentValue) return;
+    const group = document.createElement("div");
+    const label = document.createElement("dt");
+    const content = document.createElement("dd");
+    setText(label, labelValue);
+    setText(content, contentValue);
+    group.append(label, content);
+    container.append(group);
+  }
+
+  function sweepNarrativeText(narrative) {
+    const parts = [];
+    if (narrative.summary) parts.push(narrative.summary);
+    if (narrative.at) parts.push(readableDateTime(narrative.at));
+    if (narrative.source) parts.push(sweepSourceLabel(narrative.source));
+    if (narrative.actor) parts.push(narrative.actor);
+    return parts.filter(Boolean).join(" · ");
+  }
+
+  function sweepEventSummaryText(summary) {
+    const parts = [];
+    if (summary.fetchedEventCount !== null) {
+      parts.push(String(summary.fetchedEventCount) + " fetched");
+    }
+    if (summary.acceptedEventCount !== null) {
+      parts.push(String(summary.acceptedEventCount) + " allowlisted");
+    }
+    if (
+      summary.communicationActivityCount !== null
+      && summary.communicationActivityCount > 0
+    ) {
+      parts.push(
+        String(summary.communicationActivityCount)
+        + " communication activit"
+        + (summary.communicationActivityCount === 1 ? "y" : "ies")
+      );
+    }
+    if (summary.operationalActivityCount !== null) {
+      parts.push(String(summary.operationalActivityCount) + " operational");
+    }
+    if (summary.noiseCount !== null) {
+      parts.push(String(summary.noiseCount) + " noise excluded");
+    }
+    if (
+      summary.unsupportedEventCount !== null
+      && summary.unsupportedEventCount > 0
+    ) {
+      parts.push(
+        String(summary.unsupportedEventCount)
+        + " unsupported excluded"
+      );
+    }
+    if (
+      summary.ignoredUnfreshEventCount !== null
+      && summary.ignoredUnfreshEventCount > 0
+    ) {
+      parts.push(
+        String(summary.ignoredUnfreshEventCount) + " ignored from unfresh evidence"
+      );
+    }
+    return parts.join(" · ");
+  }
+
+  function renderSweepExclusions(exclusions) {
+    const excludedFileCount = exclusions.reduce(function (total, exclusion) {
+      return total + (
+        Number.isInteger(exclusion.count) && exclusion.count >= 0
+          ? exclusion.count
+          : 0
+      );
+    }, 0);
+    setText(
+      elements["management-sweep-exclusion-count"],
+      String(excludedFileCount || exclusions.length)
+    );
+    elements["management-sweep-exclusions"].hidden = exclusions.length === 0;
+    if (!exclusions.length) {
+      elements["management-sweep-exclusion-list"].replaceChildren();
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    exclusions.forEach(function (exclusion) {
+      const item = document.createElement("div");
+      const label = document.createElement("strong");
+      const detail = document.createElement("span");
+      setText(
+        label,
+        humanize(exclusion.label) + (
+          exclusion.count === null ? "" : " · " + String(exclusion.count)
+        )
+      );
+      setText(detail, exclusion.detail || "Excluded by the report’s eligibility rules.");
+      item.append(label, detail);
+      fragment.append(item);
+    });
+    elements["management-sweep-exclusion-list"].replaceChildren(fragment);
+  }
+
+  function sweepCompletenessTone(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (
+      normalized === "complete"
+      || normalized === "available"
+      || normalized === "fresh"
+      || normalized === "ok"
+      || normalized === "good"
+    ) return "good";
+    if (
+      normalized === "partial"
+      || normalized === "stale"
+      || normalized === "limited"
+      || normalized === "unknown"
+    ) return "warn";
+    if (
+      normalized === "unavailable"
+      || normalized === "insufficient"
+      || normalized === "failed"
+      || normalized === "error"
+      || normalized === "bad"
+    ) return "bad";
+    return "neutral";
   }
 
   async function loadWorkCenter(options) {
@@ -1179,6 +2454,7 @@
         elements["work-center-list"],
         "No active insurance files are currently assigned to Chance."
       );
+      refreshManagementSweepFileLinks();
       return;
     }
 
@@ -1187,6 +2463,13 @@
       fragment.append(createWorkFileButton(file));
     });
     elements["work-center-list"].replaceChildren(fragment);
+    refreshManagementSweepFileLinks();
+  }
+
+  function refreshManagementSweepFileLinks() {
+    if (!state.managementSweep) return;
+    renderCompanyWorst(state.managementSweep.companyWorst);
+    renderAdjusterSweeps(state.managementSweep.adjusters);
   }
 
   function createWorkFileButton(file) {
@@ -3370,6 +4653,22 @@
     return "The Work Center could not verify a fresh assigned-file queue.";
   }
 
+  function managementSweepErrorMessage(error) {
+    if (!navigator.onLine) {
+      return "The connection went offline. No company report is retained.";
+    }
+    if (statusOf(error) === 409) {
+      return "The eligible-file set changed while the report was running. Run a fresh sweep.";
+    }
+    if (statusOf(error) === 422) {
+      return "The management sweep could not verify its eligibility or ownership rules.";
+    }
+    if (statusOf(error) === 502 || statusOf(error) === 503) {
+      return "One or more live sources are unavailable. No stale management report is shown.";
+    }
+    return "The company management sweep could not be completed from fresh evidence.";
+  }
+
   function fileErrorMessage(error) {
     if (!navigator.onLine) return "The connection went offline. File evidence was cleared.";
     if (statusOf(error) === 404) {
@@ -3535,6 +4834,7 @@
     if (navigator.onLine) {
       loadPlatformState();
     } else {
+      cancelManagementSweepExpiryTimer();
       clearOperationalData("Client data was cleared when the connection went offline.");
       renderOperationsLocked(
         "Offline",
@@ -3542,6 +4842,11 @@
       );
       renderOverallState();
     }
+  }
+
+  function handleVisibilityChange() {
+    enforceSessionDeadline();
+    enforceManagementSweepExpiry();
   }
 
   function readableTime(value) {
@@ -3572,6 +4877,11 @@
       .replace(/\b\w/g, function (letter) {
         return letter.toUpperCase();
       });
+  }
+
+  function sweepSourceLabel(value) {
+    const normalized = boundedString(value, 64).toLowerCase();
+    return SWEEP_SOURCE_LABELS[normalized] || humanize(normalized);
   }
 
   function statusOf(error) {

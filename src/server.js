@@ -143,6 +143,15 @@ import {
   mapScopedGmailEnvelope,
   mapScopedQuoEnvelope
 } from "./hcn-console/provider-mappers.js";
+import {
+  loadHcnManagementAdjusterConfiguration
+} from "./hcn-console/management-config.js";
+import {
+  mapManagementJobNimbusEnvelope
+} from "./hcn-console/management-provider.js";
+import {
+  buildManagementSweep
+} from "./hcn-ops/management-sweep/core.js";
 import { fetchBoundedJson } from "./http/bounded-json.js";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -259,6 +268,31 @@ const ALLOW_RETELL_CALLS = RELEASE_GATES.ALLOW_RETELL_CALLS;
 const ALLOW_CLIENT_COORDINATOR_CALLS = RELEASE_GATES.ALLOW_CLIENT_COORDINATOR_CALLS;
 const ALLOW_CARRIER_FOLLOWUP_CALLS = RELEASE_GATES.ALLOW_CARRIER_FOLLOWUP_CALLS;
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
+const HCN_MANAGEMENT_ADJUSTERS =
+  loadHcnManagementAdjusterConfiguration(
+    process.env.HCN_MANAGEMENT_ADJUSTERS_JSON
+  );
+const HCN_MANAGEMENT_MAX_FILES = Math.min(
+  positiveIntegerEnv("HCN_MANAGEMENT_MAX_FILES", 300),
+  500
+);
+const HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS = Math.min(
+  positiveIntegerEnv("HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS", 1000),
+  5000
+);
+const HCN_MANAGEMENT_READ_CONCURRENCY = Math.min(
+  positiveIntegerEnv("HCN_MANAGEMENT_READ_CONCURRENCY", 4),
+  8
+);
+const HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET = Math.min(
+  positiveIntegerEnv("HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET", 750),
+  2500
+);
+const HCN_MANAGEMENT_VERIFIED_ACTIVITY_CLASSES = new Set([
+  "successful_communication",
+  "contact_attempt",
+  "operational"
+]);
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-approvals.json");
@@ -364,6 +398,7 @@ const routes = new Map([
   ["GET /hcn/auth/session", hcnBrowserSession],
   ["POST /hcn/auth/logout", hcnBrowserLogout],
   ["POST /hcn/api/v1/work-center", hcnReadWorkCenter],
+  ["POST /hcn/api/v1/management-sweep", hcnReadManagementSweep],
   ["POST /hcn/api/v1/file-review", hcnReadFile],
   ["POST /hcn/api/v1/action-plans/prepare", hcnPrepareActionPlan],
   ["POST /hcn/api/v1/action-plans/list", hcnListActionPlans],
@@ -623,8 +658,22 @@ function health() {
       browserCredential: "secure_http_only_host_cookie",
       csrfProtection: "exact_origin_and_session_token",
       authorizedSurface: hcnConsoleFreshReadConfigured()
-        ? "chance_assigned_fresh_read_only"
+        ? (
+            HCN_MANAGEMENT_ADJUSTERS.ready
+              ? "chance_management_and_assigned_fresh_read_only"
+              : "chance_assigned_fresh_read_only"
+          )
         : "foundation_metadata_only",
+      managementSweep: {
+        configured: HCN_MANAGEMENT_ADJUSTERS.ready === true,
+        ready:
+          HCN_MANAGEMENT_ADJUSTERS.ready === true
+          && hcnConsoleFreshReadConfigured(),
+        configuredAdjusterCount:
+          HCN_MANAGEMENT_ADJUSTERS.adjusters.length,
+        rankingMode: "jobnimbus_activity_only",
+        companyCommunicationCoverage: "not_evaluated"
+      },
       clientDataPersistence: "none",
       referenceConfiguration:
         projectHcnReferenceConfigurationReadiness(
@@ -1298,6 +1347,378 @@ async function hcnReadWorkCenter(input = {}) {
   return withHcnReadAdmission(
     () => hcnConsoleFreshReadService().readWorkCenter(input)
   );
+}
+
+async function hcnReadManagementSweep(input = {}) {
+  assertChanceHcnReadSession();
+  return withHcnReadAdmission(
+    () => readHcnManagementSweep(input)
+  );
+}
+
+async function readHcnManagementSweep(input = {}) {
+  const request = validateHcnManagementSweepInput(input);
+  if (!API_KEY) {
+    const error = new Error("Fresh JobNimbus evidence is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const requestedAt = new Date().toISOString();
+  const snapshot = await loadHcnManagementJobNimbusSnapshot({
+    requestedAt
+  });
+  const generatedAt = snapshot.checkedAt;
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const adjusters = HCN_MANAGEMENT_ADJUSTERS.adjusters.map((adjuster) => ({
+    ...adjuster,
+    adjusterRef: hcnManagementAdjusterRef(
+      references,
+      adjuster.ownerId
+    )
+  }));
+  const adjustersByOwner = new Map(
+    adjusters.map((adjuster) => [adjuster.ownerId, adjuster])
+  );
+  const eventsByProviderFileId = new Map();
+  for (const event of snapshot.data.events) {
+    const list = eventsByProviderFileId.get(event.providerFileId) || [];
+    list.push(event);
+    eventsByProviderFileId.set(event.providerFileId, list);
+  }
+
+  const displayByFileRef = new Map();
+  const files = snapshot.data.files.map((file) => {
+    const adjuster = adjustersByOwner.get(file.assignedAdjusterId);
+    if (!adjuster) {
+      throw hcnManagementSourceUnavailable(
+        "The JobNimbus management owner scope changed during the sweep."
+      );
+    }
+    const fileRef = references.subjectId(
+      "jobnimbus",
+      file.providerFileId
+    );
+    const mappedEvents = (
+      eventsByProviderFileId.get(file.providerFileId) || []
+    ).map((event) => ({
+      reference: references.sourceRecordRef(
+        "jobnimbus",
+        event.evidenceId
+      ),
+      source: "jobnimbus",
+      eventCode: hcnManagementJobNimbusEventCode(event),
+      occurredAt: event.occurredAt,
+      actorRef: null
+    }));
+    displayByFileRef.set(fileRef, {
+      displayName: file.displayName,
+      jobNumber: file.jobNumber,
+      statusCode: file.statusCode,
+      stageCode: file.stageCode,
+      eventSummary: file.eventSummary
+    });
+    return {
+      fileRef,
+      status: "active",
+      assignedAdjusterRef: adjuster.adjusterRef,
+      activeSince: file.activeSince,
+      sources: [{
+        source: "jobnimbus",
+        status: "fresh",
+        completeness: "complete",
+        asOf: snapshot.asOf,
+        checkedAt: snapshot.checkedAt,
+        validUntil: snapshot.validUntil
+      }],
+      events: mappedEvents
+    };
+  });
+
+  let sweep;
+  try {
+    sweep = buildManagementSweep({
+      generatedAt,
+      adjusters: adjusters.map(({ adjusterRef }) => ({ adjusterRef })),
+      requiredSources: ["jobnimbus"],
+      files,
+      limitPerAdjuster: request.limitPerAdjuster,
+      rankingMode: "activity_only"
+    });
+  } catch {
+    throw hcnManagementSourceUnavailable(
+      "The normalized JobNimbus activity report is unavailable."
+    );
+  }
+  const displayNameByAdjusterRef = new Map(
+    adjusters.map((adjuster) => [
+      adjuster.adjusterRef,
+      adjuster.displayName
+    ])
+  );
+  const ambiguousOwnerCount =
+    snapshot.data.excluded.ambiguousOwner || 0;
+  const unsupportedActivityRecordCount =
+    snapshot.data.files.reduce(
+      (total, file) =>
+        total + Number(file.eventSummary?.unsupportedEventCount || 0),
+      0
+    );
+  const completenessStatus =
+    ambiguousOwnerCount > 0 || unsupportedActivityRecordCount > 0
+      ? "partial"
+      : "complete";
+  const completenessDetails = [];
+  if (ambiguousOwnerCount > 0) {
+    completenessDetails.push(
+      "one or more active insurance files had ambiguous configured ownership and were excluded"
+    );
+  }
+  if (unsupportedActivityRecordCount > 0) {
+    completenessDetails.push(
+      `${unsupportedActivityRecordCount} JobNimbus activity record`
+      + (unsupportedActivityRecordCount === 1 ? "" : "s")
+      + " used an unsupported type or state and could not reset a gap"
+    );
+  }
+  const completenessSummary = completenessDetails.length
+    ? "Complete per-file JobNimbus histories were read, but "
+      + `${completenessDetails.join("; ")}.`
+    : "Every eligible configured-owner file was checked with complete per-file JobNimbus activity reads.";
+
+  const response = {
+    schema: sweep.schemaVersion,
+    schemaVersion: sweep.schemaVersion,
+    generatedAt: sweep.generatedAt,
+    asOf: snapshot.asOf,
+    checkedAt: snapshot.checkedAt,
+    validUntil: snapshot.validUntil,
+    ephemeral: true,
+    cachePolicy: "no_store",
+    authority: sweep.authority,
+    criteria: sweep.criteria,
+    summary: {
+      ...sweep.summary,
+      unsupportedActivityRecordCount
+    },
+    sourceHealth: [
+      {
+        key: "jobnimbus",
+        label: "JobNimbus activity",
+        status: completenessStatus,
+        detail: completenessSummary
+      },
+      {
+        key: "gmail",
+        label: "Gmail",
+        status: "not_evaluated",
+        detail:
+          "The connected mailbox is not a verified company-wide mail archive."
+      },
+      {
+        key: "quo",
+        label: "Quo",
+        status: "not_evaluated",
+        detail:
+          "Company-wide line coverage was not evaluated in this JobNimbus activity report."
+      },
+      {
+        key: "google_calendar",
+        label: "Calendar",
+        status: "not_evaluated",
+        detail:
+          "The connected calendar does not provide company-wide exact-file activity evidence."
+      }
+    ],
+    completeness: {
+      status: completenessStatus,
+      summary: completenessSummary
+    },
+    adjusters: sweep.adjusters.map((group) => ({
+      id: group.adjusterRef,
+      adjusterRef: group.adjusterRef,
+      name:
+        displayNameByAdjusterRef.get(group.adjusterRef)
+        || "Configured adjuster",
+      eligibleCount: group.eligibleCount,
+      returnedCount: group.returnedCount,
+      requestedCount: group.requestedCount,
+      shortage: group.shortage,
+      items: group.items.map((item) =>
+        projectHcnManagementSweepItem(item, displayByFileRef)
+      )
+    })),
+    companyWorst: sweep.companyWorst.map((item) =>
+      projectHcnManagementSweepItem(item, displayByFileRef)
+    ),
+    exclusions: hcnManagementSweepExclusions(
+      snapshot.data.excluded,
+      sweep.exclusions
+    )
+  };
+  if (Date.now() >= Date.parse(snapshot.validUntil)) {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus management sweep expired before it could be returned."
+    );
+  }
+  return response;
+}
+
+function validateHcnManagementSweepInput(input) {
+  if (
+    !input
+    || typeof input !== "object"
+    || Array.isArray(input)
+    || Object.keys(input).some((key) => key !== "limitPerAdjuster")
+  ) {
+    badRequest(
+      "Management sweep input may contain only limitPerAdjuster."
+    );
+  }
+  const limitPerAdjuster =
+    input.limitPerAdjuster === undefined ? 10 : input.limitPerAdjuster;
+  if (
+    !Number.isSafeInteger(limitPerAdjuster)
+    || limitPerAdjuster < 1
+    || limitPerAdjuster > 10
+  ) {
+    badRequest("limitPerAdjuster must be an integer from 1 to 10.");
+  }
+  return { limitPerAdjuster };
+}
+
+function hcnManagementAdjusterRef(references, ownerId) {
+  const sourceRef = references.sourceRecordRef(
+    "jobnimbus",
+    `management-adjuster:${ownerId}`
+  );
+  return `adjuster_${sourceRef.slice("ref_".length)}`;
+}
+
+function hcnManagementJobNimbusEventCode(event) {
+  const kind = String(event?.kind || "").toLowerCase();
+  const state = String(event?.state || "").toLowerCase();
+  if (kind.includes("claim") && state.includes("filed")) {
+    return "claim_filed";
+  }
+  if (kind.includes("claim")) return "claim_result_recorded";
+  if (kind.includes("appointment") || kind.includes("inspection")) {
+    if (state.includes("rescheduled")) return "appointment_rescheduled";
+    if (state.includes("completed")) return "appointment_completed";
+    return "appointment_scheduled";
+  }
+  if (kind.includes("settlement")) return "settlement_received";
+  if (kind.includes("payment")) return "payment_follow_up";
+  if (kind.includes("supplement")) return "supplement_submitted";
+  if (kind.includes("estimate")) return "estimate_revised";
+  if (
+    kind.includes("document")
+    || kind.includes("file")
+    || kind.includes("attachment")
+  ) {
+    return "document_received";
+  }
+  if (kind.includes("status")) return "status_progressed";
+  return "note_substantive";
+}
+
+function projectHcnManagementSweepItem(item, displayByFileRef) {
+  const display = displayByFileRef.get(item.fileRef);
+  if (!display) {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus management display scope changed during the sweep."
+    );
+  }
+  const lastAt = item.gaps.operationalActivity.lastAt;
+  const unsupportedEventCount =
+    Number(display.eventSummary?.unsupportedEventCount || 0);
+  return {
+    ...item,
+    display: {
+      name: display.displayName,
+      jobNumber: display.jobNumber
+    },
+    status: {
+      code: display.statusCode,
+      label: display.statusCode
+        .split("_")
+        .filter(Boolean)
+        .map((word) => word[0].toUpperCase() + word.slice(1))
+        .join(" ")
+    },
+    stageCode: display.stageCode,
+    lastTouch: lastAt
+      ? {
+          summary: "Latest allowlisted JobNimbus activity record",
+          at: lastAt,
+          source: "jobnimbus"
+        }
+      : {
+          summary: "No verified JobNimbus activity was found",
+          at: "",
+          source: "jobnimbus"
+        },
+    evidenceHealth: {
+      ...item.evidenceHealth,
+      status:
+        unsupportedEventCount > 0
+          ? "partial"
+          : item.evidenceHealth.status,
+      completeness:
+        unsupportedEventCount > 0
+          ? "partial"
+          : item.evidenceHealth.completeness,
+      summary:
+        unsupportedEventCount > 0
+          ? "All JobNimbus activity pages were read, but "
+            + `${unsupportedEventCount} unsupported record`
+            + (unsupportedEventCount === 1 ? "" : "s")
+            + " did not reset this gap; Gmail, Quo, and calendar were not evaluated."
+          : "All JobNimbus activity pages were read; ranking uses only allowlisted activity types, and Gmail, Quo, and calendar were not evaluated."
+    },
+    eventSummary: display.eventSummary
+  };
+}
+
+function hcnManagementSweepExclusions(providerExclusions, coreExclusions) {
+  const definitions = [
+    [
+      "Non-insurance records",
+      providerExclusions.nonInsurance,
+      "Outside the insurance-file scope."
+    ],
+    [
+      "Inactive insurance files",
+      providerExclusions.inactive,
+      "Not active at the time of the fresh sweep."
+    ],
+    [
+      "Owners outside the configured three adjusters",
+      providerExclusions.unconfiguredOwner,
+      "Not assigned to exactly one configured management adjuster."
+    ],
+    [
+      "Ambiguous configured ownership",
+      providerExclusions.ambiguousOwner,
+      "Matched more than one configured adjuster and was excluded rather than guessed."
+    ]
+  ];
+  const results = definitions
+    .filter(([, count]) => Number(count) > 0)
+    .map(([label, count, detail]) => ({
+      label,
+      count,
+      detail
+    }));
+  if (Array.isArray(coreExclusions) && coreExclusions.length) {
+    results.push({
+      label: "Core eligibility exclusions",
+      count: coreExclusions.length,
+      detail:
+        "One or more normalized files did not meet the active configured-adjuster contract."
+    });
+  }
+  return results;
 }
 
 async function hcnReadFile(input = {}) {
@@ -7725,6 +8146,250 @@ async function loadHcnJobNimbusIndex({
   });
 }
 
+async function loadHcnManagementJobNimbusSnapshot({
+  requestedAt
+} = {}) {
+  if (HCN_MANAGEMENT_ADJUSTERS.ready !== true) {
+    const error = new Error(
+      "The three-adjuster management sweep is not configured."
+    );
+    error.code = "hcn_management_sweep_unconfigured";
+    error.statusCode = 503;
+    throw error;
+  }
+  const providerReadBudget = {
+    maximum: HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET,
+    used: 0
+  };
+  let index;
+  try {
+    index = await hcnCachedContactIndex({
+      maxRecords: 5000,
+      requestBudget: providerReadBudget
+    });
+  } catch (error) {
+    if (error?.code === "hcn_management_source_unavailable") throw error;
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus management file index is unavailable."
+    );
+  }
+  if (!index.complete) {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus file index is incomplete."
+    );
+  }
+  const freshness = hcnFreshnessWindow(requestedAt);
+  let initial;
+  try {
+    initial = mapManagementJobNimbusEnvelope({
+      contacts: index.rows,
+      activities: [],
+      tasks: [],
+      contactsComplete: true,
+      activitiesComplete: true,
+      tasksComplete: true,
+      ...freshness
+    }, {
+      adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters
+    });
+  } catch {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus management file index is unavailable."
+    );
+  }
+  if (initial.data.files.length > HCN_MANAGEMENT_MAX_FILES) {
+    const error = new Error(
+      "The management sweep eligible-file bound was exceeded."
+    );
+    error.code = "hcn_management_scope_changed";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const contactsById = new Map(
+    index.rows.map((contact) => [
+      hcnProviderFileId(String(contact?.jnid || contact?.id || "")),
+      contact
+    ])
+  );
+  const indexedContactIds = new Set(contactsById.keys());
+  const fileEvidence = await mapWithBoundedConcurrency(
+    initial.data.files,
+    HCN_MANAGEMENT_READ_CONCURRENCY,
+    async (file) => {
+      let result;
+      try {
+        result = await listHcnExactFileActivitiesComplete(
+          file.providerFileId,
+          { requestBudget: providerReadBudget }
+        );
+      } catch (error) {
+        if (error?.code === "hcn_management_source_unavailable") throw error;
+        throw hcnManagementSourceUnavailable(
+          "One or more JobNimbus activity histories are unavailable."
+        );
+      }
+      if (!result.complete) {
+        throw hcnManagementSourceUnavailable(
+          "One or more JobNimbus activity histories are incomplete."
+        );
+      }
+      for (const activity of result.rows) {
+        const indexedReferences =
+          hcnManagementIndexedFileReferences(
+            activity,
+            indexedContactIds
+          );
+        if (
+          indexedReferences.length !== 1
+          || indexedReferences[0] !== file.providerFileId
+        ) {
+          throw hcnManagementSourceUnavailable(
+            "One or more JobNimbus activities have ambiguous file scope."
+          );
+        }
+      }
+      const contact = contactsById.get(file.providerFileId);
+      if (!contact) {
+        throw hcnManagementSourceUnavailable(
+          "The JobNimbus management file index changed during the sweep."
+        );
+      }
+      try {
+        const mapped = mapManagementJobNimbusEnvelope({
+          contacts: [contact],
+          activities: result.rows,
+          tasks: [],
+          contactsComplete: true,
+          activitiesComplete: true,
+          tasksComplete: true,
+          ...freshness
+        }, {
+          adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters
+        });
+        const accepted = mapped.data.events.filter((event) =>
+          HCN_MANAGEMENT_VERIFIED_ACTIVITY_CLASSES.has(
+            event.classification
+          )
+        );
+        const latestEvent = accepted.reduce((latest, event) => {
+          if (!latest) return event;
+          const occurred =
+            Date.parse(event.occurredAt) - Date.parse(latest.occurredAt);
+          if (occurred > 0) return event;
+          if (
+            occurred === 0
+            && event.evidenceId.localeCompare(latest.evidenceId) < 0
+          ) {
+            return event;
+          }
+          return latest;
+        }, null);
+        return {
+          providerFileId: file.providerFileId,
+          latestEvent,
+          eventSummary: {
+            fetchedEventCount: result.rows.length,
+            acceptedEventCount: accepted.length,
+            communicationActivityCount: mapped.data.events.filter(
+              (event) =>
+                event.classification === "successful_communication"
+                || event.classification === "contact_attempt"
+            ).length,
+            operationalActivityCount: mapped.data.events.filter(
+              (event) => event.classification === "operational"
+            ).length,
+            noiseCount: mapped.data.events.filter(
+              (event) => event.classification === "noise"
+            ).length,
+            unsupportedEventCount: mapped.data.events.filter(
+              (event) => event.classification === "unsupported"
+            ).length,
+            ignoredUnfreshEventCount: 0
+          }
+        };
+      } catch {
+        throw hcnManagementSourceUnavailable(
+          "One or more JobNimbus activity histories are unavailable."
+        );
+      }
+    }
+  );
+  const evidenceByProviderFileId = new Map(
+    fileEvidence.map((evidence) => [
+      evidence.providerFileId,
+      evidence
+    ])
+  );
+  const events = fileEvidence.flatMap((evidence) =>
+    evidence.latestEvent ? [evidence.latestEvent] : []
+  );
+  const completedAt = new Date().toISOString();
+  if (Date.parse(completedAt) >= Date.parse(freshness.validUntil)) {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus management sweep exceeded its fresh-evidence window."
+    );
+  }
+  return {
+    status: "ok",
+    asOf: freshness.asOf,
+    checkedAt: completedAt,
+    validUntil: freshness.validUntil,
+    data: {
+      complete: true,
+      files: initial.data.files.map((file) => ({
+        ...file,
+        eventSummary:
+          evidenceByProviderFileId.get(file.providerFileId)?.eventSummary
+          || {
+            fetchedEventCount: 0,
+            acceptedEventCount: 0,
+            communicationActivityCount: 0,
+            operationalActivityCount: 0,
+            noiseCount: 0,
+            unsupportedEventCount: 0,
+            ignoredUnfreshEventCount: 0
+          }
+      })),
+      events,
+      openTasks: [],
+      excluded: initial.data.excluded,
+      diagnostics: {
+        ...initial.data.diagnostics,
+        perFileActivityReads: initial.data.files.length,
+        retainedLatestActivityCount: events.length,
+        providerReadBudgetUsed: providerReadBudget.used,
+        providerReadBudgetMaximum: providerReadBudget.maximum
+      }
+    }
+  };
+}
+
+function hcnManagementIndexedFileReferences(record, indexedContactIds) {
+  const ids = [];
+  for (const key of [
+    "primary",
+    "related",
+    "customer",
+    "contact",
+    "parent"
+  ]) {
+    collectIds(record?.[key], ids);
+  }
+  return [...new Set(
+    ids
+      .map(String)
+      .filter((id) => indexedContactIds.has(id))
+  )].sort();
+}
+
+function hcnManagementSourceUnavailable(message) {
+  const error = new Error(message);
+  error.code = "hcn_management_source_unavailable";
+  error.statusCode = 503;
+  return error;
+}
+
 async function loadHcnJobNimbusFile({
   providerFileId,
   recentLimit,
@@ -8039,12 +8704,16 @@ function hcnFreshProviderCache() {
   return context[HCN_FRESH_PROVIDER_CACHE];
 }
 
-async function hcnCachedContactIndex({ maxRecords } = {}) {
+async function hcnCachedContactIndex({
+  maxRecords,
+  requestBudget = null
+} = {}) {
   const maximum = Number(maxRecords);
   const cache = hcnFreshProviderCache();
   if (!cache) {
     return listHcnResourceComplete("/contacts", {
-      maxRecords: maximum
+      maxRecords: maximum,
+      requestBudget
     });
   }
   if (
@@ -8054,7 +8723,8 @@ async function hcnCachedContactIndex({ maxRecords } = {}) {
     return cache.contactIndexPromise;
   }
   const pending = listHcnResourceComplete("/contacts", {
-    maxRecords: maximum
+    maxRecords: maximum,
+    requestBudget
   });
   cache.contactIndexPromise = pending;
   cache.contactIndexMaximum = maximum;
@@ -8169,7 +8839,9 @@ async function listHcnResourceComplete(
   endpoint,
   {
     maxRecords,
-    relatedContactId = ""
+    relatedContactId = "",
+    contactReferenceField = "related.id",
+    requestBudget = null
   } = {}
 ) {
   const maximum = Number(maxRecords);
@@ -8183,15 +8855,22 @@ async function listHcnResourceComplete(
   const relatedId = relatedContactId
     ? hcnProviderFileId(relatedContactId)
     : "";
+  if (
+    relatedId
+    && !["related.id", "primary.id"].includes(contactReferenceField)
+  ) {
+    throw new Error("HCN exact-file reference field is unavailable.");
+  }
   const filter = relatedId
     ? JSON.stringify({
-        must: [{ term: { "related.id": relatedId } }]
+        must: [{ term: { [contactReferenceField]: relatedId } }]
       })
     : "";
   const rows = [];
   let offset = 0;
   while (offset < maximum) {
     const size = Math.min(500, maximum - offset);
+    consumeHcnProviderReadBudget(requestBudget);
     const payload = await hcnJobNimbus(
       hcnPagedEndpoint(endpoint, {
         size,
@@ -8232,7 +8911,12 @@ async function listHcnResourceComplete(
     if (
       relatedId
       && batch.some(
-        (item) => !referencesContact(item, relatedId)
+        (item) =>
+          !referencesContactField(
+            item,
+            contactReferenceField,
+            relatedId
+          )
       )
     ) {
       throw new Error("JobNimbus exact-file pagination is unavailable.");
@@ -8247,6 +8931,7 @@ async function listHcnResourceComplete(
     offset += batch.length;
   }
 
+  consumeHcnProviderReadBudget(requestBudget);
   const probe = unwrapHcnList(
     await hcnJobNimbus(
       hcnPagedEndpoint(endpoint, {
@@ -8261,6 +8946,161 @@ async function listHcnResourceComplete(
     rows,
     complete: probe.length === 0
   };
+}
+
+async function listHcnExactFileActivitiesComplete(
+  providerFileId,
+  {
+    maxRecords = HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS,
+    requestBudget = null
+  } = {}
+) {
+  const id = hcnProviderFileId(providerFileId);
+  const [primary, related] = await Promise.all([
+    listHcnResourceComplete("/activities", {
+      maxRecords,
+      relatedContactId: id,
+      contactReferenceField: "primary.id",
+      requestBudget
+    }),
+    listHcnResourceComplete("/activities", {
+      maxRecords,
+      relatedContactId: id,
+      contactReferenceField: "related.id",
+      requestBudget
+    })
+  ]);
+  if (!primary.complete || !related.complete) {
+    return {
+      rows: [],
+      complete: false
+    };
+  }
+
+  const unique = new Map();
+  for (const [referenceField, rows] of [
+    ["primary.id", primary.rows],
+    ["related.id", related.rows]
+  ]) {
+    for (const activity of rows) {
+      if (
+        !activity
+        || typeof activity !== "object"
+        || Array.isArray(activity)
+        || !referencesContactField(activity, referenceField, id)
+      ) {
+        throw new Error(
+          "JobNimbus exact-file activity scope is unavailable."
+        );
+      }
+      const activityId = hcnProviderFileId(
+        String(activity.jnid || activity.id || "")
+      );
+      const fingerprint = hcnProviderRecordFingerprint(activity);
+      const existing = unique.get(activityId);
+      if (existing && existing.fingerprint !== fingerprint) {
+        throw new Error(
+          "JobNimbus exact-file activity provenance is inconsistent."
+        );
+      }
+      if (existing) {
+        existing.referenceFields.add(referenceField);
+      } else {
+        unique.set(activityId, {
+          activity,
+          fingerprint,
+          referenceFields: new Set([referenceField])
+        });
+      }
+    }
+  }
+  if (unique.size > maxRecords) {
+    return {
+      rows: [],
+      complete: false
+    };
+  }
+  return {
+    rows: [...unique.values()].map((entry) => entry.activity),
+    complete: true
+  };
+}
+
+function referencesContactField(item, referenceField, contactId) {
+  const field =
+    referenceField === "primary.id"
+      ? "primary"
+      : referenceField === "related.id"
+        ? "related"
+        : "";
+  if (!field) return false;
+  const ids = [];
+  collectIds(item?.[field], ids);
+  return ids.map(String).includes(String(contactId));
+}
+
+function hcnProviderRecordFingerprint(value) {
+  return createHash("sha256")
+    .update(JSON.stringify(hcnCanonicalProviderValue(value)))
+    .digest("hex");
+}
+
+function hcnCanonicalProviderValue(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(hcnCanonicalProviderValue)
+      .sort((left, right) =>
+        JSON.stringify(left).localeCompare(JSON.stringify(right))
+      );
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [
+        key,
+        hcnCanonicalProviderValue(entry)
+      ])
+  );
+}
+
+function consumeHcnProviderReadBudget(budget) {
+  if (budget === null) return;
+  if (
+    !budget
+    || typeof budget !== "object"
+    || !Number.isSafeInteger(budget.maximum)
+    || budget.maximum < 1
+    || !Number.isSafeInteger(budget.used)
+    || budget.used < 0
+    || budget.used >= budget.maximum
+  ) {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus management provider-read budget was exceeded."
+    );
+  }
+  budget.used += 1;
+}
+
+async function mapWithBoundedConcurrency(items, concurrency, worker) {
+  if (!Array.isArray(items) || typeof worker !== "function") {
+    throw new TypeError("Bounded worker input is invalid.");
+  }
+  const width = Math.max(
+    1,
+    Math.min(Number(concurrency) || 1, Math.max(1, items.length))
+  );
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: width }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function hcnPagedEndpoint(
@@ -12259,6 +13099,7 @@ const OPENAPI = {
               googleCalendar: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
               googleOAuth: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
               jobNimbus: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
+              managementSweep: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
               quo: { $ref: "#/components/schemas/PlatformConfigurationStatus" },
               realtimeVoice: { $ref: "#/components/schemas/PlatformConfigurationStatus" }
             },
@@ -12270,6 +13111,7 @@ const OPENAPI = {
               "googleCalendar",
               "googleOAuth",
               "jobNimbus",
+              "managementSweep",
               "quo",
               "realtimeVoice"
             ]
@@ -13435,6 +14277,43 @@ const OPENAPI = {
           "413": { description: "Request exceeds the 4 KiB console limit." },
           "502": { description: "Fresh JobNimbus evidence could not be proven." },
           "503": { description: "HCN read-only reference configuration is unavailable." }
+        }
+      }
+    },
+    "/hcn/api/v1/management-sweep": {
+      post: {
+        operationId: "readHcnManagementSweep",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Chance-only fresh, read-only ranking of the longest verified JobNimbus activity gaps for exactly three configured adjusters. The report uses complete per-file JobNimbus activity reads, exposes explicit exclusions, and does not claim company-wide Gmail, Quo, or calendar coverage.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  limitPerAdjuster: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 10,
+                    default: 10
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Fresh ephemeral JobNimbus activity-gap report with three adjuster groups and a company-wide ranking."
+          },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN browser session required." },
+          "403": { description: "Chance-only session, Origin, or CSRF check failed." },
+          "409": { description: "The eligible file scope exceeded the configured safe bound." },
+          "413": { description: "Request exceeds the 4 KiB console limit." },
+          "503": { description: "The three-adjuster configuration, opaque-reference configuration, or fresh complete JobNimbus evidence is unavailable." }
         }
       }
     },

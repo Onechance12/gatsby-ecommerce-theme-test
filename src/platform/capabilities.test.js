@@ -95,6 +95,7 @@ test("HCN browser capability metadata is intersected with the console surface", 
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
     "hcn.file.review",
+    "hcn.management_sweep.read",
     "hcn.work_center.read",
     "platform.session.read"
   ]);
@@ -192,6 +193,12 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
       googleCalendarConfigured: true,
       failClosed: true
     },
+    hcnConsole: {
+      managementSweep: {
+        configured: true,
+        ready: true
+      }
+    },
     brain: {
       available: true,
       operationalProviderConfigured: false,
@@ -205,6 +212,7 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   });
 
   assert.equal(status.connectors.jobNimbus, "configured");
+  assert.equal(status.connectors.managementSweep, "configured");
   assert.equal(status.connectors.gmail, "unconfigured");
   assert.equal(status.connectors.quo, "unknown");
   assert.equal(status.gates.externalWrites, "enabled");
@@ -228,6 +236,21 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   }]);
   assert.deepEqual(status.configurationDrift.unknown, ["ALLOW_QUO_SEND"]);
   assert.equal(buildRuntimeStatus(null).connectors.jobNimbus, "unknown");
+  assert.equal(
+    buildRuntimeStatus(null).connectors.managementSweep,
+    "unknown"
+  );
+  assert.equal(
+    buildRuntimeStatus({
+      hcnConsole: {
+        managementSweep: {
+          configured: true,
+          ready: false
+        }
+      }
+    }).connectors.managementSweep,
+    "unconfigured"
+  );
 });
 
 test("identity and runtime secrets, contact data, and arbitrary strings cannot leak", () => {
