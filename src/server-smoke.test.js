@@ -419,12 +419,12 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(rootRedirectResponse.status, 302);
   assert.equal(
     rootRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v11"
+    "/hcn/auth/login?returnTo=%2Fhcn%2F"
   );
   assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
   assert.match(
     rootRedirectResponse.headers.get("content-security-policy"),
-    /default-src 'self'/
+    /default-src 'none'/
   );
   assert.equal(rootRedirectResponse.headers.get("set-cookie"), null);
 
@@ -434,21 +434,21 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(consoleRedirectResponse.status, 302);
   assert.equal(
     consoleRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v11"
+    "/hcn/auth/login?returnTo=%2Fhcn%2F"
   );
   assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
 
-  const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`);
-  assert.equal(consoleResponse.status, 200);
-  assert.match(consoleResponse.headers.get("content-type"), /^text\/html/);
-  assert.match(consoleResponse.headers.get("content-security-policy"), /default-src 'self'/);
-  assert.equal(consoleResponse.headers.get("x-frame-options"), "DENY");
-  const consoleHtml = await consoleResponse.text();
-  assert.match(consoleHtml, /HCN Work Center/);
-  assert.doesNotMatch(consoleHtml, /type=["']password["']/i);
+  const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`, {
+    redirect: "manual"
+  });
+  assert.equal(consoleResponse.status, 302);
+  assert.equal(
+    consoleResponse.headers.get("location"),
+    "/hcn/auth/login?returnTo=%2Fhcn%2F"
+  );
+  assert.equal(consoleResponse.headers.get("cache-control"), "no-store, max-age=0");
 
   for (const [pathname, contentType] of [
-    ["/hcn/?shell=v9", "text/html"],
     ["/hcn/app.css?shell=v9", "text/css"],
     ["/hcn/app.js?shell=v9", "text/javascript"],
     [
@@ -3074,6 +3074,43 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.doesNotMatch(callbackCookies.join("\n"), /hcn-google-access-token|hcn-google-code/);
   const sessionCookie = sessionSetCookie.split(";", 1)[0];
 
+  const authenticatedRootResponse = await fetch(`${origin}/`, {
+    redirect: "manual",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(authenticatedRootResponse.status, 302);
+  assert.equal(
+    authenticatedRootResponse.headers.get("location"),
+    "/hcn/?shell=v12"
+  );
+
+  const authenticatedConsoleRedirectResponse = await fetch(`${origin}/hcn`, {
+    redirect: "manual",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(authenticatedConsoleRedirectResponse.status, 302);
+  assert.equal(
+    authenticatedConsoleRedirectResponse.headers.get("location"),
+    "/hcn/?shell=v12"
+  );
+
+  const authenticatedConsoleResponse = await fetch(
+    `${origin}/hcn/?shell=v12`,
+    { headers: { cookie: sessionCookie } }
+  );
+  assert.equal(authenticatedConsoleResponse.status, 200);
+  assert.match(
+    authenticatedConsoleResponse.headers.get("content-type"),
+    /^text\/html/
+  );
+  assert.match(
+    authenticatedConsoleResponse.headers.get("content-security-policy"),
+    /default-src 'self'/
+  );
+  const authenticatedConsoleHtml = await authenticatedConsoleResponse.text();
+  assert.match(authenticatedConsoleHtml, /HCN Work Center/);
+  assert.doesNotMatch(authenticatedConsoleHtml, /type=["']password["']/i);
+
   assert.equal(providerRequests.length, 1);
   assert.equal(providerRequests[0].code, "hcn-google-code");
   assert.equal(
@@ -4786,6 +4823,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     headers: { cookie: sessionCookie }
   });
   assert.equal(revokedSessionResponse.status, 401);
+  const revokedConsoleResponse = await fetch(`${origin}/hcn/`, {
+    redirect: "manual",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(revokedConsoleResponse.status, 302);
+  assert.equal(
+    revokedConsoleResponse.headers.get("location"),
+    "/hcn/auth/login?returnTo=%2Fhcn%2F"
+  );
 
   for (let index = 0; index < 3; index += 1) {
     const retryLogin = await fetch(`${origin}/hcn/auth/login`, {

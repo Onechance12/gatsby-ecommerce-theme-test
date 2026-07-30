@@ -3,6 +3,7 @@
 
   const ENDPOINTS = Object.freeze({
     meta: "/api/v1/meta",
+    login: "/hcn/auth/login?returnTo=%2Fhcn%2F",
     session: "/hcn/auth/session",
     logout: "/hcn/auth/logout",
     connectorsStatus: "/hcn/api/v1/connectors/status",
@@ -295,6 +296,7 @@
     assistantLoading: false,
     assistantPlanId: null,
     assistantPreparedPlanCount: 0,
+    leavingForLogin: false,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
   };
@@ -1574,14 +1576,7 @@
     clearOperationalData(message);
     state.session = null;
     state.sessionError = { status: 401 };
-    renderSignedOut(
-      "Sign in with your HCN account to verify operating authority again."
-    );
-    renderOperationsLocked(
-      "Session expired",
-      "Sign in with your HCN account to load fresh assigned files."
-    );
-    renderOverallState();
+    leaveConsoleForLogin();
   }
 
   function setLoadingView() {
@@ -1819,7 +1814,7 @@
   function renderSessionError(error) {
     const status = statusOf(error);
     if (status === 401 || status === 403) {
-      renderSignedOut("Sign in with your HCN account to see your exact operating scope.");
+      leaveConsoleForLogin();
       return;
     }
 
@@ -1858,7 +1853,7 @@
     const csrfToken = stringValue(browserSession.csrfToken);
     if (!csrfToken) {
       clearOperationalData("The browser session could not be verified.");
-      await loadPlatformState();
+      leaveConsoleForLogin();
       return;
     }
 
@@ -1881,12 +1876,7 @@
       if (!response.ok) throw new Error("Sign out failed");
       state.session = null;
       state.sessionError = { status: 401 };
-      renderSignedOut("You are signed out. No operating authority is assumed.");
-      renderOperationsLocked(
-        "Signed out",
-        "Sign in with your HCN account to load fresh assigned files."
-      );
-      renderOverallState();
+      leaveConsoleForLogin();
     } catch {
       setText(
         elements["load-message"],
@@ -7359,12 +7349,16 @@
     clearOperationalData("The operational session is no longer authorized.");
     state.session = null;
     state.sessionError = { status: 401 };
-    renderSignedOut("Sign in again to verify your exact operating scope.");
-    renderOperationsLocked(
-      "Session expired",
-      "Client data was cleared. Sign in again before requesting fresh evidence."
-    );
-    renderOverallState();
+    leaveConsoleForLogin();
+  }
+
+  function leaveConsoleForLogin() {
+    if (state.leavingForLogin) return;
+    state.leavingForLogin = true;
+    cancelSessionExpiryTimer();
+    cancelManagementSweepExpiryTimer();
+    clearOperationalData("Leaving the private HCN workspace.");
+    window.location.replace(ENDPOINTS.login);
   }
 
   function isAuthorizationStatus(error) {
@@ -7655,8 +7649,14 @@
   function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("/hcn/sw.js?shell=v11", { scope: "/hcn/" }).catch(function () {
-        // Offline support is optional; readiness remains sourced from live API checks.
+      navigator.serviceWorker.getRegistration("/hcn/").then(function (registration) {
+        if (!registration) return null;
+        return navigator.serviceWorker.register(
+          "/hcn/sw.js?shell=v12",
+          { scope: "/hcn/" }
+        );
+      }).catch(function () {
+        // Legacy cache retirement is best effort; the server still gates HTML.
       });
     });
   }

@@ -212,11 +212,11 @@ test("console serves only its fixed application-shell allowlist", async () => {
   const manifest = JSON.parse(
     manifestAsset.body.toString("utf8")
   );
-  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v11/);
-  assert.match(html, /\/hcn\/app\.css\?shell=v11/);
-  assert.match(html, /\/hcn\/app\.js\?shell=v11/);
-  assert.match(html, /href="\/hcn\/\?shell=v11"/);
-  assert.equal(manifest.start_url, "/hcn/?shell=v11");
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v12/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v12/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v12/);
+  assert.match(html, /href="\/hcn\/\?shell=v12"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v12");
 
   for (const pathname of [
     "/hcn",
@@ -367,7 +367,7 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(script, /elements\["assistant-mode-auto"\]\.checked = true/);
   assert.match(script, /state\.assistantPreparedPlanCount = 0/);
   assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
-  assert.match(worker, /"\/hcn\/api\/"/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /assistant\/turns/);
 });
 
@@ -454,13 +454,17 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v11";/);
-  assert.match(worker, /"\/hcn\/\?shell=v11"/);
-  assert.match(worker, /"\/hcn\/app\.css\?shell=v11"/);
-  assert.match(worker, /"\/hcn\/app\.js\?shell=v11"/);
-  assert.match(worker, /"\/hcn\/manifest\.webmanifest\?shell=v11"/);
-  assert.match(worker, /const SHELL_PATH_SET = new Set\(SHELL_PATHNAMES\)/);
-  assert.match(script, /\/hcn\/sw\.js\?shell=v11/);
+  assert.match(worker, /const CACHE_PREFIX = "hcn-console-shell-";/);
+  assert.match(worker, /caches\.keys\(\)/);
+  assert.match(worker, /caches\.delete\(name\)/);
+  assert.match(worker, /self\.clients\.matchAll\(/);
+  assert.match(worker, /client\.navigate\("\/hcn\/"\)/);
+  assert.match(worker, /self\.registration\.unregister\(\)/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
+  assert.doesNotMatch(worker, /caches\.open|caches\.match|cache\.addAll/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v12/);
+  assert.match(script, /serviceWorker\.getRegistration\("\/hcn\/"\)/);
+  assert.match(script, /window\.location\.replace\(ENDPOINTS\.login\)/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   const browserAuthority = script.slice(
     script.indexOf("function hasBrowserAuthority()"),
@@ -493,8 +497,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.match(script, /\{ fileRef: fileRef, recentLimit: 20 \}/);
   assert.match(script, /clearOperationalData\("Client data was cleared when the connection went offline\."/);
 
-  assert.match(worker, /"\/hcn\/api\/"/);
-  assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /work-center|file-review/);
 });
 
@@ -598,7 +601,7 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(script, /"X-HCN-CSRF": csrfToken/);
   assert.match(script, /credentials: "same-origin"/);
   assert.match(script, /cache: "no-store"/);
-  assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /connectors\/status|connectors\/quo-line|connect\/google\/start/);
 
   const managementAccess = script.slice(
@@ -804,7 +807,7 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
   assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
 
-  assert.match(worker, /"\/hcn\/api\/"/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /management-sweep/);
 
   const sweepShell = html.slice(
@@ -1027,7 +1030,6 @@ test("action and receipt data are memory-only, purge on operational loss, and by
   assert.match(script, /state\.receipts = null/);
   assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
 
-  assert.match(worker, /"\/hcn\/api\/"/);
-  assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /action-plans|action-receipts/);
 });

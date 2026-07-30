@@ -838,11 +838,29 @@ const server = createServer(async (req, res) => {
     if (
       HCN_CONSOLE_ENABLED &&
       req.method === "GET" &&
-      (url.pathname === "/" || url.pathname === "/hcn")
+      ["/", "/hcn", "/hcn/"].includes(url.pathname)
     ) {
+      const consoleAuthentication = await authenticateRequest(req);
+      if (
+        consoleAuthentication?.authenticationMethod !== "hcn_cookie"
+        || consoleAuthentication.identity?.type !== "hcn_browser_session"
+      ) {
+        res.writeHead(302, {
+          ...hcnNoStoreSecurityHeaders(),
+          vary: "Cookie, Authorization",
+          location: "/hcn/auth/login?returnTo=%2Fhcn%2F"
+        });
+        return res.end();
+      }
+      if (url.pathname === "/hcn/") {
+        const consoleAsset = await readHcnConsoleAsset(url.pathname);
+        if (!consoleAsset) return send(res, 404, { error: "Not found" });
+        res.writeHead(200, consoleAsset.headers);
+        return res.end(consoleAsset.body);
+      }
       res.writeHead(302, {
         ...HCN_CONSOLE_SECURITY_HEADERS,
-        location: "/hcn/?shell=v11"
+        location: "/hcn/?shell=v12"
       });
       return res.end();
     }

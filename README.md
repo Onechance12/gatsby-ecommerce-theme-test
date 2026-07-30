@@ -243,6 +243,11 @@ working files, finding a file, reviewing communications, checking neglected
 files, and preparing follow-up work. Every enabled employee can work only the
 JobNimbus files assigned to that employee by default. Connections links that
 employee's Gmail/read-only Calendar grant and Quo line separately.
+The application document at `/`, `/hcn`, or `/hcn/` is never served without a
+current HCN employee cookie; unauthenticated navigation is redirected directly
+to Google sign-in. The retirement service worker deletes every older HCN shell
+cache and unregisters itself, so a signed-out or expired browser cannot reopen
+an offline shell.
 Exact-file review can combine current JobNimbus evidence with exactly
 correlated Gmail and Quo evidence for the same employee; missing or unhealthy
 employee connectors fail closed and never fall back to Chance's accounts.
