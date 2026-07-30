@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -314,6 +321,7 @@ test("canonical key, absolute path, exact input, and symlink constraints fail cl
   );
 
   if (process.platform !== "win32") {
+    await mkdir(path.dirname(fixture.filePath), { recursive: true });
     const target = path.join(path.dirname(fixture.filePath), "target");
     await writeFile(target, "target", "utf8");
     await symlink(target, fixture.filePath);
