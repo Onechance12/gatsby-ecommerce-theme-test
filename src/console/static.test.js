@@ -167,6 +167,7 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(html, /id="quo-code"[\s\S]*pattern="\[0-9\]\{6\}"/);
   assert.match(html, /id="quo-use-code"/);
   assert.match(html, /id="quo-restart"/);
+  assert.match(html, /id="home-auth-alert"[\s\S]*aria-live="polite"/);
   assert.match(html, /id="work-center-previous"/);
   assert.match(html, /id="work-center-page"/);
   assert.match(html, /id="work-center-next"/);
@@ -206,6 +207,11 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(script, /record\(response\)\.linked === true/);
   assert.match(script, /function showQuoCodeEntry\(\)/);
   assert.match(script, /function restartQuoConnection\(\)/);
+  assert.match(script, /const outcomes = current\.searchParams\.getAll\("auth"\)/);
+  assert.match(script, /AUTH_CALLBACK_OUTCOMES\.has\(outcomes\[0\]\)/);
+  assert.match(script, /current\.searchParams\.delete\("auth"\)/);
+  assert.match(script, /renderAuthCallbackOutcome\(\)/);
+  assert.match(script, /active JobNimbus employee profile/);
   assert.match(script, /const outcomes = current\.searchParams\.getAll\("google"\)/);
   assert.match(script, /GOOGLE_CALLBACK_OUTCOMES\.has\(outcomes\[0\]\)/);
   assert.match(script, /"temporarily_unavailable"/);

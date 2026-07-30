@@ -54,6 +54,13 @@
     "invalid_request",
     "temporarily_unavailable"
   ]);
+  const AUTH_CALLBACK_OUTCOMES = new Set([
+    "access_denied",
+    "cancelled",
+    "invalid_request",
+    "provider_error",
+    "temporarily_unavailable"
+  ]);
   const CONNECTION_STATUSES = new Set([
     "connected",
     "not_connected",
@@ -219,6 +226,7 @@
     quoController: null,
     quoMutationLoading: false,
     quoChallengePending: false,
+    authCallbackOutcome: "",
     googleCallbackOutcome: "",
     workCenter: null,
     workCenterOffset: 0,
@@ -248,11 +256,13 @@
   document.addEventListener("DOMContentLoaded", initialize);
 
   function initialize() {
+    state.authCallbackOutcome = consumeAuthCallbackOutcome();
     state.googleCallbackOutcome = consumeGoogleCallbackOutcome();
     [
       "connection-status",
       "connection-status-text",
       "sign-in-action",
+      "home-auth-alert",
       "sign-out-action",
       "retry-action",
       "readiness-summary",
@@ -435,6 +445,7 @@
       elements[id] = document.getElementById(id);
     });
 
+    renderAuthCallbackOutcome();
     elements["retry-action"].addEventListener("click", loadPlatformState);
     elements["sign-out-action"].addEventListener("click", signOut);
     elements["management-sweep-refresh"].addEventListener(
@@ -512,6 +523,58 @@
     document.body.classList.add("console-ready");
     loadPlatformState();
     registerServiceWorker();
+  }
+
+  function consumeAuthCallbackOutcome() {
+    let current;
+    try {
+      current = new URL(window.location.href);
+    } catch {
+      return "";
+    }
+    const outcomes = current.searchParams.getAll("auth");
+    const outcome = outcomes.length === 1
+      && AUTH_CALLBACK_OUTCOMES.has(outcomes[0])
+      ? outcomes[0]
+      : "";
+    if (outcomes.length) {
+      current.searchParams.delete("auth");
+      const query = current.searchParams.toString();
+      window.history.replaceState(
+        null,
+        "",
+        current.pathname + (query ? "?" + query : "") + current.hash
+      );
+    }
+    return outcome;
+  }
+
+  function renderAuthCallbackOutcome() {
+    const outcome = state.authCallbackOutcome;
+    if (!outcome) return;
+    state.authCallbackOutcome = "";
+    elements["home-auth-alert"].hidden = false;
+    if (outcome === "access_denied" || outcome === "cancelled") {
+      notice(
+        elements["home-auth-alert"],
+        "Sign-in was canceled. Choose the Google account tied to your active JobNimbus employee profile.",
+        "warn"
+      );
+      return;
+    }
+    if (outcome === "temporarily_unavailable") {
+      notice(
+        elements["home-auth-alert"],
+        "HCN sign-in is temporarily unavailable. Try again in a moment.",
+        "warn"
+      );
+      return;
+    }
+    notice(
+      elements["home-auth-alert"],
+      "HCN could not verify that Google account. Choose the Google account tied to your active JobNimbus employee profile, or ask an HCN manager to check the email on that JobNimbus user.",
+      "bad"
+    );
   }
 
   function consumeGoogleCallbackOutcome() {
