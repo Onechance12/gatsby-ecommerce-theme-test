@@ -404,11 +404,16 @@ ranking. Its request body may contain only:
 ```
 
 `limitPerAdjuster` defaults to `10` and must be an integer from `1` through
-`10`. The route requires an explicitly provisioned HCN management role
+`10`. Browser access requires an explicitly provisioned HCN management role
 (`chance`, `administrator`, or `manager`), the exact console origin, the
-session CSRF value, and the `hcn.management_sweep.read` capability. It is not
-exposed as a general employee or operator report. The console runs this
-high-cost report only after an authorized manager presses
+session CSRF value, and the `hcn.management_sweep.read` capability. The
+dedicated HP Codex operator is the only bearer-token exception: its immutable
+`codex-hp-operator` identity must carry the separate
+`management_sweep:read` scope. The Mac operator, shared bridge token, other
+Codex identities, and general employee sessions remain denied. This exception
+does not grant a general company index or any write, upload, send, call, or
+action route. The console runs this high-cost report only after an authorized
+manager presses
 **Run fresh 10 × 3 sweep**; it does not auto-run on page load.
 
 The report is ready only when JobNimbus, the HCN opaque-reference

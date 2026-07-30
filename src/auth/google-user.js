@@ -94,6 +94,12 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /quo/transcript"
 ]);
 
+export const CODEX_HP_OPERATOR_SUBJECT = "codex-hp-operator";
+export const CODEX_HP_MANAGEMENT_SWEEP_SCOPE =
+  "management_sweep:read";
+const HCN_MANAGEMENT_SWEEP_ROUTE =
+  "POST /hcn/api/v1/management-sweep";
+
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /api/v1/session",
   "GET /hcn/auth/session",
@@ -346,8 +352,13 @@ export function routeAllowed(identity, method, pathname) {
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
   const hcnRoles = HCN_BROWSER_ROUTE_ROLES.get(route);
   if (hcnRoles) {
-    return identity.type === "hcn_browser_session"
-      && hcnRoles.has(identity.role);
+    return (
+      identity.type === "hcn_browser_session"
+      && hcnRoles.has(identity.role)
+    ) || (
+      route === HCN_MANAGEMENT_SWEEP_ROUTE
+      && isCodexHpManagementSweepIdentity(identity)
+    );
   }
   if (identity.type === "bridge_token") {
     return route !== "GET /api/v1/session";
@@ -364,6 +375,17 @@ export function routeAllowed(identity, method, pathname) {
   if (!policy) return false;
   if (policy.allRoutes) return true;
   return policy.allowedRoutes.includes(route);
+}
+
+export function isCodexHpManagementSweepIdentity(identity) {
+  return Boolean(
+    identity
+    && identity.type === "codex_operator_token"
+    && identity.subject === CODEX_HP_OPERATOR_SUBJECT
+    && identity.role === "codex_operator"
+    && Array.isArray(identity.scopes)
+    && identity.scopes.includes(CODEX_HP_MANAGEMENT_SWEEP_SCOPE)
+  );
 }
 
 export function publicIdentity(identity) {

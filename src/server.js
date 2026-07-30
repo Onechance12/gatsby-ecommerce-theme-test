@@ -63,8 +63,11 @@ import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } fro
 import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
 import { buildCommunicationRecoveryQueue } from "./operations/communication-recovery.js";
 import {
+  CODEX_HP_MANAGEMENT_SWEEP_SCOPE,
+  CODEX_HP_OPERATOR_SUBJECT,
   authenticateGoogleAccessToken,
   hcnConsoleSessionMatchesApprovedUser,
+  isCodexHpManagementSweepIdentity,
   parseWaveUsers,
   publicIdentity,
   routeAllowed
@@ -1133,6 +1136,16 @@ function health() {
       defaultScope: "chance_assigned",
       macCompanyExactFileScope: Boolean(CODEX_MAC_OPERATOR_TOKEN),
       companyWideIndexOrSweep: false,
+      fixedManagementSweepRead: {
+        hpOperatorConfigured: Boolean(CODEX_OPERATOR_TOKEN),
+        hpOperatorReady: Boolean(
+          CODEX_OPERATOR_TOKEN
+          && HCN_MANAGEMENT_ADJUSTERS.ready === true
+          && hcnConsoleFreshReadConfigured()
+        ),
+        macOperatorAuthorized: false,
+        readOnly: true
+      },
       gmailReadsRequireExactAssignedFile: true,
       quoReadsRequireExactAssignedFile: true,
       broadUnmatchedCommunicationsSweep: false,
@@ -2057,6 +2070,8 @@ async function authWhoAmI() {
           companyExactFileScope:
             identity.subject === "codex-mac-operator",
           companyWideIndexOrSweep: false,
+          fixedManagementSweepRead:
+            isCodexHpManagementSweepIdentity(identity),
           actionPath: "approval_batch_only"
         }
       : null,
@@ -4646,6 +4661,18 @@ function hcnPublicCompletedActions(result, operations, scope) {
 }
 
 function assertHcnManagementSession() {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  if (
+    context?.authenticationMethod === "bearer"
+    && isCodexHpManagementSweepIdentity(identity)
+  ) {
+    return {
+      role: "codex_operator",
+      subject: CODEX_HP_OPERATOR_SUBJECT,
+      scope: CODEX_HP_MANAGEMENT_SWEEP_SCOPE
+    };
+  }
   const principal = assertHcnAssignedReadSession();
   if (!["chance", "administrator", "manager"].includes(principal.role)) {
     const error = new Error(
@@ -4666,18 +4693,34 @@ function hcnConsoleFreshReadConfigured() {
 
 async function withHcnReadAdmission(callback) {
   const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
   const sessionId = String(context?.hcnSessionId || "");
-  if (!sessionId) {
+  const bindingMaterial =
+    context?.authenticationMethod === "hcn_cookie" && sessionId
+      ? {
+          namespace: "hcn-console:fresh-read:session:v1",
+          value: sessionId
+        }
+      : (
+          context?.authenticationMethod === "bearer"
+          && isCodexHpManagementSweepIdentity(identity)
+        )
+        ? {
+            namespace: "hcn-console:fresh-read:hp-operator:v1",
+            value: CODEX_HP_OPERATOR_SUBJECT
+          }
+        : null;
+  if (!bindingMaterial) {
     const error = new Error(
-      "An HCN employee browser session is required."
+      "An authorized HCN fresh-read identity is required."
     );
     error.statusCode = 403;
     throw error;
   }
   const sessionBinding = createHash("sha256")
-    .update("hcn-console:fresh-read:session:v1", "utf8")
+    .update(bindingMaterial.namespace, "utf8")
     .update("\0", "utf8")
-    .update(sessionId, "utf8")
+    .update(bindingMaterial.value, "utf8")
     .digest("hex");
   const release = HCN_CONSOLE_READ_ADMISSION.enter(sessionBinding);
   try {
@@ -14000,12 +14043,16 @@ async function authenticateBearerRequest(req) {
   if (CODEX_OPERATOR_TOKEN && secureEqual(token, CODEX_OPERATOR_TOKEN)) {
     return {
       type: "codex_operator_token",
-      subject: "codex-hp-operator",
+      subject: CODEX_HP_OPERATOR_SUBJECT,
       email: "",
       name: "Codex Operator",
       role: "codex_operator",
       hostedDomain: "",
-      scopes: ["client_evidence:read", "approval_batches:prepare_execute"],
+      scopes: [
+        "client_evidence:read",
+        CODEX_HP_MANAGEMENT_SWEEP_SCOPE,
+        "approval_batches:prepare_execute"
+      ],
       googleAccessToken: "",
       jobNimbusOwnerId: CHANCE_OWNER_ID,
       jobNimbusScope: "assigned",

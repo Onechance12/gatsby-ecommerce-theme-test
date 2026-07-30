@@ -48,6 +48,54 @@ test("Codex operator descriptor names exactly the existing least-privilege route
   assert.equal(descriptor.authorizedCapabilities.includes("voice.call.place"), false);
 });
 
+test("only the exact scoped HP operator advertises the fixed management sweep capability", () => {
+  const hpCapabilities = capabilitiesForIdentity({
+    type: "codex_operator_token",
+    subject: "codex-hp-operator",
+    role: "codex_operator",
+    scopes: [
+      "client_evidence:read",
+      "management_sweep:read",
+      "approval_batches:prepare_execute"
+    ]
+  });
+  assert.equal(
+    hpCapabilities.includes("hcn.management_sweep.read"),
+    true
+  );
+
+  for (const identity of [
+    {
+      type: "codex_operator_token",
+      subject: "codex-mac-operator",
+      role: "codex_operator",
+      scopes: [
+        "client_evidence:read",
+        "management_sweep:read"
+      ]
+    },
+    {
+      type: "codex_operator_token",
+      subject: "codex-hp-operator",
+      role: "codex_operator",
+      scopes: ["client_evidence:read"]
+    },
+    {
+      type: "codex_operator_token",
+      subject: "spoofed-operator",
+      role: "codex_operator",
+      scopes: ["management_sweep:read"]
+    }
+  ]) {
+    assert.equal(
+      capabilitiesForIdentity(identity).includes(
+        "hcn.management_sweep.read"
+      ),
+      false
+    );
+  }
+});
+
 test("Google roles are normalized to named capabilities without wildcard authority", () => {
   const onboarding = buildCapabilityDescriptor({
     identity: { type: "google_oauth", role: "onboarding" }

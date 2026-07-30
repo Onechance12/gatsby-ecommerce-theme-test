@@ -860,7 +860,13 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(identity.identity.role, "codex_operator");
   assert.equal(identity.identity.subject, "codex-hp-operator");
   assert.equal(identity.identity.email, "");
-  assert.deepEqual(identity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
+  assert.deepEqual(identity.identity.scopes, [
+    "client_evidence:read",
+    "management_sweep:read",
+    "approval_batches:prepare_execute"
+  ]);
+  assert.equal(identity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(identity.operatorAccess.fixedManagementSweepRead, true);
   assert.match(identity.instruction, /dedicated least-privilege Codex operator/i);
 
   const macIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
@@ -883,6 +889,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(macIdentity.operatorAccess.defaultScope, "chance_assigned");
   assert.equal(macIdentity.operatorAccess.companyExactFileScope, true);
   assert.equal(macIdentity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(macIdentity.operatorAccess.fixedManagementSweepRead, false);
   assert.match(macIdentity.instruction, /dedicated least-privilege Codex Mac Operator/i);
 
   const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
@@ -897,6 +904,12 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(platformSession.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
   assert.equal(platformSession.build.sourceCommitTrust, "provider_attested");
   assert.equal(platformSession.authorizedCapabilities.includes("platform.session.read"), true);
+  assert.equal(
+    platformSession.authorizedCapabilities.includes(
+      "hcn.management_sweep.read"
+    ),
+    true
+  );
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".send")), false);
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".upload")), false);
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.startsWith("brain.")), false);
@@ -2928,7 +2941,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       ]),
       AUTO_ENROLL_WAVE_USERS: "false",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-for-ambiguity",
-      CODEX_OPERATOR_TOKEN: "",
+      CODEX_OPERATOR_TOKEN:
+        "fixture-hcn-hp-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN:
+        "fixture-hcn-mac-operator-token-1234567890",
       JOBNIMBUS_API_KEY: "hcn-jobnimbus-api-key",
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
       RETELL_API_KEY: "",
@@ -2966,6 +2982,19 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(
     managementHealth.userOAuth.perUserGmail,
     "custom_gpt_broker_and_hcn_connector"
+  );
+  assert.deepEqual(
+    managementHealth.codexOperator.fixedManagementSweepRead,
+    {
+      hpOperatorConfigured: true,
+      hpOperatorReady: true,
+      macOperatorAuthorized: false,
+      readOnly: true
+    }
+  );
+  assert.equal(
+    managementHealth.codexOperator.companyWideIndexOrSweep,
+    false
   );
   assert.equal(managementHealth.gmailConfigured, true);
   assert.deepEqual(managementHealth.hcnAssistant, {
@@ -3781,6 +3810,92 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         request === `jobnimbus:/contacts/${exactFileId}`
     ).length,
     1
+  );
+
+  const hpManagementRequestsBefore = hcnProviderRequests.length;
+  const hpMutationRequestsBefore = jobNimbusMutationRequests.length;
+  const hpManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer fixture-hcn-hp-operator-token-1234567890",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  assert.equal(hpManagementSweepResponse.status, 200);
+  assert.equal(
+    hpManagementSweepResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const hpManagementSweep = await hpManagementSweepResponse.json();
+  assert.equal(
+    hpManagementSweep.schema,
+    "hcn.console.management-sweep.v1"
+  );
+  assert.equal(hpManagementSweep.ephemeral, true);
+  assert.equal(hpManagementSweep.adjusters.length, 3);
+  assert.equal(
+    jobNimbusMutationRequests.length,
+    hpMutationRequestsBefore
+  );
+  assert.equal(
+    hcnProviderRequests
+      .slice(hpManagementRequestsBefore)
+      .every((request) => request.startsWith("jobnimbus:")),
+    true
+  );
+  const serializedHpManagementSweep =
+    JSON.stringify(hpManagementSweep);
+  for (const forbidden of [
+    exactFileId,
+    otherOwnerContact.jnid,
+    thirdOwnerContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    chanceOwnerId,
+    otherOwnerId,
+    thirdOwnerId,
+    "active.homeowner@example.test",
+    "2145551212",
+    "HCN-POLICY-1001",
+    "Fresh synthetic carrier activity"
+  ]) {
+    assert.equal(
+      serializedHpManagementSweep.includes(forbidden),
+      false,
+      `HP management sweep leaked ${forbidden}`
+    );
+  }
+
+  const deniedManagementRequestsBefore =
+    hcnProviderRequests.length;
+  for (const authorization of [
+    "Bearer fixture-hcn-mac-operator-token-1234567890",
+    "Bearer fixture-shared-bridge-token-for-ambiguity"
+  ]) {
+    const deniedManagementSweepResponse = await fetch(
+      `${origin}/hcn/api/v1/management-sweep`,
+      {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ limitPerAdjuster: 10 })
+      }
+    );
+    assert.equal(deniedManagementSweepResponse.status, 403);
+  }
+  assert.equal(
+    hcnProviderRequests.length,
+    deniedManagementRequestsBefore
+  );
+  assert.equal(
+    jobNimbusMutationRequests.length,
+    hpMutationRequestsBefore
   );
 
   const managementRequestsBefore = hcnProviderRequests.length;

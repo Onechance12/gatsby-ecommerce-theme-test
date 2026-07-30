@@ -115,7 +115,16 @@ export function capabilitiesForIdentity(identity) {
   if (safeIdentity.authentication !== "authenticated") return [];
 
   const policyIdentity = safeIdentity.type === "codex_operator"
-    ? { type: "codex_operator_token", role: "codex_operator" }
+    ? {
+        type: "codex_operator_token",
+        role: "codex_operator",
+        subject: typeof identity?.subject === "string"
+          ? identity.subject
+          : "",
+        scopes: Array.isArray(identity?.scopes)
+          ? identity.scopes
+          : []
+      }
     : safeIdentity.type === "hcn_browser_session"
       ? { type: "hcn_browser_session", role: safeIdentity.role }
       : { type: "google_oauth", role: safeIdentity.role };
