@@ -1,6 +1,7 @@
 # ADR 001: Permanent HCN System Boundaries
 
-- Status: Accepted target architecture; legacy-v1 isolation migration in progress
+- Status: Accepted and enforced on HCN operational surfaces; legacy-v1 storage
+  quarantine remediation pending
 - Decision date: 2026-07-28
 - Applies to: Home Claim Network bridge, operator clients, Work Center,
   Thresher, and HCN Operations Brain
@@ -24,16 +25,22 @@ There is no synchronization, federation, migration, fallback, or
 
 ## Current implementation state
 
-HCN Operations v2 follows this decision now: its contracts, opaque references,
-and future persistence have no Chance Brain or Jobrolo data path. The pre-v2
-bridge still contains legacy memory imports and non-operator read routes. Those
-paths are not HCN Operations Brain and are not evidence of full runtime
-isolation. They are read-only behind the default-off legacy privacy gate until
-they are removed through a reviewed migration.
+The HCN/JobNimbus operational surface follows this decision now. Its route
+registry, employee/operator capabilities, console, and GPT tool schema expose
+no Chance Brain or legacy-client-memory operation. Reviews and sweeps begin
+with fresh authorized provider evidence. There is no fallback to Chance Brain.
 
-Runtime metadata must report this transitional state honestly. It may report
-the HCN v2-to-Chance-Brain data flow as disconnected, but it may not describe
-the entire legacy bridge as fully disconnected while those read paths exist.
+Legacy-v1 client-memory code and stored files may still exist as quarantined
+historical artifacts pending a separately reviewed privacy-remediation
+project. They are not runtime evidence, not migration input, and not reachable
+through HCN, JobNimbus tools, Custom GPT actions, or local operators. This
+boundary change does not inspect, alter, migrate, or purge those files.
+
+The isolated HCN Operations Brain currently has minimized contracts, opaque
+references, and deterministic Thresher rule foundations. Dedicated operational
+persistence is not active yet. Runtime metadata and the console must say
+`foundation_persistence_pending`; they must not represent the foundation as a
+working persistent brain.
 
 ## System ownership
 
@@ -47,8 +54,8 @@ or credentials.
 
 ### HCN Operations Brain
 
-HCN Operations Brain is the only operational state layer for Home Claim
-Network. Its scope is deliberately narrow:
+HCN Operations Brain is the only permitted future operational state layer for
+Home Claim Network. Its planned scope is deliberately narrow:
 
 - coded Work Center state;
 - versioned Thresher rule evaluations;
@@ -62,6 +69,14 @@ Operations Brain stores no raw email or text bodies, snippets, transcripts,
 documents, client names, property addresses, phone numbers, email addresses,
 policy values, or claim values.
 
+Its future encrypted store, opaque references, and cross-process signatures
+use separate `HCN_THRESHER_STORE_KEY`, `HCN_THRESHER_REFERENCE_KEY`, and
+`HCN_THRESHER_SIGNING_KEY` material. Those keys cannot be reused from another
+HCN subsystem, provider, Chance Brain, legacy memory, or Jobrolo. The server
+validates this isolated path/key foundation and fails closed on partial,
+malformed, escaped, or reused configuration. It does not activate Thresher
+state reads or writes and therefore does not claim active persistence.
+
 ### Jobrolo
 
 Jobrolo is a separate commercial CRM product. It is not an HCN bridge module,
@@ -72,7 +87,10 @@ credentials, storage, tests, releases, and backups.
 
 ## Allowed HCN data flow
 
-The only permitted HCN operational flow is:
+The only permitted HCN operational flow is below. Steps 1 through 4 exist in
+the current read-only foundation. Steps 5 through 8 require the isolated
+persistence and approval-control phases and are not current employee
+capabilities:
 
 1. A device-specific HCN operator identity requests fresh evidence.
 2. The HCN bridge reads an authorized provider.
@@ -112,11 +130,13 @@ Automated contract tests must fail closed when an invariant is violated.
 
 ## Legacy v1 handling
 
-Legacy v1 client snapshots are untrusted. They are not a migration source for
-HCN Operations Brain v2. Until a separately reviewed privacy process exists:
+Legacy v1 client snapshots are untrusted and unreachable. They are not a
+migration source for HCN Operations Brain. Until a separately reviewed privacy
+process exists:
 
+- no legacy snapshot, receipt, operational-state, advisory, or context reads;
 - no new legacy snapshot or advisory writes;
-- no Codex operator access to legacy contents;
+- no HCN employee, GPT, or local operator access to legacy contents;
 - no copying, indexing, embedding, replaying, or importing legacy contents;
 - metadata-only inventory may include path classification, counts, sizes, and
   timestamps, but no client content;
@@ -132,8 +152,14 @@ snapshots and must never be included in a legacy purge.
 This decision must be enforced in several independent layers:
 
 - repository and dependency checks prevent cross-system imports;
-- deployment configuration assigns distinct stores and credentials;
+- production packaging excludes quarantined legacy-memory code and data while
+  leaving the local artifacts untouched for a separately approved remediation;
+- deployment configuration assigns a new HCN-only physical disk, backup
+  boundary, and credentials; a different directory on a legacy/shared disk is
+  not isolation;
 - route authorization exposes only HCN capabilities to HCN identities;
+- the advertised capability registry and GPT schema contain no Chance Brain or
+  legacy-memory route;
 - v2 contracts validate exact fields, safe enums, system identity, tenant
   consistency, opaque references, provenance, and freshness;
 - logs and telemetry contain request IDs and coded outcomes, not raw client

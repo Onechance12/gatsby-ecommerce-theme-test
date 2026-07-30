@@ -5,6 +5,9 @@
     meta: "/api/v1/meta",
     session: "/hcn/auth/session",
     logout: "/hcn/auth/logout",
+    connectorsStatus: "/hcn/api/v1/connectors/status",
+    googleConnectStart: "/hcn/connect/google/start",
+    quoLine: "/hcn/api/v1/connectors/quo-line",
     managementSweep: "/hcn/api/v1/management-sweep",
     workCenter: "/hcn/api/v1/work-center",
     fileReview: "/hcn/api/v1/file-review",
@@ -19,6 +22,9 @@
 
   const WORK_CENTER_CAPABILITY = "hcn.work_center.read";
   const MANAGEMENT_SWEEP_CAPABILITY = "hcn.management_sweep.read";
+  const CONNECTOR_READ_CAPABILITY = "hcn.connectors.read";
+  const GOOGLE_LINK_CAPABILITY = "hcn.connectors.google.link";
+  const QUO_LINE_LINK_CAPABILITY = "hcn.connectors.quo_line.link";
   const FILE_REVIEW_CAPABILITY = "hcn.file.review";
   const ACTION_PREPARE_CAPABILITY = "hcn.action_plans.prepare";
   const ACTION_READ_CAPABILITY = "hcn.action_plans.read";
@@ -35,6 +41,20 @@
   const SESSION_ABSOLUTE_HEADER = "x-hcn-session-expires-at";
   const MAX_TIMER_DELAY_MS = 2_147_000_000;
   const MAX_ACTIONS = 12;
+  const WORK_CENTER_PAGE_SIZE = 25;
+  const GOOGLE_CALLBACK_OUTCOMES = new Set([
+    "connected",
+    "cancelled",
+    "provider_error",
+    "access_denied",
+    "invalid_request",
+    "temporarily_unavailable"
+  ]);
+  const CONNECTION_STATUSES = new Set([
+    "connected",
+    "not_connected",
+    "unavailable"
+  ]);
 
   const ACTION_LABELS = Object.freeze({
     "jobnimbus.create_note": "Create JobNimbus note",
@@ -127,13 +147,13 @@
     chanceBrain: {
       title: "Chance Brain",
       states: {
-        legacy_read_only_non_operator_paths: "Legacy compatibility · read only"
+        disconnected_no_route: "Disconnected · no route or data flow"
       }
     },
-    hcnV2ChanceBrainDataFlow: {
-      title: "HCN v2 → Chance Brain",
+    hcnChanceBrainDataFlow: {
+      title: "HCN → Chance Brain",
       states: {
-        disconnected: "Disconnected · no data flow"
+        none: "None · permanently isolated"
       }
     },
     jobrolo: {
@@ -143,28 +163,26 @@
       }
     },
     hcnOperationsBrain: {
-      title: "HCN Operations Brain",
+      title: "Thresher · HCN Operations Brain",
       states: {
-        v2_foundation: "V2 foundation · HCN only"
+        foundation_persistence_pending: "Isolated foundation · persistence pending"
       }
     },
     legacyClientMemory: {
       title: "Legacy client memory",
       states: {
-        migration_required: "Restricted · migration required"
+        quarantined_unreachable: "Quarantined · unreachable from HCN"
       }
     }
   });
 
   const CAPABILITY_GROUP_LABELS = Object.freeze({
-    brain: "Advisory",
     claims: "Claims",
     gmail: "Gmail",
     handoff: "Handoffs",
     hcn: "HCN console",
     identity: "Identity",
     jobnimbus: "JobNimbus",
-    memory: "Memory controls",
     operations: "Operations",
     platform: "Platform",
     quo: "Quo",
@@ -184,7 +202,15 @@
     managementSweepLoading: false,
     managementSweepController: null,
     managementSweepExpiryTimer: null,
+    connections: null,
+    connectionsLoading: false,
+    connectionsController: null,
+    quoController: null,
+    quoMutationLoading: false,
+    quoChallengePending: false,
+    googleCallbackOutcome: "",
     workCenter: null,
+    workCenterOffset: 0,
     selectedFileRef: null,
     fileReview: null,
     workCenterLoading: false,
@@ -211,6 +237,7 @@
   document.addEventListener("DOMContentLoaded", initialize);
 
   function initialize() {
+    state.googleCallbackOutcome = consumeGoogleCallbackOutcome();
     [
       "connection-status",
       "connection-status-text",
@@ -268,6 +295,9 @@
       "work-center-count",
       "work-center-freshness",
       "work-center-list",
+      "work-center-previous",
+      "work-center-page",
+      "work-center-next",
       "file-placeholder",
       "file-review",
       "file-back",
@@ -342,7 +372,30 @@
       "receipt-detail",
       "receipt-detail-heading",
       "receipt-detail-state",
-      "receipt-detail-fields"
+      "receipt-detail-fields",
+      "connections-status",
+      "connections-refresh",
+      "connections-alert",
+      "connections-locked",
+      "connections-workspace",
+      "connections-profile-name",
+      "connections-profile-role",
+      "jobnimbus-connection-status",
+      "jobnimbus-connection-detail",
+      "google-connection-status",
+      "google-gmail-status",
+      "google-calendar-status",
+      "google-connect-action",
+      "quo-connection-status",
+      "quo-connection-detail",
+      "quo-phone-form",
+      "quo-phone",
+      "quo-start",
+      "quo-use-code",
+      "quo-verify-form",
+      "quo-code",
+      "quo-verify",
+      "quo-restart"
     ].forEach(function (id) {
       elements[id] = document.getElementById(id);
     });
@@ -354,7 +407,24 @@
       loadManagementSweep
     );
     elements["work-center-refresh"].addEventListener("click", function () {
-      loadWorkCenter({ resetFile: true });
+      loadWorkCenter({ resetFile: true, offset: 0 });
+    });
+    elements["work-center-previous"].addEventListener("click", function () {
+      const page = record(record(state.workCenter).page);
+      const currentOffset = Number.isInteger(page.offset)
+        ? page.offset
+        : state.workCenterOffset;
+      const offset = Math.max(
+        0,
+        currentOffset - WORK_CENTER_PAGE_SIZE
+      );
+      loadWorkCenter({ resetFile: true, offset: offset });
+    });
+    elements["work-center-next"].addEventListener("click", function () {
+      const page = record(record(state.workCenter).page);
+      if (page.hasMore !== true) return;
+      const offset = Number(page.offset || 0) + WORK_CENTER_PAGE_SIZE;
+      loadWorkCenter({ resetFile: true, offset: offset });
     });
     elements["file-refresh"].addEventListener("click", function () {
       if (state.selectedFileRef) loadFileReview(state.selectedFileRef);
@@ -384,12 +454,119 @@
     elements["receipt-refresh"].addEventListener("click", function () {
       loadReceipts();
     });
+    elements["connections-refresh"].addEventListener("click", loadConnections);
+    elements["google-connect-action"].addEventListener(
+      "click",
+      startGoogleConnection
+    );
+    elements["quo-phone-form"].addEventListener("submit", startQuoConnection);
+    elements["quo-verify-form"].addEventListener("submit", verifyQuoConnection);
+    elements["quo-use-code"].addEventListener("click", showQuoCodeEntry);
+    elements["quo-restart"].addEventListener("click", restartQuoConnection);
     window.addEventListener("online", handleNetworkChange);
     window.addEventListener("offline", handleNetworkChange);
+    window.addEventListener("hashchange", syncActiveNavigation);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.querySelectorAll(".primary-nav .nav-item").forEach(function (link) {
+      link.addEventListener("click", function () {
+        setActiveNavigation(link);
+      });
+    });
 
     loadPlatformState();
     registerServiceWorker();
+  }
+
+  function consumeGoogleCallbackOutcome() {
+    let current;
+    try {
+      current = new URL(window.location.href);
+    } catch {
+      return "";
+    }
+    const outcomes = current.searchParams.getAll("google");
+    const outcome = outcomes.length === 1
+      && GOOGLE_CALLBACK_OUTCOMES.has(outcomes[0])
+      ? outcomes[0]
+      : "";
+    if (outcomes.length) {
+      current.searchParams.delete("google");
+      const query = current.searchParams.toString();
+      window.history.replaceState(
+        null,
+        "",
+        current.pathname + (query ? "?" + query : "") + current.hash
+      );
+    }
+    return outcome;
+  }
+
+  function syncCapabilityAwareConsole() {
+    const capabilities = new Set(sessionCapabilities());
+    const authorized = hasBrowserAuthority();
+    const allowedHashes = new Set(
+      Array.from(document.querySelectorAll(".primary-nav .nav-item"))
+        .map(function (link) {
+          return link.getAttribute("href");
+        })
+        .filter(function (href) {
+          return /^#[a-z0-9-]+$/.test(String(href || ""));
+        })
+    );
+    document.querySelectorAll("[data-hcn-capability]").forEach(function (element) {
+      const capability = boundedString(
+        element.getAttribute("data-hcn-capability"),
+        160
+      );
+      element.hidden = !authorized || !capabilities.has(capability);
+    });
+
+    let preferredHash = window.location.hash;
+    if (state.googleCallbackOutcome && hasConnectorReadAuthority()) {
+      preferredHash = "#connections";
+    } else if (
+      hasWorkCenterAuthority()
+      && !hasManagementSweepAuthority()
+      && (!preferredHash || preferredHash === "#overview")
+    ) {
+      preferredHash = "#work-center";
+    } else if (!preferredHash) {
+      preferredHash = "#overview";
+    }
+
+    if (!allowedHashes.has(preferredHash)) preferredHash = "#overview";
+    const preferredSection = document.getElementById(preferredHash.slice(1));
+    if (!preferredSection || preferredSection.hidden) {
+      preferredHash = hasWorkCenterAuthority() ? "#work-center" : "#overview";
+    }
+    if (window.location.hash !== preferredHash) {
+      window.history.replaceState(null, "", preferredHash);
+      const target = document.getElementById(preferredHash.slice(1));
+      if (target) target.scrollIntoView({ block: "start" });
+    }
+    syncActiveNavigation();
+  }
+
+  function setActiveNavigation(activeLink) {
+    document.querySelectorAll(".primary-nav .nav-item").forEach(function (link) {
+      const active = link === activeLink && !link.hidden;
+      link.classList.toggle("is-active", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+  }
+
+  function syncActiveNavigation() {
+    const hash = window.location.hash || "#overview";
+    const links = Array.from(
+      document.querySelectorAll(".primary-nav .nav-item")
+    ).filter(function (link) {
+      return !link.hidden;
+    });
+    const exact = links.find(function (link) {
+      return link.getAttribute("href") === hash;
+    });
+    setActiveNavigation(exact || links[0] || null);
   }
 
   async function loadPlatformState() {
@@ -462,7 +639,7 @@
 
   async function postOperationalJson(url, body, signal, requiredCapability) {
     if (
-      !hasChanceBrowserAuthority()
+      !hasBrowserAuthority()
       || (
         requiredCapability
         && !sessionCapabilities().includes(requiredCapability)
@@ -598,7 +775,7 @@
     );
     renderOperationsLocked(
       "Session expired",
-      "Sign in with the authorized Chance account to load fresh assigned files."
+      "Sign in with your HCN account to load fresh assigned files."
     );
     renderOverallState();
   }
@@ -718,7 +895,11 @@
       setText(status, specification.states[value] || humanize(value));
       mark.className = "boundary-state";
       mark.setAttribute("aria-hidden", "true");
-      if (value === "migration_required" || value === "unknown") {
+      if (
+        value === "foundation_persistence_pending"
+        || value === "quarantined_unreachable"
+        || value === "unknown"
+      ) {
         mark.dataset.tone = "warn";
       }
 
@@ -781,6 +962,7 @@
 
   function renderSession(session) {
     const identity = record(session.identity);
+    const profile = record(session.profile);
     const capabilities = Array.isArray(session.authorizedCapabilities)
       ? session.authorizedCapabilities.filter(function (value) {
           return typeof value === "string" && value.length <= 160;
@@ -811,6 +993,14 @@
 
     elements["sign-in-action"].hidden = true;
     elements["sign-out-action"].hidden = false;
+    setText(
+      elements["connections-profile-name"],
+      boundedString(profile.displayName, 100) || "Signed-in employee"
+    );
+    setText(
+      elements["connections-profile-role"],
+      humanize(boundedString(profile.role, 64) || role)
+    );
     badge(elements["identity-badge"], identityLabel, "good");
     setText(elements["capability-metric"], String(capabilities.length));
     setText(
@@ -861,6 +1051,7 @@
     setText(elements["capability-metric-detail"], "Authority not assumed");
     setText(elements["capability-summary"], message);
     elements["capability-groups"].replaceChildren();
+    syncCapabilityAwareConsole();
   }
 
   async function signOut() {
@@ -894,7 +1085,7 @@
       renderSignedOut("You are signed out. No operating authority is assumed.");
       renderOperationsLocked(
         "Signed out",
-        "Sign in with the authorized Chance account to load fresh assigned files."
+        "Sign in with your HCN account to load fresh assigned files."
       );
       renderOverallState();
     } catch {
@@ -916,7 +1107,7 @@
       : [];
   }
 
-  function hasChanceBrowserAuthority() {
+  function hasBrowserAuthority() {
     if (
       state.sessionDeadlineMs
       && Date.now() >= state.sessionDeadlineMs
@@ -931,22 +1122,42 @@
     return (
       session.authenticated === true &&
       identity.authentication === "authenticated" &&
-      identity.type === "hcn_browser_session" &&
-      identity.role === "chance"
+      identity.type === "hcn_browser_session"
     );
   }
 
   function hasWorkCenterAuthority() {
     return (
-      hasChanceBrowserAuthority()
+      hasBrowserAuthority()
       && sessionCapabilities().includes(WORK_CENTER_CAPABILITY)
     );
   }
 
   function hasManagementSweepAuthority() {
     return (
-      hasChanceBrowserAuthority()
+      hasBrowserAuthority()
       && sessionCapabilities().includes(MANAGEMENT_SWEEP_CAPABILITY)
+    );
+  }
+
+  function hasConnectorReadAuthority() {
+    return (
+      hasBrowserAuthority()
+      && sessionCapabilities().includes(CONNECTOR_READ_CAPABILITY)
+    );
+  }
+
+  function hasGoogleLinkAuthority() {
+    return (
+      hasBrowserAuthority()
+      && sessionCapabilities().includes(GOOGLE_LINK_CAPABILITY)
+    );
+  }
+
+  function hasQuoLineAuthority() {
+    return (
+      hasBrowserAuthority()
+      && sessionCapabilities().includes(QUO_LINE_LINK_CAPABILITY)
     );
   }
 
@@ -967,7 +1178,7 @@
 
   function hasActionReadAuthority() {
     return (
-      hasChanceBrowserAuthority()
+      hasBrowserAuthority()
       && sessionCapabilities().includes(ACTION_READ_CAPABILITY)
     );
   }
@@ -989,12 +1200,13 @@
 
   function hasReceiptReadAuthority() {
     return (
-      hasChanceBrowserAuthority()
+      hasBrowserAuthority()
       && sessionCapabilities().includes(RECEIPT_READ_CAPABILITY)
     );
   }
 
   function syncOperationalAccess() {
+    syncCapabilityAwareConsole();
     syncActionAccess();
     if (!navigator.onLine) {
       clearOperationalData("Reconnect to request fresh client evidence.");
@@ -1005,6 +1217,7 @@
       return;
     }
 
+    syncConnectionsAccess();
     syncManagementSweepAccess();
 
     if (!hasWorkCenterAuthority()) {
@@ -1015,8 +1228,8 @@
       renderOperationsLocked(
         authenticated ? "Not authorized" : "Sign in required",
         authenticated
-          ? "This HCN session does not have Chance’s Work Center read capability."
-          : "Sign in with the authorized Chance account to load fresh assigned files."
+          ? "This HCN session does not have the assigned-file Work Center capability."
+          : "Sign in with your HCN account to load fresh assigned files."
       );
       return;
     }
@@ -1027,7 +1240,7 @@
     badge(elements["work-center-status"], "Read only", "good");
     setText(
       elements["work-center-summary"],
-      "Fresh assigned-file evidence is available for this verified Chance session."
+      "Fresh assigned-file evidence is available for your verified HCN session."
     );
     if (!state.workCenter && !state.workCenterLoading) {
       loadWorkCenter({ resetFile: true });
@@ -1044,7 +1257,7 @@
         authenticated ? "Not authorized" : "Sign in required",
         authenticated
           ? "This HCN session does not have the company management-sweep capability."
-          : "Sign in with the authorized Chance account to request a fresh company report."
+          : "Sign in with your HCN account to request a fresh company report."
       );
       return;
     }
@@ -1097,6 +1310,9 @@
     elements["work-center-locked"].hidden = false;
     elements["work-center-workspace"].hidden = true;
     elements["work-center-refresh"].hidden = true;
+    elements["work-center-previous"].hidden = true;
+    elements["work-center-next"].hidden = true;
+    setText(elements["work-center-page"], "Page 1");
     badge(elements["work-center-status"], status, "neutral");
     setText(elements["work-center-summary"], message);
     notice(
@@ -1107,6 +1323,7 @@
   }
 
   function clearOperationalData(message) {
+    clearConnectionsData(message);
     clearManagementSweepData(message);
     if (state.workCenterController) state.workCenterController.abort();
     if (state.fileController) state.fileController.abort();
@@ -1119,13 +1336,19 @@
     state.workCenterLoading = false;
     state.fileLoading = false;
     state.workCenter = null;
+    state.workCenterOffset = 0;
     state.selectedFileRef = null;
     state.fileReview = null;
 
     elements["work-center-list"].setAttribute("aria-busy", "false");
     elements["work-center-refresh"].disabled = false;
+    elements["work-center-previous"].disabled = false;
+    elements["work-center-next"].disabled = false;
+    elements["work-center-previous"].hidden = true;
+    elements["work-center-next"].hidden = true;
     elements["file-refresh"].disabled = false;
     setText(elements["work-center-count"], "—");
+    setText(elements["work-center-page"], "Page 1");
     setText(elements["work-center-freshness"], "No client records are retained on this page.");
     renderWorkspaceEmpty(elements["work-center-list"], message || "Fresh data is not loaded.");
     closeFileReview();
@@ -1167,6 +1390,673 @@
       "Checking authority",
       message || "Verifying the signed-in session before loading company records."
     );
+  }
+
+  function syncConnectionsAccess() {
+    if (!navigator.onLine) {
+      renderConnectionsLocked(
+        "Offline",
+        "Reconnect to verify your HCN session and work-account connections."
+      );
+      return;
+    }
+    if (!hasConnectorReadAuthority()) {
+      const session = record(state.session);
+      const identity = record(session.identity);
+      const authenticated = session.authenticated === true
+        && identity.authentication === "authenticated"
+        && identity.type === "hcn_browser_session";
+      renderConnectionsLocked(
+        authenticated ? "Not authorized" : "Sign in required",
+        authenticated
+          ? "This HCN session cannot read employee connection status."
+          : "Sign in with your HCN account to check and link your work accounts."
+      );
+      return;
+    }
+
+    elements["connections-locked"].hidden = true;
+    elements["connections-workspace"].hidden = false;
+    elements["connections-refresh"].hidden = false;
+    elements["connections-refresh"].disabled = state.connectionsLoading;
+    badge(
+      elements["connections-status"],
+      state.connectionsLoading ? "Checking" : "Ready",
+      state.connectionsLoading ? "neutral" : "good"
+    );
+    syncConnectionControls();
+    if (!state.connections && !state.connectionsLoading) {
+      loadConnections();
+    }
+  }
+
+  function renderConnectionsLocked(status, message) {
+    elements["connections-locked"].hidden = false;
+    elements["connections-workspace"].hidden = true;
+    elements["connections-refresh"].hidden = true;
+    elements["google-connect-action"].hidden = true;
+    elements["quo-phone-form"].hidden = true;
+    elements["quo-verify-form"].hidden = true;
+    badge(elements["connections-status"], status, "neutral");
+    notice(
+      elements["connections-alert"],
+      message || "Connection details are not loaded.",
+      "neutral"
+    );
+  }
+
+  function clearConnectionsData(message) {
+    if (state.connectionsController) state.connectionsController.abort();
+    if (state.quoController) state.quoController.abort();
+    state.connectionsController = null;
+    state.quoController = null;
+    state.connectionsLoading = false;
+    state.quoMutationLoading = false;
+    state.quoChallengePending = false;
+    state.connections = null;
+
+    elements["connections-refresh"].disabled = false;
+    elements["google-connect-action"].disabled = false;
+    elements["quo-start"].disabled = false;
+    elements["quo-verify"].disabled = false;
+    elements["quo-phone-form"].reset();
+    elements["quo-verify-form"].reset();
+    setText(elements["connections-profile-name"], "—");
+    setText(elements["connections-profile-role"], "—");
+    badge(elements["jobnimbus-connection-status"], "Not loaded", "neutral");
+    badge(elements["google-connection-status"], "Not loaded", "neutral");
+    badge(elements["quo-connection-status"], "Not loaded", "neutral");
+    setText(
+      elements["jobnimbus-connection-detail"],
+      "No assigned-file identity is retained on this page."
+    );
+    setText(elements["google-gmail-status"], "Not loaded");
+    setText(elements["google-calendar-status"], "Not loaded");
+    setText(
+      elements["quo-connection-detail"],
+      "No linked-line detail is retained on this page."
+    );
+    renderConnectionsLocked(
+      "Checking authority",
+      message || "Verifying your HCN session before loading connection details."
+    );
+  }
+
+  async function loadConnections() {
+    if (!hasConnectorReadAuthority()) {
+      syncConnectionsAccess();
+      return;
+    }
+    if (!navigator.onLine) {
+      clearConnectionsData("Reconnect to check your work-account connections.");
+      syncConnectionsAccess();
+      return;
+    }
+
+    if (state.connectionsController) state.connectionsController.abort();
+    const controller = new AbortController();
+    state.connectionsController = controller;
+    state.connectionsLoading = true;
+    state.connections = null;
+    elements["connections-locked"].hidden = true;
+    elements["connections-workspace"].hidden = false;
+    elements["connections-refresh"].hidden = false;
+    elements["connections-refresh"].disabled = true;
+    badge(elements["connections-status"], "Checking", "neutral");
+    renderConnectionsLoading();
+    notice(
+      elements["connections-alert"],
+      "Checking your work-account connections. No credential values are loaded.",
+      "neutral"
+    );
+    syncConnectionControls();
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.connectorsStatus,
+        {},
+        controller.signal,
+        CONNECTOR_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      let connections = normalizeConnectionsResponse(response);
+
+      if (hasQuoLineAuthority()) {
+        try {
+          const quoStatus = await postOperationalJson(
+            ENDPOINTS.quoLine,
+            { mode: "status" },
+            controller.signal,
+            QUO_LINE_LINK_CAPABILITY
+          );
+          if (controller.signal.aborted) return;
+          connections = Object.assign({}, connections, {
+            quo: normalizeQuoLineStatus(quoStatus, connections.quo)
+          });
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (statusOf(error) === 401) {
+            handleOperationalAuthLoss();
+            return;
+          }
+        }
+      }
+
+      state.connections = connections;
+      renderConnections(connections);
+      renderGoogleCallbackOutcome(connections);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      state.connections = null;
+      if (statusOf(error) === 401) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      if (statusOf(error) === 403) {
+        renderConnectionsLocked(
+          "Not authorized",
+          "This HCN session cannot read employee connection status."
+        );
+        return;
+      }
+      badge(elements["connections-status"], "Unavailable", "bad");
+      badge(elements["jobnimbus-connection-status"], "Unavailable", "bad");
+      badge(elements["google-connection-status"], "Unavailable", "bad");
+      badge(elements["quo-connection-status"], "Unavailable", "bad");
+      setText(
+        elements["jobnimbus-connection-detail"],
+        "Your assigned-file identity could not be verified."
+      );
+      setText(elements["google-gmail-status"], "Unavailable");
+      setText(elements["google-calendar-status"], "Unavailable");
+      setText(
+        elements["quo-connection-detail"],
+        "Your linked-line status could not be verified."
+      );
+      notice(
+        elements["connections-alert"],
+        connectionErrorMessage(error),
+        "bad"
+      );
+      renderGoogleCallbackOutcome(null);
+      syncConnectionControls();
+    } finally {
+      if (state.connectionsController === controller) {
+        state.connectionsController = null;
+        state.connectionsLoading = false;
+        elements["connections-refresh"].disabled = false;
+        syncConnectionControls();
+      }
+    }
+  }
+
+  function renderGoogleCallbackOutcome(connections) {
+    const outcome = state.googleCallbackOutcome;
+    if (!outcome) return;
+    state.googleCallbackOutcome = "";
+    if (!connections) {
+      notice(
+        elements["connections-alert"],
+        "Google returned to HCN, but the current connection status could not be verified. No connection change is assumed.",
+        "bad"
+      );
+      return;
+    }
+    if (outcome === "connected") {
+      if (record(connections.google).status !== "connected") {
+        notice(
+          elements["connections-alert"],
+          "Google returned, but a fresh check did not confirm the connection. No connection change is assumed.",
+          "bad"
+        );
+        return;
+      }
+      notice(
+        elements["connections-alert"],
+        "Google returned successfully. The connection status shown here was verified again.",
+        "good"
+      );
+      return;
+    }
+    if (outcome === "cancelled") {
+      notice(
+        elements["connections-alert"],
+        "Google linking was cancelled. The verified connection status is shown below.",
+        "warn"
+      );
+      return;
+    }
+    if (outcome === "temporarily_unavailable") {
+      notice(
+        elements["connections-alert"],
+        "Google linking is temporarily unavailable. The verified connection status is shown below.",
+        "warn"
+      );
+      return;
+    }
+    notice(
+      elements["connections-alert"],
+      "Google could not complete linking. The verified connection status is shown below.",
+      "bad"
+    );
+  }
+
+  function renderConnectionsLoading() {
+    const profile = record(record(state.session).profile);
+    setText(
+      elements["connections-profile-name"],
+      boundedString(profile.displayName, 100) || "Signed-in employee"
+    );
+    setText(
+      elements["connections-profile-role"],
+      humanize(boundedString(profile.role, 64) || "HCN employee")
+    );
+    badge(elements["jobnimbus-connection-status"], "Checking", "neutral");
+    badge(elements["google-connection-status"], "Checking", "neutral");
+    badge(elements["quo-connection-status"], "Checking", "neutral");
+    setText(
+      elements["jobnimbus-connection-detail"],
+      "Checking your assigned-file identity."
+    );
+    setText(elements["google-gmail-status"], "Checking");
+    setText(elements["google-calendar-status"], "Checking");
+    setText(
+      elements["quo-connection-detail"],
+      "Checking whether your work line is linked."
+    );
+    elements["google-connect-action"].hidden = true;
+    elements["quo-phone-form"].hidden = true;
+    elements["quo-verify-form"].hidden = true;
+  }
+
+  function normalizeConnectionsResponse(value) {
+    if (
+      value.schema !== "hcn.console.connectors.v1"
+      || !isRecord(value.profile)
+      || !isRecord(value.jobNimbus)
+      || !isRecord(value.google)
+      || !isRecord(value.quo)
+    ) {
+      throw new Error("Invalid Connections response");
+    }
+
+    const generatedAt = boundedString(value.generatedAt, 40);
+    if (generatedAt && Number.isNaN(new Date(generatedAt).getTime())) {
+      throw new Error("Invalid Connections timestamp");
+    }
+    const jobNimbusStatus = connectionStatus(value.jobNimbus.status);
+    if (
+      !["connected", "unavailable"].includes(jobNimbusStatus)
+      || value.jobNimbus.scope !== "assigned"
+    ) {
+      throw new Error("Invalid JobNimbus connection");
+    }
+    const googleStatus = connectionStatus(value.google.status);
+    const gmailStatus = connectionStatus(value.google.gmail);
+    const calendarStatus = connectionStatus(value.google.calendar);
+    const connectUrl = boundedString(value.google.connectUrl, 120);
+    if (connectUrl && connectUrl !== ENDPOINTS.googleConnectStart) {
+      throw new Error("Invalid Google connection path");
+    }
+    const quoStatus = connectionStatus(value.quo.status);
+
+    return {
+      generatedAt: generatedAt,
+      profile: {
+        displayName: boundedString(value.profile.displayName, 100),
+        role: boundedString(value.profile.role, 64)
+      },
+      jobNimbus: {
+        status: jobNimbusStatus,
+        scope: "assigned"
+      },
+      google: {
+        status: googleStatus,
+        gmail: gmailStatus,
+        calendar: calendarStatus,
+        connectUrl: ENDPOINTS.googleConnectStart
+      },
+      quo: {
+        status: quoStatus,
+        line: normalizeSafeQuoLine(value.quo.line)
+      }
+    };
+  }
+
+  function normalizeQuoLineStatus(value, fallback) {
+    const current = record(fallback);
+    const mode = boundedString(value.mode, 16);
+    if (mode && mode !== "status") {
+      throw new Error("Invalid Quo status response");
+    }
+    if (typeof value.linked !== "boolean") {
+      return {
+        status: connectionStatus(current.status),
+        line: normalizeSafeQuoLine(current.line)
+      };
+    }
+    return {
+      status: value.linked ? "connected" : "not_connected",
+      line: value.linked ? normalizeSafeQuoLine(value.line) : null
+    };
+  }
+
+  function normalizeSafeQuoLine(value) {
+    if (!isRecord(value)) return null;
+    const name = safeLineName(value.name);
+    const maskedNumber = safeMaskedPhone(value.maskedNumber);
+    return name || maskedNumber
+      ? { name: name, maskedNumber: maskedNumber }
+      : null;
+  }
+
+  function safeLineName(value) {
+    const name = boundedString(value, 80);
+    if (!name) return "";
+    const digits = name.match(/\d/g) || [];
+    return digits.length >= 7 ? "" : name;
+  }
+
+  function safeMaskedPhone(value) {
+    const masked = boundedString(value, 40);
+    if (!masked || !/^[0-9*•xX()+.\s-]+$/.test(masked)) return "";
+    const digits = masked.match(/\d/g) || [];
+    return digits.length <= 4 ? masked : "";
+  }
+
+  function connectionStatus(value) {
+    const status = boundedString(value, 32);
+    if (!CONNECTION_STATUSES.has(status)) {
+      throw new Error("Invalid connection status");
+    }
+    return status;
+  }
+
+  function renderConnections(connections) {
+    setText(
+      elements["connections-profile-name"],
+      connections.profile.displayName || "Signed-in employee"
+    );
+    setText(
+      elements["connections-profile-role"],
+      humanize(connections.profile.role || "HCN employee")
+    );
+
+    renderConnectionBadge(
+      elements["jobnimbus-connection-status"],
+      connections.jobNimbus.status
+    );
+    setText(
+      elements["jobnimbus-connection-detail"],
+      connections.jobNimbus.status === "connected"
+        ? "Connected with assigned-file scope."
+        : "Your assigned JobNimbus identity is unavailable."
+    );
+
+    renderConnectionBadge(
+      elements["google-connection-status"],
+      connections.google.status
+    );
+    setText(
+      elements["google-gmail-status"],
+      connectionStatusLabel(connections.google.gmail)
+    );
+    setText(
+      elements["google-calendar-status"],
+      connectionStatusLabel(connections.google.calendar)
+    );
+
+    renderConnectionBadge(
+      elements["quo-connection-status"],
+      connections.quo.status
+    );
+    const line = connections.quo.line;
+    const lineDetail = line
+      ? [line.name, line.maskedNumber].filter(Boolean).join(" · ")
+      : "";
+    setText(
+      elements["quo-connection-detail"],
+      connections.quo.status === "connected"
+        ? lineDetail || "Your Quo work line is linked."
+        : connections.quo.status === "not_connected"
+          ? "Link the Quo work line you use for client calls and texts."
+          : "Quo line status is currently unavailable."
+    );
+
+    badge(elements["connections-status"], "Current", "good");
+    notice(
+      elements["connections-alert"],
+      connections.generatedAt
+        ? "Connection status checked " + readableDateTime(connections.generatedAt) + "."
+        : "Connection status is current for this session.",
+      "good"
+    );
+    syncConnectionControls();
+  }
+
+  function renderConnectionBadge(element, status) {
+    badge(element, connectionStatusLabel(status), connectionStatusTone(status));
+  }
+
+  function connectionStatusLabel(status) {
+    if (status === "connected") return "Connected";
+    if (status === "not_connected") return "Not connected";
+    return "Unavailable";
+  }
+
+  function connectionStatusTone(status) {
+    if (status === "connected") return "good";
+    if (status === "not_connected") return "warn";
+    return "bad";
+  }
+
+  function syncConnectionControls() {
+    const connections = record(state.connections);
+    const google = record(connections.google);
+    const quo = record(connections.quo);
+    const canLinkGoogle = (
+      navigator.onLine
+      && hasGoogleLinkAuthority()
+      && (
+        google.status === "not_connected"
+        || google.status === "connected"
+      )
+      && !state.connectionsLoading
+    );
+    const canLinkQuo = (
+      navigator.onLine
+      && hasQuoLineAuthority()
+      && (
+        quo.status === "not_connected"
+        || quo.status === "connected"
+      )
+      && !state.connectionsLoading
+    );
+
+    elements["google-connect-action"].hidden = !canLinkGoogle;
+    elements["google-connect-action"].disabled = state.connectionsLoading;
+    setText(
+      elements["google-connect-action"],
+      google.status === "connected" ? "Reconnect Google" : "Connect Google"
+    );
+    elements["quo-phone-form"].hidden = !canLinkQuo || state.quoChallengePending;
+    elements["quo-verify-form"].hidden = !canLinkQuo || !state.quoChallengePending;
+    setText(
+      elements["quo-start"],
+      quo.status === "connected" ? "Verify a different line" : "Send code"
+    );
+    elements["quo-start"].disabled = state.quoMutationLoading;
+    elements["quo-use-code"].disabled = state.quoMutationLoading;
+    elements["quo-verify"].disabled = state.quoMutationLoading;
+    elements["quo-restart"].disabled = state.quoMutationLoading;
+  }
+
+  function startGoogleConnection() {
+    if (!navigator.onLine || !hasGoogleLinkAuthority()) {
+      notice(
+        elements["connections-alert"],
+        "Google linking is not available for this HCN session.",
+        "warn"
+      );
+      return;
+    }
+    elements["google-connect-action"].disabled = true;
+    window.location.assign(ENDPOINTS.googleConnectStart);
+  }
+
+  async function startQuoConnection(event) {
+    event.preventDefault();
+    if (!navigator.onLine || !hasQuoLineAuthority() || state.quoMutationLoading) {
+      notice(
+        elements["connections-alert"],
+        "Quo line linking is not available for this HCN session.",
+        "warn"
+      );
+      return;
+    }
+    const phone = boundedString(elements["quo-phone"].value.trim(), 24);
+    const digits = phone.match(/\d/g) || [];
+    if (
+      digits.length < 7
+      || digits.length > 15
+      || !/^[0-9()+.\s-]+$/.test(phone)
+    ) {
+      notice(
+        elements["connections-alert"],
+        "Enter the work phone number that should receive the Quo verification code.",
+        "warn"
+      );
+      return;
+    }
+
+    await mutateQuoLine(
+      { mode: "start", phone: phone },
+      "A verification code was sent to that work line.",
+      async function (response) {
+        elements["quo-phone-form"].reset();
+        if (record(response).linked === true && !record(response).verification) {
+          state.quoChallengePending = false;
+          await loadConnections();
+          notice(
+            elements["connections-alert"],
+            "That Quo line is already verified for your HCN account.",
+            "good"
+          );
+          return;
+        }
+        state.quoChallengePending = true;
+        syncConnectionControls();
+        elements["quo-code"].focus();
+      }
+    );
+  }
+
+  function showQuoCodeEntry() {
+    if (!navigator.onLine || !hasQuoLineAuthority() || state.quoMutationLoading) {
+      return;
+    }
+    state.quoChallengePending = true;
+    syncConnectionControls();
+    notice(
+      elements["connections-alert"],
+      "Enter the six-digit code already sent to your Quo work line.",
+      "neutral"
+    );
+    elements["quo-code"].focus();
+  }
+
+  function restartQuoConnection() {
+    if (state.quoMutationLoading) return;
+    elements["quo-verify-form"].reset();
+    state.quoChallengePending = false;
+    syncConnectionControls();
+    notice(
+      elements["connections-alert"],
+      "Enter your Quo work number to request a new verification code.",
+      "neutral"
+    );
+    elements["quo-phone"].focus();
+  }
+
+  async function verifyQuoConnection(event) {
+    event.preventDefault();
+    if (!navigator.onLine || !hasQuoLineAuthority() || state.quoMutationLoading) {
+      notice(
+        elements["connections-alert"],
+        "Quo line verification is not available for this HCN session.",
+        "warn"
+      );
+      return;
+    }
+    const code = boundedString(elements["quo-code"].value.trim(), 6);
+    if (!/^\d{6}$/.test(code)) {
+      notice(
+        elements["connections-alert"],
+        "Enter the six-digit Quo verification code.",
+        "warn"
+      );
+      return;
+    }
+
+    await mutateQuoLine(
+      { mode: "verify", code: code },
+      "The Quo line was verified. Refreshing its safe connection status.",
+      async function () {
+        elements["quo-verify-form"].reset();
+        state.quoChallengePending = false;
+        await loadConnections();
+      }
+    );
+  }
+
+  async function mutateQuoLine(body, successMessage, onSuccess) {
+    if (state.quoController) state.quoController.abort();
+    const controller = new AbortController();
+    state.quoController = controller;
+    state.quoMutationLoading = true;
+    syncConnectionControls();
+    notice(elements["connections-alert"], "Verifying the Quo work line.", "neutral");
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.quoLine,
+        body,
+        controller.signal,
+        QUO_LINE_LINK_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      notice(elements["connections-alert"], successMessage, "good");
+      await onSuccess(response);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (statusOf(error) === 401) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["connections-alert"],
+        statusOf(error) === 403
+          ? "This HCN session cannot link a Quo line."
+          : "The Quo line could not be verified. No connection change is assumed.",
+        "bad"
+      );
+    } finally {
+      if (state.quoController === controller) {
+        state.quoController = null;
+        state.quoMutationLoading = false;
+        syncConnectionControls();
+      }
+    }
+  }
+
+  function connectionErrorMessage(error) {
+    if (!navigator.onLine) {
+      return "The connection went offline. No connection details are retained.";
+    }
+    if (statusOf(error) === 502 || statusOf(error) === 503) {
+      return "Work-account connection status is temporarily unavailable.";
+    }
+    return "Your work-account connections could not be verified.";
   }
 
   async function loadManagementSweep() {
@@ -2294,6 +3184,12 @@
 
   async function loadWorkCenter(options) {
     const resetFile = !options || options.resetFile !== false;
+    const optionOffset = options && Number(options.offset);
+    const requestedOffset = Number.isInteger(optionOffset)
+      && optionOffset >= 0
+      && optionOffset <= 5000
+      ? optionOffset
+      : state.workCenterOffset;
     if (!hasWorkCenterAuthority()) {
       syncOperationalAccess();
       return;
@@ -2309,6 +3205,7 @@
     state.workCenterController = controller;
     state.workCenterLoading = true;
     state.workCenter = null;
+    state.workCenterOffset = requestedOffset;
     if (resetFile) {
       state.selectedFileRef = null;
       state.fileReview = null;
@@ -2317,10 +3214,18 @@
 
     elements["work-center-list"].setAttribute("aria-busy", "true");
     elements["work-center-refresh"].disabled = true;
+    elements["work-center-previous"].disabled = true;
+    elements["work-center-next"].disabled = true;
+    elements["work-center-previous"].hidden = requestedOffset === 0;
+    elements["work-center-next"].hidden = true;
+    setText(
+      elements["work-center-page"],
+      "Loading page " + (Math.floor(requestedOffset / WORK_CENTER_PAGE_SIZE) + 1)
+    );
     badge(elements["work-center-status"], "Loading", "neutral");
     notice(
       elements["work-center-alert"],
-      "Checking the current Chance-assigned JobNimbus queue.",
+      "Checking your current assigned JobNimbus queue.",
       "neutral"
     );
     renderWorkspaceEmpty(elements["work-center-list"], "Loading fresh assigned files…");
@@ -2328,11 +3233,13 @@
     try {
       const response = await postOperationalJson(
         ENDPOINTS.workCenter,
-        { offset: 0, limit: 25 },
-        controller.signal
+        { offset: requestedOffset, limit: WORK_CENTER_PAGE_SIZE },
+        controller.signal,
+        WORK_CENTER_CAPABILITY
       );
       if (controller.signal.aborted) return;
-      state.workCenter = normalizeWorkCenterResponse(response);
+      state.workCenter = normalizeWorkCenterResponse(response, requestedOffset);
+      state.workCenterOffset = state.workCenter.page.offset;
       renderWorkCenter(state.workCenter);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -2352,18 +3259,30 @@
         "The fresh assigned-file queue could not be loaded."
       );
       setText(elements["work-center-count"], "—");
-      setText(elements["work-center-freshness"], "No stale queue is shown.");
+      setText(
+        elements["work-center-page"],
+        "Page " + (Math.floor(requestedOffset / WORK_CENTER_PAGE_SIZE) + 1) +
+          " unavailable"
+      );
+      setText(
+        elements["work-center-freshness"],
+        requestedOffset
+          ? "No stale page is shown. Return to the previous page or refresh the queue."
+          : "No stale queue is shown."
+      );
     } finally {
       if (state.workCenterController === controller) {
         state.workCenterController = null;
         state.workCenterLoading = false;
         elements["work-center-list"].setAttribute("aria-busy", "false");
         elements["work-center-refresh"].disabled = false;
+        elements["work-center-previous"].disabled = false;
+        elements["work-center-next"].disabled = false;
       }
     }
   }
 
-  function normalizeWorkCenterResponse(value) {
+  function normalizeWorkCenterResponse(value, expectedOffset) {
     if (
       value.schema !== "hcn.console.work-center.v1" ||
       value.ephemeral !== true ||
@@ -2378,9 +3297,19 @@
       !Number.isInteger(page.offset) ||
       !Number.isInteger(page.limit) ||
       !Number.isInteger(page.total) ||
-      page.offset !== 0 ||
-      page.limit !== 25 ||
-      page.total < 0
+      page.offset !== expectedOffset ||
+      page.offset < 0 ||
+      page.offset > 5000 ||
+      page.limit !== WORK_CENTER_PAGE_SIZE ||
+      page.total < 0 ||
+      typeof page.hasMore !== "boolean" ||
+      value.files.length > page.limit ||
+      (
+        page.offset > page.total
+        ? value.files.length !== 0
+        : page.offset + value.files.length > page.total
+      ) ||
+      page.hasMore !== (page.offset + value.files.length < page.total)
     ) {
       throw new Error("Invalid Work Center page");
     }
@@ -2430,29 +3359,47 @@
   function renderWorkCenter(workCenter) {
     const files = workCenter.files;
     const total = workCenter.page.total;
+    const offset = workCenter.page.offset;
+    const first = files.length ? offset + 1 : 0;
+    const last = offset + files.length;
+    const pageNumber = Math.floor(offset / workCenter.page.limit) + 1;
+    const pageCount = Math.max(
+      pageNumber,
+      Math.ceil(total / workCenter.page.limit),
+      1
+    );
     setText(
       elements["work-center-count"],
-      total > files.length ? files.length + " / " + total : String(total)
+      files.length ? first + "–" + last + " / " + total : "0 / " + total
     );
+    setText(
+      elements["work-center-page"],
+      "Page " + pageNumber + " of " + pageCount
+    );
+    elements["work-center-previous"].hidden = offset === 0;
+    elements["work-center-next"].hidden = !workCenter.page.hasMore;
     setText(
       elements["work-center-freshness"],
       "Fresh JobNimbus check " + readableDateTime(workCenter.generatedAt) +
-        (workCenter.page.hasMore ? " · showing the first 25 files." : ".")
+        (files.length ? " · showing files " + first + "–" + last + "." : ".")
     );
     badge(elements["work-center-status"], "Fresh · read only", "good");
     notice(
       elements["work-center-alert"],
       files.length
-        ? files.length + " active assigned file" + (files.length === 1 ? " is" : "s are") +
-          " ready for exact review."
-        : "The fresh assigned-file queue is empty.",
+        ? "Assigned files " + first + "–" + last + " are ready for exact review."
+        : offset
+          ? "No assigned files remain on this page."
+          : "The fresh assigned-file queue is empty.",
       "good"
     );
 
     if (!files.length) {
       renderWorkspaceEmpty(
         elements["work-center-list"],
-        "No active insurance files are currently assigned to Chance."
+        offset
+          ? "No files remain on this page. Return to the previous page or refresh the queue."
+          : "No active insurance files are currently assigned to you."
       );
       refreshManagementSweepFileLinks();
       return;
@@ -2560,7 +3507,8 @@
       const response = await postOperationalJson(
         ENDPOINTS.fileReview,
         { fileRef: fileRef, recentLimit: 20 },
-        controller.signal
+        controller.signal,
+        FILE_REVIEW_CAPABILITY
       );
       if (controller.signal.aborted) return;
       state.fileReview = normalizeFileResponse(response, fileRef);
@@ -3045,7 +3993,7 @@
   }
 
   function syncActionAccess() {
-    if (!navigator.onLine || !hasChanceBrowserAuthority()) {
+    if (!navigator.onLine || !hasBrowserAuthority()) {
       clearActionControlData(
         navigator.onLine
           ? "Action and receipt data was cleared because authority is unavailable."
@@ -4672,7 +5620,7 @@
   function fileErrorMessage(error) {
     if (!navigator.onLine) return "The connection went offline. File evidence was cleared.";
     if (statusOf(error) === 404) {
-      return "That file is no longer in the current Chance-assigned queue. Refresh the queue.";
+      return "That file is no longer in your current assigned queue. Refresh the queue.";
     }
     if (statusOf(error) === 502 || statusOf(error) === 503) {
       return "Fresh file evidence is unavailable. Try this exact file again.";

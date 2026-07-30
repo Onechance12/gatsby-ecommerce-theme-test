@@ -6,8 +6,8 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     disk:
-      name: jobnimbus-bridge-data
-      mountPath: /var/data
+      name: hcn-operations-data
+      mountPath: /var/data/hcn-operations
       sizeGB: 1
     envVars:
       - key: JOBNIMBUS_API_BASE_URL
@@ -26,8 +26,16 @@ services:
         value: "false"
       - key: HCN_ACTION_EXECUTION_ENABLED
         value: "false"
-      - key: MEMORY_ROOT
-        value: /var/data
+      - key: HCN_OPERATIONS_ROOT
+        value: /var/data/hcn-operations
+      - key: HCN_THRESHER_STORE_PATH
+        value: /var/data/hcn-operations/thresher/state.enc.json
+      - key: HCN_THRESHER_STORE_KEY
+        sync: false
+      - key: HCN_THRESHER_REFERENCE_KEY
+        sync: false
+      - key: HCN_THRESHER_SIGNING_KEY
+        sync: false
       - key: MAX_ARTIFACT_BYTES
         value: "5242880"
       - key: MAX_CHATGPT_FILE_BYTES
@@ -39,6 +47,10 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: HCN_GOOGLE_CLIENT_ID
+        sync: false
+      - key: HCN_GOOGLE_CLIENT_SECRET
         sync: false
       - key: ALLOW_GOOGLE_USER_AUTH
         value: "true"
@@ -56,6 +68,20 @@ services:
         sync: false
       - key: OAUTH_SESSION_SECRET
         sync: false
+      - key: HCN_CONSOLE_ENABLED
+        value: "true"
+      - key: HCN_CONSOLE_ORIGIN
+        value: https://jobnimbus-chatgpt-bridge.onrender.com
+      - key: CHANCE_GOOGLE_SUBJECT
+        sync: false
+      - key: HCN_TENANT_ID
+        sync: false
+      - key: HCN_REFERENCE_KEY
+        sync: false
+      - key: HCN_GOOGLE_GRANT_KEY
+        sync: false
+      - key: HCN_GOOGLE_GRANT_STORE_PATH
+        value: /var/data/hcn-operations/platform/google-grants.enc.json
       - key: GMAIL_USER
         value: me
       - key: ALLOW_GMAIL_SEND
@@ -92,16 +118,6 @@ services:
         sync: false
       - key: OPENAI_REALTIME_MODEL
         value: gpt-realtime
-      - key: OPENAI_OPERATIONAL_MODEL
-        value: gpt-5.6-luna
-      - key: ZAI_API_KEY
-        sync: false
-      - key: ZAI_OPERATIONAL_MODEL
-        value: glm-4.7-flash
-      - key: OPERATIONAL_LLM_PROVIDER
-        value: zai
-      - key: OPERATIONAL_LLM_FALLBACK_PROVIDER
-        value: ""
       - key: OPENAI_VOICE
         value: marin
       - key: VOICE_PUBLIC_BASE_URL
@@ -135,12 +151,10 @@ services:
       - key: RETELL_FROM_NUMBER
         sync: false
       - key: ALLOW_RETELL_CALLS
-        value: "true"
+        value: "false"
       - key: ALLOW_CLIENT_COORDINATOR_CALLS
         value: "false"
       - key: ALLOW_CARRIER_FOLLOWUP_CALLS
-        value: "true"
-      - key: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
         value: "false"
       - key: RETELL_CALLBACK_TTL_HOURS
         value: "72"
@@ -157,20 +171,20 @@ services:
       - key: HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET
         value: "750"
       - key: CLAIM_CALL_STORE_PATH
-        value: /var/data/bridge/claim-call-ledger.json
+        value: /var/data/hcn-operations/platform/claim-call-ledger.json
       - key: ACTION_BATCH_STORE_PATH
-        value: /var/data/bridge/action-batches.json
+        value: /var/data/hcn-operations/platform/action-batches.json
       - key: ACTION_APPROVAL_STORE_PATH
-        value: /var/data/bridge/action-approvals.json
+        value: /var/data/hcn-operations/platform/action-approvals.json
       - key: HCN_ACTION_RECEIPT_STORE_PATH
-        value: /var/data/bridge/hcn-action-receipts.json
+        value: /var/data/hcn-operations/platform/action-receipts.json
       - key: ACTION_APPROVAL_TTL_SECONDS
         value: "900"
       - key: OUTBOUND_SEND_STORE_PATH
-        value: /var/data/bridge/outbound-sends.json
-      - key: QUO_LINE_LINK_STORE_PATH
-        value: /var/data/bridge/quo-line-links.json
-      - key: QUO_LINE_CHALLENGE_STORE_PATH
-        value: /var/data/bridge/quo-line-challenges.json
+        value: /var/data/hcn-operations/platform/outbound-sends.json
+      - key: HCN_QUO_LINE_STORE_PATH
+        value: /var/data/hcn-operations/platform/quo-line-store.enc.json
+      - key: HCN_QUO_LINK_KEY
+        sync: false
       - key: AUTO_ENROLLED_USER_STORE_PATH
-        value: /var/data/bridge/auto-enrolled-users.json
+        value: /var/data/hcn-operations/platform/auto-enrolled-users.json

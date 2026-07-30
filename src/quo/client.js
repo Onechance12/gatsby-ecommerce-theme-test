@@ -62,7 +62,27 @@ export async function readQuoHistoryStrict(config, input = {}) {
   } catch {
     throw quoHistoryProviderFailure();
   }
-  const numbers = lineInventory.numbers;
+  const requestedLineId = String(input.lineId || "").trim();
+  const requestedLineNumberRaw = String(input.lineNumber || "").trim();
+  const requestedLineNumber = toE164(requestedLineNumberRaw);
+  if (
+    (requestedLineId && !/^[A-Za-z0-9._~-]{1,255}$/.test(requestedLineId))
+    || (requestedLineNumberRaw && !requestedLineNumber)
+  ) {
+    throw quoHistoryProviderFailure();
+  }
+  const numbers = requestedLineId || requestedLineNumber
+    ? lineInventory.numbers.filter((line) =>
+        (!requestedLineId || line.id === requestedLineId)
+        && (
+          !requestedLineNumber
+          || toE164(line.number) === requestedLineNumber
+        )
+      )
+    : lineInventory.numbers;
+  if (numbers.length !== 1 && (requestedLineId || requestedLineNumber)) {
+    throw quoHistoryProviderFailure();
+  }
 
   const nameById = Object.fromEntries(numbers.map((row) => [row.id, row.name || row.number]));
   const byId = new Map();

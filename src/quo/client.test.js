@@ -116,6 +116,53 @@ test("strict Quo history completely paginates messages and calls across every te
   }
 });
 
+test("strict Quo history can be confined to one exact employee line", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedLines = [];
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith("/phone-numbers")) {
+      return jsonResponse(200, { data: [
+        { id: "PN_one", name: "Line One", number: "+19725550101" },
+        { id: "PN_two", name: "Line Two", number: "+19725550102" }
+      ] });
+    }
+    requestedLines.push(parsed.searchParams.get("phoneNumberId"));
+    if (
+      parsed.pathname.endsWith("/messages")
+      && parsed.searchParams.get("phoneNumberId") === "PN_two"
+    ) {
+      return jsonResponse(200, {
+        data: [scopedMessage("PN_two", "+19725550102", {
+          id: "MSG_employee",
+          createdAt: "2026-07-15T15:00:00Z",
+          content: "Employee line only"
+        })]
+      });
+    }
+    return jsonResponse(200, { data: [] });
+  };
+  try {
+    const result = await readQuoHistoryStrict(
+      { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+      {
+        phone: "+12145550199",
+        lineId: "PN_two",
+        lineNumber: "+19725550102",
+        maxResults: 10
+      }
+    );
+    assert.equal(result.completeness.complete, true);
+    assert.equal(result.completeness.lineCount, 1);
+    assert.deepEqual(result.timeline.map((item) => item.id), [
+      "MSG_employee"
+    ]);
+    assert.deepEqual(requestedLines, ["PN_two", "PN_two"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("strict Quo history returns privacy-safe partial metadata for restricted line streams", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {

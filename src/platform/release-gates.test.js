@@ -8,9 +8,17 @@ import {
   readReleaseGates
 } from "./release-gates.js";
 
-const LEGACY_MEMORY_GATE = "ALLOW_LEGACY_CLIENT_MEMORY_WRITES";
 const RENDER_MANIFEST_PATH = fileURLToPath(
   new URL("../../render.yaml", import.meta.url)
+);
+const PACKAGE_MANIFEST_PATH = fileURLToPath(
+  new URL("../../package.json", import.meta.url)
+);
+const DOCKERIGNORE_PATH = fileURLToPath(
+  new URL("../../.dockerignore", import.meta.url)
+);
+const NPMIGNORE_PATH = fileURLToPath(
+  new URL("../../.npmignore", import.meta.url)
 );
 
 test("release gate defaults are immutable and expose a stable sorted key list", () => {
@@ -18,7 +26,6 @@ test("release gate defaults are immutable and expose a stable sorted key list", 
   assert.equal(Object.isFrozen(RELEASE_GATE_KEYS), true);
   assert.deepEqual(RELEASE_GATE_KEYS, [...RELEASE_GATE_KEYS].sort());
   assert.deepEqual(Object.keys(RELEASE_GATE_DEFAULTS).sort(), RELEASE_GATE_KEYS);
-  assert.equal(RELEASE_GATE_DEFAULTS[LEGACY_MEMORY_GATE], false);
 });
 
 test("all release-critical render manifest gates match the code defaults", () => {
@@ -26,7 +33,7 @@ test("all release-critical render manifest gates match the code defaults", () =>
     readFileSync(RENDER_MANIFEST_PATH, "utf8")
   );
 
-  assert.equal(RELEASE_GATE_KEYS.length, 9);
+  assert.equal(RELEASE_GATE_KEYS.length, 8);
   for (const key of RELEASE_GATE_KEYS) {
     assert.equal(
       manifestValues.has(key),
@@ -62,7 +69,6 @@ test("release gate parsing is exact and fails closed", () => {
     ALLOW_RETELL_CALLS: "true",
     ALLOW_CLIENT_COORDINATOR_CALLS: "false",
     ALLOW_CARRIER_FOLLOWUP_CALLS: "1",
-    ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "true",
     HCN_ACTION_EXECUTION_ENABLED: "true"
   });
 
@@ -70,7 +76,6 @@ test("release gate parsing is exact and fails closed", () => {
     ALLOW_CARRIER_FOLLOWUP_CALLS: false,
     ALLOW_CLIENT_COORDINATOR_CALLS: false,
     ALLOW_GMAIL_SEND: false,
-    ALLOW_LEGACY_CLIENT_MEMORY_WRITES: true,
     ALLOW_QUO_SEND: false,
     ALLOW_RETELL_CALLS: true,
     ALLOW_VOICE_CALLS: false,
@@ -104,6 +109,53 @@ test("release gate reader ignores arbitrary environment secrets", () => {
   assert.deepEqual(Object.keys(gates), RELEASE_GATE_KEYS);
   assert.equal(gates.ALLOW_RETELL_CALLS, true);
   assert.doesNotMatch(JSON.stringify(gates), new RegExp(secretMarker));
+});
+
+test("production packaging excludes quarantined legacy memory", () => {
+  const packageManifest = JSON.parse(
+    readFileSync(PACKAGE_MANIFEST_PATH, "utf8")
+  );
+  const scripts = packageManifest.scripts || {};
+  const dockerIgnore = readFileSync(DOCKERIGNORE_PATH, "utf8");
+  const npmIgnore = readFileSync(NPMIGNORE_PATH, "utf8");
+
+  assert.equal("memory" in scripts, false);
+  assert.doesNotMatch(String(scripts.check || ""), /src\/memory\//);
+  assert.match(dockerIgnore, /^src\/memory\/$/m);
+  assert.match(npmIgnore, /^src\/memory\/$/m);
+  assert.match(npmIgnore, /^memory\/$/m);
+  assert.match(npmIgnore, /^data\/memory\/$/m);
+});
+
+test("Render uses one HCN-only persistent root and no unwired advisory provider", () => {
+  const manifest = readFileSync(RENDER_MANIFEST_PATH, "utf8");
+
+  assert.match(manifest, /name:\s+hcn-operations-data/);
+  assert.match(manifest, /mountPath:\s+\/var\/data\/hcn-operations/);
+  assert.match(
+    manifest,
+    /key:\s+HCN_OPERATIONS_ROOT\s*\r?\n\s+value:\s+\/var\/data\/hcn-operations/
+  );
+  assert.match(
+    manifest,
+    /key:\s+HCN_THRESHER_STORE_PATH\s*\r?\n\s+value:\s+\/var\/data\/hcn-operations\/thresher\/state\.enc\.json/
+  );
+  for (const key of [
+    "HCN_THRESHER_STORE_KEY",
+    "HCN_THRESHER_REFERENCE_KEY",
+    "HCN_THRESHER_SIGNING_KEY"
+  ]) {
+    assert.match(
+      manifest,
+      new RegExp(`key:\\s+${key}\\s*\\r?\\n\\s+sync:\\s+false`)
+    );
+  }
+  assert.doesNotMatch(manifest, /\bMEMORY_ROOT\b/);
+  assert.doesNotMatch(
+    manifest,
+    /\b(?:OPENAI_OPERATIONAL_MODEL|ZAI_API_KEY|ZAI_OPERATIONAL_MODEL|OPERATIONAL_LLM_[A-Z_]+)\b/
+  );
+  assert.doesNotMatch(manifest, /\/var\/data\/bridge/);
 });
 
 function parseRenderEnvValues(source) {

@@ -21,6 +21,7 @@ import {
 const START = Date.parse("2026-07-28T18:00:00.000Z");
 const GOOGLE_ACCESS_SECRET = "provider-access-token-secret";
 const GOOGLE_CLIENT_SECRET = "provider-client-secret";
+const AUTHORIZATION_VERSION = `authz_v1_${"a".repeat(64)}`;
 
 test("authorization uses the shared callback, minimal scopes, and S256 PKCE", async () => {
   const fixture = createFixture();
@@ -81,7 +82,8 @@ test("callback consumes the transaction, exchanges with its verifier, and create
   assert.deepEqual(fixture.sessionInputs, [{
     subject: "chance@wavepa.com",
     googleSubject: "google-subject-1",
-    role: "chance"
+    role: "chance",
+    authorizationVersion: AUTHORIZATION_VERSION
   }]);
   assert.match(completed.setCookies[0],
     new RegExp(`^${HCN_LOGIN_COOKIE_NAME}=;`));
@@ -298,7 +300,7 @@ test("callback results and session records do not serialize provider or PKCE sec
   );
   assert.equal(serialized.includes("chance@wavepa.com"), true);
   assert.deepEqual(Object.keys(fixture.sessionInputs[0]),
-    ["subject", "googleSubject", "role"]);
+    ["subject", "googleSubject", "role", "authorizationVersion"]);
 });
 
 function createFixture({
@@ -307,7 +309,8 @@ function createFixture({
     name: "Chance",
     role: "chance",
     enabled: true,
-    googleSubject: "google-subject-1"
+    googleSubject: "google-subject-1",
+    authorizationVersion: AUTHORIZATION_VERSION
   }),
   authenticateGoogleAccessToken = defaultAuthenticator
 } = {}) {

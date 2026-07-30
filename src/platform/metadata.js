@@ -30,11 +30,11 @@ export function buildPlatformMeta({
     },
     runtime: buildRuntimeStatus(runtime),
     boundaries: {
-      chanceBrain: "legacy_read_only_non_operator_paths",
-      hcnV2ChanceBrainDataFlow: "disconnected",
+      chanceBrain: "disconnected_no_route",
+      hcnChanceBrainDataFlow: "none",
       jobrolo: "disconnected",
-      hcnOperationsBrain: "v2_foundation",
-      legacyClientMemory: "migration_required"
+      hcnOperationsBrain: "foundation_persistence_pending",
+      legacyClientMemory: "quarantined_unreachable"
     }
   };
 }

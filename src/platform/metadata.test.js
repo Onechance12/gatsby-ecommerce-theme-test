@@ -33,7 +33,6 @@ test("public metadata proves the runtime without exposing environment contents",
         ALLOW_CARRIER_FOLLOWUP_CALLS: true,
         ALLOW_CLIENT_COORDINATOR_CALLS: false,
         ALLOW_GMAIL_SEND: true,
-        ALLOW_LEGACY_CLIENT_MEMORY_WRITES: false,
         ALLOW_QUO_SEND: true,
         ALLOW_RETELL_CALLS: true,
         ALLOW_VOICE_CALLS: false,
@@ -49,15 +48,34 @@ test("public metadata proves the runtime without exposing environment contents",
   assert.equal(meta.build.attested, true);
   assert.equal(meta.build.sourceCommit, "810802542c35625327662e97fd21f7208532b371");
   assert.equal(meta.build.sourceCommitTrust, "provider_attested");
-  assert.equal(meta.boundaries.chanceBrain, "legacy_read_only_non_operator_paths");
-  assert.equal(meta.boundaries.hcnV2ChanceBrainDataFlow, "disconnected");
+  assert.equal(meta.boundaries.chanceBrain, "disconnected_no_route");
+  assert.equal(meta.boundaries.hcnChanceBrainDataFlow, "none");
   assert.equal(meta.boundaries.jobrolo, "disconnected");
+  assert.equal(
+    meta.boundaries.hcnOperationsBrain,
+    "foundation_persistence_pending"
+  );
+  assert.equal(
+    meta.boundaries.legacyClientMemory,
+    "quarantined_unreachable"
+  );
+  assert.equal("hcnV2ChanceBrainDataFlow" in meta.boundaries, false);
+  assert.doesNotMatch(
+    JSON.stringify(meta.boundaries),
+    /legacy_read_only_non_operator_paths|migration_required/
+  );
   assert.equal(meta.capabilityCatalog.semantics, "route_authorization_only");
   assert.equal(meta.capabilityCatalog.effectiveAvailability, "combine_with_runtime");
   assert.equal(meta.runtime.configurationDrift.status, "detected");
   assert.deepEqual(
     meta.runtime.configurationDrift.differences.map((item) => item.key),
-    ["ALLOW_GMAIL_SEND", "ALLOW_QUO_SEND", "BRIDGE_ALLOW_WRITES"]
+    [
+      "ALLOW_CARRIER_FOLLOWUP_CALLS",
+      "ALLOW_GMAIL_SEND",
+      "ALLOW_QUO_SEND",
+      "ALLOW_RETELL_CALLS",
+      "BRIDGE_ALLOW_WRITES"
+    ]
   );
   assert.equal(JSON.stringify(meta).includes(secret), false);
 });

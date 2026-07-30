@@ -232,7 +232,8 @@ export function createHcnConsoleOAuthCoordinator({
       session = await store.createSession({
         subject: identity.subject,
         googleSubject: identity.googleSubject,
-        role: identity.role
+        role: identity.role,
+        authorizationVersion: identity.authorizationVersion
       });
     } catch {
       throw oauthError(
@@ -490,6 +491,9 @@ function normalizeApprovedIdentity(
     approved.googleSubject || approved.subject,
     "approved subject"
   );
+  const authorizationVersion = normalizeAuthorizationVersion(
+    approved.authorizationVersion
+  );
 
   if (
     subject !== candidate.subject ||
@@ -515,8 +519,23 @@ function normalizeApprovedIdentity(
   return Object.freeze({
     subject: approvedEmail,
     googleSubject: subject,
-    role
+    role,
+    authorizationVersion
   });
+}
+
+function normalizeAuthorizationVersion(value) {
+  if (
+    typeof value !== "string"
+    || !/^authz_v1_[a-f0-9]{64}$/.test(value)
+  ) {
+    throw oauthError(
+      "access_denied",
+      "This Google account is not approved for the HCN console.",
+      403
+    );
+  }
+  return value;
 }
 
 function normalizeGoogleConfig(

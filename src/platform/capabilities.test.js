@@ -41,6 +41,8 @@ test("Codex operator descriptor names exactly the existing least-privilege route
   });
   assert.equal(descriptor.identity.jobNimbusScope, "assigned");
   assert.equal(descriptor.authorizedCapabilities.includes("brain.context.read"), false);
+  assert.equal(descriptor.authorizedCapabilities.includes("memory.file_actions.read"), false);
+  assert.equal(descriptor.authorizedCapabilities.includes("memory.persistence.probe"), false);
   assert.equal(descriptor.authorizedCapabilities.includes("gmail.drafts.send"), false);
   assert.equal(descriptor.authorizedCapabilities.includes("jobnimbus.documents.upload"), false);
   assert.equal(descriptor.authorizedCapabilities.includes("voice.call.place"), false);
@@ -77,6 +79,12 @@ test("Google roles are normalized to named capabilities without wildcard authori
   assert.equal(JSON.stringify(chance).includes('"*"'), false);
 });
 
+test("the advertised registry has no Chance Brain or legacy-memory route", () => {
+  const serialized = JSON.stringify(CAPABILITY_ROUTE_REGISTRY);
+  assert.doesNotMatch(serialized, /brain\.context|memory\.file_actions|memory\.persistence/i);
+  assert.doesNotMatch(serialized, /\/brain\/|\/memory\//i);
+});
+
 test("HCN browser capability metadata is intersected with the console surface", () => {
   const browser = buildCapabilityDescriptor({
     identity: {
@@ -94,6 +102,10 @@ test("HCN browser capability metadata is intersected with the console surface", 
     "hcn.action_plans.prepare",
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
+    "hcn.connectors.google.disconnect",
+    "hcn.connectors.google.link",
+    "hcn.connectors.quo_line.link",
+    "hcn.connectors.read",
     "hcn.file.review",
     "hcn.management_sweep.read",
     "hcn.work_center.read",
@@ -104,29 +116,70 @@ test("HCN browser capability metadata is intersected with the console surface", 
     type: "hcn_browser_session",
     role: "chance",
     jobNimbusScope: "assigned",
-    gmailMode: "exact_assigned_file_evidence"
+    gmailMode: "per_user_connector_required"
   });
   assert.doesNotMatch(JSON.stringify(browser), /private-google-subject|private@example|private-provider-token/);
 });
 
-test("non-Chance HCN browser sessions retain foundation metadata without operational capabilities", () => {
-  for (const role of [
-    "administrator",
-    "employee",
-    "onboarding",
-    "client_coordinator",
-    "manager"
-  ]) {
+test("non-Chance HCN browser sessions receive only their reviewed employee capabilities", () => {
+  const cases = {
+    administrator: [
+      "hcn.connectors.google.disconnect",
+      "hcn.connectors.google.link",
+      "hcn.connectors.quo_line.link",
+      "hcn.connectors.read",
+      "hcn.file.review",
+      "hcn.management_sweep.read",
+      "hcn.work_center.read",
+      "platform.session.read"
+    ],
+    employee: [
+      "hcn.connectors.google.disconnect",
+      "hcn.connectors.google.link",
+      "hcn.connectors.quo_line.link",
+      "hcn.connectors.read",
+      "hcn.file.review",
+      "hcn.work_center.read",
+      "platform.session.read"
+    ],
+    onboarding: [
+      "hcn.connectors.google.disconnect",
+      "hcn.connectors.google.link",
+      "hcn.connectors.quo_line.link",
+      "hcn.connectors.read",
+      "platform.session.read"
+    ],
+    client_coordinator: [
+      "hcn.connectors.google.disconnect",
+      "hcn.connectors.google.link",
+      "hcn.connectors.quo_line.link",
+      "hcn.connectors.read",
+      "hcn.file.review",
+      "hcn.work_center.read",
+      "platform.session.read"
+    ],
+    manager: [
+      "hcn.connectors.google.disconnect",
+      "hcn.connectors.google.link",
+      "hcn.connectors.quo_line.link",
+      "hcn.connectors.read",
+      "hcn.file.review",
+      "hcn.management_sweep.read",
+      "hcn.work_center.read",
+      "platform.session.read"
+    ]
+  };
+  for (const [role, capabilities] of Object.entries(cases)) {
     const browser = buildCapabilityDescriptor({
       identity: { type: "hcn_browser_session", role }
     });
-    assert.deepEqual(browser.authorizedCapabilities, ["platform.session.read"], role);
+    assert.deepEqual(browser.authorizedCapabilities, capabilities, role);
     assert.deepEqual(browser.identity, {
       authentication: "authenticated",
       type: "hcn_browser_session",
       role,
-      jobNimbusScope: "none",
-      gmailMode: "none"
+      jobNimbusScope: "assigned",
+      gmailMode: "per_user_connector_required"
     });
   }
 });
@@ -164,7 +217,6 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
       ALLOW_CARRIER_FOLLOWUP_CALLS: true,
       ALLOW_CLIENT_COORDINATOR_CALLS: false,
       ALLOW_GMAIL_SEND: false,
-      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: false,
       ALLOW_QUO_SEND: undefined,
       ALLOW_RETELL_CALLS: true,
       ALLOW_VOICE_CALLS: false,
@@ -199,15 +251,14 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
         ready: true
       }
     },
-    brain: {
-      available: true,
+    hcnOperationsBrain: {
+      contractsAvailable: true,
       operationalProviderConfigured: false,
-      fallbackProvider: "disabled",
-      persistentRootConfigured: true,
+      optionalModelAdvisory: false,
+      persistenceConfigured: false,
       modelCanExecute: false,
-      legacyClientMemoryWritesAllowed: false,
-      codexOperatorClientMemory: "disabled_no_read_no_write",
-      clientSnapshots: "legacy_v1_unsafe_until_migrated"
+      externalActions: false,
+      thresherRulesAvailable: true
     }
   });
 
@@ -221,19 +272,37 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.gates.quoSend, "unknown");
   assert.equal(status.controls.actionBatchOnly, "enabled");
   assert.equal(status.controls.directEffectRoutes, "disabled");
-  assert.equal(status.brain.advisory, "unconfigured");
-  assert.equal(status.brain.fallback, "disabled");
-  assert.equal(status.brain.clientMemory, "disabled");
-  assert.equal(status.brain.legacyClientMemoryWrites, "disabled");
-  assert.equal(status.brain.snapshotSafety, "migration_required");
+  assert.equal(status.hcnOperationsBrain.advisory, "disabled");
+  assert.equal(status.hcnOperationsBrain.contracts, "configured");
+  assert.equal(status.hcnOperationsBrain.execution, "disabled");
+  assert.equal(status.hcnOperationsBrain.externalActions, "disabled");
+  assert.equal(status.hcnOperationsBrain.persistence, "unconfigured");
+  assert.equal(status.hcnOperationsBrain.thresherRules, "configured");
+  assert.equal("brain" in status, false);
+  assert.doesNotMatch(
+    JSON.stringify(status.hcnOperationsBrain),
+    /legacy|chance|snapshot/i
+  );
   assert.equal(status.configurationDrift.scope, "release_critical_effect_gates");
-  assert.equal(status.configurationDrift.monitoredKeys.length, 9);
+  assert.equal(status.configurationDrift.monitoredKeys.length, 8);
   assert.equal(status.configurationDrift.status, "detected");
-  assert.deepEqual(status.configurationDrift.differences, [{
-    key: "BRIDGE_ALLOW_WRITES",
-    checkedIn: "disabled",
-    runtime: "enabled"
-  }]);
+  assert.deepEqual(status.configurationDrift.differences, [
+    {
+      key: "ALLOW_CARRIER_FOLLOWUP_CALLS",
+      checkedIn: "disabled",
+      runtime: "enabled"
+    },
+    {
+      key: "ALLOW_RETELL_CALLS",
+      checkedIn: "disabled",
+      runtime: "enabled"
+    },
+    {
+      key: "BRIDGE_ALLOW_WRITES",
+      checkedIn: "disabled",
+      runtime: "enabled"
+    }
+  ]);
   assert.deepEqual(status.configurationDrift.unknown, ["ALLOW_QUO_SEND"]);
   assert.equal(buildRuntimeStatus(null).connectors.jobNimbus, "unknown");
   assert.equal(
@@ -284,8 +353,8 @@ test("identity and runtime secrets, contact data, and arbitrary strings cannot l
       email: secretValues[1],
       phone: secretValues[2]
     },
-    brain: {
-      available: true,
+    hcnOperationsBrain: {
+      contractsAvailable: true,
       operationalProviderConfigured: true,
       operationalProvider: secretValues[3],
       apiKey: secretValues[3]

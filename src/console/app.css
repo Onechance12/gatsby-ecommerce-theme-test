@@ -388,6 +388,36 @@ a[href] {
   content: "";
 }
 
+.glyph-connections {
+  border-radius: 50%;
+}
+
+.glyph-connections::before,
+.glyph-connections::after {
+  position: absolute;
+  content: "";
+}
+
+.glyph-connections::before {
+  top: 4px;
+  left: 4px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 6px 6px 0 currentColor;
+}
+
+.glyph-connections::after {
+  top: 7px;
+  left: 6px;
+  width: 6px;
+  height: 1.5px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: rotate(45deg);
+}
+
 .glyph-health {
   border-radius: 50%;
 }
@@ -1418,6 +1448,26 @@ h1 {
   letter-spacing: -0.025em;
 }
 
+.work-center-pagination {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.work-center-pagination .workspace-freshness {
+  margin: 0;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.work-center-pagination .button {
+  min-width: 94px;
+}
+
 .queue-count {
   display: inline-grid;
   min-width: 34px;
@@ -2148,6 +2198,134 @@ h1 {
   color: var(--ink-soft);
   font-size: 0.82rem;
   line-height: 1.55;
+}
+
+.connections-workspace {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.connections-profile {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid rgba(24, 92, 68, 0.18);
+  border-radius: 13px;
+  background: rgba(232, 249, 187, 0.34);
+}
+
+.connections-profile strong {
+  display: block;
+  max-width: 520px;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.96rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connections-profile > span {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--forest);
+  font-size: 0.7rem;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connections-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.connection-card {
+  display: flex;
+  min-width: 0;
+  min-height: 250px;
+  flex-direction: column;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fbfaf5;
+}
+
+.connection-card-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connection-card-heading h3 {
+  margin: 1px 0 0;
+  font-size: 1.08rem;
+  letter-spacing: -0.025em;
+}
+
+.connection-card-detail {
+  min-height: 42px;
+  margin: 17px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.connection-status-list {
+  display: grid;
+  gap: 1px;
+  margin: 16px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--line);
+}
+
+.connection-status-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 11px;
+  background: var(--surface);
+}
+
+.connection-status-list dt,
+.connection-status-list dd {
+  margin: 0;
+  font-size: 0.68rem;
+}
+
+.connection-status-list dt {
+  color: var(--ink-soft);
+}
+
+.connection-status-list dd {
+  color: var(--forest);
+  font-weight: 760;
+}
+
+.connection-action {
+  width: 100%;
+  margin-top: auto;
+}
+
+.connection-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid var(--line);
+}
+
+.connection-form .button {
+  width: 100%;
 }
 
 .approval-workspace,
@@ -3054,6 +3232,22 @@ h1 {
     width: 100%;
   }
 
+  .connections-profile {
+    display: grid;
+  }
+
+  .connections-profile > span {
+    max-width: none;
+  }
+
+  .connections-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .connection-card {
+    min-height: 0;
+  }
+
   .operations-locked {
     align-items: flex-start;
     padding: 28px 18px;
@@ -3061,6 +3255,21 @@ h1 {
 
   .work-center-workspace {
     display: block;
+  }
+
+  .work-center-pagination {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .work-center-pagination .workspace-freshness {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .work-center-pagination .button {
+    width: 100%;
+    min-width: 0;
   }
 
   .work-center-workspace[data-file-open="true"] .queue-panel {

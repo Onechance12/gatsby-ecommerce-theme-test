@@ -69,7 +69,7 @@ export function createHcnConsoleFreshReadService({
     try {
       envelope = await loadJobNimbusIndex(
         immutableCopy({
-          scope: "active_chance_assigned_insurance",
+          scope: "active_authenticated_employee_assigned_insurance",
           maxRecords: HCN_WORK_CENTER_LIMITS.maximumIndexRecords,
           requestedAt: generatedAt
         })
@@ -377,7 +377,10 @@ function isEligible(value) {
     isPlainObject(value)
     && value.isInsuranceFile === true
     && value.isActive === true
-    && value.assignedToChance === true
+    && (
+      value.assignedToCurrentUser === true
+      || value.assignedToChance === true
+    )
   );
 }
 

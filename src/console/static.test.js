@@ -71,6 +71,28 @@ test("console shell contains no client records, bearer-token field, or browser s
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
 
+test("console states the hard Chance Brain boundary and honest Thresher maturity", async () => {
+  const [htmlAsset, scriptAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+
+  assert.match(html, /HCN has no route to Chance Brain/);
+  assert.match(html, /isolated HCN Operations Brain foundation/);
+  assert.match(html, /persistence[\s\S]*is not active yet/);
+  assert.match(html, /untouched, quarantined, and unreachable from HCN/);
+  assert.match(script, /disconnected_no_route/);
+  assert.match(script, /Disconnected · no route or data flow/);
+  assert.match(script, /foundation_persistence_pending/);
+  assert.match(script, /Isolated foundation · persistence pending/);
+  assert.match(script, /quarantined_unreachable/);
+  assert.match(script, /Quarantined · unreachable from HCN/);
+  assert.doesNotMatch(script, /Legacy compatibility · read only/);
+  assert.doesNotMatch(script, /hcnV2ChanceBrainDataFlow/);
+});
+
 test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-only", async () => {
   const [scriptAsset, workerAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/app.js"),
@@ -79,9 +101,13 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v6";/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v7";/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
-  assert.match(script, /identity\.role === "chance"/);
+  const browserAuthority = script.slice(
+    script.indexOf("function hasBrowserAuthority()"),
+    script.indexOf("function hasWorkCenterAuthority()")
+  );
+  assert.doesNotMatch(browserAuthority, /identity\.role|chance/i);
   assert.match(script, /hcn\.work_center\.read/);
   assert.match(script, /"X-HCN-CSRF": csrfToken/);
   assert.match(script, /credentials: "same-origin"/);
@@ -97,7 +123,14 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
     script,
     /The HCN session expired\. Client data was cleared from this page\./
   );
-  assert.match(script, /\{ offset: 0, limit: 25 \}/);
+  assert.match(
+    script,
+    /\{ offset: requestedOffset, limit: WORK_CENTER_PAGE_SIZE \}/
+  );
+  assert.match(script, /: state\.workCenterOffset/);
+  assert.match(script, /normalizeWorkCenterResponse\(response, requestedOffset\)/);
+  assert.match(script, /page\.offset !== expectedOffset/);
+  assert.match(script, /page\.hasMore !== \(page\.offset \+ value\.files\.length < page\.total\)/);
   assert.match(script, /\{ fileRef: fileRef, recentLimit: 20 \}/);
   assert.match(script, /clearOperationalData\("Client data was cleared when the connection went offline\."/);
 
@@ -106,7 +139,117 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.doesNotMatch(worker, /work-center|file-review/);
 });
 
-test("Company Today centers the fresh read-only 10 by 3 management sweep", async () => {
+test("Connections links each authenticated employee to safe, memory-only work accounts", async () => {
+  const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(html, /href="#connections"/);
+  assert.match(html, /id="connections"[\s\S]*aria-labelledby="connections-title"/);
+  assert.match(html, /id="connections-profile-name"/);
+  assert.match(html, /id="connections-profile-role"/);
+  assert.match(html, /id="jobnimbus-connection-status"/);
+  assert.match(html, /id="google-connect-action"/);
+  assert.match(html, /id="google-gmail-status"/);
+  assert.match(html, /id="google-calendar-status"/);
+  assert.match(html, /id="quo-phone-form"[\s\S]*autocomplete="off"/);
+  assert.match(html, /id="quo-code"[\s\S]*pattern="\[0-9\]\{6\}"/);
+  assert.match(html, /id="quo-use-code"/);
+  assert.match(html, /id="quo-restart"/);
+  assert.match(html, /id="work-center-previous"/);
+  assert.match(html, /id="work-center-page"/);
+  assert.match(html, /id="work-center-next"/);
+  assert.doesNotMatch(html, /authorized Chance account|Assigned to Chance/);
+  assert.doesNotMatch(html, /type=["']password["']/i);
+
+  for (const route of [
+    "/hcn/api/v1/connectors/status",
+    "/hcn/connect/google/start",
+    "/hcn/api/v1/connectors/quo-line"
+  ]) {
+    assert.match(script, new RegExp(route.replaceAll("/", "\\/")));
+  }
+  for (const capability of [
+    "hcn.connectors.read",
+    "hcn.connectors.google.link",
+    "hcn.connectors.quo_line.link"
+  ]) {
+    assert.match(script, new RegExp(capability.replaceAll(".", "\\.")));
+  }
+
+  assert.match(script, /"hcn\.console\.connectors\.v1"/);
+  assert.match(script, /\{ mode: "status" \}/);
+  assert.match(script, /\{ mode: "start", phone: phone \}/);
+  assert.match(script, /\{ mode: "verify", code: code \}/);
+  assert.match(script, /window\.location\.assign\(ENDPOINTS\.googleConnectStart\)/);
+  assert.match(script, /function safeMaskedPhone\(value\)/);
+  assert.match(script, /return digits\.length <= 4 \? masked : ""/);
+  const safeLineNormalizer = script.slice(
+    script.indexOf("function normalizeSafeQuoLine"),
+    script.indexOf("function connectionStatus(value)")
+  );
+  assert.match(safeLineNormalizer, /value\.maskedNumber/);
+  assert.doesNotMatch(safeLineNormalizer, /value\.(?:number|phone|phoneNumber)/);
+  assert.match(script, /google\.status === "connected" \? "Reconnect Google"/);
+  assert.match(script, /quo\.status === "connected" \? "Verify a different line"/);
+  assert.match(script, /record\(response\)\.linked === true/);
+  assert.match(script, /function showQuoCodeEntry\(\)/);
+  assert.match(script, /function restartQuoConnection\(\)/);
+  assert.match(script, /const outcomes = current\.searchParams\.getAll\("google"\)/);
+  assert.match(script, /GOOGLE_CALLBACK_OUTCOMES\.has\(outcomes\[0\]\)/);
+  assert.match(script, /"temporarily_unavailable"/);
+  assert.match(script, /"invalid_request"/);
+  assert.match(script, /current\.searchParams\.delete\("google"\)/);
+  assert.match(script, /renderGoogleCallbackOutcome\(connections\)/);
+  assert.match(script, /record\(connections\.google\)\.status !== "connected"/);
+  assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
+
+  const clearer = script.slice(
+    script.indexOf("function clearConnectionsData(message)"),
+    script.indexOf("async function loadConnections()")
+  );
+  assert.match(clearer, /state\.connectionsController\.abort\(\)/);
+  assert.match(clearer, /state\.quoController\.abort\(\)/);
+  assert.match(clearer, /state\.connections = null/);
+  assert.match(clearer, /state\.quoChallengePending = false/);
+  assert.match(clearer, /elements\["quo-phone-form"\]\.reset\(\)/);
+  assert.match(clearer, /elements\["quo-verify-form"\]\.reset\(\)/);
+  const operationalClearer = script.slice(
+    script.indexOf("function clearOperationalData(message)"),
+    script.indexOf("function clearManagementSweepData(message)")
+  );
+  assert.match(operationalClearer, /clearConnectionsData\(message\)/);
+
+  assert.match(script, /"X-HCN-CSRF": csrfToken/);
+  assert.match(script, /credentials: "same-origin"/);
+  assert.match(script, /cache: "no-store"/);
+  assert.match(worker, /SHELL_PATH_SET\.has\(url\.pathname\)/);
+  assert.doesNotMatch(worker, /connectors\/status|connectors\/quo-line|connect\/google\/start/);
+
+  const managementAccess = script.slice(
+    script.indexOf("function hasManagementSweepAuthority()"),
+    script.indexOf("function hasConnectorReadAuthority()")
+  );
+  assert.match(managementAccess, /MANAGEMENT_SWEEP_CAPABILITY/);
+  const workAccess = script.slice(
+    script.indexOf("function hasWorkCenterAuthority()"),
+    script.indexOf("function hasManagementSweepAuthority()")
+  );
+  assert.match(workAccess, /WORK_CENTER_CAPABILITY/);
+  const actionAccess = script.slice(
+    script.indexOf("function hasActionReadAuthority()"),
+    script.indexOf("function hasActionPrepareAuthority()")
+  );
+  assert.match(actionAccess, /ACTION_READ_CAPABILITY/);
+});
+
+test("employee Work Center leads while the read-only 10 by 3 sweep stays capability-gated", async () => {
   const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/"),
     readHcnConsoleAsset("/hcn/app.js"),
@@ -117,21 +260,41 @@ test("Company Today centers the fresh read-only 10 by 3 management sweep", async
   const worker = workerAsset.body.toString("utf8");
 
   assert.match(html, /id="overview" class="company-today-hero"/);
+  assert.match(html, /Start with the files assigned to you/);
+  assert.match(html, /read only: it does not send, schedule, call, upload, or change JobNimbus/);
   assert.match(html, /Richard’s 10 × 3 Sweep/);
-  assert.match(html, /id="management-sweep-refresh"/);
+  assert.match(
+    html,
+    /id="management-sweep-refresh"[\s\S]*data-hcn-capability="hcn\.management_sweep\.read"[\s\S]*hidden/
+  );
+  assert.match(
+    html,
+    /id="management-sweep"[\s\S]*data-hcn-capability="hcn\.management_sweep\.read"[\s\S]*hidden/
+  );
+  assert.match(
+    html,
+    /href="#approvals"[\s\S]*data-hcn-capability="hcn\.action_plans\.read"[\s\S]*hidden/
+  );
+  assert.match(
+    html,
+    /href="#receipts"[\s\S]*data-hcn-capability="hcn\.action_receipts\.read"[\s\S]*hidden/
+  );
   assert.match(html, /id="company-worst-list"/);
   assert.match(html, /id="adjuster-sweep-list"/);
   assert.match(html, /id="management-sweep-source-health"/);
   assert.match(html, /id="system-health"/);
   assert.match(html, /This first report uses JobNimbus activity only/);
-  assert.match(html, /On demand/);
-  assert.match(html, /longest JobNimbus-recorded activity gaps/);
+  assert.match(html, /longest verified JobNimbus activity[\s\S]*gap/);
   assert.match(html, /Company-wide Gmail,[\s\S]*Quo,[\s\S]*calendar communication evidence is not available/);
+  assert.match(html, /delivery, export, delegation, and follow-up creation belong to[\s\S]*a later approval-gated phase/);
 
   assert.match(script, /managementSweep: "\/hcn\/api\/v1\/management-sweep"/);
   assert.match(script, /const MANAGEMENT_SWEEP_CAPABILITY = "hcn\.management_sweep\.read"/);
   assert.match(script, /connectors\)\.managementSweep/);
   assert.match(script, /runtimeStatus !== "configured"/);
+  assert.match(script, /function syncCapabilityAwareConsole\(\)/);
+  assert.match(script, /document\.querySelectorAll\("\[data-hcn-capability\]"\)/);
+  assert.match(script, /preferredHash = "#work-center"/);
   assert.match(script, /\{ limitPerAdjuster: 10 \}/);
   assert.match(script, /"hcn\.console\.management-sweep\.v1"/);
   assert.match(script, /value\.schemaVersion \|\| value\.schema/);

@@ -393,6 +393,24 @@ test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete
       mapJobNimbusFileEnvelope(
         {
           ...base,
+          activities: [
+            {
+              jnid: 'cross-linked-activity',
+              primary: { id: 'different-client-file' },
+              related: [{ id: FILE_ID }],
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+    mappingError('scope_mismatch'),
+  );
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
           documentsComplete: false,
         },
         options,

@@ -1,0 +1,8 @@
+.git
+node_modules
+
+# Quarantined pre-HCN memory code and data are not runtime dependencies and
+# must never enter the production image or Docker build context.
+src/memory/
+memory/
+data/memory/

@@ -3,18 +3,16 @@ const DEFAULTS = {
   ALLOW_GMAIL_SEND: false,
   ALLOW_QUO_SEND: false,
   ALLOW_VOICE_CALLS: false,
-  ALLOW_RETELL_CALLS: true,
+  ALLOW_RETELL_CALLS: false,
   ALLOW_CLIENT_COORDINATOR_CALLS: false,
-  ALLOW_CARRIER_FOLLOWUP_CALLS: true,
-  ALLOW_LEGACY_CLIENT_MEMORY_WRITES: false,
+  ALLOW_CARRIER_FOLLOWUP_CALLS: false,
   HCN_ACTION_EXECUTION_ENABLED: false
 };
 
 /**
  * Checked-in production defaults for every release-critical effect gate.
  *
- * Keep this list synchronized with render.yaml. The legacy client-memory gate
- * is intentionally fail-closed.
+ * Keep this list synchronized with render.yaml.
  */
 export const RELEASE_GATE_DEFAULTS = Object.freeze(DEFAULTS);
 

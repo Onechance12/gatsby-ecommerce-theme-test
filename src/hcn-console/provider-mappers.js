@@ -205,10 +205,9 @@ export class HcnProviderMappingError extends Error {
  * Map a completely paginated JobNimbus contact index.
  */
 export function mapJobNimbusIndexEnvelope(input, options = {}) {
-  const chanceOwnerId = requireProviderId(
-    options.chanceOwnerId,
-    'chanceOwnerId',
-  );
+  const assignedOwnerId = assignedOwnerIdFromOptions(options);
+  const legacyChanceField = !options.assignedOwnerId
+    && Boolean(options.chanceOwnerId);
   const freshness = normalizeFreshness(input);
   requireCompletePagination(input, 'contacts');
   const contacts = requireArray(input?.contacts, 'contacts');
@@ -228,8 +227,11 @@ export function mapJobNimbusIndexEnvelope(input, options = {}) {
         'JobNimbus contact index contains an invalid record.',
       );
     }
-    if (!isEligibleContact(contact, chanceOwnerId)) continue;
-    const file = mapEligibleContact(contact, chanceOwnerId, { detail: false });
+    if (!isEligibleContact(contact, assignedOwnerId)) continue;
+    const file = mapEligibleContact(contact, assignedOwnerId, {
+      detail: false,
+      legacyChanceField,
+    });
     if (seen.has(file.providerFileId)) {
       fail(
         'duplicate_provider_record',
@@ -254,10 +256,9 @@ export function mapJobNimbusIndexEnvelope(input, options = {}) {
  * Map one exact, completely paginated JobNimbus file read.
  */
 export function mapJobNimbusFileEnvelope(input, options = {}) {
-  const chanceOwnerId = requireProviderId(
-    options.chanceOwnerId,
-    'chanceOwnerId',
-  );
+  const assignedOwnerId = assignedOwnerIdFromOptions(options);
+  const legacyChanceField = !options.assignedOwnerId
+    && Boolean(options.chanceOwnerId);
   const expectedProviderFileId = requireProviderId(
     options.expectedProviderFileId,
     'expectedProviderFileId',
@@ -268,7 +269,10 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
   }
 
   const contact = requirePlainObject(input?.contact, 'contact');
-  const file = mapEligibleContact(contact, chanceOwnerId, { detail: true });
+  const file = mapEligibleContact(contact, assignedOwnerId, {
+    detail: true,
+    legacyChanceField,
+  });
   if (file.providerFileId !== expectedProviderFileId) {
     fail(
       'scope_mismatch',
@@ -280,13 +284,15 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     value: input.activities,
     label: 'activities',
     expectedProviderFileId,
-    mapper: (record) => mapActivity(record, chanceOwnerId),
+    mapper: (record) =>
+      mapActivity(record, assignedOwnerId, legacyChanceField),
   });
   const tasks = mapScopedCollection({
     value: input.tasks,
     label: 'tasks',
     expectedProviderFileId,
-    mapper: (record) => mapTask(record, chanceOwnerId),
+    mapper: (record) =>
+      mapTask(record, assignedOwnerId, legacyChanceField),
   });
   const documents = mapScopedCollection({
     value: input.documents,
@@ -393,11 +399,15 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
   });
 }
 
-function mapEligibleContact(contact, chanceOwnerId, { detail }) {
-  if (!isEligibleContact(contact, chanceOwnerId)) {
+function mapEligibleContact(
+  contact,
+  assignedOwnerId,
+  { detail, legacyChanceField = false },
+) {
+  if (!isEligibleContact(contact, assignedOwnerId)) {
     fail(
       'file_not_eligible',
-      'JobNimbus file is not an active Chance-assigned insurance file.',
+      'JobNimbus file is not an active file assigned to the authenticated employee.',
     );
   }
   const providerFileId = requireProviderId(
@@ -426,7 +436,9 @@ function mapEligibleContact(contact, chanceOwnerId, { detail }) {
     fileTypeCode: 'insurance',
     isInsuranceFile: true,
     isActive: true,
-    assignedToChance: true,
+    ...(legacyChanceField
+      ? { assignedToChance: true }
+      : { assignedToCurrentUser: true }),
     updatedAt,
     missingFacts: {
       claimNumber: !hasValue(field(contact, CONTACT_FIELDS.claimNumber)),
@@ -455,12 +467,12 @@ function mapEligibleContact(contact, chanceOwnerId, { detail }) {
   };
 }
 
-function isEligibleContact(contact, chanceOwnerId) {
+function isEligibleContact(contact, assignedOwnerId) {
   if (!isPlainObject(contact)) return false;
   const recordType = normalizedLabel(field(contact, CONTACT_FIELDS.recordType));
   if (recordType !== 'insurance') return false;
   if (!contactIsActive(contact)) return false;
-  return ownerIds(contact).includes(chanceOwnerId);
+  return ownerIds(contact).includes(assignedOwnerId);
 }
 
 function contactIsActive(contact) {
@@ -568,7 +580,10 @@ function recordReferencesFile(record, expectedProviderFileId) {
   ];
   const ids = [];
   for (const value of containers) collectReferenceIds(value, ids);
-  return ids.includes(expectedProviderFileId);
+  return (
+    ids.length > 0
+    && ids.every((id) => id === expectedProviderFileId)
+  );
 }
 
 function collectReferenceIds(value, ids) {
@@ -588,7 +603,7 @@ function collectReferenceIds(value, ids) {
   }
 }
 
-function mapActivity(record, chanceOwnerId) {
+function mapActivity(record, assignedOwnerId, legacyChanceField = false) {
   if (!isPlainObject(record)) return null;
   const providerRecordId = normalizeProviderId(
     field(record, ACTIVITY_FIELDS.id),
@@ -604,12 +619,14 @@ function mapActivity(record, chanceOwnerId) {
     occurredAt,
     actorRole:
       toCode(field(record, ACTIVITY_FIELDS.actorRole)) ??
-      (ownerIds(record).includes(chanceOwnerId) ? 'chance' : 'team'),
+      (ownerIds(record).includes(assignedOwnerId)
+        ? legacyChanceField ? 'chance' : 'employee'
+        : 'team'),
     label: boundedText(field(record, ACTIVITY_FIELDS.label), 160),
   };
 }
 
-function mapTask(record, chanceOwnerId) {
+function mapTask(record, assignedOwnerId, legacyChanceField = false) {
   if (!isPlainObject(record)) return null;
   const providerRecordId = normalizeProviderId(field(record, TASK_FIELDS.id));
   if (!providerRecordId) return null;
@@ -631,7 +648,9 @@ function mapTask(record, chanceOwnerId) {
     dueAt,
     assignedRole:
       toCode(field(record, TASK_FIELDS.assignedRole)) ??
-      (ownerIds(record).includes(chanceOwnerId) ? 'chance' : 'team'),
+      (ownerIds(record).includes(assignedOwnerId)
+        ? legacyChanceField ? 'chance' : 'employee'
+        : 'team'),
     label: boundedText(field(record, TASK_FIELDS.label), 160),
   };
 }
@@ -960,6 +979,11 @@ function requirePlainObject(value, label) {
     fail('invalid_provider_payload', `${label} must be a plain object.`);
   }
   return value;
+}
+
+function assignedOwnerIdFromOptions(options) {
+  const value = options.assignedOwnerId ?? options.chanceOwnerId;
+  return requireProviderId(value, 'assignedOwnerId');
 }
 
 function requireProviderId(value, label) {

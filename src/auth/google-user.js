@@ -5,8 +5,30 @@ import {
 
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
-  administrator: { allRoutes: true },
-  employee: { allRoutes: true },
+  administrator: {
+    allowedRoutes: [
+      "GET /auth/whoami",
+      "GET /api/v1/session",
+      "POST /auth/quo-line",
+      "POST /jobnimbus/search",
+      "POST /jobnimbus/document-review",
+      "POST /jobnimbus/document-file",
+      "POST /jobnimbus/photo-review",
+      "POST /gmail/search",
+      "POST /gmail/thread",
+      "POST /gmail/attachment-review",
+      "POST /scheduling/availability",
+      "POST /quo/history",
+      "POST /quo/transcript"
+    ]
+  },
+  employee: {
+    allowedRoutes: [
+      "GET /auth/whoami",
+      "GET /api/v1/session",
+      "POST /auth/quo-line"
+    ]
+  },
   onboarding: {
     allowedRoutes: [
       "GET /auth/whoami",
@@ -19,8 +41,6 @@ export const WAVE_ROLE_POLICIES = {
       "GET /auth/whoami",
       "GET /api/v1/session",
       "POST /auth/quo-line",
-      "POST /brain/context",
-      "POST /memory/file-actions",
       "POST /jobnimbus/search",
       "POST /jobnimbus/document-review",
       "POST /jobnimbus/document-file",
@@ -40,8 +60,6 @@ export const WAVE_ROLE_POLICIES = {
       "GET /auth/whoami",
       "GET /api/v1/session",
       "POST /auth/quo-line",
-      "POST /brain/context",
-      "POST /memory/file-actions",
       "POST /jobnimbus/search",
       "POST /jobnimbus/document-review",
       "POST /jobnimbus/document-file",
@@ -80,6 +98,10 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /api/v1/session",
   "GET /hcn/auth/session",
   "POST /hcn/auth/logout",
+  "GET /hcn/connect/google/start",
+  "POST /hcn/api/v1/connectors/status",
+  "POST /hcn/api/v1/connectors/google/disconnect",
+  "POST /hcn/api/v1/connectors/quo-line",
   "POST /hcn/api/v1/work-center",
   "POST /hcn/api/v1/management-sweep",
   "POST /hcn/api/v1/file-review",
@@ -92,10 +114,42 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "POST /hcn/api/v1/action-receipts/detail"
 ]);
 
+const HCN_ASSIGNED_WORK_ROLES = new Set([
+  "chance",
+  "administrator",
+  "employee",
+  "client_coordinator",
+  "manager"
+]);
+const HCN_CONNECTION_ROLES = new Set([
+  ...HCN_ASSIGNED_WORK_ROLES,
+  "onboarding"
+]);
+const HCN_MANAGEMENT_ROLES = new Set([
+  "chance",
+  "administrator",
+  "manager"
+]);
+const HCN_CHANCE_ACTION_ROLES = new Set(["chance"]);
+
+export const HCN_BROWSER_ROUTE_ROLES = new Map([
+  ["GET /hcn/connect/google/start", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/connectors/status", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/connectors/google/disconnect", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/connectors/quo-line", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/work-center", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/file-review", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/management-sweep", HCN_MANAGEMENT_ROLES],
+  ["POST /hcn/api/v1/action-plans/prepare", HCN_CHANCE_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/list", HCN_CHANCE_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/detail", HCN_CHANCE_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/execute", HCN_CHANCE_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/invalidate", HCN_CHANCE_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-receipts/list", HCN_CHANCE_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-receipts/detail", HCN_CHANCE_ACTION_ROLES]
+]);
+
 export const HCN_BROWSER_CHANCE_ONLY_ROUTES = new Set([
-  "POST /hcn/api/v1/work-center",
-  "POST /hcn/api/v1/management-sweep",
-  "POST /hcn/api/v1/file-review",
   "POST /hcn/api/v1/action-plans/prepare",
   "POST /hcn/api/v1/action-plans/list",
   "POST /hcn/api/v1/action-plans/detail",
@@ -254,8 +308,10 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
-  if (HCN_BROWSER_CHANCE_ONLY_ROUTES.has(route)) {
-    return identity.type === "hcn_browser_session" && identity.role === "chance";
+  const hcnRoles = HCN_BROWSER_ROUTE_ROLES.get(route);
+  if (hcnRoles) {
+    return identity.type === "hcn_browser_session"
+      && hcnRoles.has(identity.role);
   }
   if (identity.type === "bridge_token") {
     return route !== "GET /api/v1/session";
@@ -298,14 +354,25 @@ function addUser(users, entry = {}) {
   const existing = users.get(email);
   const hasConfiguredSubject = Object.hasOwn(entry, "googleSubject")
     || Object.hasOwn(entry, "subject");
+  const hasJobNimbusOwnerId = Object.hasOwn(entry, "jobNimbusOwnerId");
+  const hasJobNimbusScope = Object.hasOwn(entry, "jobNimbusScope");
+  const hasQuoLineId = Object.hasOwn(entry, "quoLineId");
   users.set(email, {
     email,
-    name: String(entry.name || email).trim(),
+    name: String(entry.name || existing?.name || email).trim(),
     role,
     enabled: entry.enabled !== false,
-    jobNimbusOwnerId: String(entry.jobNimbusOwnerId || "").trim(),
-    jobNimbusScope: String(entry.jobNimbusScope || defaultJobNimbusScope(role)).trim(),
-    quoLineId: String(entry.quoLineId || "").trim(),
+    jobNimbusOwnerId: hasJobNimbusOwnerId
+      ? String(entry.jobNimbusOwnerId || "").trim()
+      : String(existing?.jobNimbusOwnerId || "").trim(),
+    jobNimbusScope: hasJobNimbusScope
+      ? String(entry.jobNimbusScope || "").trim()
+      : String(
+          existing?.jobNimbusScope || defaultJobNimbusScope(role)
+        ).trim(),
+    quoLineId: hasQuoLineId
+      ? String(entry.quoLineId || "").trim()
+      : String(existing?.quoLineId || "").trim(),
     googleSubject: hasConfiguredSubject
       ? configuredGoogleSubject(entry)
       : String(existing?.googleSubject || "")
@@ -339,7 +406,7 @@ function normalizeConfiguredGoogleSubject(value) {
 }
 
 function defaultJobNimbusScope(role) {
-  return role === "chance" ? "assigned" : "company";
+  return WAVE_ROLE_POLICIES[role] ? "assigned" : "none";
 }
 
 function authError(message, statusCode) {
