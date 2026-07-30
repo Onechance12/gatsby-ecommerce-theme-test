@@ -23,6 +23,83 @@
 
   const WORK_CENTER_CAPABILITY = "hcn.work_center.read";
   const ASSISTANT_TURN_CAPABILITY = "hcn.assistant.turn";
+  const ASSISTANT_MODES = new Set(["auto", "deep"]);
+  const ASSISTANT_ROUTES = new Set([
+    "deterministic",
+    "standard",
+    "deep",
+    "codex_escalation"
+  ]);
+  const ASSISTANT_ROUTE_PROFILES = Object.freeze({
+    deterministic: Object.freeze({
+      profileId: "hcn.deterministic.v1",
+      modelUsed: false
+    }),
+    standard: Object.freeze({
+      profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
+      modelUsed: true
+    }),
+    deep: Object.freeze({
+      profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+      modelUsed: true
+    }),
+    codex_escalation: Object.freeze({
+      profileId: "hcn.codex-operator-escalation.v1",
+      modelUsed: false
+    })
+  });
+  const ASSISTANT_ROUTE_REASON_CODES = Object.freeze({
+    deterministic: Object.freeze([
+      "fact_only_work_center",
+      "fact_only_management_sweep",
+      "fact_only_file_status"
+    ]),
+    standard: Object.freeze([
+      "ordinary_interpretation",
+      "ordinary_drafting",
+      "general_assistance"
+    ]),
+    deep: Object.freeze([
+      "explicit_deep_review",
+      "multi_source_contradiction",
+      "settlement_review",
+      "policy_review",
+      "coverage_review",
+      "claim_strategy",
+      "complex_document",
+      "high_stakes_ambiguity"
+    ]),
+    codex_escalation: Object.freeze([
+      "explicit_codex_request",
+      "unsupported_live_call",
+      "unsupported_upload",
+      "unsupported_delete",
+      "unsupported_financial_action",
+      "unsupported_legal_action",
+      "unsupported_capability",
+      "missing_required_evidence"
+    ])
+  });
+  const ASSISTANT_SOURCE_KEYS = new Set([
+    "jobnimbus",
+    "gmail",
+    "quo",
+    "google_calendar",
+    "retell",
+    "action_plan"
+  ]);
+  const ASSISTANT_SOURCE_STATUSES = new Set([
+    "fresh",
+    "complete",
+    "partial",
+    "stale",
+    "incomplete",
+    "unavailable",
+    "not_evaluated",
+    "not_configured",
+    "unknown",
+    "pending_human_review"
+  ]);
   const MANAGEMENT_SWEEP_CAPABILITY = "hcn.management_sweep.read";
   const CONNECTOR_READ_CAPABILITY = "hcn.connectors.read";
   const GOOGLE_LINK_CAPABILITY = "hcn.connectors.google.link";
@@ -217,6 +294,7 @@
     assistantController: null,
     assistantLoading: false,
     assistantPlanId: null,
+    assistantPreparedPlanCount: 0,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
   };
@@ -269,6 +347,11 @@
       "assistant-form",
       "assistant-prompt",
       "assistant-send",
+      "assistant-mode-auto",
+      "assistant-mode-deep",
+      "assistant-pilot-route",
+      "assistant-pilot-sources",
+      "assistant-pilot-plans",
       "assistant-review-action",
       "management-sweep-refresh",
       "management-sweep-hero-message",
@@ -313,6 +396,10 @@
       "file-freshness",
       "source-health",
       "key-facts",
+      "file-intelligence-urgency",
+      "file-intelligence-summary",
+      "file-intelligence-workflows",
+      "file-intelligence-actions",
       "priority-count",
       "priority-lane",
       "today-count",
@@ -871,12 +958,20 @@
       return;
     }
     const runtimeStatus = assistantRuntimeStatus();
-    if (runtimeStatus !== "configured") {
+    if (!["configured", "direct_only"].includes(runtimeStatus)) {
       notice(
         elements["assistant-alert"],
         runtimeStatus === "unconfigured"
           ? "Ask Thresher setup is not finished yet."
           : "Ask Thresher readiness could not be verified.",
+        "warn"
+      );
+      return;
+    }
+    if (runtimeStatus === "direct_only") {
+      notice(
+        elements["assistant-alert"],
+        "Direct JobNimbus lookups are ready. Deeper AI review is not connected yet.",
         "warn"
       );
       return;
@@ -889,16 +984,27 @@
   }
 
   function syncAssistantControls() {
+    const runtimeStatus = assistantRuntimeStatus();
     const available = (
       navigator.onLine
       && hasAssistantAuthority()
-      && assistantRuntimeStatus() === "configured"
+      && ["configured", "direct_only"].includes(runtimeStatus)
       && !state.assistantLoading
     );
-    elements["assistant-prompt"].disabled = !available;
-    elements["assistant-send"].disabled = !available;
+    elements["assistant-prompt"].disabled = (
+      !available || runtimeStatus === "direct_only"
+    );
+    elements["assistant-send"].disabled = (
+      !available || runtimeStatus === "direct_only"
+    );
     document.querySelectorAll("[data-assistant-starter]").forEach(function (button) {
-      button.disabled = !available;
+      button.disabled = (
+        !available
+        || (
+          runtimeStatus === "direct_only"
+          && button.dataset.assistantDirect !== "true"
+        )
+      );
     });
     elements["assistant-transcript"].setAttribute(
       "aria-busy",
@@ -909,6 +1015,14 @@
       || !state.assistantPlanId
       || !hasActionReadAuthority()
     );
+    if (runtimeStatus === "direct_only") {
+      elements["assistant-mode-auto"].checked = true;
+      elements["assistant-mode-deep"].checked = false;
+    }
+    elements["assistant-mode-auto"].disabled = !available;
+    elements["assistant-mode-deep"].disabled = (
+      !available || runtimeStatus !== "configured"
+    );
   }
 
   async function submitAssistantTurn(event) {
@@ -917,7 +1031,9 @@
     if (
       !navigator.onLine
       || !hasAssistantAuthority()
-      || assistantRuntimeStatus() !== "configured"
+      || !["configured", "direct_only"].includes(
+        assistantRuntimeStatus()
+      )
     ) {
       syncAssistantAccess();
       return;
@@ -927,6 +1043,7 @@
       elements["assistant-prompt"].value,
       2000
     ).trim();
+    const mode = selectedAssistantMode();
     if (!prompt) {
       notice(
         elements["assistant-alert"],
@@ -955,7 +1072,7 @@
     try {
       const response = await postOperationalJson(
         ENDPOINTS.assistantTurns,
-        { prompt: prompt },
+        { prompt: prompt, mode: mode },
         controller.signal,
         ASSISTANT_TURN_CAPABILITY
       );
@@ -965,8 +1082,10 @@
       appendAssistantMessage("assistant", turn.message);
       if (turn.planId) {
         state.assistantPlanId = turn.planId;
+        state.assistantPreparedPlanCount += 1;
         elements["assistant-review-action"].hidden = false;
       }
+      renderAssistantPilot(turn);
       notice(
         elements["assistant-alert"],
         turn.planId
@@ -1010,7 +1129,8 @@
       "authority",
       "message",
       "plan",
-      "sources"
+      "sources",
+      "routing"
     ]);
     const authority = record(value.authority);
     const allowedAuthority = new Set([
@@ -1023,6 +1143,8 @@
     ]);
     const keys = Object.keys(value);
     const authorityKeys = Object.keys(authority);
+    const routing = normalizeAssistantRouting(value.routing);
+    const sources = normalizeAssistantSources(value.sources);
     if (
       keys.length !== allowed.size
       || keys.some(function (key) {
@@ -1032,7 +1154,7 @@
       || authorityKeys.some(function (key) {
         return !allowedAuthority.has(key);
       })
-      || value.schema !== "hcn.console.assistant-turn.v1"
+      || value.schema !== "hcn.console.assistant-turn.v2"
       || !validIsoInstant(value.generatedAt)
       || value.ephemeral !== true
       || value.cachePolicy !== "no_store"
@@ -1044,8 +1166,6 @@
       || authority.exactHumanApprovalRequired !== true
       || typeof value.message !== "string"
       || value.message.length > 16000
-      || !Array.isArray(value.sources)
-      || value.sources.length > 50
       || !(value.plan === null || isRecord(value.plan))
     ) {
       throw new Error("Invalid assistant response");
@@ -1058,18 +1178,128 @@
 
     let planId = "";
     if (isRecord(value.plan)) {
-      const possiblePlanId = boundedString(value.plan.planId, 80).trim();
-      if (possiblePlanId) {
-        if (!PLAN_ID.test(possiblePlanId)) {
-          throw new Error("Invalid assistant response");
-        }
-        planId = possiblePlanId;
-      }
+      planId = normalizeActionPlan(value.plan, true).planId;
     }
     return {
       message: message,
-      planId: planId
+      planId: planId,
+      sourceCount: sources.filter(function (source) {
+        return source.key !== "action_plan";
+      }).length,
+      routing: routing
     };
+  }
+
+  function normalizeAssistantRouting(value) {
+    if (!isRecord(value)) throw new Error("Invalid assistant response");
+    const allowed = new Set([
+      "route",
+      "profileId",
+      "reasonCodes",
+      "modelUsed"
+    ]);
+    const keys = Object.keys(value);
+    const profileId = boundedString(value.profileId, 120);
+    const routeContract = ASSISTANT_ROUTE_PROFILES[value.route];
+    const allowedReasonCodes = ASSISTANT_ROUTE_REASON_CODES[value.route];
+    if (
+      keys.length !== allowed.size
+      || keys.some(function (key) {
+        return !allowed.has(key);
+      })
+      || !ASSISTANT_ROUTES.has(value.route)
+      || !profileId
+      || profileId !== String(value.profileId).trim()
+      || !routeContract
+      || profileId !== routeContract.profileId
+      || !Array.isArray(allowedReasonCodes)
+      || !Array.isArray(value.reasonCodes)
+      || value.reasonCodes.length === 0
+      || value.reasonCodes.length > 12
+      || value.modelUsed !== routeContract.modelUsed
+    ) {
+      throw new Error("Invalid assistant response");
+    }
+    const reasonCodes = value.reasonCodes.map(function (reason) {
+      if (
+        typeof reason !== "string"
+        || reason.length === 0
+        || reason.length > 80
+        || reason !== reason.trim()
+        || !allowedReasonCodes.includes(reason)
+      ) {
+        throw new Error("Invalid assistant response");
+      }
+      return reason;
+    });
+    if (new Set(reasonCodes).size !== reasonCodes.length) {
+      throw new Error("Invalid assistant response");
+    }
+    return {
+      route: value.route,
+      profileId: profileId,
+      reasonCodes: reasonCodes,
+      modelUsed: value.modelUsed
+    };
+  }
+
+  function normalizeAssistantSources(value) {
+    if (!Array.isArray(value) || value.length > 50) {
+      throw new Error("Invalid assistant response");
+    }
+    const allowed = new Set(["key", "label", "status", "checkedAt"]);
+    const seen = new Set();
+    return value.map(function (source) {
+      if (!isRecord(source)) {
+        throw new Error("Invalid assistant response");
+      }
+      const keys = Object.keys(source);
+      const key = boundedString(source.key, 32);
+      const label = boundedString(source.label, 80);
+      const status = boundedString(source.status, 32);
+      if (
+        keys.length !== allowed.size
+        || keys.some(function (field) {
+          return !allowed.has(field);
+        })
+        || !ASSISTANT_SOURCE_KEYS.has(key)
+        || seen.has(key)
+        || !label
+        || label !== String(source.label).trim()
+        || !ASSISTANT_SOURCE_STATUSES.has(status)
+        || !validIsoInstant(source.checkedAt)
+      ) {
+        throw new Error("Invalid assistant response");
+      }
+      seen.add(key);
+      return { key: key, label: label, status: status };
+    });
+  }
+
+  function selectedAssistantMode() {
+    const selected = document.querySelector(
+      'input[name="assistant-mode"]:checked'
+    );
+    const mode = boundedString(selected && selected.value, 12);
+    return ASSISTANT_MODES.has(mode) ? mode : "auto";
+  }
+
+  function renderAssistantPilot(turn) {
+    const routeLabels = {
+      deterministic: "Direct lookup",
+      standard: "Standard review",
+      deep: "Deep review",
+      codex_escalation: "Needs operator review"
+    };
+    setText(
+      elements["assistant-pilot-route"],
+      routeLabels[turn.routing.route] || "Unavailable"
+    );
+    setText(elements["assistant-pilot-sources"], String(turn.sourceCount));
+    setText(
+      elements["assistant-pilot-plans"],
+      String(state.assistantPreparedPlanCount)
+    );
   }
 
   function appendAssistantMessage(speaker, message, options) {
@@ -1095,8 +1325,14 @@
     state.assistantController = null;
     state.assistantLoading = false;
     state.assistantPlanId = null;
+    state.assistantPreparedPlanCount = 0;
     elements["assistant-prompt"].value = "";
+    elements["assistant-mode-auto"].checked = true;
+    elements["assistant-mode-deep"].checked = false;
     elements["assistant-review-action"].hidden = true;
+    setText(elements["assistant-pilot-route"], "Not run yet");
+    setText(elements["assistant-pilot-sources"], "0");
+    setText(elements["assistant-pilot-plans"], "0");
     elements["assistant-transcript"].replaceChildren();
     appendAssistantMessage(
       "assistant",
@@ -1705,10 +1941,13 @@
 
   function assistantRuntimeStatus() {
     const runtime = record(record(state.session).runtime);
-    return boundedString(
-      record(runtime.assistant).availability,
-      32
-    ) || "unknown";
+    const assistant = record(runtime.assistant);
+    const availability = boundedString(assistant.availability, 32);
+    if (availability === "configured") return "configured";
+    if (boundedString(assistant.directReads, 32) === "configured") {
+      return "direct_only";
+    }
+    return availability || "unknown";
   }
 
   function hasManagementSweepAuthority() {
@@ -4201,10 +4440,15 @@
     const client = record(sourceFile.client);
     const property = record(sourceFile.property);
     const insurance = record(sourceFile.insurance);
+    const adjuster = record(sourceFile.adjuster);
     const missing = record(sourceFile.missing);
     const sources = record(value.sources);
     const lanes = record(value.lanes);
     const recent = record(value.recent);
+    const intelligence = normalizeFileIntelligence(
+      value.intelligence,
+      fileRef
+    );
 
     return {
       generatedAt: boundedString(value.generatedAt, 40),
@@ -4228,7 +4472,13 @@
         insurance: {
           carrierName: boundedString(insurance.carrierName, 120),
           claimNumber: boundedString(insurance.claimNumber, 80),
-          policyNumber: boundedString(insurance.policyNumber, 80)
+          policyNumber: boundedString(insurance.policyNumber, 80),
+          dateOfLoss: boundedString(insurance.dateOfLoss, 10)
+        },
+        adjuster: {
+          name: boundedString(adjuster.name, 120),
+          email: boundedString(adjuster.email, 254),
+          phone: boundedString(adjuster.phone, 64)
         },
         missing: {
           claimNumber: missing.claimNumber === true,
@@ -4253,8 +4503,97 @@
         documents: normalizeRecentItems(recent.documents, "document"),
         gmail: normalizeRecentItems(recent.gmail, "gmail"),
         quo: normalizeRecentItems(recent.quo, "quo")
-      }
+      },
+      intelligence: intelligence
     };
+  }
+
+  function normalizeFileIntelligence(value, expectedFileRef) {
+    const intelligence = record(value);
+    if (
+      intelligence.schemaVersion !== "hcn.ops.file-intelligence.v1" ||
+      intelligence.fileRef !== expectedFileRef
+    ) {
+      throw new Error("Invalid deterministic file intelligence");
+    }
+    const stage = record(intelligence.currentStage);
+    const urgency = record(intelligence.urgency);
+    const confidence = record(intelligence.confidence);
+    const completeness = record(intelligence.sourceCompleteness);
+    const workflowSource = record(intelligence.workflows);
+    const workflowIds = [
+      "neglected_files",
+      "communications",
+      "claim_filing",
+      "inspection_scheduling",
+      "follow_up"
+    ];
+    const workflows = {};
+    workflowIds.forEach(function (workflowId) {
+      const workflow = record(workflowSource[workflowId]);
+      if (
+        workflow.schemaVersion !== "hcn.ops.workflow-evaluation.v1" ||
+        workflow.workflowId !== workflowId ||
+        workflow.fileRef !== expectedFileRef
+      ) {
+        throw new Error("Invalid workflow intelligence");
+      }
+      workflows[workflowId] = {
+        eligibility: boundedString(workflow.eligibility, 32),
+        readiness: boundedString(workflow.readiness, 32),
+        escalationFlags: normalizeCodeList(
+          workflow.escalationFlags,
+          16
+        ),
+        nextActions: normalizeIntelligenceActions(
+          workflow.nextActions,
+          12
+        )
+      };
+    });
+    return {
+      currentStage: boundedString(stage.code, 64),
+      urgency: {
+        level: boundedString(urgency.level, 32),
+        reasonCodes: normalizeCodeList(urgency.reasonCodes, 16)
+      },
+      confidence: {
+        level: boundedString(confidence.level, 32),
+        reasonCodes: normalizeCodeList(confidence.reasonCodes, 16)
+      },
+      sourceCompleteness: boundedString(
+        completeness.status,
+        32
+      ),
+      nextRequiredActions: normalizeIntelligenceActions(
+        intelligence.nextRequiredActions,
+        12
+      ),
+      workflows: workflows
+    };
+  }
+
+  function normalizeIntelligenceActions(value, maximum) {
+    if (!Array.isArray(value)) return [];
+    return value.slice(0, maximum).map(function (candidate) {
+      const action = record(candidate);
+      return {
+        actionCode: boundedString(action.actionCode, 64),
+        targetCode: boundedString(action.targetCode, 64),
+        urgency: boundedString(action.urgency, 32),
+        dueAt: boundedString(action.dueAt, 40),
+        requiresApproval: action.requiresApproval === true
+      };
+    }).filter(function (action) {
+      return Boolean(action.actionCode);
+    });
+  }
+
+  function normalizeCodeList(value, maximum) {
+    if (!Array.isArray(value)) return [];
+    return value.slice(0, maximum).map(function (code) {
+      return boundedString(code, 64);
+    }).filter(Boolean);
   }
 
   function normalizeSourceSummary(value, expectedSource) {
@@ -4355,6 +4694,7 @@
     );
     renderSourceHealth(review.sources);
     renderKeyFacts(file);
+    renderFileIntelligence(review.intelligence);
     renderLane("priority", review.lanes.priority);
     renderLane("today", review.lanes.today);
     renderLane("waiting", review.lanes.waiting);
@@ -4434,8 +4774,10 @@
           ["Carrier", file.insurance.carrierName],
           ["Claim number", file.insurance.claimNumber, file.missing.claimNumber],
           ["Policy number", file.insurance.policyNumber, file.missing.policyNumber],
-          ["Date of loss", file.missing.dateOfLoss ? "Missing" : "On file", file.missing.dateOfLoss],
-          ["Adjuster", file.missing.adjuster ? "Missing" : "On file", file.missing.adjuster]
+          ["Date of loss", file.insurance.dateOfLoss, file.missing.dateOfLoss],
+          ["Adjuster", file.adjuster.name, file.missing.adjuster],
+          ["Adjuster email", file.adjuster.email],
+          ["Adjuster phone", file.adjuster.phone]
         ]
       }
     ];
@@ -4461,6 +4803,96 @@
       fragment.append(article);
     });
     elements["key-facts"].replaceChildren(fragment);
+  }
+
+  function renderFileIntelligence(intelligence) {
+    const urgencyLevel = intelligence.urgency.level || "unknown";
+    badge(
+      elements["file-intelligence-urgency"],
+      humanize(urgencyLevel) + " attention",
+      urgencyLevel === "urgent"
+        ? "bad"
+        : urgencyLevel === "high"
+          ? "warn"
+          : urgencyLevel === "low"
+            ? "good"
+            : "neutral"
+    );
+    setText(
+      elements["file-intelligence-summary"],
+      "Operational stage: "
+        + humanize(intelligence.currentStage || "unknown")
+        + " · Confidence: "
+        + humanize(intelligence.confidence.level || "unknown")
+        + " · Source coverage: "
+        + humanize(intelligence.sourceCompleteness || "unknown")
+    );
+
+    const workflowLabels = {
+      neglected_files: "Neglected file",
+      communications: "Communications",
+      claim_filing: "Claim filing",
+      inspection_scheduling: "Inspection",
+      follow_up: "Follow-up"
+    };
+    const workflowFragment = document.createDocumentFragment();
+    Object.keys(workflowLabels).forEach(function (workflowId) {
+      const workflow = record(intelligence.workflows[workflowId]);
+      const item = document.createElement("div");
+      const label = document.createElement("strong");
+      const status = document.createElement("span");
+      item.className = "intelligence-workflow";
+      item.dataset.tone =
+        workflow.readiness === "ready"
+          ? "good"
+          : workflow.readiness === "blocked"
+            ? "bad"
+            : workflow.readiness === "partially_ready"
+              ? "warn"
+              : "neutral";
+      setText(label, workflowLabels[workflowId]);
+      setText(status, humanize(workflow.readiness || "unknown"));
+      item.append(label, status);
+      workflowFragment.append(item);
+    });
+    elements["file-intelligence-workflows"].replaceChildren(
+      workflowFragment
+    );
+
+    const actions = intelligence.nextRequiredActions.slice(0, 6);
+    if (!actions.length) {
+      renderRecentEmpty(
+        elements["file-intelligence-actions"],
+        "No deterministic next step is currently proven by the fresh evidence."
+      );
+      return;
+    }
+    const actionFragment = document.createDocumentFragment();
+    actions.forEach(function (action) {
+      const item = document.createElement("div");
+      const title = document.createElement("strong");
+      const detail = document.createElement("span");
+      item.className = "intelligence-action";
+      setText(
+        title,
+        humanize(action.actionCode)
+          + (action.targetCode
+            ? ": " + humanize(action.targetCode)
+            : "")
+      );
+      setText(
+        detail,
+        [
+          action.urgency ? humanize(action.urgency) + " priority" : "",
+          action.dueAt ? "Due " + readableDateTime(action.dueAt) : ""
+        ].filter(Boolean).join(" · ")
+      );
+      item.append(title, detail);
+      actionFragment.append(item);
+    });
+    elements["file-intelligence-actions"].replaceChildren(
+      actionFragment
+    );
   }
 
   function renderLane(name, items) {
@@ -4553,6 +4985,20 @@
   function resetFileEvidenceContainers(message) {
     renderRecentEmpty(elements["source-health"], message);
     renderRecentEmpty(elements["key-facts"], message);
+    badge(
+      elements["file-intelligence-urgency"],
+      "Not loaded",
+      "neutral"
+    );
+    setText(elements["file-intelligence-summary"], message);
+    renderRecentEmpty(
+      elements["file-intelligence-workflows"],
+      message
+    );
+    renderRecentEmpty(
+      elements["file-intelligence-actions"],
+      message
+    );
     ["priority", "today", "waiting"].forEach(function (name) {
       setText(elements[name + "-count"], "0");
       renderRecentEmpty(elements[name + "-lane"], message);
@@ -7209,7 +7655,7 @@
   function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("/hcn/sw.js?shell=v10", { scope: "/hcn/" }).catch(function () {
+      navigator.serviceWorker.register("/hcn/sw.js?shell=v11", { scope: "/hcn/" }).catch(function () {
         // Offline support is optional; readiness remains sourced from live API checks.
       });
     });

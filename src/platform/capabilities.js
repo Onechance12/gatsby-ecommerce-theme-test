@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-30.1";
+export const CAPABILITY_VERSION = "2026-07-30.2";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -148,6 +148,7 @@ export function buildRuntimeStatus(runtime = {}) {
   return {
     assistant: {
       availability: configurationStatus(hcnAssistant.ready),
+      directReads: configurationStatus(hcnAssistant.deterministicReady),
       provider: typeof hcnAssistant.provider === "string"
         ? hcnAssistant.provider
         : "unknown",

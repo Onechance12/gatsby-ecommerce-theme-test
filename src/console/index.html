@@ -13,15 +13,15 @@
       content="Home Claim Network employee Work Center."
     >
     <title>HCN Work Center</title>
-    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v10">
-    <link rel="stylesheet" href="/hcn/app.css?shell=v10">
-    <script src="/hcn/app.js?shell=v10" defer></script>
+    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v11">
+    <link rel="stylesheet" href="/hcn/app.css?shell=v11">
+    <script src="/hcn/app.js?shell=v11" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to employee Work Center</a>
 
     <header class="topbar">
-      <a class="brand" href="/hcn/?shell=v10" aria-label="HCN Work Center home">
+      <a class="brand" href="/hcn/?shell=v11" aria-label="HCN Work Center home">
         <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
         <span class="brand-copy">
           <strong>HCN Work Center</strong>
@@ -170,7 +170,8 @@
               <button
                 class="assistant-starter"
                 type="button"
-                data-assistant-starter="Show me the files assigned to me that need attention."
+                data-assistant-starter="Show my assigned Work Center."
+                data-assistant-direct="true"
               >Work my files</button>
               <button
                 class="assistant-starter"
@@ -201,7 +202,35 @@
           </div>
 
           <form id="assistant-form" class="assistant-composer" novalidate>
-            <label for="assistant-prompt">What do you need?</label>
+            <div class="assistant-composer-heading">
+              <label for="assistant-prompt">What do you need?</label>
+              <fieldset
+                id="assistant-mode"
+                class="assistant-mode"
+                aria-describedby="assistant-mode-help"
+              >
+                <legend>Thinking mode</legend>
+                <label>
+                  <input
+                    id="assistant-mode-auto"
+                    name="assistant-mode"
+                    type="radio"
+                    value="auto"
+                    checked
+                  >
+                  <span>Auto</span>
+                </label>
+                <label>
+                  <input
+                    id="assistant-mode-deep"
+                    name="assistant-mode"
+                    type="radio"
+                    value="deep"
+                  >
+                  <span>Deep Review</span>
+                </label>
+              </fieldset>
+            </div>
             <div class="assistant-compose-row">
               <textarea
                 id="assistant-prompt"
@@ -219,7 +248,35 @@
             <p id="assistant-composer-help">
               Thresher shows proposed actions for review before anything changes.
             </p>
+            <p id="assistant-mode-help" class="visually-hidden">
+              Auto chooses the right level of review. Deep Review uses more
+              careful reasoning for complicated files.
+            </p>
           </form>
+
+          <aside
+            id="assistant-pilot"
+            class="assistant-pilot"
+            aria-label="Pilot check for this session"
+          >
+            <span class="assistant-pilot-label">Pilot check</span>
+            <span>
+              Last route
+              <strong id="assistant-pilot-route">Not run yet</strong>
+            </span>
+            <span>
+              Fresh sources
+              <strong id="assistant-pilot-sources">0</strong>
+            </span>
+            <span>
+              Plans prepared
+              <strong id="assistant-pilot-plans">0</strong>
+            </span>
+            <span class="assistant-pilot-gate">
+              <span class="status-dot" aria-hidden="true"></span>
+              Nothing executes in chat
+            </span>
+          </aside>
 
           <button
             id="assistant-review-action"
@@ -546,6 +603,37 @@
                     <span>Fresh JobNimbus detail</span>
                   </div>
                   <div id="key-facts" class="key-facts-grid"></div>
+                </section>
+
+                <section
+                  class="file-block"
+                  aria-labelledby="file-intelligence-title"
+                >
+                  <div class="file-block-heading">
+                    <div>
+                      <h4 id="file-intelligence-title">What Thresher sees</h4>
+                      <p class="file-block-caption">
+                        Next steps based on the latest file information.
+                      </p>
+                    </div>
+                    <span
+                      id="file-intelligence-urgency"
+                      class="card-status"
+                    >Checking</span>
+                  </div>
+                  <p
+                    id="file-intelligence-summary"
+                    class="intelligence-summary"
+                  ></p>
+                  <div
+                    id="file-intelligence-workflows"
+                    class="intelligence-workflows"
+                    aria-label="Workflow readiness"
+                  ></div>
+                  <div
+                    id="file-intelligence-actions"
+                    class="intelligence-actions"
+                  ></div>
                 </section>
 
                 <section class="file-block" aria-labelledby="operating-lanes-title">

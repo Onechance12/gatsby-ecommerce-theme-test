@@ -19,7 +19,7 @@ const EMPLOYEE_EMAIL = "assigned.employee@wavepa.com";
 const EMPLOYEE_SUBJECT = "assigned-employee-google-subject";
 const EMPLOYEE_OWNER_ID = "assigned-employee-jobnimbus-owner";
 
-test("enabled assistant route serves an assigned employee without model execution or external mutation", async (t) => {
+test("enabled assistant route uses fixed routed reasoning without external mutation", async (t) => {
   const temporaryRoot = await mkdtemp(
     path.join(tmpdir(), "hcn-assistant-http-")
   );
@@ -82,6 +82,27 @@ test("enabled assistant route serves an assigned employee without model executio
         ]
       });
     }
+    if (url.pathname === "/contacts" && req.method === "GET") {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-assistant-jobnimbus-key"
+      );
+      return json(res, 200, {
+        contacts: [
+          {
+            jnid: "assigned-file-provider-id",
+            number: 2739,
+            record_type_name: "Insurance",
+            owners: [{ id: EMPLOYEE_OWNER_ID }],
+            display_name: "Assigned File Fixture",
+            status_name: "Ready for Review",
+            stage_name: "Carrier Review",
+            is_active: true,
+            date_updated: 1785261000
+          }
+        ]
+      });
+    }
 
     if (
       ["/contacts", "/activities", "/tasks", "/files"].some(
@@ -126,6 +147,7 @@ test("enabled assistant route serves an assigned employee without model executio
         HCN_ASSISTANT_ENABLED: "true",
         HCN_ASSISTANT_OPENAI_API_KEY:
           "sk-hcn-route-fixture-key-1234567890",
+        // These legacy values must not override the fixed reasoning router.
         HCN_ASSISTANT_MODEL: "gpt-5.6-terra",
         HCN_ASSISTANT_REASONING_EFFORT: "low",
         HCN_ASSISTANT_MAX_OUTPUT_TOKENS: "1200",
@@ -199,6 +221,24 @@ test("enabled assistant route serves an assigned employee without model executio
   assert.equal(health.hcnAssistant.enabled, true);
   assert.equal(health.hcnAssistant.configured, true);
   assert.equal(health.hcnAssistant.ready, true);
+  assert.equal(health.hcnAssistant.deterministicReady, true);
+  assert.equal(health.hcnAssistant.model, "gpt-5.6-sol");
+  assert.equal(
+    health.hcnAssistant.reasoningEffort,
+    "routed_medium_or_high"
+  );
+  assert.equal(
+    health.hcnAssistant.routing.deterministic.providerCall,
+    false
+  );
+  assert.equal(
+    health.hcnAssistant.routing.standard.reasoningEffort,
+    "medium"
+  );
+  assert.equal(
+    health.hcnAssistant.routing.deep.reasoningEffort,
+    "high"
+  );
   assert.equal(health.hcnAssistant.modelHasReadTools, true);
   assert.equal(health.hcnAssistant.modelCanPrepareActionPlans, true);
   assert.equal(health.hcnAssistant.modelCanExecute, false);
@@ -252,6 +292,38 @@ test("enabled assistant route serves an assigned employee without model executio
     true
   );
 
+  const deterministicResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        prompt: "Show my assigned Work Center.",
+        mode: "auto"
+      })
+    }
+  );
+  assert.equal(deterministicResponse.status, 200);
+  const deterministic = await deterministicResponse.json();
+  assert.equal(
+    deterministic.schema,
+    "hcn.console.assistant-turn.v2"
+  );
+  assert.equal(deterministic.routing.route, "deterministic");
+  assert.equal(deterministic.routing.profileId, "hcn.deterministic.v1");
+  assert.equal(deterministic.routing.modelUsed, false);
+  assert.match(deterministic.message, /2739/);
+  assert.match(deterministic.message, /Nothing was changed/);
+  assert.deepEqual(
+    deterministic.sources.map(({ key, status }) => ({ key, status })),
+    [{ key: "jobnimbus", status: "fresh" }]
+  );
+
   const assistantResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
     {
@@ -263,7 +335,8 @@ test("enabled assistant route serves an assigned employee without model executio
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        prompt: "Tell me what you can safely help with."
+        prompt: "Tell me what you can safely help with.",
+        mode: "auto"
       })
     }
   );
@@ -273,7 +346,7 @@ test("enabled assistant route serves an assigned employee without model executio
     "no-store, max-age=0"
   );
   const assistant = await assistantResponse.json();
-  assert.equal(assistant.schema, "hcn.console.assistant-turn.v1");
+  assert.equal(assistant.schema, "hcn.console.assistant-turn.v2");
   assert.equal(assistant.message, ASSISTANT_RESPONSE);
   assert.equal(assistant.plan, null);
   assert.deepEqual(assistant.sources, []);
@@ -287,18 +360,77 @@ test("enabled assistant route serves an assigned employee without model executio
     canExecuteActions: false,
     exactHumanApprovalRequired: true
   });
+  assert.equal(assistant.routing.route, "standard");
+  assert.equal(
+    assistant.routing.profileId,
+    "hcn.openai.gpt-5.6-sol.medium.v1"
+  );
+  assert.deepEqual(assistant.routing.reasonCodes, [
+    "general_assistance"
+  ]);
+  assert.equal(assistant.routing.modelUsed, true);
+
+  const deepResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        prompt: "Review the claim evidence carefully.",
+        mode: "deep"
+      })
+    }
+  );
+  assert.equal(deepResponse.status, 200);
+  const deep = await deepResponse.json();
+  assert.equal(deep.schema, "hcn.console.assistant-turn.v2");
+  assert.equal(deep.routing.route, "deep");
+  assert.equal(
+    deep.routing.profileId,
+    "hcn.openai.gpt-5.6-sol.high.v1"
+  );
+  assert.equal(deep.routing.modelUsed, true);
+
+  const escalationResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        prompt: "Call the homeowner right now.",
+        mode: "auto"
+      })
+    }
+  );
+  assert.equal(escalationResponse.status, 200);
+  const escalation = await escalationResponse.json();
+  assert.equal(escalation.routing.route, "codex_escalation");
+  assert.equal(escalation.routing.modelUsed, false);
+  assert.match(escalation.message, /Nothing was changed, sent, called/);
 
   const providerLines = (
     await readFile(providerRecordPath, "utf8")
   ).trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(providerLines.length, 1);
+  assert.equal(providerLines.length, 2);
   const providerRequest = JSON.parse(providerLines[0]);
   assert.equal(
     providerRequest.url,
     "https://api.openai.com/v1/responses"
   );
   assert.equal(providerRequest.method, "POST");
-  assert.equal(providerRequest.body.model, "gpt-5.6-terra");
+  assert.equal(providerRequest.body.model, "gpt-5.6-sol");
+  assert.equal(providerRequest.body.reasoning.effort, "medium");
+  assert.equal(providerRequest.body.max_output_tokens, 1800);
   assert.equal(providerRequest.body.store, false);
   assert.equal(providerRequest.body.stream, false);
   assert.equal(providerRequest.body.parallel_tool_calls, false);
@@ -321,7 +453,14 @@ test("enabled assistant route serves an assigned employee without model executio
     ),
     false
   );
-  const serializedProviderRequest = JSON.stringify(providerRequest);
+  const deepProviderRequest = JSON.parse(providerLines[1]);
+  assert.equal(deepProviderRequest.body.model, "gpt-5.6-sol");
+  assert.equal(deepProviderRequest.body.reasoning.effort, "high");
+  assert.equal(deepProviderRequest.body.max_output_tokens, 2400);
+  const serializedProviderRequest = JSON.stringify([
+    providerRequest,
+    deepProviderRequest
+  ]);
   assert.doesNotMatch(
     serializedProviderRequest,
     /assigned-employee-google-subject|assigned-employee-jobnimbus-owner|assigned\.employee@wavepa\.com|hcn-route-fixture-key/
@@ -334,6 +473,7 @@ test("enabled assistant route serves an assigned employee without model executio
       .sort(),
     [
       "GET /account/users",
+      "GET /contacts",
       "GET /tokeninfo",
       "GET /userinfo",
       "POST /token"
@@ -341,7 +481,7 @@ test("enabled assistant route serves an assigned employee without model executio
   );
   assert.deepEqual(
     providerObservations.filter(({ pathname }) =>
-      ["/contacts", "/activities", "/tasks", "/files"].some(
+      ["/activities", "/tasks", "/files"].some(
         (prefix) =>
           pathname === prefix || pathname.startsWith(`${prefix}/`)
       )

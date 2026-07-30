@@ -276,6 +276,10 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
         ready: true
       }
     },
+    hcnAssistant: {
+      deterministicReady: true,
+      ready: false
+    },
     hcnOperationsBrain: {
       contractsAvailable: true,
       operationalProviderConfigured: false,
@@ -291,6 +295,8 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.connectors.managementSweep, "configured");
   assert.equal(status.connectors.gmail, "unconfigured");
   assert.equal(status.connectors.quo, "unknown");
+  assert.equal(status.assistant.availability, "unconfigured");
+  assert.equal(status.assistant.directReads, "configured");
   assert.equal(status.gates.externalWrites, "enabled");
   assert.equal(status.gates.gmailSend, "disabled");
   assert.equal(status.gates.hcnActionExecution, "disabled");

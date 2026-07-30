@@ -66,12 +66,6 @@ services:
         value: "true"
       - key: HCN_ASSISTANT_OPENAI_API_KEY
         sync: false
-      - key: HCN_ASSISTANT_MODEL
-        value: gpt-5.6-terra
-      - key: HCN_ASSISTANT_REASONING_EFFORT
-        value: low
-      - key: HCN_ASSISTANT_MAX_OUTPUT_TOKENS
-        value: "1600"
       # Dedicated least-privilege credential used only by the HP HCN operator.
       # Never reuse the shared bridge token or a Chance Brain credential.
       - key: CODEX_OPERATOR_TOKEN

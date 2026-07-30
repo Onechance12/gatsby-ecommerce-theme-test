@@ -39,6 +39,11 @@ function contact(overrides = {}) {
     'Insurance Company': 'Example Carrier',
     'Claim #': 'CLAIM-PRIVATE',
     'Policy #': 'POLICY-PRIVATE',
+    'Date of Loss': '2026-05-17',
+    'Damage Summary': 'Roof and interior damage documented',
+    'Carrier DA': 'Taylor Adjuster',
+    'Carrier DA Contact #': '(555) 555-0130',
+    'Carrier DA Email': 'ADJUSTER@CARRIER.EXAMPLE',
     ...overrides,
   };
 }
@@ -156,8 +161,8 @@ test('index maps field aliases and keeps only active exact-owner insurance files
   assert.deepEqual(result.data.files[0].missingFacts, {
     claimNumber: false,
     policyNumber: false,
-    dateOfLoss: true,
-    adjuster: true,
+    dateOfLoss: false,
+    adjuster: false,
   });
   assert.equal(JSON.stringify(result).includes(CHANCE_ID), false);
   assert.equal(JSON.stringify(result).includes('DO-NOT-LEAK'), false);
@@ -312,6 +317,14 @@ test('exact JobNimbus file maps aliases, bounds presentation text, and excludes 
 
   assert.equal(result.data.file.nextAppointmentAt, '2026-07-29T14:00:00.000Z');
   assert.equal(result.data.file.primaryEmail, 'owner@example.test');
+  assert.equal(result.data.file.dateOfLoss, '2026-05-17');
+  assert.equal(result.data.file.damageFactsPresent, true);
+  assert.equal(result.data.file.adjusterName, 'Taylor Adjuster');
+  assert.equal(result.data.file.adjusterPhone, '(555) 555-0130');
+  assert.equal(
+    result.data.file.adjusterEmail,
+    'adjuster@carrier.example',
+  );
   assert.equal(
     result.data.file.propertyAddress,
     '100 Private Street, Example TX 75001',
@@ -464,12 +477,14 @@ test('Gmail mapper requires an exact complete scope and emits only bounded fresh
     'direction',
     'occurredAt',
     'hasAttachment',
+    'deliveryState',
     'actionState',
     'subject',
     'snippet',
   ]);
   assert.equal(result.data.items[0].direction, 'inbound');
   assert.equal(result.data.items[0].hasAttachment, true);
+  assert.equal(result.data.items[0].deliveryState, 'received');
   assert.equal(result.data.items[0].actionState, 'needs_reply');
   assert.equal(Array.from(result.data.items[0].subject).length, 160);
   assert.equal(Array.from(result.data.items[0].snippet).length, 240);
@@ -532,6 +547,62 @@ test('scoped communication mappers preserve bounded evidence while marking pagin
   assert.equal(result.data.items[0].providerRecordId, 'partial-message');
 });
 
+test('Gmail delivery proof and per-thread ordering prevent drafts and answered messages from becoming response due', () => {
+  const result = mapScopedGmailEnvelope(
+    {
+      ...FRESHNESS,
+      scope: {
+        providerFileId: FILE_ID,
+        exactFileMatch: true,
+      },
+      itemsComplete: true,
+      items: [
+        {
+          id: 'older-inbound',
+          threadId: 'thread-one',
+          direction: 'incoming',
+          internalDate: '1785260000000',
+          subject: 'Older inbound',
+        },
+        {
+          id: 'later-sent',
+          threadId: 'thread-one',
+          direction: 'outgoing',
+          internalDate: '1785261000000',
+          actionState: 'sent_verified',
+          subject: 'Verified reply',
+        },
+        {
+          id: 'draft-only',
+          threadId: 'thread-two',
+          direction: 'outgoing',
+          internalDate: '1785262000000',
+          actionState: 'draft',
+          subject: 'Unsent draft',
+        },
+      ],
+    },
+    { expectedProviderFileId: FILE_ID },
+  );
+
+  const byId = new Map(
+    result.data.items.map((item) => [item.providerRecordId, item]),
+  );
+  assert.equal(byId.get('older-inbound').actionState, 'no_action');
+  assert.equal(byId.get('later-sent').deliveryState, 'sent_verified');
+  assert.equal(byId.get('later-sent').actionState, 'awaiting_response');
+  assert.equal(byId.get('draft-only').deliveryState, 'draft');
+  assert.equal(byId.get('draft-only').actionState, 'draft');
+  assert.equal(
+    result.data.items.some(
+      (item) =>
+        item.providerRecordId === 'draft-only'
+        && item.deliveryState === 'sent_verified',
+    ),
+    false,
+  );
+});
+
 test('Quo mapper normalizes call/text aliases without exposing participants, lines, or transcripts', () => {
   const result = mapScopedQuoEnvelope(
     {
@@ -583,6 +654,52 @@ test('Quo mapper normalizes call/text aliases without exposing participants, lin
     'raw-conversation-id',
   ]) {
     assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test('only delivered Quo replies suppress an earlier inbound response due', () => {
+  for (const disposition of ['undelivered', 'sent', 'completed']) {
+    const result = mapScopedQuoEnvelope(
+      {
+        ...FRESHNESS,
+        scope: {
+          providerFileId: FILE_ID,
+          exactFileMatch: true,
+        },
+        itemsComplete: true,
+        items: [
+          {
+            id: `inbound-before-${disposition}`,
+            type: 'sms',
+            direction: 'incoming',
+            createdAt: '2026-07-28T17:00:00Z',
+            status: 'delivered',
+            conversationId: `conversation-${disposition}`,
+          },
+          {
+            id: `outbound-${disposition}`,
+            type: 'sms',
+            direction: 'outgoing',
+            createdAt: '2026-07-28T17:05:00Z',
+            status: disposition,
+            conversationId: `conversation-${disposition}`,
+          },
+        ],
+      },
+      { expectedProviderFileId: FILE_ID },
+    );
+
+    const byId = new Map(
+      result.data.items.map((item) => [item.providerRecordId, item]),
+    );
+    assert.equal(
+      byId.get(`inbound-before-${disposition}`).actionState,
+      'needs_reply',
+    );
+    assert.notEqual(
+      byId.get(`outbound-${disposition}`).actionState,
+      'awaiting_response',
+    );
   }
 });
 

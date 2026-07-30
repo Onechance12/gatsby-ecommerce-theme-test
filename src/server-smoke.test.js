@@ -419,7 +419,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(rootRedirectResponse.status, 302);
   assert.equal(
     rootRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v10"
+    "/hcn/?shell=v11"
   );
   assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
   assert.match(
@@ -434,7 +434,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(consoleRedirectResponse.status, 302);
   assert.equal(
     consoleRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v10"
+    "/hcn/?shell=v11"
   );
   assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
 
@@ -631,6 +631,16 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.components.schemas.PlatformMetadataResponse.additionalProperties, false);
   assert.equal(schema.components.schemas.PlatformSessionResponse.additionalProperties, false);
   assert.equal(schema.components.schemas.PlatformRuntimeStatus.additionalProperties, false);
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.assistant
+      .properties.directReads.$ref,
+    "#/components/schemas/PlatformConfigurationStatus"
+  );
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.assistant
+      .required.includes("directReads"),
+    true
+  );
   assert.equal(
     schema.components.schemas.PlatformRuntimeStatus.properties.gates
       .properties.hcnActionExecution.$ref,
@@ -2690,7 +2700,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       hcnProviderRequests.push(`gmail:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }]
+        messages: [
+          { id: "gmail-message-1", threadId: "gmail-thread-1" },
+          { id: "gmail-message-2", threadId: "gmail-carrier-thread-1" }
+        ]
       }));
       return;
     }
@@ -2729,6 +2742,43 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       }));
       return;
     }
+    if (
+      url.pathname === "/gmail/v1/users/me/messages/gmail-message-2"
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-google-connector-access-token"
+      );
+      assert.equal(url.searchParams.get("format"), "full");
+      hcnProviderRequests.push(`gmail:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "gmail-message-2",
+        threadId: "gmail-carrier-thread-1",
+        internalDate: String(Date.parse("2026-07-27T17:30:00.000Z")),
+        labelIds: ["SENT"],
+        snippet: "Fresh synthetic carrier follow-up",
+        payload: {
+          mimeType: "text/plain",
+          headers: [
+            { name: "From", value: "claims@wavepa.com" },
+            { name: "To", value: "carrier@example.test" },
+            {
+              name: "Subject",
+              value: "HCN-CLAIM-1001 carrier follow-up"
+            },
+            { name: "Date", value: "Mon, 27 Jul 2026 12:30:00 -0500" }
+          ],
+          body: {
+            data: Buffer.from(
+              "Fresh synthetic sent carrier follow-up"
+            ).toString("base64url")
+          }
+        }
+      }));
+      return;
+    }
     if (url.pathname === "/quo/phone-numbers" && req.method === "GET") {
       assert.equal(req.headers.authorization, "hcn-quo-api-key");
       hcnProviderRequests.push(`quo:${url.pathname}`);
@@ -2756,16 +2806,28 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       hcnProviderRequests.push(`quo:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        data: [{
-          id: "quo-message-1",
-          phoneNumberId: "quo-line-1",
-          from: "+12145551212",
-          to: ["+12145559999"],
-          createdAt: "2026-07-27T17:00:00.000Z",
-          direction: "incoming",
-          status: "delivered",
-          content: "Fresh synthetic text reply"
-        }]
+        data: [
+          {
+            id: "quo-message-1",
+            phoneNumberId: "quo-line-1",
+            from: "+12145551212",
+            to: ["+12145559999"],
+            createdAt: "2026-07-27T17:00:00.000Z",
+            direction: "incoming",
+            status: "delivered",
+            content: "Fresh synthetic text reply"
+          },
+          {
+            id: "quo-message-2",
+            phoneNumberId: "quo-line-1",
+            from: "+12145559999",
+            to: ["+12145551212"],
+            createdAt: "2026-07-27T18:30:00.000Z",
+            direction: "outgoing",
+            status: "delivered",
+            content: "Fresh synthetic follow-up"
+          }
+        ]
       }));
       return;
     }
@@ -2910,9 +2972,30 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     enabled: false,
     configured: false,
     ready: false,
+    deterministicReady: false,
     provider: "openai_responses_api",
-    model: "gpt-5.6-terra",
-    reasoningEffort: "low",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "routed_medium_or_high",
+    routing: {
+      deterministic: {
+        profileId: "hcn.deterministic.v1",
+        providerCall: false
+      },
+      standard: {
+        profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium"
+      },
+      deep: {
+        profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high"
+      },
+      codexEscalation: {
+        profileId: "hcn.codex-operator-escalation.v1",
+        providerCall: false
+      }
+    },
     responsesApiStore: false,
     providerRetention: "openai_project_data_controls_apply",
     sessionHistory:
@@ -3370,7 +3453,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
           "Bearer fixture-shared-bridge-token-for-ambiguity",
         "content-type": "application/json"
       },
-      body: JSON.stringify({ prompt: "Work my files." })
+      body: JSON.stringify({
+        prompt: "Work my files.",
+        mode: "auto"
+      })
     }
   );
   assert.equal(sharedBearerAssistantResponse.status, 403);
@@ -3444,7 +3530,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     {
       method: "POST",
       headers: hcnReadHeaders,
-      body: JSON.stringify({ prompt: "Work my files." })
+      body: JSON.stringify({
+        prompt: "Work my files.",
+        mode: "auto"
+      })
     }
   );
   assert.equal(unavailableAssistantResponse.status, 503);
@@ -3520,10 +3609,42 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.schema, "hcn.console.file.v1");
   assert.equal(exactFile.ephemeral, true);
   assert.equal(exactFile.cachePolicy, "no_store");
-  assert.equal(exactFile.evidenceStatus, "complete");
+  assert.equal(
+    exactFile.evidenceStatus,
+    "complete",
+    JSON.stringify({
+      sources: exactFile.sources,
+      providerRequests: hcnProviderRequests
+    })
+  );
   assert.equal(exactFile.file.fileRef, fileRef);
   assert.equal(exactFile.file.jobNumber, "HCN-1001");
   assert.equal(exactFile.file.displayName, "Fixture Active Homeowner");
+  assert.equal(
+    exactFile.intelligence.schemaVersion,
+    "hcn.ops.file-intelligence.v1"
+  );
+  assert.equal(exactFile.intelligence.fileRef, fileRef);
+  assert.deepEqual(
+    Object.keys(exactFile.intelligence.workflows).sort(),
+    [
+      "claim_filing",
+      "communications",
+      "follow_up",
+      "inspection_scheduling",
+      "neglected_files"
+    ]
+  );
+  for (const [workflowId, workflow] of Object.entries(
+    exactFile.intelligence.workflows
+  )) {
+    assert.equal(
+      workflow.schemaVersion,
+      "hcn.ops.workflow-evaluation.v1"
+    );
+    assert.equal(workflow.workflowId, workflowId);
+    assert.equal(workflow.fileRef, fileRef);
+  }
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(exactFile.sources)
@@ -3541,9 +3662,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.recent.activities.length, 1);
   assert.equal(exactFile.recent.tasks.length, 1);
   assert.equal(exactFile.recent.documents.length, 1);
-  assert.equal(exactFile.recent.gmail.length, 1);
-  assert.equal(exactFile.recent.quo.length, 2);
-  assert.equal(exactFile.recent.gmail[0].direction, "inbound");
+  assert.equal(exactFile.recent.gmail.length, 2);
+  assert.equal(exactFile.recent.quo.length, 3);
+  assert.equal(
+    exactFile.recent.gmail.some((item) => item.direction === "inbound"),
+    true
+  );
+  assert.equal(
+    exactFile.recent.gmail.some(
+      (item) =>
+        item.direction === "outbound"
+        && item.deliveryState === "sent_verified"
+    ),
+    true
+  );
   assert.equal(exactFile.recent.quo.some((item) => item.direction === "inbound"), true);
   assert.equal(exactFile.recent.quo.some((item) => item.direction === "outbound"), true);
   assert.equal(
@@ -3577,8 +3709,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "jn-task-1",
     "jn-document-1",
     "gmail-message-1",
+    "gmail-message-2",
     "gmail-thread-1",
+    "gmail-carrier-thread-1",
     "quo-message-1",
+    "quo-message-2",
     "quo-call-1",
     "quo-line-1",
     chanceOwnerId

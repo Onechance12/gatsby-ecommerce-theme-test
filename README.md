@@ -176,9 +176,6 @@ HCN_THRESHER_STORE_KEY=
 HCN_THRESHER_REFERENCE_KEY=
 HCN_THRESHER_SIGNING_KEY=
 HCN_ASSISTANT_ENABLED=false
-HCN_ASSISTANT_MODEL=gpt-5.6-terra
-HCN_ASSISTANT_REASONING_EFFORT=low
-HCN_ASSISTANT_MAX_OUTPUT_TOKENS=1600
 ALLOW_GMAIL_SEND=false
 QUO_DEFAULT_FROM_NUMBER=
 ALLOW_QUO_SEND=false
@@ -216,6 +213,16 @@ and abuse-monitoring retention policies still apply. Zero Data Retention or
 Modified Abuse Monitoring is a separate project-level approval and
 configuration.
 
+The reasoning router is fixed in server code, not selected by the browser or
+environment variables. In Auto mode, narrow Work Center, exact-file status,
+and authorized activity-gap reports use deterministic fresh reads with no
+model call. Ordinary interpretation and drafting use GPT-5.6 Sol with medium
+reasoning. The explicit Deep Review control and high-stakes settlement,
+policy, coverage, or claim-strategy work use GPT-5.6 Sol with high reasoning.
+Unsupported live
+calls, uploads, deletions, financial actions, and legal actions fail closed to
+the protected operator workflow.
+
 The exact `HCN_THRESHER_ENABLED=true` gate activates the isolated Thresher
 storage lifecycle only after every dedicated value validates.
 `HCN_THRESHER_STORE_KEY` is the dedicated AEAD/HKDF master,
@@ -239,6 +246,11 @@ employee's Gmail/read-only Calendar grant and Quo line separately.
 Exact-file review can combine current JobNimbus evidence with exactly
 correlated Gmail and Quo evidence for the same employee; missing or unhealthy
 employee connectors fail closed and never fall back to Chance's accounts.
+The file view also shows coded, evidence-backed readiness for neglected files,
+communications, claim filing, inspection scheduling, and follow-up. Its
+plain-language next steps come from fresh provider evidence; drafts,
+unverified delivery, missing contact channels, and unsupported damage facts
+cannot be promoted into completed work.
 
 The console is an orchestration and control layer. It does not copy JobNimbus
 into a new CRM or become authoritative for client records. JobNimbus remains

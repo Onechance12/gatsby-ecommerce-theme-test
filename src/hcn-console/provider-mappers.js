@@ -168,6 +168,18 @@ const CONTACT_FIELDS = Object.freeze({
     'dateOfLoss',
     'cf_date_1',
   ],
+  damageFacts: [
+    'Damage Details',
+    'Damage Summary',
+    'Description of Loss',
+    'Loss Description',
+    'damage_details',
+    'damageDetails',
+    'damage_summary',
+    'damageSummary',
+    'description_of_loss',
+    'descriptionOfLoss',
+  ],
   adjusterName: [
     'Carrier DA',
     'Carrier Adjuster',
@@ -387,6 +399,11 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
     items.push(mapped);
   }
   assertUniqueRecordIds(items, source);
+  const resolvedItems = resolveCommunicationActionStates(
+    source,
+    items,
+    itemsComplete,
+  );
 
   return immutableCopy({
     status: 'ok',
@@ -394,7 +411,7 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
     data: {
       providerFileId: expectedProviderFileId,
       complete: itemsComplete,
-      items,
+      items: resolvedItems,
     },
   });
 }
@@ -426,6 +443,30 @@ function mapEligibleContact(
   if (!updatedAt) {
     fail('invalid_provider_record', 'JobNimbus file update time is invalid.');
   }
+  const claimNumber = boundedText(
+    field(contact, CONTACT_FIELDS.claimNumber),
+    80,
+  );
+  const policyNumber = boundedText(
+    field(contact, CONTACT_FIELDS.policyNumber),
+    80,
+  );
+  const dateOfLoss = normalizeProviderDate(
+    field(contact, CONTACT_FIELDS.dateOfLoss),
+  );
+  const adjusterName = boundedText(
+    field(contact, CONTACT_FIELDS.adjusterName),
+    120,
+  );
+  const adjusterPhone = normalizePhone(
+    field(contact, CONTACT_FIELDS.adjusterPhone),
+  );
+  const adjusterEmail = normalizeEmail(
+    field(contact, CONTACT_FIELDS.adjusterEmail),
+  );
+  const damageFactsPresent = Boolean(
+    boundedText(field(contact, CONTACT_FIELDS.damageFacts), 1000),
+  );
 
   const base = {
     providerFileId,
@@ -441,14 +482,10 @@ function mapEligibleContact(
       : { assignedToCurrentUser: true }),
     updatedAt,
     missingFacts: {
-      claimNumber: !hasValue(field(contact, CONTACT_FIELDS.claimNumber)),
-      policyNumber: !hasValue(field(contact, CONTACT_FIELDS.policyNumber)),
-      dateOfLoss: !hasValue(field(contact, CONTACT_FIELDS.dateOfLoss)),
-      adjuster: ![
-        field(contact, CONTACT_FIELDS.adjusterName),
-        field(contact, CONTACT_FIELDS.adjusterPhone),
-        field(contact, CONTACT_FIELDS.adjusterEmail),
-      ].some(hasValue),
+      claimNumber: !claimNumber,
+      policyNumber: !policyNumber,
+      dateOfLoss: !dateOfLoss,
+      adjuster: ![adjusterPhone, adjusterEmail].some(Boolean),
     },
   };
   if (!detail) return base;
@@ -462,8 +499,13 @@ function mapEligibleContact(
     primaryPhone: normalizePhone(field(contact, CONTACT_FIELDS.phone)),
     propertyAddress: contactAddress(contact),
     carrierName: boundedText(field(contact, CONTACT_FIELDS.carrier), 120),
-    claimNumber: boundedText(field(contact, CONTACT_FIELDS.claimNumber), 80),
-    policyNumber: boundedText(field(contact, CONTACT_FIELDS.policyNumber), 80),
+    claimNumber,
+    policyNumber,
+    dateOfLoss,
+    damageFactsPresent,
+    adjusterName,
+    adjusterPhone,
+    adjusterEmail,
   };
 }
 
@@ -700,6 +742,13 @@ function mapGmailItem(record) {
   const direction = normalizeDirection(
     field(record, ['direction', 'messageDirection', 'message_direction']),
   );
+  const requestedActionState = normalizeCommunicationActionState(
+    field(record, ['actionState', 'action_state']),
+  );
+  const deliveryState = gmailDeliveryState(
+    requestedActionState,
+    direction,
+  );
   const hasAttachment =
     typeof record.hasAttachment === 'boolean'
       ? record.hasAttachment
@@ -711,15 +760,22 @@ function mapGmailItem(record) {
     direction,
     occurredAt,
     hasAttachment,
-    actionState: communicationActionState(
-      field(record, ['actionState', 'action_state']),
-      direction,
-    ),
+    deliveryState,
+    actionState: deliveryState === 'draft'
+      ? 'draft'
+      : deliveryState === 'failed'
+        ? 'failed'
+        : deliveryState === 'unverified'
+          ? 'unverified'
+          : 'no_action',
     subject: boundedText(field(record, ['subject']), 160),
     snippet: boundedText(
       field(record, ['snippet', 'preview', 'plainText', 'plain_text', 'text']),
       240,
     ),
+    conversationKey: normalizeProviderId(
+      field(record, ['threadId', 'thread_id', 'conversationId']),
+    ) ?? providerRecordId,
   };
 }
 
@@ -749,17 +805,31 @@ function mapQuoItem(record) {
   if (!providerRecordId || !occurredAt) return null;
   const direction = normalizeDirection(field(record, ['direction']));
   const channel = quoChannel(field(record, ['channel', 'type']));
+  const disposition =
+    toCode(field(record, ['disposition', 'status'])) ?? 'unknown';
+  const requestedActionState = normalizeCommunicationActionState(
+    field(record, ['actionState', 'action_state']),
+  );
+  let actionState = requestedActionState;
+  if (/failed|undelivered/.test(disposition)) actionState = 'failed';
+  if (
+    channel === 'call'
+    && direction === 'inbound'
+    && /missed|voicemail/.test(disposition)
+  ) {
+    actionState = 'needs_reply';
+  }
   return {
     providerRecordId,
     channel,
     direction,
     occurredAt,
-    disposition: toCode(field(record, ['disposition', 'status'])) ?? 'unknown',
-    actionState: communicationActionState(
-      field(record, ['actionState', 'action_state']),
-      direction,
-    ),
+    disposition,
+    actionState,
     preview: boundedText(field(record, ['preview', 'text', 'voicemail']), 240),
+    conversationKey: normalizeProviderId(
+      field(record, ['conversationId', 'conversation_id', 'threadId']),
+    ) ?? 'quo_file_stream',
   };
 }
 
@@ -844,12 +914,80 @@ function quoChannel(value) {
   return 'unknown';
 }
 
-function communicationActionState(value, direction) {
+function normalizeCommunicationActionState(value) {
   const code = toCode(value);
-  if (code) return code;
-  if (direction === 'inbound') return 'needs_reply';
-  if (direction === 'outbound') return 'awaiting_response';
+  if (
+    [
+      'draft',
+      'failed',
+      'sent_verified',
+      'unverified',
+      'needs_reply',
+      'awaiting_response',
+      'responded',
+      'no_action',
+    ].includes(code)
+  ) {
+    return code;
+  }
   return 'no_action';
+}
+
+function gmailDeliveryState(actionState, direction) {
+  if (actionState === 'draft') return 'draft';
+  if (actionState === 'failed') return 'failed';
+  if (direction === 'inbound') return 'received';
+  if (direction === 'outbound' && actionState === 'sent_verified') {
+    return 'sent_verified';
+  }
+  if (direction === 'outbound') return 'unverified';
+  return 'unknown';
+}
+
+function resolveCommunicationActionStates(source, items, complete) {
+  const grouped = new Map();
+  const resolved = items.map((item) => {
+    const copy = { ...item };
+    const key = copy.conversationKey;
+    delete copy.conversationKey;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(copy);
+    return copy;
+  });
+  if (!complete) return resolved;
+
+  for (const group of grouped.values()) {
+    const candidates = group
+      .filter((item) => responseCandidate(source, item))
+      .sort(
+        (left, right) =>
+          Date.parse(right.occurredAt) - Date.parse(left.occurredAt)
+          || left.providerRecordId.localeCompare(right.providerRecordId),
+      );
+    if (candidates.length === 0) continue;
+    const latest = candidates[0];
+    if (latest.direction === 'inbound') {
+      latest.actionState = 'needs_reply';
+    } else {
+      latest.actionState = 'awaiting_response';
+    }
+  }
+  return resolved;
+}
+
+function responseCandidate(source, item) {
+  if (source === 'gmail') {
+    return item.deliveryState === 'received'
+      || item.deliveryState === 'sent_verified';
+  }
+  if (source === 'quo' && item.channel === 'text') {
+    return item.direction === 'inbound'
+      || (
+        item.direction === 'outbound'
+        && item.disposition === 'delivered'
+      );
+  }
+  return false;
 }
 
 function normalizeFreshness(input) {
@@ -1034,6 +1172,42 @@ function normalizeNullableProviderTimestamp(value) {
   return value === undefined || value === null || value === ''
     ? null
     : normalizeProviderTimestamp(value);
+}
+
+function normalizeProviderDate(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? null
+      : value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const timestamp = normalizeProviderTimestamp(value);
+    return timestamp ? timestamp.slice(0, 10) : null;
+  }
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  const usDate = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text);
+  let year;
+  let month;
+  let day;
+  if (isoDate) {
+    [, year, month, day] = isoDate;
+  } else if (usDate) {
+    [, month, day, year] = usDate;
+    month = month.padStart(2, '0');
+    day = day.padStart(2, '0');
+  } else {
+    const timestamp = normalizeProviderTimestamp(text);
+    return timestamp ? timestamp.slice(0, 10) : null;
+  }
+  const candidate = `${year}-${month}-${day}`;
+  const parsed = new Date(`${candidate}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime())
+    && parsed.toISOString().slice(0, 10) === candidate
+    ? candidate
+    : null;
 }
 
 function normalizeEmail(value) {

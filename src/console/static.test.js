@@ -62,6 +62,129 @@ function evaluateAuthMessage(functionSource, outcome, authenticated) {
     : null;
 }
 
+function evaluateAssistantRouting(functionSource, value) {
+  const context = {
+    ASSISTANT_ROUTES: new Set([
+      "deterministic",
+      "standard",
+      "deep",
+      "codex_escalation"
+    ]),
+    ASSISTANT_ROUTE_PROFILES: {
+      deterministic: {
+        profileId: "hcn.deterministic.v1",
+        modelUsed: false
+      },
+      standard: {
+        profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
+        modelUsed: true
+      },
+      deep: {
+        profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+        modelUsed: true
+      },
+      codex_escalation: {
+        profileId: "hcn.codex-operator-escalation.v1",
+        modelUsed: false
+      }
+    },
+    ASSISTANT_ROUTE_REASON_CODES: {
+      deterministic: [
+        "fact_only_work_center",
+        "fact_only_management_sweep",
+        "fact_only_file_status"
+      ],
+      standard: [
+        "ordinary_interpretation",
+        "ordinary_drafting",
+        "general_assistance"
+      ],
+      deep: [
+        "explicit_deep_review",
+        "multi_source_contradiction",
+        "settlement_review",
+        "policy_review",
+        "coverage_review",
+        "claim_strategy",
+        "complex_document",
+        "high_stakes_ambiguity"
+      ],
+      codex_escalation: [
+        "explicit_codex_request",
+        "unsupported_live_call",
+        "unsupported_upload",
+        "unsupported_delete",
+        "unsupported_financial_action",
+        "unsupported_legal_action",
+        "unsupported_capability",
+        "missing_required_evidence"
+      ]
+    },
+    boundedString(input, maximum) {
+      if (typeof input !== "string") return "";
+      return Array.from(input).slice(0, maximum).join("");
+    },
+    isRecord(input) {
+      return input !== null
+        && typeof input === "object"
+        && !Array.isArray(input);
+    },
+    value,
+    result: null
+  };
+  runInNewContext(
+    `${functionSource}\nresult = normalizeAssistantRouting(value);`,
+    context
+  );
+  return JSON.parse(JSON.stringify(context.result));
+}
+
+function evaluateAssistantSources(functionSource, value) {
+  const context = {
+    ASSISTANT_SOURCE_KEYS: new Set([
+      "jobnimbus",
+      "gmail",
+      "quo",
+      "google_calendar",
+      "retell",
+      "action_plan"
+    ]),
+    ASSISTANT_SOURCE_STATUSES: new Set([
+      "fresh",
+      "complete",
+      "partial",
+      "stale",
+      "incomplete",
+      "unavailable",
+      "not_evaluated",
+      "not_configured",
+      "unknown",
+      "pending_human_review"
+    ]),
+    boundedString(input, maximum) {
+      if (typeof input !== "string") return "";
+      return Array.from(input).slice(0, maximum).join("");
+    },
+    validIsoInstant(input) {
+      return typeof input === "string"
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input)
+        && new Date(input).toISOString() === input;
+    },
+    isRecord(input) {
+      return input !== null
+        && typeof input === "object"
+        && !Array.isArray(input);
+    },
+    value,
+    result: null
+  };
+  runInNewContext(
+    `${functionSource}\nresult = normalizeAssistantSources(value);`,
+    context
+  );
+  return JSON.parse(JSON.stringify(context.result));
+}
+
 test("console serves only its fixed application-shell allowlist", async () => {
   const expected = new Map([
     ["/hcn/", "text/html; charset=utf-8"],
@@ -89,11 +212,11 @@ test("console serves only its fixed application-shell allowlist", async () => {
   const manifest = JSON.parse(
     manifestAsset.body.toString("utf8")
   );
-  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v10/);
-  assert.match(html, /\/hcn\/app\.css\?shell=v10/);
-  assert.match(html, /\/hcn\/app\.js\?shell=v10/);
-  assert.match(html, /href="\/hcn\/\?shell=v10"/);
-  assert.equal(manifest.start_url, "/hcn/?shell=v10");
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v11/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v11/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v11/);
+  assert.match(html, /href="\/hcn\/\?shell=v11"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v11");
 
   for (const pathname of [
     "/hcn",
@@ -175,6 +298,17 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /id="assistant-send"/);
   assert.match(html, /id="assistant-alert"[\s\S]*role="status"/);
   assert.match(html, /id="assistant-review-action"/);
+  assert.match(html, /id="assistant-mode"[\s\S]*<legend>Thinking mode<\/legend>/);
+  assert.match(
+    html,
+    /id="assistant-mode-auto"[\s\S]*value="auto"[\s\S]*checked/
+  );
+  assert.match(html, /id="assistant-mode-deep"[\s\S]*value="deep"/);
+  assert.match(html, /id="assistant-pilot"[\s\S]*Pilot check/);
+  assert.match(html, /id="assistant-pilot-route"/);
+  assert.match(html, /id="assistant-pilot-sources"/);
+  assert.match(html, /id="assistant-pilot-plans"/);
+  assert.match(html, /Nothing executes in chat/);
   for (const label of [
     "Work my files",
     "Find a file",
@@ -188,26 +322,128 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
 
   assert.match(script, /assistantTurns: "\/hcn\/api\/v1\/assistant\/turns"/);
   assert.match(script, /const ASSISTANT_TURN_CAPABILITY = "hcn\.assistant\.turn"/);
-  assert.match(script, /ENDPOINTS\.assistantTurns,[\s\S]*\{ prompt: prompt \}/);
+  assert.match(
+    script,
+    /ENDPOINTS\.assistantTurns,[\s\S]*\{ prompt: prompt, mode: mode \}/
+  );
   assert.match(script, /ASSISTANT_TURN_CAPABILITY/);
   assert.match(script, /postOperationalJson\(/);
-  assert.match(script, /"hcn\.console\.assistant-turn\.v1"/);
+  assert.match(script, /"hcn\.console\.assistant-turn\.v2"/);
   assert.match(script, /function normalizeAssistantTurnResponse\(value\)/);
+  assert.match(script, /function normalizeAssistantRouting\(value\)/);
+  assert.match(script, /const ASSISTANT_MODES = new Set\(\["auto", "deep"\]\)/);
+  assert.match(script, /"codex_escalation"/);
+  assert.match(script, /"route",[\s\S]*"profileId",[\s\S]*"reasonCodes",[\s\S]*"modelUsed"/);
+  assert.match(script, /value\.reasonCodes\.length > 12/);
+  assert.match(script, /profileId !== routeContract\.profileId/);
+  assert.match(script, /value\.modelUsed !== routeContract\.modelUsed/);
+  assert.match(script, /!allowedReasonCodes\.includes\(reason\)/);
+  assert.match(script, /new Set\(reasonCodes\)\.size !== reasonCodes\.length/);
+  assert.match(script, /function normalizeAssistantSources\(value\)/);
+  assert.match(script, /function selectedAssistantMode\(\)/);
+  assert.match(script, /function renderAssistantPilot\(turn\)/);
+  assert.match(script, /state\.assistantPreparedPlanCount \+= 1/);
   assert.match(script, /keys\.length !== allowed\.size/);
   assert.match(script, /value\.ephemeral !== true/);
   assert.match(script, /value\.cachePolicy !== "no_store"/);
   assert.match(script, /authority\.canExecuteActions !== false/);
   assert.match(script, /authority\.exactHumanApprovalRequired !== true/);
   assert.match(script, /value\.plan === null \|\| isRecord\(value\.plan\)/);
-  assert.match(script, /if \(possiblePlanId\)/);
+  assert.match(script, /normalizeActionPlan\(value\.plan, true\)\.planId/);
+  assert.match(
+    script,
+    /elements\["assistant-prompt"\]\.disabled = \(\s*!available \|\| runtimeStatus === "direct_only"\s*\)/
+  );
+  assert.match(
+    script,
+    /elements\["assistant-send"\]\.disabled = \(\s*!available \|\| runtimeStatus === "direct_only"\s*\)/
+  );
   assert.match(script, /setText\(paragraph, boundedString\(message, 16000\)\)/);
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
   assert.match(script, /window\.location\.hash = "#approvals"/);
   assert.match(script, /loadActionPlans\(\{ selectPlanId: planId \}\)/);
   assert.match(script, /state\.assistantController\.abort\(\)/);
   assert.match(script, /elements\["assistant-transcript"\]\.replaceChildren\(\)/);
+  assert.match(script, /elements\["assistant-mode-auto"\]\.checked = true/);
+  assert.match(script, /state\.assistantPreparedPlanCount = 0/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
   assert.match(worker, /"\/hcn\/api\/"/);
   assert.doesNotMatch(worker, /assistant\/turns/);
+});
+
+test("Ask Thresher accepts only the exact bounded reasoning-routing contract", async () => {
+  const asset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = asset.body.toString("utf8");
+  const normalize = extractConsoleFunction(
+    script,
+    "normalizeAssistantRouting"
+  );
+  const valid = {
+    route: "deep",
+    profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+    reasonCodes: ["explicit_deep_review"],
+    modelUsed: true
+  };
+
+  assert.deepEqual(evaluateAssistantRouting(normalize, valid), valid);
+  for (const invalid of [
+    { ...valid, route: "unknown" },
+    { ...valid, extra: true },
+    { ...valid, profileId: "" },
+    { ...valid, profileId: "totally-untrusted" },
+    { ...valid, reasonCodes: [] },
+    { ...valid, reasonCodes: ["made_up"] },
+    {
+      ...valid,
+      reasonCodes: ["explicit_deep_review", "explicit_deep_review"]
+    },
+    { ...valid, reasonCodes: ["x".repeat(81)] },
+    { ...valid, modelUsed: false },
+    {
+      route: "deterministic",
+      profileId: "hcn.deterministic.v1",
+      reasonCodes: ["fact_only_work_center"],
+      modelUsed: true
+    }
+  ]) {
+    assert.throws(
+      () => evaluateAssistantRouting(normalize, invalid),
+      /Invalid assistant response/
+    );
+  }
+});
+
+test("Ask Thresher accepts only bounded known source projections", async () => {
+  const asset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = asset.body.toString("utf8");
+  const normalize = extractConsoleFunction(
+    script,
+    "normalizeAssistantSources"
+  );
+  const valid = [{
+    key: "jobnimbus",
+    label: "JobNimbus assigned files",
+    status: "fresh",
+    checkedAt: "2026-07-30T12:00:00.000Z"
+  }];
+
+  assert.deepEqual(evaluateAssistantSources(normalize, valid), [{
+    key: "jobnimbus",
+    label: "JobNimbus assigned files",
+    status: "fresh"
+  }]);
+  for (const invalid of [
+    [{ ...valid[0], key: "unknown_source" }],
+    [{ ...valid[0], status: "invented" }],
+    [{ ...valid[0], extra: true }],
+    [{ ...valid[0], checkedAt: "" }],
+    [valid[0], valid[0]]
+  ]) {
+    assert.throws(
+      () => evaluateAssistantSources(normalize, invalid),
+      /Invalid assistant response/
+    );
+  }
 });
 
 test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-only", async () => {
@@ -218,13 +454,13 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v10";/);
-  assert.match(worker, /"\/hcn\/\?shell=v10"/);
-  assert.match(worker, /"\/hcn\/app\.css\?shell=v10"/);
-  assert.match(worker, /"\/hcn\/app\.js\?shell=v10"/);
-  assert.match(worker, /"\/hcn\/manifest\.webmanifest\?shell=v10"/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v11";/);
+  assert.match(worker, /"\/hcn\/\?shell=v11"/);
+  assert.match(worker, /"\/hcn\/app\.css\?shell=v11"/);
+  assert.match(worker, /"\/hcn\/app\.js\?shell=v11"/);
+  assert.match(worker, /"\/hcn\/manifest\.webmanifest\?shell=v11"/);
   assert.match(worker, /const SHELL_PATH_SET = new Set\(SHELL_PATHNAMES\)/);
-  assert.match(script, /\/hcn\/sw\.js\?shell=v10/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v11/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   const browserAuthority = script.slice(
     script.indexOf("function hasBrowserAuthority()"),
@@ -502,7 +738,8 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.match(html, /Ask Thresher/);
   assert.match(html, /aria-live="polite"[\s\S]*id="home-next-action"/);
   assert.equal((html.match(/data-assistant-starter=/g) || []).length, 6);
-  assert.match(html, /data-assistant-starter="Show me the files assigned to me/);
+  assert.match(html, /data-assistant-starter="Show my assigned Work Center\."/);
+  assert.match(html, /data-assistant-direct="true"/);
   assert.match(html, /data-assistant-starter="Show me my neglected files/);
   assert.match(html, /data-assistant-starter="Review my recent file-related communications/);
   assert.match(script, /setConnection\("good", "System ready"\)/);

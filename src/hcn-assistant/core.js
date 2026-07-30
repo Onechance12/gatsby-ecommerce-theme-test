@@ -4,7 +4,7 @@ import {
   normalizeHcnAssistantToolCall
 } from "./tools.js";
 
-export const DEFAULT_HCN_ASSISTANT_MODEL = "gpt-5.6-terra";
+export const DEFAULT_HCN_ASSISTANT_MODEL = "gpt-5.6-sol";
 export const DEFAULT_HCN_ASSISTANT_INSTRUCTIONS = [
   "You are Thresher, HCN's file-operations assistant.",
   "Use only the provided tools and fresh tool evidence. Never invent file facts.",

@@ -71,7 +71,12 @@ function jobNimbusDetail(file = eligibleFile()) {
       propertyAddress: "100 Private Street, Example, TX 75001",
       carrierName: "Example Carrier",
       claimNumber: "CLAIM-PRIVATE-1",
-      policyNumber: "POLICY-PRIVATE-1",
+       policyNumber: "POLICY-PRIVATE-1",
+       dateOfLoss: "2026-05-17",
+       damageFactsPresent: true,
+       adjusterName: "Taylor Adjuster",
+      adjusterEmail: "ADJUSTER@CARRIER.EXAMPLE",
+      adjusterPhone: "(555) 555-0130",
       rawContact: {
         accessToken: "DO-NOT-LEAK-RAW-CONTACT"
       }
@@ -118,11 +123,12 @@ function gmailSuccess() {
     complete: true,
     items: [
       {
-        providerRecordId: "gmail-provider-id",
-        direction: "inbound",
-        occurredAt: "2026-07-28T17:20:00.000Z",
-        hasAttachment: true,
-        actionState: "needs_reply",
+         providerRecordId: "gmail-provider-id",
+         direction: "inbound",
+         occurredAt: "2026-07-28T17:20:00.000Z",
+         hasAttachment: true,
+         deliveryState: "received",
+         actionState: "needs_reply",
         subject: `Subject ${"s".repeat(300)}`,
         snippet: `Snippet ${"p".repeat(400)}`,
         body: "DO-NOT-LEAK-GMAIL-BODY"
@@ -370,6 +376,32 @@ test("exact file lookup accepts only a current opaque ref and blocks forged refs
   );
 });
 
+test("internal deterministic lookup resolves one exact assigned numeric job number", async () => {
+  const file = eligibleFile({ jobNumber: "2862" });
+  const result = await createService({
+    files: [file],
+    dependencies: {
+      loadJobNimbusFile: async () => jobNimbusDetail(file)
+    }
+  }).readFileByJobNumber({
+    jobNumber: "2862",
+    recentLimit: 10
+  });
+
+  assert.equal(result.file.jobNumber, "2862");
+  assert.equal(result.file.fileRef, fileRef());
+  assert.equal(result.evidenceStatus, "complete");
+
+  await assert.rejects(
+    () =>
+      createService({ files: [file] }).readFileByJobNumber({
+        jobNumber: "JN-2862",
+        recentLimit: 10
+      }),
+    { code: "invalid_request", statusCode: 400 }
+  );
+});
+
 test("exact file response is bounded, ephemeral, and strips provider extras", async () => {
   const result = await createService().readFile({
     fileRef: fileRef(),
@@ -381,6 +413,12 @@ test("exact file response is bounded, ephemeral, and strips provider extras", as
   assert.equal(result.file.fileRef, fileRef());
   assert.equal(result.file.client.primaryEmail, "owner@example.com");
   assert.equal(result.file.property.address, "100 Private Street, Example, TX 75001");
+  assert.equal(result.file.insurance.dateOfLoss, "2026-05-17");
+  assert.deepEqual(result.file.adjuster, {
+    name: "Taylor Adjuster",
+    email: "adjuster@carrier.example",
+    phone: "(555) 555-0130"
+  });
   assert.equal(Array.from(result.recent.activities[0].label).length, 160);
   assert.equal(Array.from(result.recent.documents[0].fileName).length, 160);
   assert.equal(Array.from(result.recent.gmail[0].subject).length, 160);
