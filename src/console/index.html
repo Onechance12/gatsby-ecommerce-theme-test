@@ -13,15 +13,15 @@
       content="Home Claim Network employee Work Center."
     >
     <title>HCN Work Center</title>
-    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v9">
-    <link rel="stylesheet" href="/hcn/app.css?shell=v9">
-    <script src="/hcn/app.js?shell=v9" defer></script>
+    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v10">
+    <link rel="stylesheet" href="/hcn/app.css?shell=v10">
+    <script src="/hcn/app.js?shell=v10" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to employee Work Center</a>
 
     <header class="topbar">
-      <a class="brand" href="/hcn/?shell=v9" aria-label="HCN Work Center home">
+      <a class="brand" href="/hcn/?shell=v10" aria-label="HCN Work Center home">
         <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
         <span class="brand-copy">
           <strong>HCN Work Center</strong>
@@ -46,7 +46,7 @@
           <p class="nav-label">Start</p>
           <a class="nav-item is-active" href="#overview" aria-current="page">
             <span class="nav-glyph glyph-overview" aria-hidden="true"></span>
-            <span>Home</span>
+            <span>Ask Thresher</span>
           </a>
           <a class="nav-item" href="#work-center">
             <span class="nav-glyph glyph-work" aria-hidden="true"></span>
@@ -94,87 +94,147 @@
         <div class="sidebar-note">
           <span class="sidebar-note-mark" aria-hidden="true"></span>
           <p><strong>Need a place to start?</strong></p>
-          <p>Open Work My Files and choose the first item that needs attention.</p>
+          <p>Ask Thresher what needs attention or choose one of the starters.</p>
         </div>
       </aside>
 
       <main id="main-content" class="main-content" tabindex="-1">
         <section
           id="overview"
-          class="company-today-hero console-view is-current-view"
+          class="assistant-view console-view is-current-view"
           aria-labelledby="company-today-title"
         >
-          <div class="company-hero-copy">
-            <p class="eyebrow">Welcome to HCN</p>
-            <h1 id="company-today-title">What do you need to get done?</h1>
-            <p class="hero-summary">
-              Pick one place to start. You will only see the files and tools your
-              HCN account is allowed to use.
-            </p>
-            <div class="hero-actions">
-              <a
-                id="sign-in-action"
-                class="button button-primary"
-                href="/hcn/auth/login?returnTo=%2Fhcn"
-                hidden
-              >Sign in to HCN</a>
+          <header class="assistant-heading">
+            <div>
+              <p class="eyebrow">Your HCN work assistant</p>
+              <h1 id="company-today-title">Ask Thresher</h1>
+              <p>
+                Tell Thresher what you need. It can review the work your HCN
+                account is allowed to use and prepare actions for your review.
+              </p>
             </div>
-            <div
-              id="home-auth-alert"
-              class="operations-alert home-auth-alert"
-              data-tone="neutral"
-              role="status"
-              aria-live="polite"
+            <a
+              id="sign-in-action"
+              class="button button-primary assistant-sign-in"
+              href="/hcn/auth/login?returnTo=%2Fhcn"
               hidden
-            ></div>
-          </div>
+            >Sign in to HCN</a>
+          </header>
 
-          <aside class="home-next-step" aria-labelledby="home-next-label">
-            <span id="home-next-label" class="home-next-label">Next step</span>
+          <div
+            id="home-auth-alert"
+            class="operations-alert home-auth-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+
+          <aside class="assistant-access" aria-labelledby="home-next-label">
+            <span id="home-next-label" class="home-next-label">Your access</span>
             <div role="status" aria-live="polite" aria-atomic="true">
               <strong id="home-next-action">Checking your access</strong>
               <span id="home-next-detail">This should only take a moment.</span>
             </div>
           </aside>
 
-          <nav
-            id="home-primary-actions"
-            class="home-action-grid"
-            aria-label="Choose what you want to do"
+          <div
+            id="assistant-alert"
+            class="operations-alert assistant-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
           >
-            <a class="home-action" data-home-action="work" href="#work-center">
-              <span class="home-action-copy">
-                <strong>Work My Files</strong>
-                <span>See what needs attention and open one exact file.</span>
-              </span>
-              <span id="home-work-status" class="home-action-status">Checking</span>
-              <span class="home-action-arrow" aria-hidden="true">→</span>
-            </a>
+            Sign in to ask Thresher for help.
+          </div>
 
-            <a
-              class="home-action"
-              data-home-action="sweep"
-              href="#management-sweep"
-              data-hcn-capability="hcn.management_sweep.read"
-              hidden
-            >
-              <span class="home-action-copy">
-                <strong>Company Sweep</strong>
-                <span>Find the files with the longest activity gaps.</span>
-              </span>
-              <span id="home-sweep-status" class="home-action-status">Checking</span>
-              <span class="home-action-arrow" aria-hidden="true">→</span>
-            </a>
+          <div
+            id="assistant-transcript"
+            class="assistant-transcript"
+            role="log"
+            aria-label="Conversation with Thresher"
+            aria-live="polite"
+            aria-relevant="additions"
+            aria-busy="false"
+            tabindex="0"
+          >
+            <article class="assistant-message" data-speaker="assistant">
+              <span class="assistant-speaker">Thresher</span>
+              <p>What do you need help with?</p>
+            </article>
+          </div>
 
-            <a class="home-action" data-home-action="connections" href="#connections">
-              <span class="home-action-copy">
-                <strong>Connections</strong>
-                <span>Check JobNimbus, then link Google and your Quo work line.</span>
-              </span>
-              <span id="home-connections-status" class="home-action-status">Checking</span>
-              <span class="home-action-arrow" aria-hidden="true">→</span>
-            </a>
-          </nav>
+          <div class="assistant-starters" aria-labelledby="assistant-starters-title">
+            <p id="assistant-starters-title">Start with one of these</p>
+            <div class="assistant-starter-grid">
+              <button
+                class="assistant-starter"
+                type="button"
+                data-assistant-starter="Show me the files assigned to me that need attention."
+              >Work my files</button>
+              <button
+                class="assistant-starter"
+                type="button"
+                data-assistant-starter="Help me find a specific client file."
+              >Find a file</button>
+              <button
+                class="assistant-starter"
+                type="button"
+                data-assistant-starter="Show me my neglected files with the longest verified activity gaps."
+              >Show neglected files</button>
+              <button
+                class="assistant-starter"
+                type="button"
+                data-assistant-starter="Review my recent file-related communications and tell me what needs attention."
+              >Review communications</button>
+              <button
+                class="assistant-starter"
+                type="button"
+                data-assistant-starter="Help me draft a follow-up for a client file."
+              >Draft a follow-up</button>
+              <button
+                class="assistant-starter"
+                type="button"
+                data-assistant-starter="Help me review a file and prepare the next steps needed to file its claim."
+              >File a claim</button>
+            </div>
+          </div>
+
+          <form id="assistant-form" class="assistant-composer" novalidate>
+            <label for="assistant-prompt">What do you need?</label>
+            <div class="assistant-compose-row">
+              <textarea
+                id="assistant-prompt"
+                name="message"
+                rows="2"
+                maxlength="2000"
+                placeholder="Ask about a file, email, follow-up, claim, or next step..."
+                aria-describedby="assistant-composer-help"
+                required
+              ></textarea>
+              <button id="assistant-send" class="button button-primary" type="submit">
+                Send
+              </button>
+            </div>
+            <p id="assistant-composer-help">
+              Thresher shows proposed actions for review before anything changes.
+            </p>
+          </form>
+
+          <button
+            id="assistant-review-action"
+            class="button button-primary assistant-review-action"
+            type="button"
+            hidden
+          >
+            Review proposed action
+          </button>
+
+          <div class="assistant-home-status" aria-hidden="true" hidden>
+            <span id="home-work-status">Checking</span>
+            <span id="home-sweep-status">Checking</span>
+            <span id="home-connections-status">Checking</span>
+          </div>
         </section>
 
         <section
@@ -1417,20 +1477,17 @@
           <section class="console-card boundaries-card" aria-labelledby="boundaries-title">
             <div class="card-heading">
               <div>
-                <p class="eyebrow">Hard boundaries</p>
-                <h2 id="boundaries-title">System separation</h2>
+                <p class="eyebrow">Protected work</p>
+                <h2 id="boundaries-title">HCN data protection</h2>
                 <p>
-                  HCN has no route to Chance Brain. Thresher uses only the
-                  isolated HCN Operations Brain. Its explicitly gated store
-                  retains encrypted, minimized operational state and has no
-                  action authority. Legacy client memory remains untouched,
-                  quarantined, and unreachable from HCN.
+                  Your HCN account controls what you can see and what you can
+                  propose. Changes still require a separate review.
                 </p>
               </div>
-              <span class="card-status card-status-fixed">Current contract</span>
+              <span class="card-status card-status-fixed">Protected</span>
             </div>
             <div id="boundary-list" class="boundary-list" aria-live="polite">
-              <p class="empty-state">Waiting for boundary attestation.</p>
+              <p class="empty-state">Checking HCN data protection.</p>
             </div>
           </section>
 

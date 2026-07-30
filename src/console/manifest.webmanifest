@@ -3,7 +3,7 @@
   "short_name": "HCN",
   "description": "Home Claim Network employee Work Center.",
   "id": "/hcn/",
-  "start_url": "/hcn/?shell=v9",
+  "start_url": "/hcn/?shell=v10",
   "scope": "/hcn/",
   "display": "standalone",
   "orientation": "any",

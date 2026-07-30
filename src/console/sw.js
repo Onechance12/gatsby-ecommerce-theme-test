@@ -1,7 +1,7 @@
 "use strict";
 
 const CACHE_PREFIX = "hcn-console-shell-";
-const CACHE_NAME = CACHE_PREFIX + "v9";
+const CACHE_NAME = CACHE_PREFIX + "v10";
 const SHELL_PATHNAMES = Object.freeze([
   "/hcn/",
   "/hcn/app.css",
@@ -10,10 +10,10 @@ const SHELL_PATHNAMES = Object.freeze([
 ]);
 const SHELL_PATHS = Object.freeze([
   ...SHELL_PATHNAMES,
-  "/hcn/?shell=v9",
-  "/hcn/app.css?shell=v9",
-  "/hcn/app.js?shell=v9",
-  "/hcn/manifest.webmanifest?shell=v9"
+  "/hcn/?shell=v10",
+  "/hcn/app.css?shell=v10",
+  "/hcn/app.js?shell=v10",
+  "/hcn/manifest.webmanifest?shell=v10"
 ]);
 const SHELL_PATH_SET = new Set(SHELL_PATHNAMES);
 const BYPASS_PREFIXES = Object.freeze([

@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-29.4";
+export const CAPABILITY_VERSION = "2026-07-30.1";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -28,6 +28,7 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("hcn.work_center.read", "POST /hcn/api/v1/work-center"),
   capability("hcn.management_sweep.read", "POST /hcn/api/v1/management-sweep"),
   capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
+  capability("hcn.assistant.turn", "POST /hcn/api/v1/assistant/turns"),
   capability("hcn.action_plans.prepare", "POST /hcn/api/v1/action-plans/prepare"),
   capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/list"),
   capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/detail"),
@@ -139,11 +140,34 @@ export function buildRuntimeStatus(runtime = {}) {
   const carrierFollowUp = safeObject(source.carrierFollowUp);
   const scheduling = safeObject(source.schedulingAvailability);
   const hcnOperationsBrain = safeObject(source.hcnOperationsBrain);
+  const hcnAssistant = safeObject(source.hcnAssistant);
   const hcnActions = safeObject(source.hcnActions);
   const hcnConsole = safeObject(source.hcnConsole);
   const managementSweep = safeObject(hcnConsole.managementSweep);
 
   return {
+    assistant: {
+      availability: configurationStatus(hcnAssistant.ready),
+      provider: typeof hcnAssistant.provider === "string"
+        ? hcnAssistant.provider
+        : "unknown",
+      model: typeof hcnAssistant.model === "string"
+        ? hcnAssistant.model
+        : "unknown",
+      responsesApiStore:
+        hcnAssistant.responsesApiStore === false
+          ? "disabled"
+          : hcnAssistant.responsesApiStore === true
+            ? "enabled"
+            : "unknown",
+      assignedFileScope: configurationStatus(
+        hcnAssistant.assignedFileScopeOnly
+      ),
+      actionPlanning: configurationStatus(
+        hcnAssistant.modelCanPrepareActionPlans
+      ),
+      execution: gateStatus(hcnAssistant.modelCanExecute)
+    },
     hcnOperationsBrain: {
       advisory: advisoryStatus(hcnOperationsBrain),
       contracts: configurationStatus(hcnOperationsBrain.contractsAvailable),

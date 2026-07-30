@@ -4,9 +4,11 @@ Authenticated bridge and HCN employee operating surface over JobNimbus, Gmail,
 Google Calendar, Quo, calls, and document evidence. `/hcn/` is the primary
 day-to-day interface for HCN employees, but it is not a replacement data store:
 JobNimbus and each connected provider remain the systems of record. The console
-organizes assigned work, presents fresh evidence, and prepares controlled
-actions while a later system-of-record migration remains a separate, measured
-product phase.
+organizes assigned work and includes Ask Thresher, a server-side AI assistant
+that reads fresh, employee-scoped evidence and prepares controlled action
+plans. It has no execution tool; a signed-in person must still review and
+explicitly approve the exact plan. A later system-of-record migration remains
+a separate, measured product phase.
 
 The bridge also supports a ChatGPT Custom GPT Action, verified PDF attachments,
 durable private action receipts, an assigned-file-only employee
@@ -35,6 +37,12 @@ transport is unavailable.
   It stores opaque coded review/work state plus plan/receipt metadata; it has
   no model tools, autonomous learning, action authority, or external-effect
   callback.
+- Ask Thresher is a separate reasoning layer over those HCN boundaries. It
+  uses a dedicated server-side OpenAI Responses API credential, serial
+  allowlisted tools, `store:false`, bounded in-memory session history, and the
+  signed-in employee's scope. It can read Work Center/file evidence, run the
+  management sweep only for an authorized role, and prepare an exact action
+  plan. It cannot execute or approve one.
 - HCN employee authority is identity-bound and least privilege. A verified
   Google email must exactly match one unique active JobNimbus employee, and
   new employees receive only their assigned JobNimbus scope by default.
@@ -151,6 +159,7 @@ JOBNIMBUS_API_KEY=
 JOBNIMBUS_BRIDGE_TOKEN=
 CODEX_OPERATOR_TOKEN=
 CODEX_MAC_OPERATOR_TOKEN=
+HCN_ASSISTANT_OPENAI_API_KEY=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
@@ -166,6 +175,10 @@ HCN_THRESHER_STORE_PATH=/var/data/hcn-operations/thresher/state.enc.json
 HCN_THRESHER_STORE_KEY=
 HCN_THRESHER_REFERENCE_KEY=
 HCN_THRESHER_SIGNING_KEY=
+HCN_ASSISTANT_ENABLED=false
+HCN_ASSISTANT_MODEL=gpt-5.6-terra
+HCN_ASSISTANT_REASONING_EFFORT=low
+HCN_ASSISTANT_MAX_OUTPUT_TOKENS=1600
 ALLOW_GMAIL_SEND=false
 QUO_DEFAULT_FROM_NUMBER=
 ALLOW_QUO_SEND=false
@@ -190,8 +203,18 @@ OPENAI_API_KEY=
 dedicated persistent directory that is not shared with Chance Brain, legacy
 client memory, or Jobrolo. All bridge security ledgers, connector grants,
 employee links, handoffs, and artifacts default beneath its `platform/`
-subdirectory. No operational-model provider is configured in this tranche;
-Thresher is deterministic and non-executing.
+subdirectory. Thresher's operational-state/rules layer remains deterministic
+and non-executing. Ask Thresher's model connection is configured separately
+with `HCN_ASSISTANT_*`; it never receives an execution tool.
+
+`HCN_ASSISTANT_OPENAI_API_KEY` must be dedicated to HCN and must not equal the
+realtime voice key, an HCN encryption key, an OAuth secret, or an operator
+credential. Ask Thresher sends each prompt and the allowlisted fresh evidence
+needed for that turn to the OpenAI Responses API with `store:false`. That
+disables Responses application-state storage, but OpenAI project data controls
+and abuse-monitoring retention policies still apply. Zero Data Retention or
+Modified Abuse Monitoring is a separate project-level approval and
+configuration.
 
 The exact `HCN_THRESHER_ENABLED=true` gate activates the isolated Thresher
 storage lifecycle only after every dedicated value validates.
@@ -208,11 +231,11 @@ plan/rule/evidence audit graph are never compacted.
 ## HCN Operations Console
 
 The HCN console is the responsive, installable employee operating surface at
-`/hcn/`. It reports fresh bridge/build readiness, connector and release-gate
-status, explicit Chance Brain/Thresher/Jobrolo boundaries, and the
-signed-in employee's exact capabilities. Every enabled employee can work only
-the JobNimbus files assigned to that employee by default. Connections links
-that employee's Gmail/read-only Calendar grant and Quo line separately.
+`/hcn/`. Its primary view is Ask Thresher, with direct starter actions for
+working files, finding a file, reviewing communications, checking neglected
+files, and preparing follow-up work. Every enabled employee can work only the
+JobNimbus files assigned to that employee by default. Connections links that
+employee's Gmail/read-only Calendar grant and Quo line separately.
 Exact-file review can combine current JobNimbus evidence with exactly
 correlated Gmail and Quo evidence for the same employee; missing or unhealthy
 employee connectors fail closed and never fall back to Chance's accounts.
@@ -465,7 +488,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check-readiness.ps1
 ```
 
 Review the complete diff and confirm the deployment branch is based on the
-current `origin/jobnimbus-bridge`. Push, merge, deployment, the Render
+current `origin/codex/hcn-platform-foundation`. Push, merge, deployment, the Render
 `HCN_MANAGEMENT_ADJUSTERS_JSON` value, or any other Render environment change
 each requires specific action-time approval. After deployment, verify the
 attested build SHA, live capability manifest, assigned-file session
@@ -474,6 +497,35 @@ connector health, `no-store` response behavior, and an exact three-adjuster
 synthetic or approved production smoke test. Never place the management
 allowlist's real owner identifiers in a test fixture, log, screenshot, chat,
 or repository.
+
+### Ask Thresher production cutover
+
+Before cutover, confirm the full test and readiness suites pass, record the
+exact candidate SHA, and obtain action-time approval for every external
+change. Store a dedicated, funded HCN OpenAI project key directly in Render as
+`HCN_ASSISTANT_OPENAI_API_KEY`; never reuse `OPENAI_API_KEY` or another HCN
+secret. Confirm the checked-in model, reasoning, and token settings, add the
+exact Google Web OAuth redirect
+`https://hcn-operations-platform.onrender.com/oauth/google/callback`, push the
+candidate to `codex/hcn-platform-foundation`, and manually deploy that exact
+SHA. Render auto-deploy is disabled.
+
+After deployment, do not treat an overall `/health` `ok: true` as assistant
+readiness: the service may remain healthy while `hcnAssistant.ready` is
+`false`. Verify `/api/v1/meta` reports the candidate SHA as
+`provider_attested`, then require `hcnAssistant.enabled`,
+`hcnAssistant.configured`, and `hcnAssistant.ready` all to be `true`. Confirm
+the full OpenAPI and capability manifest expose `hcn.assistant.turn`, the
+Custom GPT schema does not, and assistant responses are `no-store`. Complete
+one controlled employee sign-in, assigned-work read, authorized management
+sweep, and exact action-plan preparation. Do not execute the smoke-test plan;
+verify JobNimbus, Gmail, Quo, and Calendar remain unchanged.
+
+If readiness, scope, or model behavior fails, set
+`HCN_ASSISTANT_ENABLED=false` and restart the service. If the release affects
+existing HCN operations, roll Render back to the previously verified attested
+SHA. Revoke the assistant key only if exposure is suspected; do not rotate
+unrelated HCN credentials.
 
 ## Fresh Review And Approval
 

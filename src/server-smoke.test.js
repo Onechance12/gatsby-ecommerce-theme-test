@@ -419,7 +419,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(rootRedirectResponse.status, 302);
   assert.equal(
     rootRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v9"
+    "/hcn/?shell=v10"
   );
   assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
   assert.match(
@@ -434,7 +434,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(consoleRedirectResponse.status, 302);
   assert.equal(
     consoleRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v9"
+    "/hcn/?shell=v10"
   );
   assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
 
@@ -2803,6 +2803,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       PUBLIC_BASE_URL: origin,
       HCN_CONSOLE_ENABLED: "true",
       HCN_CONSOLE_ORIGIN: origin,
+      HCN_ASSISTANT_ENABLED: "false",
+      HCN_ASSISTANT_OPENAI_API_KEY: "",
       HCN_TENANT_ID: "tenant_0123456789abcdef",
       HCN_REFERENCE_KEY: hcnReferenceKey,
       HCN_GOOGLE_GRANT_KEY: hcnGoogleGrantKey,
@@ -2904,6 +2906,23 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "custom_gpt_broker_and_hcn_connector"
   );
   assert.equal(managementHealth.gmailConfigured, true);
+  assert.deepEqual(managementHealth.hcnAssistant, {
+    enabled: false,
+    configured: false,
+    ready: false,
+    provider: "openai_responses_api",
+    model: "gpt-5.6-terra",
+    reasoningEffort: "low",
+    responsesApiStore: false,
+    providerRetention: "openai_project_data_controls_apply",
+    sessionHistory:
+      "bounded_in_memory_no_durable_client_transcript",
+    assignedFileScopeOnly: true,
+    modelHasReadTools: false,
+    modelCanPrepareActionPlans: false,
+    modelCanExecute: false,
+    exactHumanApprovalRequired: true
+  });
   assert.deepEqual(
     managementHealth.hcnConsole.employeeConnections,
     {
@@ -3017,6 +3036,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "hcn.action_plans.prepare",
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
+    "hcn.assistant.turn",
     "hcn.connectors.google.disconnect",
     "hcn.connectors.google.link",
     "hcn.connectors.quo_line.link",
@@ -3247,6 +3267,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "readHcnManagementSweep"
   );
   assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/assistant/turns"].post.operationId,
+    "askHcnThresher"
+  );
+  assert.equal(
     fullOpenApi.paths["/hcn/connect/google/start"].get.operationId,
     "startHcnGoogleConnector"
   );
@@ -3308,6 +3332,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/work-center"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/file-review"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/management-sweep"], undefined);
+  assert.equal(chatGptOpenApi.paths["/hcn/api/v1/assistant/turns"], undefined);
   for (const connectorPath of hcnConnectorOpenApiPaths) {
     assert.equal(chatGptOpenApi.paths[connectorPath], undefined);
   }
@@ -3336,6 +3361,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   assert.equal(sharedBearerHcnResponse.status, 403);
 
+  const sharedBearerAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer fixture-shared-bridge-token-for-ambiguity",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prompt: "Work my files." })
+    }
+  );
+  assert.equal(sharedBearerAssistantResponse.status, 403);
+
   const directGoogleBearerHcnResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
     {
@@ -3348,6 +3387,72 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     }
   );
   assert.equal(directGoogleBearerHcnResponse.status, 403);
+
+  const missingAssistantOriginResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "x-hcn-csrf": browserSession.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prompt: "Work my files." })
+    }
+  );
+  assert.equal(missingAssistantOriginResponse.status, 403);
+
+  const missingAssistantCsrfResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prompt: "Work my files." })
+    }
+  );
+  assert.equal(missingAssistantCsrfResponse.status, 403);
+
+  const malformedAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        prompt: "Work my files.",
+        model: "attacker-selected-model"
+      })
+    }
+  );
+  assert.equal(malformedAssistantResponse.status, 400);
+
+  const oversizedAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ prompt: "x".repeat(17 * 1024) })
+    }
+  );
+  assert.equal(oversizedAssistantResponse.status, 413);
+
+  const unavailableAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ prompt: "Work my files." })
+    }
+  );
+  assert.equal(unavailableAssistantResponse.status, 503);
+  const unavailableAssistant = await unavailableAssistantResponse.json();
+  assert.equal(
+    unavailableAssistant.error,
+    "Ask Thresher is not configured for this HCN environment."
+  );
 
   const workCenterResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
@@ -4029,6 +4134,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       "hcn.action_plans.prepare",
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
+      "hcn.assistant.turn",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",

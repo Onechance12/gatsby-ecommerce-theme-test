@@ -497,6 +497,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/work-center",
     "POST /hcn/api/v1/management-sweep",
     "POST /hcn/api/v1/file-review",
+    "POST /hcn/api/v1/assistant/turns",
     "POST /hcn/api/v1/action-plans/prepare",
     "POST /hcn/api/v1/action-plans/list",
     "POST /hcn/api/v1/action-plans/detail",
@@ -535,7 +536,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-receipts/detail",
     "POST /hcn/api/v1/action-receipts/list"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 17);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 18);
 
   for (const role of [
     "administrator",
@@ -564,6 +565,11 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
       role
     );
     assert.equal(
+      routeAllowed(otherBrowser, "POST", "/hcn/api/v1/assistant/turns"),
+      role !== "onboarding",
+      role
+    );
+    assert.equal(
       routeAllowed(otherBrowser, "POST", "/hcn/api/v1/management-sweep"),
       role === "administrator" || role === "manager",
       role
@@ -585,6 +591,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
   ]) {
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/work-center"), false);
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/file-review"), false);
+    assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/assistant/turns"), false);
   }
 });
 

@@ -8,6 +8,7 @@
     connectorsStatus: "/hcn/api/v1/connectors/status",
     googleConnectStart: "/hcn/connect/google/start",
     quoLine: "/hcn/api/v1/connectors/quo-line",
+    assistantTurns: "/hcn/api/v1/assistant/turns",
     managementSweep: "/hcn/api/v1/management-sweep",
     workCenter: "/hcn/api/v1/work-center",
     fileReview: "/hcn/api/v1/file-review",
@@ -21,6 +22,7 @@
   });
 
   const WORK_CENTER_CAPABILITY = "hcn.work_center.read";
+  const ASSISTANT_TURN_CAPABILITY = "hcn.assistant.turn";
   const MANAGEMENT_SWEEP_CAPABILITY = "hcn.management_sweep.read";
   const CONNECTOR_READ_CAPABILITY = "hcn.connectors.read";
   const GOOGLE_LINK_CAPABILITY = "hcn.connectors.google.link";
@@ -159,41 +161,6 @@
     realtimeVoiceCalls: "Realtime voice calls"
   });
 
-  const BOUNDARY_LABELS = Object.freeze({
-    chanceBrain: {
-      title: "Chance Brain",
-      states: {
-        disconnected_no_route: "Disconnected · no route or data flow"
-      }
-    },
-    hcnChanceBrainDataFlow: {
-      title: "HCN → Chance Brain",
-      states: {
-        none: "None · permanently isolated"
-      }
-    },
-    jobrolo: {
-      title: "Jobrolo",
-      states: {
-        disconnected: "Disconnected · separate product"
-      }
-    },
-    hcnOperationsBrain: {
-      title: "Thresher · HCN Operations Brain",
-      states: {
-        foundation_persistence_pending: "Isolated foundation · persistence pending",
-        active_isolated_encrypted_operational_state:
-          "Active · isolated encrypted operational state"
-      }
-    },
-    legacyClientMemory: {
-      title: "Legacy client memory",
-      states: {
-        quarantined_unreachable: "Quarantined · unreachable from HCN"
-      }
-    }
-  });
-
   const CAPABILITY_GROUP_LABELS = Object.freeze({
     claims: "Claims",
     gmail: "Gmail",
@@ -247,6 +214,9 @@
     selectedReceiptPlanId: null,
     receipt: null,
     receiptLoading: false,
+    assistantController: null,
+    assistantLoading: false,
+    assistantPlanId: null,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
   };
@@ -294,6 +264,12 @@
       "home-work-status",
       "home-sweep-status",
       "home-connections-status",
+      "assistant-alert",
+      "assistant-transcript",
+      "assistant-form",
+      "assistant-prompt",
+      "assistant-send",
+      "assistant-review-action",
       "management-sweep-refresh",
       "management-sweep-hero-message",
       "management-sweep-status",
@@ -447,6 +423,32 @@
 
     elements["retry-action"].addEventListener("click", loadPlatformState);
     elements["sign-out-action"].addEventListener("click", signOut);
+    elements["assistant-form"].addEventListener("submit", submitAssistantTurn);
+    elements["assistant-prompt"].addEventListener("keydown", function (event) {
+      if (
+        event.key === "Enter"
+        && !event.shiftKey
+        && !event.isComposing
+      ) {
+        event.preventDefault();
+        elements["assistant-form"].requestSubmit();
+      }
+    });
+    elements["assistant-review-action"].addEventListener(
+      "click",
+      reviewAssistantPlan
+    );
+    document.querySelectorAll("[data-assistant-starter]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const prompt = boundedString(
+          button.getAttribute("data-assistant-starter"),
+          2000
+        ).trim();
+        if (!prompt || state.assistantLoading) return;
+        elements["assistant-prompt"].value = prompt;
+        elements["assistant-form"].requestSubmit();
+      });
+    });
     elements["management-sweep-refresh"].addEventListener(
       "click",
       loadManagementSweep
@@ -832,6 +834,308 @@
     );
   }
 
+  function syncAssistantAccess() {
+    const signedIn = hasBrowserAuthority();
+    const authorized = hasAssistantAuthority();
+    syncAssistantControls();
+    if (state.assistantLoading) {
+      notice(
+        elements["assistant-alert"],
+        "Thresher is working on your request.",
+        "neutral"
+      );
+      return;
+    }
+    if (!navigator.onLine) {
+      notice(
+        elements["assistant-alert"],
+        "Reconnect before asking Thresher to review live work.",
+        "warn"
+      );
+      return;
+    }
+    if (!signedIn) {
+      notice(
+        elements["assistant-alert"],
+        "Sign in to ask Thresher for help.",
+        "neutral"
+      );
+      return;
+    }
+    if (!authorized) {
+      notice(
+        elements["assistant-alert"],
+        "Your HCN account is signed in, but Ask Thresher is not enabled for this role.",
+        "warn"
+      );
+      return;
+    }
+    const runtimeStatus = assistantRuntimeStatus();
+    if (runtimeStatus !== "configured") {
+      notice(
+        elements["assistant-alert"],
+        runtimeStatus === "unconfigured"
+          ? "Ask Thresher setup is not finished yet."
+          : "Ask Thresher readiness could not be verified.",
+        "warn"
+      );
+      return;
+    }
+    notice(
+      elements["assistant-alert"],
+      "Ready. Ask about a file, communication, follow-up, claim, or next step.",
+      "good"
+    );
+  }
+
+  function syncAssistantControls() {
+    const available = (
+      navigator.onLine
+      && hasAssistantAuthority()
+      && assistantRuntimeStatus() === "configured"
+      && !state.assistantLoading
+    );
+    elements["assistant-prompt"].disabled = !available;
+    elements["assistant-send"].disabled = !available;
+    document.querySelectorAll("[data-assistant-starter]").forEach(function (button) {
+      button.disabled = !available;
+    });
+    elements["assistant-transcript"].setAttribute(
+      "aria-busy",
+      state.assistantLoading ? "true" : "false"
+    );
+    elements["assistant-review-action"].disabled = (
+      state.assistantLoading
+      || !state.assistantPlanId
+      || !hasActionReadAuthority()
+    );
+  }
+
+  async function submitAssistantTurn(event) {
+    event.preventDefault();
+    if (state.assistantLoading) return;
+    if (
+      !navigator.onLine
+      || !hasAssistantAuthority()
+      || assistantRuntimeStatus() !== "configured"
+    ) {
+      syncAssistantAccess();
+      return;
+    }
+
+    const prompt = boundedString(
+      elements["assistant-prompt"].value,
+      2000
+    ).trim();
+    if (!prompt) {
+      notice(
+        elements["assistant-alert"],
+        "Tell Thresher what you need before sending.",
+        "warn"
+      );
+      elements["assistant-prompt"].focus();
+      return;
+    }
+
+    if (state.assistantController) state.assistantController.abort();
+    const controller = new AbortController();
+    state.assistantController = controller;
+    state.assistantLoading = true;
+    state.assistantPlanId = null;
+    elements["assistant-review-action"].hidden = true;
+    elements["assistant-prompt"].value = "";
+    appendAssistantMessage("user", prompt);
+    const pending = appendAssistantMessage(
+      "assistant",
+      "Working on that…",
+      { busy: true }
+    );
+    syncAssistantAccess();
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.assistantTurns,
+        { prompt: prompt },
+        controller.signal,
+        ASSISTANT_TURN_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const turn = normalizeAssistantTurnResponse(response);
+      pending.remove();
+      appendAssistantMessage("assistant", turn.message);
+      if (turn.planId) {
+        state.assistantPlanId = turn.planId;
+        elements["assistant-review-action"].hidden = false;
+      }
+      notice(
+        elements["assistant-alert"],
+        turn.planId
+          ? "Thresher prepared an action. Review every detail before approval."
+          : "Thresher finished the review.",
+        "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      pending.remove();
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      appendAssistantMessage(
+        "assistant",
+        "I couldn’t complete that review. " + assistantErrorMessage(error)
+      );
+      notice(
+        elements["assistant-alert"],
+        assistantErrorMessage(error),
+        "bad"
+      );
+    } finally {
+      if (state.assistantController === controller) {
+        state.assistantController = null;
+        state.assistantLoading = false;
+        syncAssistantControls();
+      }
+    }
+    elements["assistant-prompt"].focus();
+  }
+
+  function normalizeAssistantTurnResponse(value) {
+    if (!isRecord(value)) throw new Error("Invalid assistant response");
+    const allowed = new Set([
+      "schema",
+      "generatedAt",
+      "ephemeral",
+      "cachePolicy",
+      "authority",
+      "message",
+      "plan",
+      "sources"
+    ]);
+    const authority = record(value.authority);
+    const allowedAuthority = new Set([
+      "fileScope",
+      "liveSourcesWin",
+      "canRead",
+      "canPrepareActionPlans",
+      "canExecuteActions",
+      "exactHumanApprovalRequired"
+    ]);
+    const keys = Object.keys(value);
+    const authorityKeys = Object.keys(authority);
+    if (
+      keys.length !== allowed.size
+      || keys.some(function (key) {
+        return !allowed.has(key);
+      })
+      || authorityKeys.length !== allowedAuthority.size
+      || authorityKeys.some(function (key) {
+        return !allowedAuthority.has(key);
+      })
+      || value.schema !== "hcn.console.assistant-turn.v1"
+      || !validIsoInstant(value.generatedAt)
+      || value.ephemeral !== true
+      || value.cachePolicy !== "no_store"
+      || authority.fileScope !== "signed_in_employee_assignments_only"
+      || authority.liveSourcesWin !== true
+      || authority.canRead !== true
+      || authority.canPrepareActionPlans !== true
+      || authority.canExecuteActions !== false
+      || authority.exactHumanApprovalRequired !== true
+      || typeof value.message !== "string"
+      || value.message.length > 16000
+      || !Array.isArray(value.sources)
+      || value.sources.length > 50
+      || !(value.plan === null || isRecord(value.plan))
+    ) {
+      throw new Error("Invalid assistant response");
+    }
+
+    const message = boundedString(value.message, 16000).trim();
+    if (!message || message !== value.message.trim()) {
+      throw new Error("Invalid assistant response");
+    }
+
+    let planId = "";
+    if (isRecord(value.plan)) {
+      const possiblePlanId = boundedString(value.plan.planId, 80).trim();
+      if (possiblePlanId) {
+        if (!PLAN_ID.test(possiblePlanId)) {
+          throw new Error("Invalid assistant response");
+        }
+        planId = possiblePlanId;
+      }
+    }
+    return {
+      message: message,
+      planId: planId
+    };
+  }
+
+  function appendAssistantMessage(speaker, message, options) {
+    const article = document.createElement("article");
+    const label = document.createElement("span");
+    const paragraph = document.createElement("p");
+    const normalizedSpeaker = speaker === "user" ? "user" : "assistant";
+    article.className = "assistant-message";
+    article.dataset.speaker = normalizedSpeaker;
+    if (options?.busy === true) article.dataset.busy = "true";
+    label.className = "assistant-speaker";
+    setText(label, normalizedSpeaker === "user" ? "You" : "Thresher");
+    setText(paragraph, boundedString(message, 16000));
+    article.append(label, paragraph);
+    elements["assistant-transcript"].append(article);
+    elements["assistant-transcript"].scrollTop =
+      elements["assistant-transcript"].scrollHeight;
+    return article;
+  }
+
+  function clearAssistantData() {
+    if (state.assistantController) state.assistantController.abort();
+    state.assistantController = null;
+    state.assistantLoading = false;
+    state.assistantPlanId = null;
+    elements["assistant-prompt"].value = "";
+    elements["assistant-review-action"].hidden = true;
+    elements["assistant-transcript"].replaceChildren();
+    appendAssistantMessage(
+      "assistant",
+      "What do you need help with?"
+    );
+    syncAssistantControls();
+  }
+
+  async function reviewAssistantPlan() {
+    const planId = state.assistantPlanId;
+    if (!PLAN_ID.test(String(planId || "")) || !hasActionReadAuthority()) {
+      notice(
+        elements["assistant-alert"],
+        "That proposed action is not available for review in this session.",
+        "warn"
+      );
+      return;
+    }
+    window.location.hash = "#approvals";
+    syncActiveNavigation();
+    const approvals = document.getElementById("approvals");
+    if (approvals) approvals.scrollIntoView({ block: "start" });
+    await loadActionPlans({ selectPlanId: planId });
+  }
+
+  function assistantErrorMessage(error) {
+    if (!navigator.onLine) {
+      return "The connection went offline. Try again after reconnecting.";
+    }
+    const status = statusOf(error);
+    if (status === 429) {
+      return "Thresher is busy. Wait a moment, then try again.";
+    }
+    if (status === 502 || status === 503) {
+      return "Thresher or a live work source is temporarily unavailable.";
+    }
+    return "No result or proposed action was accepted. Please try again.";
+  }
+
   async function loadPlatformState() {
     if (state.loading) return;
     cancelSessionExpiryTimer();
@@ -1058,7 +1362,7 @@
     const runtime = record(meta.runtime);
     renderConnectors(record(runtime.connectors));
     renderGates(record(runtime.gates), record(runtime.configurationDrift));
-    renderBoundaries(record(meta.boundaries));
+    renderBoundaries();
     renderBuild(record(meta.build));
 
     const generatedAt = readableTime(meta.generatedAt);
@@ -1083,7 +1387,7 @@
     badge(elements["build-card-status"], "Unverified", "bad");
     renderEmpty(elements["connector-list"], "Connected-system status is unavailable.");
     renderEmpty(elements["gate-list"], "Runtime gate status is unavailable.");
-    renderEmpty(elements["boundary-list"], "System boundaries could not be verified.");
+    renderEmpty(elements["boundary-list"], "HCN data protection could not be verified.");
     renderBuildPlaceholder("Metadata unavailable");
     setText(
       elements["freshness-text"],
@@ -1143,38 +1447,24 @@
     }
   }
 
-  function renderBoundaries(boundaries) {
-    const fragment = document.createDocumentFragment();
-
-    Object.keys(BOUNDARY_LABELS).forEach(function (key) {
-      const specification = BOUNDARY_LABELS[key];
-      const value = stringValue(boundaries[key]) || "unknown";
-      const item = document.createElement("div");
-      item.className = "boundary-item";
-
-      const copy = document.createElement("div");
-      const title = document.createElement("strong");
-      const status = document.createElement("span");
-      const mark = document.createElement("i");
-
-      setText(title, specification.title);
-      setText(status, specification.states[value] || humanize(value));
-      mark.className = "boundary-state";
-      mark.setAttribute("aria-hidden", "true");
-      if (
-        value === "foundation_persistence_pending"
-        || value === "quarantined_unreachable"
-        || value === "unknown"
-      ) {
-        mark.dataset.tone = "warn";
-      }
-
-      copy.append(title, status);
-      item.append(copy, mark);
-      fragment.append(item);
-    });
-
-    elements["boundary-list"].replaceChildren(fragment);
+  function renderBoundaries() {
+    const item = document.createElement("div");
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    const status = document.createElement("span");
+    const mark = document.createElement("i");
+    item.className = "boundary-item";
+    setText(title, "HCN data protection");
+    setText(
+      status,
+      "Active · your account controls what you can see and propose"
+    );
+    mark.className = "boundary-state";
+    mark.dataset.tone = "good";
+    mark.setAttribute("aria-hidden", "true");
+    copy.append(title, status);
+    item.append(copy, mark);
+    elements["boundary-list"].replaceChildren(item);
   }
 
   function renderBuild(build) {
@@ -1324,6 +1614,7 @@
     setText(elements["capability-summary"], message);
     elements["capability-groups"].replaceChildren();
     syncCapabilityAwareConsole();
+    syncAssistantAccess();
   }
 
   async function signOut() {
@@ -1405,6 +1696,21 @@
     );
   }
 
+  function hasAssistantAuthority() {
+    return (
+      hasBrowserAuthority()
+      && sessionCapabilities().includes(ASSISTANT_TURN_CAPABILITY)
+    );
+  }
+
+  function assistantRuntimeStatus() {
+    const runtime = record(record(state.session).runtime);
+    return boundedString(
+      record(runtime.assistant).availability,
+      32
+    ) || "unknown";
+  }
+
   function hasManagementSweepAuthority() {
     return (
       hasBrowserAuthority()
@@ -1481,6 +1787,7 @@
     syncCapabilityAwareConsole();
     syncActionAccess();
     syncHomeGuidance();
+    syncAssistantAccess();
     if (!navigator.onLine) {
       clearOperationalData("Reconnect to request fresh client evidence.");
       renderOperationsLocked(
@@ -1596,6 +1903,9 @@
   }
 
   function clearOperationalData(message) {
+    clearAssistantData(
+      message || "The conversation was cleared because operating authority changed."
+    );
     clearConnectionsData(message);
     clearManagementSweepData(message);
     if (state.workCenterController) state.workCenterController.abort();
@@ -6713,7 +7023,7 @@
         elements["readiness-summary"],
         sessionNeedsSignIn
           ? "The platform foundation is responding. Your authority remains closed until you sign in."
-          : "The bridge, system boundaries, and your route-level authority have been checked fresh. The Work Center runs a separate fresh client-data read."
+          : "HCN and your account access have been checked. Work views still request fresh client data when you use them."
       );
       return;
     }
@@ -6812,6 +7122,7 @@
         "Reconnect to verify the session and request fresh evidence."
       );
       renderOverallState();
+      syncAssistantAccess();
     }
   }
 
@@ -6898,7 +7209,7 @@
   function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("/hcn/sw.js?shell=v9", { scope: "/hcn/" }).catch(function () {
+      navigator.serviceWorker.register("/hcn/sw.js?shell=v10", { scope: "/hcn/" }).catch(function () {
         // Offline support is optional; readiness remains sourced from live API checks.
       });
     });

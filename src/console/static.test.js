@@ -89,11 +89,11 @@ test("console serves only its fixed application-shell allowlist", async () => {
   const manifest = JSON.parse(
     manifestAsset.body.toString("utf8")
   );
-  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v9/);
-  assert.match(html, /\/hcn\/app\.css\?shell=v9/);
-  assert.match(html, /\/hcn\/app\.js\?shell=v9/);
-  assert.match(html, /href="\/hcn\/\?shell=v9"/);
-  assert.equal(manifest.start_url, "/hcn/?shell=v9");
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v10/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v10/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v10/);
+  assert.match(html, /href="\/hcn\/\?shell=v10"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v10");
 
   for (const pathname of [
     "/hcn",
@@ -137,10 +137,11 @@ test("console shell contains no client records, bearer-token field, or browser s
   assert.match(source, /\/hcn\/auth\/logout/);
   assert.match(source, /\/hcn\/api\/v1\/work-center/);
   assert.match(source, /\/hcn\/api\/v1\/file-review/);
+  assert.match(source, /\/hcn\/api\/v1\/assistant\/turns/);
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
 
-test("console states the hard Chance Brain boundary and honest isolated Thresher state", async () => {
+test("employee console shows one simple HCN data-protection status", async () => {
   const [htmlAsset, scriptAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/"),
     readHcnConsoleAsset("/hcn/app.js")
@@ -148,24 +149,65 @@ test("console states the hard Chance Brain boundary and honest isolated Thresher
   const html = htmlAsset.body.toString("utf8");
   const script = scriptAsset.body.toString("utf8");
 
-  assert.match(html, /HCN has no route to Chance Brain/);
-  assert.match(html, /isolated HCN Operations Brain/);
-  assert.match(html, /encrypted, minimized operational state/);
-  assert.match(html, /has no[\s\S]*action authority/);
-  assert.match(
-    html,
-    /untouched,[\s\S]*quarantined, and unreachable from HCN/
-  );
-  assert.match(script, /disconnected_no_route/);
-  assert.match(script, /Disconnected · no route or data flow/);
-  assert.match(script, /foundation_persistence_pending/);
-  assert.match(script, /Isolated foundation · persistence pending/);
-  assert.match(script, /active_isolated_encrypted_operational_state/);
-  assert.match(script, /Active · isolated encrypted operational state/);
-  assert.match(script, /quarantined_unreachable/);
-  assert.match(script, /Quarantined · unreachable from HCN/);
-  assert.doesNotMatch(script, /Legacy compatibility · read only/);
-  assert.doesNotMatch(script, /hcnV2ChanceBrainDataFlow/);
+  assert.match(html, /HCN data protection/);
+  assert.match(html, /Your HCN account controls what you can see/);
+  assert.match(script, /HCN data protection/);
+  assert.match(script, /your account controls what you can see and propose/);
+  assert.doesNotMatch(html, /Chance Brain|Jobrolo|legacy client memory/i);
+  assert.doesNotMatch(script, /Chance Brain|Jobrolo|legacy client memory/i);
+});
+
+test("Ask Thresher is the simple authenticated employee home and fails closed", async () => {
+  const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(html, /<h1 id="company-today-title">Ask Thresher<\/h1>/);
+  assert.match(html, /id="assistant-transcript"[\s\S]*role="log"/);
+  assert.match(html, /aria-live="polite"/);
+  assert.match(html, /id="assistant-form"/);
+  assert.match(html, /id="assistant-prompt"[\s\S]*maxlength="2000"/);
+  assert.match(html, /id="assistant-send"/);
+  assert.match(html, /id="assistant-alert"[\s\S]*role="status"/);
+  assert.match(html, /id="assistant-review-action"/);
+  for (const label of [
+    "Work my files",
+    "Find a file",
+    "Show neglected files",
+    "Review communications",
+    "Draft a follow-up",
+    "File a claim"
+  ]) {
+    assert.match(html, new RegExp(`>${label}<`));
+  }
+
+  assert.match(script, /assistantTurns: "\/hcn\/api\/v1\/assistant\/turns"/);
+  assert.match(script, /const ASSISTANT_TURN_CAPABILITY = "hcn\.assistant\.turn"/);
+  assert.match(script, /ENDPOINTS\.assistantTurns,[\s\S]*\{ prompt: prompt \}/);
+  assert.match(script, /ASSISTANT_TURN_CAPABILITY/);
+  assert.match(script, /postOperationalJson\(/);
+  assert.match(script, /"hcn\.console\.assistant-turn\.v1"/);
+  assert.match(script, /function normalizeAssistantTurnResponse\(value\)/);
+  assert.match(script, /keys\.length !== allowed\.size/);
+  assert.match(script, /value\.ephemeral !== true/);
+  assert.match(script, /value\.cachePolicy !== "no_store"/);
+  assert.match(script, /authority\.canExecuteActions !== false/);
+  assert.match(script, /authority\.exactHumanApprovalRequired !== true/);
+  assert.match(script, /value\.plan === null \|\| isRecord\(value\.plan\)/);
+  assert.match(script, /if \(possiblePlanId\)/);
+  assert.match(script, /setText\(paragraph, boundedString\(message, 16000\)\)/);
+  assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.match(script, /window\.location\.hash = "#approvals"/);
+  assert.match(script, /loadActionPlans\(\{ selectPlanId: planId \}\)/);
+  assert.match(script, /state\.assistantController\.abort\(\)/);
+  assert.match(script, /elements\["assistant-transcript"\]\.replaceChildren\(\)/);
+  assert.match(worker, /"\/hcn\/api\/"/);
+  assert.doesNotMatch(worker, /assistant\/turns/);
 });
 
 test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-only", async () => {
@@ -176,13 +218,13 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v9";/);
-  assert.match(worker, /"\/hcn\/\?shell=v9"/);
-  assert.match(worker, /"\/hcn\/app\.css\?shell=v9"/);
-  assert.match(worker, /"\/hcn\/app\.js\?shell=v9"/);
-  assert.match(worker, /"\/hcn\/manifest\.webmanifest\?shell=v9"/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v10";/);
+  assert.match(worker, /"\/hcn\/\?shell=v10"/);
+  assert.match(worker, /"\/hcn\/app\.css\?shell=v10"/);
+  assert.match(worker, /"\/hcn\/app\.js\?shell=v10"/);
+  assert.match(worker, /"\/hcn\/manifest\.webmanifest\?shell=v10"/);
   assert.match(worker, /const SHELL_PATH_SET = new Set\(SHELL_PATHNAMES\)/);
-  assert.match(script, /\/hcn\/sw\.js\?shell=v9/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v10/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   const browserAuthority = script.slice(
     script.indexOf("function hasBrowserAuthority()"),
@@ -453,24 +495,16 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
 
   assert.match(
     html,
-    /id="overview"[\s\S]*class="company-today-hero console-view is-current-view"/
+    /id="overview"[\s\S]*class="assistant-view console-view is-current-view"/
   );
   assert.match(html, /aria-label="HCN Work Center home"/);
   assert.match(html, /<strong>HCN Work Center<\/strong>/);
-  assert.match(html, /What do you need to get done/);
+  assert.match(html, /Ask Thresher/);
   assert.match(html, /aria-live="polite"[\s\S]*id="home-next-action"/);
-  assert.match(html, /id="home-primary-actions"[\s\S]*aria-label="Choose what you want to do"/);
-  assert.equal((html.match(/data-home-action=/g) || []).length, 3);
-  assert.match(html, /data-home-action="work"[\s\S]*Work My Files/);
-  assert.match(
-    html,
-    /data-home-action="sweep"[\s\S]*data-hcn-capability="hcn\.management_sweep\.read"[\s\S]*Company Sweep/
-  );
-  assert.match(html, /data-home-action="connections"[\s\S]*Connections/);
-  assert.match(
-    html,
-    /Check JobNimbus, then link Google and your Quo work line/
-  );
+  assert.equal((html.match(/data-assistant-starter=/g) || []).length, 6);
+  assert.match(html, /data-assistant-starter="Show me the files assigned to me/);
+  assert.match(html, /data-assistant-starter="Show me my neglected files/);
+  assert.match(html, /data-assistant-starter="Review my recent file-related communications/);
   assert.match(script, /setConnection\("good", "System ready"\)/);
   assert.match(html, /Richard’s 10 × 3 report/);
   assert.match(

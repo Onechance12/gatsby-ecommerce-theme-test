@@ -59,6 +59,19 @@ services:
         sync: false
       - key: HCN_REFERENCE_KEY
         sync: false
+      # Embedded Ask Thresher reasoning layer. The model may read the signed-in
+      # employee's allowlisted evidence and prepare an action plan, but it has
+      # no execution tool. Keep this key dedicated to HCN and server-side.
+      - key: HCN_ASSISTANT_ENABLED
+        value: "true"
+      - key: HCN_ASSISTANT_OPENAI_API_KEY
+        sync: false
+      - key: HCN_ASSISTANT_MODEL
+        value: gpt-5.6-terra
+      - key: HCN_ASSISTANT_REASONING_EFFORT
+        value: low
+      - key: HCN_ASSISTANT_MAX_OUTPUT_TOKENS
+        value: "1600"
       # Dedicated least-privilege credential used only by the HP HCN operator.
       # Never reuse the shared bridge token or a Chance Brain credential.
       - key: CODEX_OPERATOR_TOKEN
