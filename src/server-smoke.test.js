@@ -2363,15 +2363,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         || code === "hcn-employee-connector-code";
       assert.equal(
         form.get("client_id"),
-        connectorCode
-          ? "hcn-employee-connector-client"
-          : "hcn-google-client"
+        "hcn-employee-connector-client"
       );
       assert.equal(
         form.get("client_secret"),
-        connectorCode
-          ? "hcn-employee-connector-secret"
-          : "hcn-google-secret"
+        "hcn-employee-connector-secret"
       );
       assert.equal(
         [
@@ -2428,9 +2424,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       assert.equal(acceptedTokens.includes(accessToken), true);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        audience: accessToken.includes("connector")
-          ? "hcn-employee-connector-client"
-          : "hcn-google-client",
+        audience: "hcn-employee-connector-client",
         expires_in: 3600,
         verified_email: true,
         scope: accessToken.includes("connector")
@@ -2903,6 +2897,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const loginCookie = loginCookies[0].split(";", 1)[0];
   const googleAuthorize = new URL(loginResponse.headers.get("location"));
   assert.equal(googleAuthorize.hostname, "accounts.google.com");
+  assert.equal(
+    googleAuthorize.searchParams.get("client_id"),
+    "hcn-employee-connector-client"
+  );
   assert.equal(googleAuthorize.searchParams.get("redirect_uri"), `${origin}/oauth/google/callback`);
   assert.equal(googleAuthorize.searchParams.get("scope"), "openid email profile");
   assert.equal(googleAuthorize.searchParams.get("code_challenge_method"), "S256");
@@ -3309,7 +3307,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       body: JSON.stringify({ offset: 0, limit: 10 })
     }
   );
-  assert.equal(directGoogleBearerHcnResponse.status, 403);
+  assert.equal(directGoogleBearerHcnResponse.status, 401);
 
   const workCenterResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
@@ -3943,6 +3941,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     .split(";", 1)[0];
   const employeeLoginAuthorize = new URL(
     employeeLoginResponse.headers.get("location")
+  );
+  assert.equal(
+    employeeLoginAuthorize.searchParams.get("client_id"),
+    "hcn-employee-connector-client"
   );
   assert.equal(
     employeeLoginAuthorize.searchParams.get("scope"),
@@ -4610,7 +4612,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        audience: "hcn-action-google-client",
+        audience: "hcn-action-employee-client",
         expires_in: 3600,
         verified_email: true,
         scope: "openid email profile"
@@ -4729,6 +4731,8 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       ALLOW_GOOGLE_USER_AUTH: "true",
       GOOGLE_CLIENT_ID: "hcn-action-google-client",
       GOOGLE_CLIENT_SECRET: "hcn-action-google-secret",
+      HCN_GOOGLE_CLIENT_ID: "hcn-action-employee-client",
+      HCN_GOOGLE_CLIENT_SECRET: "hcn-action-employee-secret",
       GOOGLE_REFRESH_TOKEN: "",
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeProviderPort}/token`,
       GOOGLE_TOKENINFO_URL:
@@ -4810,6 +4814,10 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       .getSetCookie()[0]
       .split(";", 1)[0];
     const googleAuthorize = new URL(loginResponse.headers.get("location"));
+    assert.equal(
+      googleAuthorize.searchParams.get("client_id"),
+      "hcn-action-employee-client"
+    );
     const callbackResponse = await fetch(
       `${origin}/oauth/google/callback?${new URLSearchParams({
         code,

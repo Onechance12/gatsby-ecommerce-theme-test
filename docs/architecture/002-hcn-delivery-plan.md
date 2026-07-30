@@ -133,12 +133,14 @@ Exit gate:
   may not reuse `OAUTH_SESSION_SECRET`, any Google/provider credential, the
   shared bridge token, a Chance Brain key, or a Jobrolo key.
 - Configure the exact HTTPS HCN/public origin and a dedicated
-  `HCN_GOOGLE_CLIENT_ID`/`HCN_GOOGLE_CLIENT_SECRET` for employee connector
-  grants. It must be distinct from the login/Custom GPT Google client, request
-  only Gmail read-only, Calendar read-only, and identity scopes, and register
-  the same exact callback. Also configure the allowed `wavepa.com` Workspace
-  domain, HCN tenant/reference secrets, and OAuth session secret. No credential
-  value belongs in Git, documentation, logs, screenshots, or chat.
+  `HCN_GOOGLE_CLIENT_ID`/`HCN_GOOGLE_CLIENT_SECRET` for HCN browser identity
+  and employee connector grants. It must be distinct from the legacy Custom
+  GPT/HP Google client. Browser sign-in requests identity scopes only; explicit
+  provider linking separately requests Gmail modify, Calendar read-only, and
+  identity scopes. Both flows register the same exact HCN callback. Also
+  configure the allowed `wavepa.com` Workspace domain, HCN tenant/reference
+  secrets, and OAuth session secret. No credential value belongs in Git,
+  documentation, logs, screenshots, or chat.
 - Enable either reviewed explicit employees or
   `AUTO_ENROLL_WAVE_USERS=true`. Before admission, JobNimbus must return one
   active user with an exact unique matching employee email and stable owner

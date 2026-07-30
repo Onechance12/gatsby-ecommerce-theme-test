@@ -264,15 +264,16 @@ binding on every browser request. `WAVE_AUTH_USERS_JSON` remains the explicit
 path for disabling a user or granting a reviewed role override; company scope
 is never an auto-enrollment default.
 
-Console sign-in and Google provider linking are separate ceremonies. Sign-in
-creates only a bounded opaque HCN browser session. Choosing **Connect Google**
-uses the dedicated `HCN_GOOGLE_CLIENT_ID`/`HCN_GOOGLE_CLIENT_SECRET`, requests
-exactly Gmail modify and Calendar read-only access plus identity scopes, and
-stores that employee's refresh grant on the server, encrypted at rest under an
-opaque reference derived from the immutable Google subject. The HCN connector
-client ID and secret must be different from the login/Custom GPT Google client;
-both clients register the same exact shared callback. Neither provider tokens
-nor the Google subject are exposed to browser JavaScript.
+Console sign-in and Google provider linking are separate ceremonies on the
+dedicated `HCN_GOOGLE_CLIENT_ID`/`HCN_GOOGLE_CLIENT_SECRET`. Sign-in requests
+identity scopes only and creates a bounded opaque HCN browser session. Choosing
+**Connect Google** separately requests Gmail modify and Calendar read-only
+access plus identity scopes, then stores that employee's refresh grant on the
+server, encrypted at rest under an opaque reference derived from the immutable
+Google subject. The dedicated HCN client ID and secret must be different from
+the legacy Custom GPT/HP Google client, and both flows register the same exact
+HCN callback. Neither provider tokens nor the Google subject are exposed to
+browser JavaScript.
 
 `HCN_GOOGLE_GRANT_KEY` must be a dedicated canonical, unpadded base64url secret
 encoding 32 to 128 random bytes. It must not reuse

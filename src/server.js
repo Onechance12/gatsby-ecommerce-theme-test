@@ -1183,8 +1183,8 @@ function hcnConsoleAuthConfigured() {
   if (
     !HCN_CONSOLE_ENABLED
     || !ALLOW_GOOGLE_USER_AUTH
-    || !GOOGLE_CLIENT_ID
-    || !GOOGLE_CLIENT_SECRET
+    || !HCN_GOOGLE_CLIENT_ID
+    || !HCN_GOOGLE_CLIENT_SECRET
     || !OAUTH_SESSION_SECRET
     || !HCN_CONSOLE_STATE_CODEC
     || !HCN_CONSOLE_ORIGIN
@@ -1492,8 +1492,8 @@ function hcnConsoleOAuthCoordinator() {
       allowTestProviderEndpoints:
         ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS,
       google: {
-        clientId: GOOGLE_CLIENT_ID,
-        clientSecret: GOOGLE_CLIENT_SECRET,
+        clientId: HCN_GOOGLE_CLIENT_ID,
+        clientSecret: HCN_GOOGLE_CLIENT_SECRET,
         authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
         tokenUrl: GOOGLE_TOKEN_URL,
         tokenInfoUrl: GOOGLE_TOKENINFO_URL,

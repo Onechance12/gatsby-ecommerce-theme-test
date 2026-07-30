@@ -64,11 +64,12 @@ services:
       - key: CODEX_OPERATOR_TOKEN
         sync: false
 
-      # Employee sign-in and each employee's separate Gmail/Calendar grant.
+      # Legacy Custom GPT/HP Gmail and Calendar fallback.
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      # Dedicated HCN browser sign-in and employee Gmail/Calendar grant.
       - key: HCN_GOOGLE_CLIENT_ID
         sync: false
       - key: HCN_GOOGLE_CLIENT_SECRET
