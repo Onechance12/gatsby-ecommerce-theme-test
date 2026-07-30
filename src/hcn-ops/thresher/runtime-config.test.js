@@ -56,6 +56,55 @@ test("valid dedicated configuration is ready but does not activate persistence",
   store.close();
 });
 
+test("the exact activation gate creates one active lifecycle runtime and disables direct stores", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hcn-thresher-active-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configuration = loadThresherRuntimeConfiguration({
+    ...validEnvironment(root),
+    HCN_THRESHER_ENABLED: "true"
+  });
+  assert.deepEqual(
+    projectThresherRuntimeConfiguration(configuration),
+    {
+      ready: true,
+      status: "active",
+      persistenceActive: true
+    }
+  );
+  assert.throws(
+    () => configuration.requireStore(),
+    /lifecycle runtime/
+  );
+  const first = configuration.requireRuntime();
+  const second = configuration.requireRuntime();
+  assert.equal(first, second);
+  const state = await first.snapshot({
+    principalRef: `principal_${"1".repeat(64)}`,
+    fileRef: `subject_${"2".repeat(32)}`
+  });
+  assert.equal(state.status, "active");
+  assert.equal(state.persisted, true);
+  assert.equal(state.authority.authorizesAction, false);
+  first.close();
+});
+
+test("activation fails closed when keys are absent or the gate is not exact", () => {
+  assert.throws(
+    () =>
+      loadThresherRuntimeConfiguration({
+        HCN_THRESHER_ENABLED: "true"
+      }),
+    /requires every dedicated key/
+  );
+  assert.throws(
+    () =>
+      loadThresherRuntimeConfiguration({
+        HCN_THRESHER_ENABLED: "TRUE"
+      }),
+    /must be exactly true or false/
+  );
+});
+
 test("partial, malformed, broad-root, and escaped-path configuration fails closed", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hcn-thresher-invalid-"));
   t.after(() => rm(root, { recursive: true, force: true }));

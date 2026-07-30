@@ -1,4 +1,4 @@
-const SERVICE = "jobnimbus-chatgpt-bridge";
+const DEFAULT_SERVICE = "jobnimbus-chatgpt-bridge";
 const API_VERSION = "v1";
 const SCHEMA_VERSION = "0.1.0";
 
@@ -48,7 +48,7 @@ export function getBuildInfo(options = {}) {
   const deployId = readAllowedValue(env, DEPLOY_ID_KEYS, normalizeId);
 
   return {
-    service: SERVICE,
+    service: serviceName(env),
     apiVersion: API_VERSION,
     schemaVersion: SCHEMA_VERSION,
     sourceCommit: sourceRevision.sourceCommit,
@@ -63,6 +63,15 @@ export function getBuildInfo(options = {}) {
     },
     attested: sourceRevision.sourceCommitTrust === "provider_attested"
   };
+}
+
+function serviceName(env) {
+  const configured = readConfiguredValue(env, "HCN_SERVICE_NAME");
+  if (!configured.configured) return DEFAULT_SERVICE;
+  const normalized = String(configured.value).trim();
+  return /^[a-z0-9][a-z0-9-]{0,62}$/.test(normalized)
+    ? normalized
+    : DEFAULT_SERVICE;
 }
 
 function readSourceRevision(env) {

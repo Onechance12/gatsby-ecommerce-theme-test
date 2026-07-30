@@ -71,7 +71,7 @@ test("console shell contains no client records, bearer-token field, or browser s
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
 
-test("console states the hard Chance Brain boundary and honest Thresher maturity", async () => {
+test("console states the hard Chance Brain boundary and honest isolated Thresher state", async () => {
   const [htmlAsset, scriptAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/"),
     readHcnConsoleAsset("/hcn/app.js")
@@ -80,13 +80,19 @@ test("console states the hard Chance Brain boundary and honest Thresher maturity
   const script = scriptAsset.body.toString("utf8");
 
   assert.match(html, /HCN has no route to Chance Brain/);
-  assert.match(html, /isolated HCN Operations Brain foundation/);
-  assert.match(html, /persistence[\s\S]*is not active yet/);
-  assert.match(html, /untouched, quarantined, and unreachable from HCN/);
+  assert.match(html, /isolated HCN Operations Brain/);
+  assert.match(html, /encrypted, minimized operational state/);
+  assert.match(html, /has no[\s\S]*action authority/);
+  assert.match(
+    html,
+    /untouched,[\s\S]*quarantined, and unreachable from HCN/
+  );
   assert.match(script, /disconnected_no_route/);
   assert.match(script, /Disconnected · no route or data flow/);
   assert.match(script, /foundation_persistence_pending/);
   assert.match(script, /Isolated foundation · persistence pending/);
+  assert.match(script, /active_isolated_encrypted_operational_state/);
+  assert.match(script, /Active · isolated encrypted operational state/);
   assert.match(script, /quarantined_unreachable/);
   assert.match(script, /Quarantined · unreachable from HCN/);
   assert.doesNotMatch(script, /Legacy compatibility · read only/);
@@ -249,7 +255,7 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(actionAccess, /ACTION_READ_CAPABILITY/);
 });
 
-test("employee Work Center leads while the read-only 10 by 3 sweep stays capability-gated", async () => {
+test("employee home stays simple while the 10 by 3 sweep remains capability-gated", async () => {
   const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/"),
     readHcnConsoleAsset("/hcn/app.js"),
@@ -259,10 +265,28 @@ test("employee Work Center leads while the read-only 10 by 3 sweep stays capabil
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(html, /id="overview" class="company-today-hero"/);
-  assert.match(html, /Start with the files assigned to you/);
-  assert.match(html, /read only: it does not send, schedule, call, upload, or change JobNimbus/);
-  assert.match(html, /Richard’s 10 × 3 Sweep/);
+  assert.match(
+    html,
+    /id="overview"[\s\S]*class="company-today-hero console-view is-current-view"/
+  );
+  assert.match(html, /aria-label="HCN Work Center home"/);
+  assert.match(html, /<strong>HCN Work Center<\/strong>/);
+  assert.match(html, /What do you need to get done/);
+  assert.match(html, /aria-live="polite"[\s\S]*id="home-next-action"/);
+  assert.match(html, /id="home-primary-actions"[\s\S]*aria-label="Choose what you want to do"/);
+  assert.equal((html.match(/data-home-action=/g) || []).length, 3);
+  assert.match(html, /data-home-action="work"[\s\S]*Work My Files/);
+  assert.match(
+    html,
+    /data-home-action="sweep"[\s\S]*data-hcn-capability="hcn\.management_sweep\.read"[\s\S]*Company Sweep/
+  );
+  assert.match(html, /data-home-action="connections"[\s\S]*Connections/);
+  assert.match(
+    html,
+    /Check JobNimbus, then link Google and your Quo work line/
+  );
+  assert.match(script, /setConnection\("good", "System ready"\)/);
+  assert.match(html, /Richard’s 10 × 3 report/);
   assert.match(
     html,
     /id="management-sweep-refresh"[\s\S]*data-hcn-capability="hcn\.management_sweep\.read"[\s\S]*hidden/
@@ -284,7 +308,7 @@ test("employee Work Center leads while the read-only 10 by 3 sweep stays capabil
   assert.match(html, /id="management-sweep-source-health"/);
   assert.match(html, /id="system-health"/);
   assert.match(html, /This first report uses JobNimbus activity only/);
-  assert.match(html, /longest verified JobNimbus activity[\s\S]*gap/);
+  assert.match(html, /longest verified\s+JobNimbus activity\s+gap/);
   assert.match(html, /Company-wide Gmail,[\s\S]*Quo,[\s\S]*calendar communication evidence is not available/);
   assert.match(html, /delivery, export, delegation, and follow-up creation belong to[\s\S]*a later approval-gated phase/);
 
@@ -294,7 +318,12 @@ test("employee Work Center leads while the read-only 10 by 3 sweep stays capabil
   assert.match(script, /runtimeStatus !== "configured"/);
   assert.match(script, /function syncCapabilityAwareConsole\(\)/);
   assert.match(script, /document\.querySelectorAll\("\[data-hcn-capability\]"\)/);
-  assert.match(script, /preferredHash = "#work-center"/);
+  assert.match(script, /preferredHash = "#overview"/);
+  assert.match(script, /function syncHomeGuidance\(\)/);
+  assert.match(script, /document\.querySelectorAll\("\.console-view"\)/);
+  assert.match(script, /document\.body\.classList\.add\("console-ready"\)/);
+  assert.match(script, /"Finish your connections"/);
+  assert.match(script, /"Open your assigned files"/);
   assert.match(script, /\{ limitPerAdjuster: 10 \}/);
   assert.match(script, /"hcn\.console\.management-sweep\.v1"/);
   assert.match(script, /value\.schemaVersion \|\| value\.schema/);
@@ -385,7 +414,7 @@ test("management sweep responses expire in memory on their canonical freshness d
   assert.match(script, /No expired company ranking is retained or shown\./);
 });
 
-test("approval composer exposes only the bounded HCN v1 JobNimbus actions", async () => {
+test("approval composer exposes every bounded HCN browser action and no unsupported effect", async () => {
   const [htmlAsset, scriptAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/"),
     readHcnConsoleAsset("/hcn/app.js")
@@ -398,28 +427,53 @@ test("approval composer exposes only the bounded HCN v1 JobNimbus actions", asyn
     "jobnimbus.create_task",
     "jobnimbus.update_task",
     "jobnimbus.update_status",
-    "jobnimbus.update_contact"
+    "jobnimbus.update_contact",
+    "jobnimbus.create_calendar_event",
+    "jobnimbus.update_calendar_event",
+    "gmail.create_draft",
+    "gmail.send",
+    "quo.send_text"
   ]) {
     assert.match(html, new RegExp(`value="${action.replace(".", "\\.")}"`));
     assert.match(script, new RegExp(`"${action.replace(".", "\\.")}"`));
   }
 
-  assert.match(html, /id="update-task-ref"/);
-  assert.match(html, /id="approval-acknowledge" type="checkbox" disabled/);
-  assert.match(html, /Prepare immutable review/);
-  assert.match(html, /Execute approved plan/);
-  assert.match(script, /const TASK_REF = \/\^ref_/);
-  assert.match(script, /reference: reference/);
-  assert.match(script, /state\.actionDraft = state\.actionDraft\.concat/);
-  assert.match(script, /MAX_ACTIONS = 12/);
-  assert.match(script, /new TextEncoder\(\)\.encode\(value\)\.length/);
   const composer = html.slice(
     html.indexOf('id="action-composer"'),
     html.indexOf('id="approvals"')
   );
+  const actionSelect = composer.slice(
+    composer.indexOf('id="action-type"'),
+    composer.indexOf("</select>", composer.indexOf('id="action-type"'))
+  );
+  assert.equal((actionSelect.match(/<option value="/g) || []).length, 10);
+  assert.match(composer, /<optgroup label="JobNimbus">/);
+  assert.match(composer, /<optgroup label="Email">/);
+  assert.match(composer, /<optgroup label="Text">/);
+  assert.match(html, /id="update-task-ref"/);
+  assert.match(html, /id="update-event-ref"/);
+  assert.match(html, /id="gmail-send-draft-ref"/);
+  assert.match(html, /id="quo-text-to"[\s\S]*placeholder="\+15551234567"/);
+  assert.match(html, /Central time/);
+  assert.match(html, /id="approval-acknowledge" type="checkbox" disabled/);
+  assert.match(html, /Prepare immutable review/);
+  assert.match(html, /Execute approved plan/);
+  assert.match(script, /const TASK_REF = \/\^ref_/);
+  assert.match(script, /const EVIDENCE_REF = \/\^ref_/);
+  assert.match(script, /const E164_PHONE = \/\^\\\+/);
+  assert.match(script, /reference: reference/);
+  assert.match(script, /state\.actionDraft = state\.actionDraft\.concat/);
+  assert.match(script, /MAX_ACTIONS = 12/);
+  assert.match(script, /new TextEncoder\(\)\.encode\(value\)\.length/);
+  assert.match(script, /function populateEventOptions\(activities\)/);
+  assert.match(script, /function populateDraftOptions\(\)/);
+  assert.match(script, /function centralLocalDateTimeToIso\(value\)/);
+  assert.match(script, /timeZone: "America\/Chicago"/);
+  assert.match(script, /function normalizeAttachmentDescriptors\(value\)/);
+  assert.match(script, /createdDraftRefs: createdDraftRefs/);
   assert.doesNotMatch(
     composer,
-    /gmail\.|quo\.|calendar\.|upload|delete|payment|financial/i
+    /google_calendar|attachment[^<]*input|upload|delete|payment|financial|live call|voice call/i
   );
 });
 

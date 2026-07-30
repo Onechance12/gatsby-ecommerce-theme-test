@@ -124,6 +124,11 @@ test("HCN browser capability metadata is intersected with the console surface", 
 test("non-Chance HCN browser sessions receive only their reviewed employee capabilities", () => {
   const cases = {
     administrator: [
+      "hcn.action_plans.execute",
+      "hcn.action_plans.invalidate",
+      "hcn.action_plans.prepare",
+      "hcn.action_plans.read",
+      "hcn.action_receipts.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",
@@ -134,6 +139,11 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "platform.session.read"
     ],
     employee: [
+      "hcn.action_plans.execute",
+      "hcn.action_plans.invalidate",
+      "hcn.action_plans.prepare",
+      "hcn.action_plans.read",
+      "hcn.action_receipts.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",
@@ -150,6 +160,11 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "platform.session.read"
     ],
     client_coordinator: [
+      "hcn.action_plans.execute",
+      "hcn.action_plans.invalidate",
+      "hcn.action_plans.prepare",
+      "hcn.action_plans.read",
+      "hcn.action_receipts.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",
@@ -159,6 +174,11 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "platform.session.read"
     ],
     manager: [
+      "hcn.action_plans.execute",
+      "hcn.action_plans.invalidate",
+      "hcn.action_plans.prepare",
+      "hcn.action_plans.read",
+      "hcn.action_receipts.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",

@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 
+import { createActiveThresherRuntime } from "./active-runtime.js";
 import { createThresherStore } from "./store.js";
 
 const TENANT_REF_PATTERN = /^tenant_[a-f0-9]{16}$/;
@@ -15,20 +16,37 @@ const KEY_NAMES = Object.freeze([
 ]);
 
 /**
- * Loads the isolated Thresher foundation without activating persistence.
+ * Loads the isolated Thresher runtime configuration.
  *
- * No configured Thresher keys is a supported "not configured" state. Once
- * any dedicated key is supplied, all three keys and the isolated path/tenant
+ * HCN_THRESHER_ENABLED must be exactly "true" before the runtime can persist
+ * state. No configured Thresher keys is a supported disabled state. Once any
+ * dedicated key is supplied, all three keys and the isolated path/tenant
  * boundary must validate or startup fails closed.
  */
 export function loadThresherRuntimeConfiguration(
   environment = {},
-  { disallowedSecrets = [] } = {}
+  { disallowedSecrets = [], now = Date.now } = {}
 ) {
   const values = readValues(environment);
+  if (
+    values.HCN_THRESHER_ENABLED
+    && !["true", "false"].includes(values.HCN_THRESHER_ENABLED)
+  ) {
+    fail(
+      "invalid_activation_gate",
+      "HCN_THRESHER_ENABLED must be exactly true or false."
+    );
+  }
+  const activationEnabled = values.HCN_THRESHER_ENABLED === "true";
   const suppliedKeys = KEY_NAMES.filter((name) => values[name]);
 
   if (suppliedKeys.length === 0) {
+    if (activationEnabled) {
+      fail(
+        "active_not_configured",
+        "Active Thresher persistence requires every dedicated key."
+      );
+    }
     return unavailableConfiguration();
   }
   if (suppliedKeys.length !== KEY_NAMES.length) {
@@ -63,7 +81,8 @@ export function loadThresherRuntimeConfiguration(
     const storeProbe = createThresherStore({
       filePath: storePath,
       encryptionKey: values.HCN_THRESHER_STORE_KEY,
-      tenantRef: values.HCN_TENANT_ID
+      tenantRef: values.HCN_TENANT_ID,
+      now
     });
     storeProbe.close();
   } finally {
@@ -74,15 +93,41 @@ export function loadThresherRuntimeConfiguration(
     createThresherStore({
       filePath: storePath,
       encryptionKey: values.HCN_THRESHER_STORE_KEY,
-      tenantRef: values.HCN_TENANT_ID
+      tenantRef: values.HCN_TENANT_ID,
+      now
     });
 
+  let runtime = null;
   return Object.freeze({
     ready: true,
-    status: "ready_not_active",
-    persistenceActive: false,
+    status: activationEnabled ? "active" : "ready_not_active",
+    persistenceActive: activationEnabled,
     requireStore() {
+      if (activationEnabled) {
+        throw new ThresherRuntimeConfigurationError(
+          "direct_store_unavailable",
+          "Active Thresher persistence is available only through its lifecycle runtime."
+        );
+      }
       return createStore();
+    },
+    requireRuntime() {
+      if (!activationEnabled) {
+        throw new ThresherRuntimeConfigurationError(
+          "not_active",
+          "The isolated Thresher runtime is not active."
+        );
+      }
+      if (!runtime) {
+        runtime = createActiveThresherRuntime({
+          store: createStore(),
+          tenantRef: values.HCN_TENANT_ID,
+          referenceKey: values.HCN_THRESHER_REFERENCE_KEY,
+          signingKey: values.HCN_THRESHER_SIGNING_KEY,
+          now
+        });
+      }
+      return runtime;
     }
   });
 }
@@ -91,8 +136,11 @@ export function projectThresherRuntimeConfiguration(configuration) {
   if (configuration?.ready === true) {
     return Object.freeze({
       ready: true,
-      status: "ready_not_active",
-      persistenceActive: false
+      status:
+        configuration.persistenceActive === true
+          ? "active"
+          : "ready_not_active",
+      persistenceActive: configuration.persistenceActive === true
     });
   }
   return Object.freeze({
@@ -121,6 +169,12 @@ function unavailableConfiguration() {
         "not_configured",
         "The isolated Thresher store is not configured."
       );
+    },
+    requireRuntime() {
+      throw new ThresherRuntimeConfigurationError(
+        "not_configured",
+        "The isolated Thresher runtime is not configured."
+      );
     }
   });
 }
@@ -134,6 +188,7 @@ function readValues(environment) {
       "HCN_OPERATIONS_ROOT",
       "HCN_TENANT_ID",
       "HCN_THRESHER_STORE_PATH",
+      "HCN_THRESHER_ENABLED",
       ...KEY_NAMES
     ].map((name) => [name, ""]));
   }
@@ -141,6 +196,7 @@ function readValues(environment) {
     "HCN_OPERATIONS_ROOT",
     "HCN_TENANT_ID",
     "HCN_THRESHER_STORE_PATH",
+    "HCN_THRESHER_ENABLED",
     ...KEY_NAMES
   ].map((name) => [
     name,

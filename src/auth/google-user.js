@@ -130,7 +130,7 @@ const HCN_MANAGEMENT_ROLES = new Set([
   "administrator",
   "manager"
 ]);
-const HCN_CHANCE_ACTION_ROLES = new Set(["chance"]);
+const HCN_ASSIGNED_ACTION_ROLES = HCN_ASSIGNED_WORK_ROLES;
 
 export const HCN_BROWSER_ROUTE_ROLES = new Map([
   ["GET /hcn/connect/google/start", HCN_CONNECTION_ROLES],
@@ -140,16 +140,16 @@ export const HCN_BROWSER_ROUTE_ROLES = new Map([
   ["POST /hcn/api/v1/work-center", HCN_ASSIGNED_WORK_ROLES],
   ["POST /hcn/api/v1/file-review", HCN_ASSIGNED_WORK_ROLES],
   ["POST /hcn/api/v1/management-sweep", HCN_MANAGEMENT_ROLES],
-  ["POST /hcn/api/v1/action-plans/prepare", HCN_CHANCE_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-plans/list", HCN_CHANCE_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-plans/detail", HCN_CHANCE_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-plans/execute", HCN_CHANCE_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-plans/invalidate", HCN_CHANCE_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-receipts/list", HCN_CHANCE_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-receipts/detail", HCN_CHANCE_ACTION_ROLES]
+  ["POST /hcn/api/v1/action-plans/prepare", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/list", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/detail", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/execute", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/invalidate", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-receipts/list", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-receipts/detail", HCN_ASSIGNED_ACTION_ROLES]
 ]);
 
-export const HCN_BROWSER_CHANCE_ONLY_ROUTES = new Set([
+export const HCN_BROWSER_ASSIGNED_ACTION_ROUTES = new Set([
   "POST /hcn/api/v1/action-plans/prepare",
   "POST /hcn/api/v1/action-plans/list",
   "POST /hcn/api/v1/action-plans/detail",
@@ -272,22 +272,56 @@ export async function authenticateGoogleAccessToken({
     throw authError("Google account is outside the approved Workspace domain", 403);
   }
 
-  let user = users instanceof Map ? users.get(email) : null;
-  if (!user && typeof resolveUser === "function") {
-    user = await resolveUser({ email, name: String(profile.name || email).trim(), subject, hostedDomain });
+  const existingUser = users instanceof Map ? users.get(email) : null;
+  if (existingUser?.enabled === false) {
+    throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   }
-  if (!user || user.enabled === false) throw authError("This Google account is not approved for the Wave Ops bridge", 403);
-  const role = String(user.role || "").trim().toLowerCase();
-  if (!WAVE_ROLE_POLICIES[role]) throw authError("This employee has an unsupported Wave Ops role", 403);
+
+  let user = existingUser;
   let approvedGoogleSubject;
   try {
-    approvedGoogleSubject = configuredGoogleSubject(user);
+    approvedGoogleSubject = user
+      ? configuredGoogleSubject(user)
+      : "";
   } catch {
     throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   }
   if (approvedGoogleSubject && approvedGoogleSubject !== subject) {
     throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   }
+
+  if (!approvedGoogleSubject) {
+    if (typeof resolveUser !== "function") {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+    user = await resolveUser({
+      email,
+      name: String(profile.name || email).trim(),
+      subject,
+      hostedDomain,
+      existingUser
+    });
+    if (!user || user.enabled === false) {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+    const resolvedEmail = String(user.email || "").trim().toLowerCase();
+    try {
+      approvedGoogleSubject = configuredGoogleSubject(user);
+    } catch {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+    if (
+      resolvedEmail !== email
+      || !approvedGoogleSubject
+      || approvedGoogleSubject !== subject
+    ) {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+  }
+
+  if (!user || user.enabled === false) throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+  const role = String(user.role || "").trim().toLowerCase();
+  if (!WAVE_ROLE_POLICIES[role]) throw authError("This employee has an unsupported Wave Ops role", 403);
 
   return {
     type: "google_oauth",

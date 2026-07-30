@@ -10,9 +10,9 @@
     >
     <meta
       name="description"
-      content="Home Claim Network read-only employee Work Center and controlled operations pilot."
+      content="Home Claim Network employee Work Center."
     >
-    <title>HCN Employee Work Center</title>
+    <title>HCN Work Center</title>
     <link rel="manifest" href="/hcn/manifest.webmanifest">
     <link rel="stylesheet" href="/hcn/app.css">
     <script src="/hcn/app.js" defer></script>
@@ -21,16 +21,15 @@
     <a class="skip-link" href="#main-content">Skip to employee Work Center</a>
 
     <header class="topbar">
-      <a class="brand" href="/hcn/" aria-label="HCN Operations Console home">
+      <a class="brand" href="/hcn/" aria-label="HCN Work Center home">
         <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
         <span class="brand-copy">
-          <strong>Operations Console</strong>
+          <strong>HCN Work Center</strong>
           <small>Home Claim Network</small>
         </span>
       </a>
 
       <div class="topbar-actions">
-        <span class="environment-label">Read-only employee pilot</span>
         <button id="sign-out-action" class="topbar-signout" type="button" hidden>
           Sign out
         </button>
@@ -44,10 +43,14 @@
     <div class="app-layout">
       <aside class="sidebar" aria-label="Console navigation">
         <nav class="primary-nav">
-          <p class="nav-label">Your work</p>
+          <p class="nav-label">Start</p>
           <a class="nav-item is-active" href="#overview" aria-current="page">
             <span class="nav-glyph glyph-overview" aria-hidden="true"></span>
-            <span>Start here</span>
+            <span>Home</span>
+          </a>
+          <a class="nav-item" href="#work-center">
+            <span class="nav-glyph glyph-work" aria-hidden="true"></span>
+            <span>Work My Files</span>
           </a>
           <a
             class="nav-item"
@@ -56,16 +59,14 @@
             hidden
           >
             <span class="nav-glyph glyph-files" aria-hidden="true"></span>
-            <span>10 × 3 Sweep</span>
-            <small>Read only</small>
+            <span>Company Sweep</span>
+          </a>
+          <a class="nav-item" href="#connections">
+            <span class="nav-glyph glyph-connections" aria-hidden="true"></span>
+            <span>Connections</span>
           </a>
 
-          <p class="nav-label">Operations</p>
-          <a class="nav-item" href="#work-center">
-            <span class="nav-glyph glyph-work" aria-hidden="true"></span>
-            <span>Work Center</span>
-            <small>Fresh reads</small>
-          </a>
+          <p class="nav-label">More</p>
           <a
             class="nav-item"
             href="#approvals"
@@ -74,7 +75,6 @@
           >
             <span class="nav-glyph glyph-approval" aria-hidden="true"></span>
             <span>Approvals</span>
-            <small>Chance only</small>
           </a>
           <a
             class="nav-item"
@@ -84,37 +84,32 @@
           >
             <span class="nav-glyph glyph-receipt" aria-hidden="true"></span>
             <span>Receipts</span>
-            <small>Chance only</small>
-          </a>
-
-          <p class="nav-label">Platform</p>
-          <a class="nav-item" href="#connections">
-            <span class="nav-glyph glyph-connections" aria-hidden="true"></span>
-            <span>Connections</span>
-            <small>Account</small>
           </a>
           <a class="nav-item" href="#system-health">
             <span class="nav-glyph glyph-health" aria-hidden="true"></span>
-            <span>System Health</span>
+            <span>System Status</span>
           </a>
         </nav>
 
         <div class="sidebar-note">
           <span class="sidebar-note-mark" aria-hidden="true"></span>
-          <p><strong>Work from fresh evidence</strong></p>
-          <p>Review your assigned files here. JobNimbus remains the source of record.</p>
+          <p><strong>Need a place to start?</strong></p>
+          <p>Open Work My Files and choose the first item that needs attention.</p>
         </div>
       </aside>
 
       <main id="main-content" class="main-content" tabindex="-1">
-        <section id="overview" class="company-today-hero" aria-labelledby="company-today-title">
+        <section
+          id="overview"
+          class="company-today-hero console-view is-current-view"
+          aria-labelledby="company-today-title"
+        >
           <div class="company-hero-copy">
-            <p class="eyebrow">HCN employee Work Center</p>
-            <h1 id="company-today-title">Start with the files assigned to you.</h1>
+            <p class="eyebrow">Welcome to HCN</p>
+            <h1 id="company-today-title">What do you need to get done?</h1>
             <p class="hero-summary">
-              Review fresh JobNimbus evidence and exact-file Gmail and Quo history
-              without copying client records into another CRM. This employee pilot is
-              read only: it does not send, schedule, call, upload, or change JobNimbus.
+              Pick one place to start. You will only see the files and tools your
+              HCN account is allowed to use.
             </p>
             <div class="hero-actions">
               <a
@@ -123,6 +118,81 @@
                 href="/hcn/auth/login?returnTo=%2Fhcn"
                 hidden
               >Sign in to HCN</a>
+            </div>
+          </div>
+
+          <aside class="home-next-step" aria-labelledby="home-next-label">
+            <span id="home-next-label" class="home-next-label">Next step</span>
+            <div role="status" aria-live="polite" aria-atomic="true">
+              <strong id="home-next-action">Checking your access</strong>
+              <span id="home-next-detail">This should only take a moment.</span>
+            </div>
+          </aside>
+
+          <nav
+            id="home-primary-actions"
+            class="home-action-grid"
+            aria-label="Choose what you want to do"
+          >
+            <a class="home-action" data-home-action="work" href="#work-center">
+              <span class="home-action-copy">
+                <strong>Work My Files</strong>
+                <span>See what needs attention and open one exact file.</span>
+              </span>
+              <span id="home-work-status" class="home-action-status">Checking</span>
+              <span class="home-action-arrow" aria-hidden="true">→</span>
+            </a>
+
+            <a
+              class="home-action"
+              data-home-action="sweep"
+              href="#management-sweep"
+              data-hcn-capability="hcn.management_sweep.read"
+              hidden
+            >
+              <span class="home-action-copy">
+                <strong>Company Sweep</strong>
+                <span>Find the files with the longest activity gaps.</span>
+              </span>
+              <span id="home-sweep-status" class="home-action-status">Checking</span>
+              <span class="home-action-arrow" aria-hidden="true">→</span>
+            </a>
+
+            <a class="home-action" data-home-action="connections" href="#connections">
+              <span class="home-action-copy">
+                <strong>Connections</strong>
+                <span>Check JobNimbus, then link Google and your Quo work line.</span>
+              </span>
+              <span id="home-connections-status" class="home-action-status">Checking</span>
+              <span class="home-action-arrow" aria-hidden="true">→</span>
+            </a>
+          </nav>
+        </section>
+
+        <section
+          id="management-sweep"
+          class="management-sweep-section console-view"
+          data-hcn-capability="hcn.management_sweep.read"
+          aria-labelledby="management-sweep-title"
+          hidden
+        >
+          <div class="operations-section-heading">
+            <div>
+              <p class="eyebrow">Richard’s 10 × 3 report</p>
+              <h2 id="management-sweep-title">Company Sweep</h2>
+              <p>
+                See the ten files for each adjuster with the longest verified
+                JobNimbus activity gap.
+              </p>
+            </div>
+            <div class="work-center-actions">
+              <span
+                id="management-sweep-section-status"
+                class="card-status"
+                data-tone="neutral"
+              >
+                Sign in required
+              </span>
               <button
                 id="management-sweep-refresh"
                 class="button button-primary"
@@ -130,21 +200,21 @@
                 data-hcn-capability="hcn.management_sweep.read"
                 hidden
               >
-                Run fresh 10 × 3 sweep
+                Run Company Sweep
               </button>
-              <a class="button button-secondary" href="#work-center">Open Work Center</a>
             </div>
-            <p
-              id="management-sweep-hero-message"
-              class="load-message"
-              data-hcn-capability="hcn.management_sweep.read"
-              role="status"
-              aria-live="polite"
-              hidden
-            >
-              The management report runs only when an authorized manager requests it.
-            </p>
           </div>
+
+          <p
+            id="management-sweep-hero-message"
+            class="section-guidance"
+            data-hcn-capability="hcn.management_sweep.read"
+            role="status"
+            aria-live="polite"
+            hidden
+          >
+            Run the report when you want a fresh company ranking.
+          </p>
 
           <div
             class="company-hero-summary"
@@ -173,34 +243,6 @@
             <p id="management-sweep-generated" class="company-hero-generated">
               No client records are loaded yet.
             </p>
-          </div>
-        </section>
-
-        <section
-          id="management-sweep"
-          class="management-sweep-section"
-          data-hcn-capability="hcn.management_sweep.read"
-          aria-labelledby="management-sweep-title"
-          hidden
-        >
-          <div class="operations-section-heading">
-            <div>
-              <p class="eyebrow">Management accountability</p>
-              <h2 id="management-sweep-title">Richard’s 10 × 3 Sweep</h2>
-              <p>
-                Ten files per adjuster with the longest verified JobNimbus activity
-                gap. Records explicitly typed as reminders, automation, or system
-                noise are excluded. Generic note meaning is not inferred, and
-                communication categories that JobNimbus cannot verify remain N/A.
-              </p>
-            </div>
-            <span
-              id="management-sweep-section-status"
-              class="card-status"
-              data-tone="neutral"
-            >
-              Sign in required
-            </span>
           </div>
 
           <div
@@ -285,15 +327,15 @@
 
         <section
           id="work-center"
-          class="work-center-section"
+          class="work-center-section console-view"
           aria-labelledby="work-center-title"
         >
           <div class="work-center-heading">
             <div>
-              <p class="eyebrow">Fresh read-only operations</p>
-              <h2 id="work-center-title">Work Center</h2>
+              <p class="eyebrow">Your assigned work</p>
+              <h2 id="work-center-title">Work My Files</h2>
               <p id="work-center-summary">
-                Sign in with your HCN account to load your current assigned-file queue.
+                Sign in to see the files assigned to you.
               </p>
             </div>
             <div class="work-center-actions">
@@ -318,17 +360,20 @@
             role="status"
             aria-live="polite"
           >
-            Client records stay unloaded until a fresh authorized session is verified.
+            Sign in to load a fresh list of your files.
           </div>
 
           <div id="work-center-locked" class="operations-locked">
             <span class="operations-lock-mark" aria-hidden="true"></span>
             <div>
-              <strong>Fresh evidence stays closed by default.</strong>
-              <p>
-                The Work Center opens only for an authenticated HCN browser session
-                with the exact assigned-file read capability.
-              </p>
+              <strong>Sign in to work your files.</strong>
+              <p>Your HCN account controls which files you can see.</p>
+              <a
+                id="work-center-sign-in"
+                class="button button-surface locked-sign-in"
+                href="/hcn/auth/login?returnTo=%2Fhcn%23work-center"
+                hidden
+              >Sign in to HCN</a>
             </div>
           </div>
 
@@ -505,8 +550,8 @@
                     <div>
                       <h4 id="action-composer-title">Prepare exact actions</h4>
                       <p>
-                        Build a memory-only batch for this file. Preparation does not
-                        change JobNimbus.
+                        Choose one thing for this file. Preparing it only creates a
+                        review—nothing is changed or sent.
                       </p>
                     </div>
                     <span id="action-composer-count">0 / 12 actions</span>
@@ -519,18 +564,29 @@
                     role="status"
                     aria-live="polite"
                   >
-                    Choose an allowlisted action and enter the exact material to review.
+                    Choose what you want to do and enter the exact details.
                   </div>
 
                   <form id="action-form" class="action-form" novalidate>
                     <label class="field field-wide">
                       <span>Action</span>
                       <select id="action-type" name="actionType">
-                        <option value="jobnimbus.create_note">Create JobNimbus note</option>
-                        <option value="jobnimbus.create_task">Create JobNimbus task</option>
-                        <option value="jobnimbus.update_task">Update JobNimbus task</option>
-                        <option value="jobnimbus.update_status">Change JobNimbus status</option>
-                        <option value="jobnimbus.update_contact">Set date of loss</option>
+                        <optgroup label="JobNimbus">
+                          <option value="jobnimbus.create_note">Add a note</option>
+                          <option value="jobnimbus.create_task">Create a task</option>
+                          <option value="jobnimbus.update_task">Update a task</option>
+                          <option value="jobnimbus.update_status">Change file status</option>
+                          <option value="jobnimbus.update_contact">Set date of loss</option>
+                          <option value="jobnimbus.create_calendar_event">Schedule an appointment</option>
+                          <option value="jobnimbus.update_calendar_event">Update an appointment</option>
+                        </optgroup>
+                        <optgroup label="Email">
+                          <option value="gmail.create_draft">Write an email draft</option>
+                          <option value="gmail.send">Send a reviewed email draft</option>
+                        </optgroup>
+                        <optgroup label="Text">
+                          <option value="quo.send_text">Send a Quo text</option>
+                        </optgroup>
                       </select>
                     </label>
 
@@ -629,6 +685,160 @@
                       </label>
                     </div>
 
+                    <div
+                      class="action-fields"
+                      data-action-fields="jobnimbus.create_calendar_event"
+                      hidden
+                    >
+                      <label class="field field-wide">
+                        <span>Appointment title</span>
+                        <input
+                          id="create-event-title"
+                          type="text"
+                          maxlength="256"
+                          autocomplete="off"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>Details <small>optional</small></span>
+                        <textarea
+                          id="create-event-description"
+                          rows="4"
+                          maxlength="4000"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                      <label class="field">
+                        <span>Starts <small>Central time</small></span>
+                        <input id="create-event-start" type="datetime-local" step="60">
+                      </label>
+                      <label class="field">
+                        <span>Ends <small>Central time</small></span>
+                        <input id="create-event-end" type="datetime-local" step="60">
+                      </label>
+                    </div>
+
+                    <div
+                      class="action-fields"
+                      data-action-fields="jobnimbus.update_calendar_event"
+                      hidden
+                    >
+                      <label class="field field-wide">
+                        <span>Appointment from this fresh file</span>
+                        <select id="update-event-ref">
+                          <option value="">Choose an appointment</option>
+                        </select>
+                      </label>
+                      <label class="field field-wide">
+                        <span>New title <small>leave blank for no change</small></span>
+                        <input
+                          id="update-event-title"
+                          type="text"
+                          maxlength="256"
+                          autocomplete="off"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>New details <small>leave blank for no change</small></span>
+                        <textarea
+                          id="update-event-description"
+                          rows="4"
+                          maxlength="4000"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                      <label class="field">
+                        <span>New start <small>Central time; set both times</small></span>
+                        <input id="update-event-start" type="datetime-local" step="60">
+                      </label>
+                      <label class="field">
+                        <span>New end <small>Central time; set both times</small></span>
+                        <input id="update-event-end" type="datetime-local" step="60">
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="gmail.create_draft" hidden>
+                      <label class="field field-wide">
+                        <span>To</span>
+                        <input
+                          id="gmail-draft-to"
+                          type="text"
+                          maxlength="2000"
+                          autocomplete="off"
+                          inputmode="email"
+                        >
+                      </label>
+                      <label class="field">
+                        <span>CC <small>optional</small></span>
+                        <input
+                          id="gmail-draft-cc"
+                          type="text"
+                          maxlength="2000"
+                          autocomplete="off"
+                          inputmode="email"
+                        >
+                      </label>
+                      <label class="field">
+                        <span>BCC <small>optional</small></span>
+                        <input
+                          id="gmail-draft-bcc"
+                          type="text"
+                          maxlength="2000"
+                          autocomplete="off"
+                          inputmode="email"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>Subject</span>
+                        <input
+                          id="gmail-draft-subject"
+                          type="text"
+                          maxlength="998"
+                          autocomplete="off"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>Exact email</span>
+                        <textarea
+                          id="gmail-draft-body"
+                          rows="8"
+                          maxlength="48000"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="gmail.send" hidden>
+                      <label class="field field-wide">
+                        <span>Reviewed draft created here</span>
+                        <select id="gmail-send-draft-ref">
+                          <option value="">Choose a reviewed draft</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <div class="action-fields" data-action-fields="quo.send_text" hidden>
+                      <label class="field field-wide">
+                        <span>Verified recipient</span>
+                        <input
+                          id="quo-text-to"
+                          type="tel"
+                          maxlength="16"
+                          autocomplete="off"
+                          placeholder="+15551234567"
+                        >
+                      </label>
+                      <label class="field field-wide">
+                        <span>Exact text</span>
+                        <textarea
+                          id="quo-text-content"
+                          rows="5"
+                          maxlength="1600"
+                          autocomplete="off"
+                        ></textarea>
+                      </label>
+                    </div>
+
                     <div class="action-form-actions">
                       <button id="action-add" class="button button-surface" type="submit">
                         Add to review batch
@@ -664,7 +874,7 @@
 
         <section
           id="approvals"
-          class="operations-section approval-section"
+          class="operations-section approval-section console-view"
           data-hcn-capability="hcn.action_plans.read"
           aria-labelledby="approvals-title"
           hidden
@@ -808,7 +1018,7 @@
 
         <section
           id="receipts"
-          class="operations-section receipt-section"
+          class="operations-section receipt-section console-view"
           data-hcn-capability="hcn.action_receipts.read"
           aria-labelledby="receipts-title"
           hidden
@@ -900,16 +1110,15 @@
 
         <section
           id="connections"
-          class="operations-section connections-section"
+          class="operations-section connections-section console-view"
           aria-labelledby="connections-title"
         >
           <div class="operations-section-heading">
             <div>
-              <p class="eyebrow">Your operating accounts</p>
+              <p class="eyebrow">Set up once</p>
               <h2 id="connections-title">Connections</h2>
               <p>
-                Verify your assigned JobNimbus identity, connect exact-file Gmail
-                evidence, and link the Quo line used for your client history.
+                Connect the work accounts HCN needs to show a complete file.
               </p>
             </div>
             <div class="work-center-actions">
@@ -934,14 +1143,20 @@
             role="status"
             aria-live="polite"
           >
-            Connection details stay unloaded until your HCN session is verified.
+            Sign in to check your work accounts.
           </div>
 
           <div id="connections-locked" class="operations-locked">
             <span class="operations-lock-mark" aria-hidden="true"></span>
             <div>
-              <strong>Your connections are closed.</strong>
-              <p>Sign in with your HCN account to check and link your work accounts.</p>
+              <strong>Sign in to check your connections.</strong>
+              <p>HCN will show what is connected and what still needs setup.</p>
+              <a
+                id="connections-sign-in"
+                class="button button-surface locked-sign-in"
+                href="/hcn/auth/login?returnTo=%2Fhcn%23connections"
+                hidden
+              >Sign in to HCN</a>
             </div>
           </div>
 
@@ -1007,8 +1222,8 @@
                   Connect Google
                 </button>
                 <p class="connection-card-detail">
-                  This pilot reads Gmail for exact-file evidence. Calendar consent is
-                  connected for a later scheduling phase; no calendar workflow runs here yet.
+                  Google lets HCN find file-related email and check scheduling
+                  information your role is allowed to use.
                 </p>
               </article>
 
@@ -1093,13 +1308,13 @@
 
         <section
           id="system-health"
-          class="system-health-section"
+          class="system-health-section console-view"
           aria-labelledby="system-health-title"
         >
           <div class="section-heading system-health-heading">
             <div>
               <p class="eyebrow">Platform</p>
-              <h2 id="system-health-title">System Health</h2>
+              <h2 id="system-health-title">System Status</h2>
             </div>
             <p>
               Connector, execution-gate, build, and authority details stay available
@@ -1198,9 +1413,10 @@
                 <h2 id="boundaries-title">System separation</h2>
                 <p>
                   HCN has no route to Chance Brain. Thresher uses only the
-                  isolated HCN Operations Brain foundation; its persistence
-                  layer is not active yet. Legacy client memory remains
-                  untouched, quarantined, and unreachable from HCN.
+                  isolated HCN Operations Brain. Its explicitly gated store
+                  retains encrypted, minimized operational state and has no
+                  action authority. Legacy client memory remains untouched,
+                  quarantined, and unreachable from HCN.
                 </p>
               </div>
               <span class="card-status card-status-fixed">Current contract</span>
@@ -1253,45 +1469,8 @@
           </div>
         </section>
 
-        <section class="next-section" aria-labelledby="next-title">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Read-only employee pilot</p>
-              <h2 id="next-title">What this release can do now</h2>
-            </div>
-            <p>Find an assigned file and understand its fresh evidence. External effects remain a later gated phase.</p>
-          </div>
-
-          <div class="next-grid">
-            <article class="next-card">
-              <span class="next-number">01</span>
-              <h3>Open your queue</h3>
-              <p>Page through the active JobNimbus insurance files assigned to your exact employee identity.</p>
-              <span class="coming-label">Work Center</span>
-            </article>
-            <article class="next-card">
-              <span class="next-number">02</span>
-              <h3>Review one file</h3>
-              <p>Select one opaque file reference and inspect fresh source-backed evidence.</p>
-              <span class="coming-label">Exact file</span>
-            </article>
-            <article class="next-card">
-              <span class="next-number">03</span>
-              <h3>See source gaps</h3>
-              <p>Keep missing, partial, or unavailable Gmail and Quo evidence visible instead of guessing.</p>
-              <span class="coming-label">Fail closed</span>
-            </article>
-            <article class="next-card">
-              <span class="next-number">04</span>
-              <h3>Controlled effects next</h3>
-              <p>Email, text, scheduling, uploads, calls, and JobNimbus changes are not employee features in this pilot.</p>
-              <span class="coming-label">Later phase</span>
-            </article>
-          </div>
-        </section>
-
         <footer class="console-footer">
-          <p>HCN Operations Console · Read-only employee pilot</p>
+          <p>HCN Work Center</p>
           <p id="freshness-text">Awaiting fresh platform metadata.</p>
         </footer>
       </main>

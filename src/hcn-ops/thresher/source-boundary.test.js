@@ -10,6 +10,7 @@ const allowedImports = new Set([
   "node:fs",
   "node:fs/promises",
   "node:path",
+  "./active-runtime.js",
   "./contracts.js",
   "./runtime-config.js",
   "./store.js"
@@ -28,6 +29,7 @@ test("production Thresher modules have a closed source boundary", async () => {
     .sort();
 
   assert.deepEqual(productionFiles, [
+    "active-runtime.js",
     "contracts.js",
     "index.js",
     "runtime-config.js",
@@ -79,7 +81,7 @@ test("production Thresher modules have a closed source boundary", async () => {
   }
 });
 
-test("integration contract keeps persistence disabled until activation review", async () => {
+test("integration contract requires an explicit activation gate and no action authority", async () => {
   const contract = await readFile(
     path.join(directory, "INTEGRATION.md"),
     "utf8"
@@ -88,6 +90,7 @@ test("integration contract keeps persistence disabled until activation review", 
   assert.match(contract, /HCN_THRESHER_STORE_KEY/);
   assert.match(contract, /HCN_THRESHER_REFERENCE_KEY/);
   assert.match(contract, /HCN_THRESHER_SIGNING_KEY/);
-  assert.match(contract, /persistenceConfigured: false/);
+  assert.match(contract, /HCN_THRESHER_ENABLED/);
+  assert.match(contract, /persistenceConfigured: true/);
   assert.match(contract, /executes no external action/);
 });

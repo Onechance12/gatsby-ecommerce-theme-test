@@ -83,6 +83,33 @@ test("authorization is separate from sign-in and requests exact offline connecto
   );
 });
 
+test("an unrestricted active-employee connector does not send a hosted-domain hint", async () => {
+  const fixture = createFixture({
+    identity: {
+      subject: GOOGLE_SUBJECT,
+      hostedDomain: ""
+    },
+    configOverrides: {
+      allowedDomain: ""
+    }
+  });
+  const begin = await fixture.coordinator.beginAuthorization({
+    sessionBinding: SESSION_BINDING,
+    googleSubject: GOOGLE_SUBJECT
+  });
+  assert.equal(
+    new URL(begin.redirectUrl).searchParams.has("hd"),
+    false
+  );
+  const completed = await fixture.coordinator.completeCallback({
+    state: stateFrom(begin),
+    code: "google-authorization-code",
+    sessionBinding: SESSION_BINDING,
+    googleSubject: GOOGLE_SUBJECT
+  });
+  assert.equal(completed.status, "connected");
+});
+
 test("successful callback verifies the pinned identity and privately persists the exact grant", async () => {
   const fixture = createFixture();
   const begin = await fixture.coordinator.beginAuthorization({

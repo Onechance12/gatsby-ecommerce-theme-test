@@ -107,6 +107,27 @@ test("session metadata returns named least-privilege capabilities without identi
   assert.equal(serialized.includes("private-token"), false);
 });
 
+test("public metadata reports only the explicitly active isolated Thresher boundary", () => {
+  const meta = buildPlatformMeta({
+    env: {},
+    runtime: {
+      hcnOperationsBrain: {
+        persistenceConfigured: true
+      }
+    },
+    nodeRuntime: NODE_RUNTIME,
+    now: NOW
+  });
+
+  assert.equal(
+    meta.boundaries.hcnOperationsBrain,
+    "active_isolated_encrypted_operational_state"
+  );
+  assert.equal(meta.boundaries.chanceBrain, "disconnected_no_route");
+  assert.equal(meta.boundaries.hcnChanceBrainDataFlow, "none");
+  assert.equal(meta.boundaries.jobrolo, "disconnected");
+});
+
 test("legacy shared-token sessions fail closed instead of inheriting wildcard authority", () => {
   const session = buildPlatformSession({
     identity: { type: "bridge_token", role: "chance" },

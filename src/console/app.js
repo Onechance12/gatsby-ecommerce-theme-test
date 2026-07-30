@@ -33,10 +33,14 @@
   const RECEIPT_READ_CAPABILITY = "hcn.action_receipts.read";
   const FILE_REF = /^subject_[a-f0-9]{32}$/;
   const TASK_REF = /^ref_[a-f0-9]{32}$/;
+  const EVIDENCE_REF = /^ref_[a-f0-9]{32}$/;
   const PLAN_ID = /^plan_[a-f0-9]{32}$/;
   const BATCH_REF = /^batch_[a-f0-9]{32}$/;
   const APPROVAL_DIGEST = /^[a-f0-9]{64}$/;
   const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+  const ISO_INSTANT =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const E164_PHONE = /^\+[1-9]\d{7,14}$/;
   const SESSION_IDLE_HEADER = "x-hcn-session-idle-expires-at";
   const SESSION_ABSOLUTE_HEADER = "x-hcn-session-expires-at";
   const MAX_TIMER_DELAY_MS = 2_147_000_000;
@@ -61,7 +65,12 @@
     "jobnimbus.create_task": "Create JobNimbus task",
     "jobnimbus.update_task": "Update JobNimbus task",
     "jobnimbus.update_status": "Change JobNimbus status",
-    "jobnimbus.update_contact": "Set JobNimbus date of loss"
+    "jobnimbus.update_contact": "Set JobNimbus date of loss",
+    "jobnimbus.create_calendar_event": "Create JobNimbus appointment",
+    "jobnimbus.update_calendar_event": "Update JobNimbus appointment",
+    "gmail.create_draft": "Create Gmail draft",
+    "gmail.send": "Send reviewed Gmail draft",
+    "quo.send_text": "Send Quo text"
   });
 
   const PLAN_STATUSES = new Set([
@@ -165,7 +174,9 @@
     hcnOperationsBrain: {
       title: "Thresher · HCN Operations Brain",
       states: {
-        foundation_persistence_pending: "Isolated foundation · persistence pending"
+        foundation_persistence_pending: "Isolated foundation · persistence pending",
+        active_isolated_encrypted_operational_state:
+          "Active · isolated encrypted operational state"
       }
     },
     legacyClientMemory: {
@@ -268,6 +279,11 @@
       "capability-summary",
       "capability-groups",
       "freshness-text",
+      "home-next-action",
+      "home-next-detail",
+      "home-work-status",
+      "home-sweep-status",
+      "home-connections-status",
       "management-sweep-refresh",
       "management-sweep-hero-message",
       "management-sweep-status",
@@ -289,6 +305,7 @@
       "work-center-summary",
       "work-center-status",
       "work-center-refresh",
+      "work-center-sign-in",
       "work-center-alert",
       "work-center-locked",
       "work-center-workspace",
@@ -337,6 +354,23 @@
       "update-task-completed",
       "action-status",
       "action-date-of-loss",
+      "create-event-title",
+      "create-event-description",
+      "create-event-start",
+      "create-event-end",
+      "update-event-ref",
+      "update-event-title",
+      "update-event-description",
+      "update-event-start",
+      "update-event-end",
+      "gmail-draft-to",
+      "gmail-draft-cc",
+      "gmail-draft-bcc",
+      "gmail-draft-subject",
+      "gmail-draft-body",
+      "gmail-send-draft-ref",
+      "quo-text-to",
+      "quo-text-content",
       "action-add",
       "action-draft-clear",
       "action-draft-list",
@@ -375,6 +409,7 @@
       "receipt-detail-fields",
       "connections-status",
       "connections-refresh",
+      "connections-sign-in",
       "connections-alert",
       "connections-locked",
       "connections-workspace",
@@ -473,6 +508,8 @@
       });
     });
 
+    syncActiveNavigation();
+    document.body.classList.add("console-ready");
     loadPlatformState();
     registerServiceWorker();
   }
@@ -524,12 +561,6 @@
     let preferredHash = window.location.hash;
     if (state.googleCallbackOutcome && hasConnectorReadAuthority()) {
       preferredHash = "#connections";
-    } else if (
-      hasWorkCenterAuthority()
-      && !hasManagementSweepAuthority()
-      && (!preferredHash || preferredHash === "#overview")
-    ) {
-      preferredHash = "#work-center";
     } else if (!preferredHash) {
       preferredHash = "#overview";
     }
@@ -566,7 +597,154 @@
     const exact = links.find(function (link) {
       return link.getAttribute("href") === hash;
     });
-    setActiveNavigation(exact || links[0] || null);
+    const activeLink = exact || links[0] || null;
+    setActiveNavigation(activeLink);
+    const activeHash = activeLink
+      ? activeLink.getAttribute("href")
+      : "#overview";
+    document.querySelectorAll(".console-view").forEach(function (section) {
+      section.classList.toggle(
+        "is-current-view",
+        "#" + section.id === activeHash && !section.hidden
+      );
+    });
+  }
+
+  function syncHomeGuidance() {
+    const authenticated = hasBrowserAuthority();
+    const canWork = hasWorkCenterAuthority();
+    const canSweep = hasManagementSweepAuthority();
+    const canConnect = hasConnectorReadAuthority();
+
+    if (!navigator.onLine) {
+      setText(elements["home-next-action"], "Reconnect to keep working");
+      setText(
+        elements["home-next-detail"],
+        "Your file information was cleared when the connection went offline."
+      );
+      badge(elements["home-work-status"], "Offline", "bad");
+      badge(elements["home-sweep-status"], "Offline", "bad");
+      badge(elements["home-connections-status"], "Offline", "bad");
+      return;
+    }
+
+    if (!authenticated) {
+      setText(elements["home-next-action"], "Sign in to start");
+      setText(
+        elements["home-next-detail"],
+        "Use your HCN account. Your access decides what appears next."
+      );
+      badge(elements["home-work-status"], "Sign in first", "neutral");
+      badge(elements["home-sweep-status"], "Sign in first", "neutral");
+      badge(elements["home-connections-status"], "Sign in first", "neutral");
+      return;
+    }
+
+    if (!canWork) {
+      badge(elements["home-work-status"], "Not available", "neutral");
+    } else if (state.workCenterLoading) {
+      badge(elements["home-work-status"], "Loading files", "neutral");
+    } else if (state.workCenter) {
+      const total = Number(record(state.workCenter.page).total || 0);
+      badge(
+        elements["home-work-status"],
+        total + " assigned",
+        total ? "good" : "neutral"
+      );
+    } else {
+      badge(elements["home-work-status"], "Ready", "good");
+    }
+
+    if (!canSweep) {
+      badge(elements["home-sweep-status"], "Not available", "neutral");
+    } else if (state.managementSweepLoading) {
+      badge(elements["home-sweep-status"], "Running", "neutral");
+    } else if (state.managementSweep) {
+      badge(elements["home-sweep-status"], "Report ready", "good");
+    } else if (managementSweepRuntimeStatus() === "configured") {
+      badge(elements["home-sweep-status"], "Ready to run", "good");
+    } else {
+      badge(elements["home-sweep-status"], "Setup needed", "warn");
+    }
+
+    let connectionsNeedSetup = false;
+    if (!canConnect) {
+      badge(elements["home-connections-status"], "Not available", "neutral");
+    } else if (state.connectionsLoading) {
+      badge(elements["home-connections-status"], "Checking", "neutral");
+    } else if (state.connections) {
+      const connections = record(state.connections);
+      const connectedCount = [
+        record(connections.jobNimbus).status,
+        record(connections.google).status,
+        record(connections.quo).status
+      ].filter(function (status) {
+        return status === "connected";
+      }).length;
+      connectionsNeedSetup = connectedCount < 3;
+      badge(
+        elements["home-connections-status"],
+        connectedCount === 3 ? "All connected" : connectedCount + " of 3 connected",
+        connectedCount === 3 ? "good" : "warn"
+      );
+    } else {
+      badge(elements["home-connections-status"], "Ready to check", "good");
+    }
+
+    if (state.connectionsLoading) {
+      setText(elements["home-next-action"], "Checking your connections");
+      setText(
+        elements["home-next-detail"],
+        "HCN is verifying the work accounts available to you."
+      );
+      return;
+    }
+    if (connectionsNeedSetup) {
+      setText(elements["home-next-action"], "Finish your connections");
+      setText(
+        elements["home-next-detail"],
+        "Open Connections to see which work account needs attention."
+      );
+      return;
+    }
+    if (state.workCenterLoading) {
+      setText(elements["home-next-action"], "Loading your files");
+      setText(
+        elements["home-next-detail"],
+        "HCN is checking your current assigned JobNimbus queue."
+      );
+      return;
+    }
+    if (canWork) {
+      const total = state.workCenter
+        ? Number(record(state.workCenter.page).total || 0)
+        : 0;
+      setText(
+        elements["home-next-action"],
+        total ? "Open your assigned files" : "Open Work My Files"
+      );
+      setText(
+        elements["home-next-detail"],
+        total
+          ? total + " file" + (total === 1 ? " is" : "s are")
+            + " ready for review."
+          : "Start with your current assigned-file queue."
+      );
+      return;
+    }
+    if (canSweep) {
+      setText(elements["home-next-action"], "Run the Company Sweep");
+      setText(
+        elements["home-next-detail"],
+        "Find the company files with the longest activity gaps."
+      );
+      return;
+    }
+    setText(elements["home-next-action"], "Your account is signed in");
+    setText(
+      elements["home-next-detail"],
+      "Ask an HCN manager if you expected another work option here."
+    );
   }
 
   async function loadPlatformState() {
@@ -784,6 +962,8 @@
     elements["retry-action"].disabled = true;
     elements["sign-in-action"].hidden = true;
     elements["sign-out-action"].hidden = true;
+    elements["work-center-sign-in"].hidden = true;
+    elements["connections-sign-in"].hidden = true;
     setConnection("pending", "Checking");
     setText(elements["load-message"], "Checking fresh platform and session metadata…");
   }
@@ -993,6 +1173,8 @@
 
     elements["sign-in-action"].hidden = true;
     elements["sign-out-action"].hidden = false;
+    elements["work-center-sign-in"].hidden = true;
+    elements["connections-sign-in"].hidden = true;
     setText(
       elements["connections-profile-name"],
       boundedString(profile.displayName, 100) || "Signed-in employee"
@@ -1031,6 +1213,8 @@
 
     elements["sign-in-action"].hidden = true;
     elements["sign-out-action"].hidden = true;
+    elements["work-center-sign-in"].hidden = true;
+    elements["connections-sign-in"].hidden = true;
     badge(elements["identity-badge"], "Unavailable", "bad");
     setText(elements["capability-metric"], "Unavailable");
     setText(elements["capability-metric-detail"], "Session check failed");
@@ -1045,6 +1229,8 @@
     cancelSessionExpiryTimer();
     elements["sign-in-action"].hidden = false;
     elements["sign-out-action"].hidden = true;
+    elements["work-center-sign-in"].hidden = false;
+    elements["connections-sign-in"].hidden = false;
     renderManagementSweepLocked("Sign in required", message);
     badge(elements["identity-badge"], "Sign in required", "neutral");
     setText(elements["capability-metric"], "Sign in");
@@ -1208,6 +1394,7 @@
   function syncOperationalAccess() {
     syncCapabilityAwareConsole();
     syncActionAccess();
+    syncHomeGuidance();
     if (!navigator.onLine) {
       clearOperationalData("Reconnect to request fresh client evidence.");
       renderOperationsLocked(
@@ -1498,6 +1685,7 @@
     state.connectionsController = controller;
     state.connectionsLoading = true;
     state.connections = null;
+    syncHomeGuidance();
     elements["connections-locked"].hidden = true;
     elements["connections-workspace"].hidden = false;
     elements["connections-refresh"].hidden = false;
@@ -1586,6 +1774,7 @@
         state.connectionsLoading = false;
         elements["connections-refresh"].disabled = false;
         syncConnectionControls();
+        syncHomeGuidance();
       }
     }
   }
@@ -2081,6 +2270,7 @@
     state.managementSweepController = controller;
     state.managementSweepLoading = true;
     state.managementSweep = null;
+    syncHomeGuidance();
 
     elements["management-sweep-locked"].hidden = true;
     elements["management-sweep-workspace"].hidden = false;
@@ -2154,6 +2344,7 @@
         elements["management-sweep-refresh"].disabled = false;
         elements["company-worst-list"].setAttribute("aria-busy", "false");
         elements["adjuster-sweep-list"].setAttribute("aria-busy", "false");
+        syncHomeGuidance();
       }
     }
   }
@@ -3206,6 +3397,7 @@
     state.workCenterLoading = true;
     state.workCenter = null;
     state.workCenterOffset = requestedOffset;
+    syncHomeGuidance();
     if (resetFile) {
       state.selectedFileRef = null;
       state.fileReview = null;
@@ -3278,6 +3470,7 @@
         elements["work-center-refresh"].disabled = false;
         elements["work-center-previous"].disabled = false;
         elements["work-center-next"].disabled = false;
+        syncHomeGuidance();
       }
     }
   }
@@ -3779,6 +3972,7 @@
       "activities"
     );
     populateTaskOptions(review.recent.tasks);
+    populateEventOptions(review.recent.activities);
     renderActionComposerState();
   }
 
@@ -4136,11 +4330,15 @@
     state.actionDraft = [];
     elements["action-form"].reset();
     elements["action-type"].value = "jobnimbus.create_note";
-    const taskSelect = elements["update-task-ref"];
-    const emptyOption = document.createElement("option");
-    emptyOption.value = "";
-    setText(emptyOption, "Choose a task");
-    taskSelect.replaceChildren(emptyOption);
+    resetReferenceSelect(elements["update-task-ref"], "Choose a task");
+    resetReferenceSelect(
+      elements["update-event-ref"],
+      "Choose an appointment"
+    );
+    resetReferenceSelect(
+      elements["gmail-send-draft-ref"],
+      "Choose a reviewed draft"
+    );
     renderActionFields();
     renderActionComposerState();
     notice(
@@ -4165,6 +4363,7 @@
     document.querySelectorAll("[data-action-fields]").forEach(function (panel) {
       panel.hidden = panel.dataset.actionFields !== selectedType;
     });
+    prefillFreshFileActionMaterial(selectedType);
   }
 
   function populateTaskOptions(tasks) {
@@ -4188,7 +4387,98 @@
     select.replaceChildren(fragment);
   }
 
+  function populateEventOptions(activities) {
+    replaceReferenceOptions(
+      elements["update-event-ref"],
+      "Choose an appointment",
+      activities.filter(function (activity) {
+        return (
+          EVIDENCE_REF.test(activity.reference)
+          && ["event", "appointment"].includes(activity.typeCode)
+        );
+      }).map(function (activity) {
+        return {
+          reference: activity.reference,
+          label:
+            (activity.label || humanize(activity.typeCode))
+            + (
+              activity.occurredAt
+                ? " · " + readableDateTime(activity.occurredAt)
+                : ""
+            )
+        };
+      })
+    );
+  }
+
+  function populateDraftOptions() {
+    const rows = [];
+    const seen = new Set();
+    const plans = []
+      .concat(Array.isArray(state.actionPlans) ? state.actionPlans : [])
+      .concat(state.actionPlan ? [state.actionPlan] : []);
+    plans.forEach(function (plan) {
+      if (plan.fileRef !== state.selectedFileRef) return;
+      (plan.createdDraftRefs || []).forEach(function (reference) {
+        if (!EVIDENCE_REF.test(reference) || seen.has(reference)) return;
+        seen.add(reference);
+        rows.push({
+          reference: reference,
+          label: "Reviewed draft from " + plan.planId.slice(0, 13) + "…"
+        });
+      });
+    });
+    replaceReferenceOptions(
+      elements["gmail-send-draft-ref"],
+      "Choose a reviewed draft",
+      rows
+    );
+  }
+
+  function resetReferenceSelect(select, emptyLabel) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    setText(emptyOption, emptyLabel);
+    select.replaceChildren(emptyOption);
+  }
+
+  function replaceReferenceOptions(select, emptyLabel, rows) {
+    const current = select.value;
+    const fragment = document.createDocumentFragment();
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    setText(emptyOption, emptyLabel);
+    fragment.append(emptyOption);
+    rows.forEach(function (row) {
+      if (!EVIDENCE_REF.test(row.reference)) return;
+      const option = document.createElement("option");
+      option.value = row.reference;
+      setText(option, row.label);
+      fragment.append(option);
+    });
+    select.replaceChildren(fragment);
+    if (rows.some(function (row) {
+      return row.reference === current;
+    })) {
+      select.value = current;
+    }
+  }
+
+  function prefillFreshFileActionMaterial(type) {
+    const file = record(state.fileReview).file;
+    if (!file || typeof file !== "object") return;
+    if (type === "gmail.create_draft" && !elements["gmail-draft-to"].value) {
+      const email = boundedString(record(file.client).primaryEmail, 254);
+      if (email) elements["gmail-draft-to"].value = email;
+    }
+    if (type === "quo.send_text" && !elements["quo-text-to"].value) {
+      const phone = e164Phone(record(file.client).primaryPhone, false);
+      if (phone) elements["quo-text-to"].value = phone;
+    }
+  }
+
   function renderActionComposerState() {
+    populateDraftOptions();
     const available = Boolean(
       navigator.onLine
       && hasActionPrepareAuthority()
@@ -4208,6 +4498,18 @@
       && elements["update-task-ref"].options.length <= 1
     ) {
       elements["update-task-ref"].disabled = true;
+    }
+    if (
+      available
+      && elements["update-event-ref"].options.length <= 1
+    ) {
+      elements["update-event-ref"].disabled = true;
+    }
+    if (
+      available
+      && elements["gmail-send-draft-ref"].options.length <= 1
+    ) {
+      elements["gmail-send-draft-ref"].disabled = true;
     }
     elements["action-draft-clear"].disabled =
       state.actionDraft.length === 0 || state.actionLoading;
@@ -4353,8 +4655,141 @@
       return { type: type, input: { status: status } };
     }
 
-    const dateOfLoss = exactIsoDate(elements["action-date-of-loss"].value);
-    return { type: type, input: { dateOfLoss: dateOfLoss } };
+    if (type === "jobnimbus.update_contact") {
+      const dateOfLoss = exactIsoDate(elements["action-date-of-loss"].value);
+      return { type: type, input: { dateOfLoss: dateOfLoss } };
+    }
+
+    if (type === "jobnimbus.create_calendar_event") {
+      const startsAt = centralLocalDateTimeToIso(
+        elements["create-event-start"].value
+      );
+      const endsAt = centralLocalDateTimeToIso(
+        elements["create-event-end"].value
+      );
+      assertDateRange(startsAt, endsAt);
+      const input = {
+        title: exactTitle(
+          elements["create-event-title"].value,
+          "Enter an appointment title without leading or trailing spaces."
+        ),
+        startsAt: startsAt,
+        endsAt: endsAt
+      };
+      const description = elements["create-event-description"].value;
+      if (description) {
+        input.description = exactMultilineText(
+          description,
+          4096,
+          "The appointment details are not valid bounded text."
+        );
+      }
+      return { type: type, input: input };
+    }
+
+    if (type === "jobnimbus.update_calendar_event") {
+      const eventRef = elements["update-event-ref"].value;
+      if (!EVIDENCE_REF.test(eventRef)) {
+        throw new Error("Choose an appointment from this fresh file.");
+      }
+      const input = { eventRef: eventRef };
+      let changes = 0;
+      const title = elements["update-event-title"].value;
+      const description = elements["update-event-description"].value;
+      const start = elements["update-event-start"].value;
+      const end = elements["update-event-end"].value;
+      if (title) {
+        input.title = exactTitle(
+          title,
+          "The new appointment title cannot have leading or trailing spaces."
+        );
+        changes += 1;
+      }
+      if (description) {
+        input.description = exactMultilineText(
+          description,
+          4096,
+          "The new appointment details are not valid bounded text."
+        );
+        changes += 1;
+      }
+      if (Boolean(start) !== Boolean(end)) {
+        throw new Error("Set both the new start and end time.");
+      }
+      if (start && end) {
+        input.startsAt = centralLocalDateTimeToIso(start);
+        input.endsAt = centralLocalDateTimeToIso(end);
+        assertDateRange(input.startsAt, input.endsAt);
+        changes += 2;
+      }
+      if (changes === 0) {
+        throw new Error("Enter at least one exact appointment change.");
+      }
+      return { type: type, input: input };
+    }
+
+    if (type === "gmail.create_draft") {
+      const input = {
+        to: exactSingleLineText(
+          elements["gmail-draft-to"].value,
+          2000,
+          "Enter the exact email recipient."
+        ),
+        subject: exactSingleLineText(
+          elements["gmail-draft-subject"].value,
+          998,
+          "Enter the exact email subject."
+        ),
+        body: exactMultilineText(
+          elements["gmail-draft-body"].value,
+          48 * 1024,
+          "Enter the exact email body."
+        )
+      };
+      const cc = elements["gmail-draft-cc"].value;
+      const bcc = elements["gmail-draft-bcc"].value;
+      if (cc) {
+        input.cc = exactSingleLineText(
+          cc,
+          2000,
+          "Enter exact single-line CC recipients."
+        );
+      }
+      if (bcc) {
+        input.bcc = exactSingleLineText(
+          bcc,
+          2000,
+          "Enter exact single-line BCC recipients."
+        );
+      }
+      return { type: type, input: input };
+    }
+
+    if (type === "gmail.send") {
+      const draftRef = elements["gmail-send-draft-ref"].value;
+      if (!EVIDENCE_REF.test(draftRef)) {
+        throw new Error(
+          "Choose a reviewed draft that was created for this file."
+        );
+      }
+      return { type: type, input: { draftRef: draftRef } };
+    }
+
+    if (type === "quo.send_text") {
+      return {
+        type: type,
+        input: {
+          to: e164Phone(elements["quo-text-to"].value, true),
+          content: exactTrimmedMultilineText(
+            elements["quo-text-content"].value,
+            1600,
+            "Enter the exact text without leading or trailing spaces."
+          )
+        }
+      };
+    }
+
+    throw new Error("That action is not enabled for HCN v1.");
   }
 
   function exactTitle(value, message) {
@@ -4394,6 +4829,140 @@
     return value;
   }
 
+  function exactTrimmedMultilineText(value, maximumCharacters, message) {
+    if (
+      typeof value !== "string"
+      || !value
+      || value !== value.trim()
+      || Array.from(value).length > maximumCharacters
+      || /[\u0000\u0008\u000b\u000c\u007f]/.test(value)
+    ) {
+      throw new Error(message);
+    }
+    return value;
+  }
+
+  function e164Phone(value, required) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (E164_PHONE.test(text)) return text;
+    const digits = text.replace(/\D/g, "");
+    const normalized =
+      digits.length === 10
+        ? "+1" + digits
+        : digits.length === 11 && digits.startsWith("1")
+          ? "+" + digits
+          : "";
+    if (E164_PHONE.test(normalized)) return normalized;
+    if (required) {
+      throw new Error("Enter one verified phone number, including area code.");
+    }
+    return "";
+  }
+
+  function centralLocalDateTimeToIso(value) {
+    const match = String(value || "").match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+    );
+    if (!match) {
+      throw new Error("Choose a complete appointment date and time.");
+    }
+    const target = match.slice(1).map(function (part, index) {
+      return index === 5 && part === undefined ? 0 : Number(part);
+    });
+    const targetAsUtc = Date.UTC(
+      target[0],
+      target[1] - 1,
+      target[2],
+      target[3],
+      target[4],
+      target[5],
+      0
+    );
+    const check = new Date(targetAsUtc);
+    if (
+      check.getUTCFullYear() !== target[0]
+      || check.getUTCMonth() + 1 !== target[1]
+      || check.getUTCDate() !== target[2]
+      || check.getUTCHours() !== target[3]
+      || check.getUTCMinutes() !== target[4]
+      || check.getUTCSeconds() !== target[5]
+    ) {
+      throw new Error("Choose a real appointment date and time.");
+    }
+
+    let candidate = targetAsUtc;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const displayed = centralDateTimeParts(candidate);
+      const displayedAsUtc = Date.UTC(
+        displayed[0],
+        displayed[1] - 1,
+        displayed[2],
+        displayed[3],
+        displayed[4],
+        displayed[5],
+        0
+      );
+      candidate += targetAsUtc - displayedAsUtc;
+    }
+    if (!sameDateTimeParts(centralDateTimeParts(candidate), target)) {
+      throw new Error(
+        "That Central time does not exist because the clock changes then."
+      );
+    }
+    const ambiguous = [-3_600_000, 3_600_000].some(function (offset) {
+      return sameDateTimeParts(
+        centralDateTimeParts(candidate + offset),
+        target
+      );
+    });
+    if (ambiguous) {
+      throw new Error(
+        "That Central time occurs twice because the clock changes then. Choose a different time."
+      );
+    }
+    const result = new Date(candidate).toISOString();
+    if (!ISO_INSTANT.test(result)) {
+      throw new Error("The appointment time could not be verified.");
+    }
+    return result;
+  }
+
+  function centralDateTimeParts(milliseconds) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(new Date(milliseconds));
+    const values = Object.fromEntries(parts.map(function (part) {
+      return [part.type, part.value];
+    }));
+    return [
+      Number(values.year),
+      Number(values.month),
+      Number(values.day),
+      Number(values.hour),
+      Number(values.minute),
+      Number(values.second)
+    ];
+  }
+
+  function sameDateTimeParts(left, right) {
+    return left.every(function (value, index) {
+      return value === right[index];
+    });
+  }
+
+  function assertDateRange(startsAt, endsAt) {
+    if (Date.parse(endsAt) < Date.parse(startsAt)) {
+      throw new Error("The appointment end must be after its start.");
+    }
+  }
+
   function exactIsoDate(value) {
     if (!ISO_DATE.test(String(value || ""))) {
       throw new Error("Choose a real date in YYYY-MM-DD format.");
@@ -4424,11 +4993,34 @@
         "update-task-completed"
       ],
       "jobnimbus.update_status": ["action-status"],
-      "jobnimbus.update_contact": ["action-date-of-loss"]
+      "jobnimbus.update_contact": ["action-date-of-loss"],
+      "jobnimbus.create_calendar_event": [
+        "create-event-title",
+        "create-event-description",
+        "create-event-start",
+        "create-event-end"
+      ],
+      "jobnimbus.update_calendar_event": [
+        "update-event-ref",
+        "update-event-title",
+        "update-event-description",
+        "update-event-start",
+        "update-event-end"
+      ],
+      "gmail.create_draft": [
+        "gmail-draft-to",
+        "gmail-draft-cc",
+        "gmail-draft-bcc",
+        "gmail-draft-subject",
+        "gmail-draft-body"
+      ],
+      "gmail.send": ["gmail-send-draft-ref"],
+      "quo.send_text": ["quo-text-to", "quo-text-content"]
     };
     (ids[type] || []).forEach(function (id) {
       elements[id].value = "";
     });
+    prefillFreshFileActionMaterial(type);
   }
 
   function renderActionDraft() {
@@ -4524,7 +5116,91 @@
         return row[1] !== undefined && row[1] !== "";
       });
     }
-    return [["Date of loss", source.dateOfLoss]];
+    if (type === "jobnimbus.update_contact") {
+      return [["Date of loss", source.dateOfLoss]];
+    }
+    if (
+      type === "jobnimbus.create_calendar_event"
+      || type === "jobnimbus.update_calendar_event"
+    ) {
+      return [
+        ["Appointment reference", source.eventRef],
+        [type === "jobnimbus.update_calendar_event" ? "New title" : "Title", source.title],
+        [
+          type === "jobnimbus.update_calendar_event" ? "New details" : "Details",
+          source.description
+        ],
+        [
+          type === "jobnimbus.update_calendar_event" ? "New start" : "Starts",
+          readableCentralDateTime(source.startsAt)
+        ],
+        [
+          type === "jobnimbus.update_calendar_event" ? "New end" : "Ends",
+          readableCentralDateTime(source.endsAt)
+        ],
+        [
+          "Time zone",
+          source.timeZone
+          || (source.startsAt || source.endsAt ? "America/Chicago" : undefined)
+        ]
+      ].filter(function (row) {
+        return row[1] !== undefined && row[1] !== "";
+      });
+    }
+    if (type === "gmail.create_draft" || type === "gmail.send") {
+      const rows = [
+        ["Reviewed draft reference", source.draftRef],
+        ["To", source.to],
+        ["CC", source.cc],
+        ["BCC", source.bcc],
+        ["Subject", source.subject],
+        ["Exact email", source.body]
+      ].filter(function (row) {
+        return row[1] !== undefined && row[1] !== "";
+      });
+      const attachments = Array.isArray(source.attachments)
+        ? source.attachments
+        : [];
+      if (!attachments.length) {
+        rows.push(["Attachments", "None"]);
+      } else {
+        attachments.forEach(function (attachment, index) {
+          rows.push([
+            "Attachment " + (index + 1),
+            [
+              attachment.filename,
+              attachment.mimeType,
+              Number.isInteger(attachment.bytes)
+                ? attachment.bytes + " bytes"
+                : "",
+              attachment.sha256 ? "SHA-256 " + attachment.sha256 : "",
+              attachment.disposition
+            ].filter(Boolean).join(" · ")
+          ]);
+        });
+      }
+      if (source.contentDigest) {
+        rows.push(["Content digest", source.contentDigest]);
+      }
+      if (source.sourceDraftRetention) {
+        rows.push([
+          "Source draft",
+          humanize(source.sourceDraftRetention)
+        ]);
+      }
+      return rows;
+    }
+    if (type === "quo.send_text") {
+      return [
+        ["From", source.from],
+        ["To", source.to],
+        ["Exact text", source.content],
+        ["Character count", source.characterCount]
+      ].filter(function (row) {
+        return row[1] !== undefined && row[1] !== "";
+      });
+    }
+    return [];
   }
 
   async function prepareActionPlan() {
@@ -4817,6 +5493,10 @@
     } else if (requireOperations) {
       throw new Error("Exact action plan material is unavailable");
     }
+    const createdDraftRefs = normalizeCreatedDraftRefs(
+      plan.result,
+      plan.operationCount
+    );
     return {
       planId: planId,
       fileRef: fileRef,
@@ -4826,6 +5506,7 @@
       status: status,
       operationCount: plan.operationCount,
       operations: operations,
+      createdDraftRefs: createdDraftRefs,
       createdAt: plan.createdAt,
       updatedAt: plan.updatedAt
     };
@@ -4857,7 +5538,47 @@
         "completed"
       ],
       "jobnimbus.update_status": ["requestedStatus", "resolvedStatus"],
-      "jobnimbus.update_contact": ["dateOfLoss"]
+      "jobnimbus.update_contact": ["dateOfLoss"],
+      "jobnimbus.create_calendar_event": [
+        "title",
+        "description",
+        "startsAt",
+        "endsAt",
+        "timeZone"
+      ],
+      "jobnimbus.update_calendar_event": [
+        "eventRef",
+        "title",
+        "description",
+        "startsAt",
+        "endsAt",
+        "timeZone"
+      ],
+      "gmail.create_draft": [
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "body",
+        "attachments"
+      ],
+      "gmail.send": [
+        "draftRef",
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "body",
+        "attachments",
+        "contentDigest",
+        "sourceDraftRetention"
+      ],
+      "quo.send_text": [
+        "from",
+        "to",
+        "content",
+        "characterCount"
+      ]
     }[type];
     if (Object.keys(source).some(function (key) {
       return !allowed.includes(key);
@@ -4873,7 +5594,23 @@
         material[key] = source[key];
         return;
       }
-      if (typeof source[key] !== "string" || source[key].length > 8192) {
+      if (key === "attachments") {
+        material.attachments = normalizeAttachmentDescriptors(source[key]);
+        return;
+      }
+      if (key === "characterCount") {
+        if (
+          !Number.isInteger(source[key])
+          || source[key] < 1
+          || source[key] > 1600
+        ) {
+          throw new Error("Invalid action material");
+        }
+        material[key] = source[key];
+        return;
+      }
+      const maximum = key === "body" ? 48 * 1024 : 8192;
+      if (typeof source[key] !== "string" || source[key].length > maximum) {
         throw new Error("Invalid action material");
       }
       material[key] = source[key];
@@ -4890,6 +5627,68 @@
         type === "jobnimbus.update_contact"
         && !ISO_DATE.test(material.dateOfLoss || "")
       )
+      || (
+        type === "jobnimbus.create_calendar_event"
+        && (
+          !material.title
+          || !validIsoInstant(material.startsAt)
+          || !validIsoInstant(material.endsAt)
+          || material.timeZone !== "America/Chicago"
+        )
+      )
+      || (
+        type === "jobnimbus.update_calendar_event"
+        && (
+          !EVIDENCE_REF.test(material.eventRef || "")
+          || (
+            !material.title
+            && !material.description
+            && !material.startsAt
+            && !material.endsAt
+          )
+          || Boolean(material.startsAt) !== Boolean(material.endsAt)
+          || (
+            material.startsAt
+            && (
+              !validIsoInstant(material.startsAt)
+              || !validIsoInstant(material.endsAt)
+              || material.timeZone !== "America/Chicago"
+            )
+          )
+        )
+      )
+      || (
+        type === "gmail.create_draft"
+        && (
+          !material.to
+          || !material.subject
+          || !material.body
+          || !Array.isArray(material.attachments)
+          || material.attachments.length !== 0
+        )
+      )
+      || (
+        type === "gmail.send"
+        && (
+          !EVIDENCE_REF.test(material.draftRef || "")
+          || !material.to
+          || !material.subject
+          || !material.body
+          || !Array.isArray(material.attachments)
+          || !APPROVAL_DIGEST.test(material.contentDigest || "")
+          || material.sourceDraftRetention
+            !== "retained_for_separate_cleanup"
+        )
+      )
+      || (
+        type === "quo.send_text"
+        && (
+          !E164_PHONE.test(material.from || "")
+          || !E164_PHONE.test(material.to || "")
+          || !material.content
+          || material.characterCount !== material.content.length
+        )
+      )
     ) {
       throw new Error("Incomplete action material");
     }
@@ -4901,6 +5700,142 @@
     };
   }
 
+  function normalizeAttachmentDescriptors(value) {
+    if (!Array.isArray(value) || value.length > 25) {
+      throw new Error("Invalid attachment material");
+    }
+    let totalBytes = 0;
+    return value.map(function (candidate) {
+      const attachment = record(candidate);
+      const allowed = [
+        "partId",
+        "filename",
+        "mimeType",
+        "bytes",
+        "sha256",
+        "disposition"
+      ];
+      const partId = boundedString(attachment.partId, 1024);
+      const filename = boundedString(attachment.filename, 512);
+      const mimeType = boundedString(attachment.mimeType, 256);
+      const sha256 = boundedString(attachment.sha256, 80);
+      if (
+        Object.keys(attachment).some(function (key) {
+          return !allowed.includes(key);
+        })
+        || !partId
+        || partId !== attachment.partId
+        || !filename
+        || filename !== attachment.filename
+        || mimeType !== attachment.mimeType
+        || !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(
+          mimeType
+        )
+        || !Number.isInteger(attachment.bytes)
+        || attachment.bytes < 1
+        || attachment.bytes > 20 * 1024 * 1024
+        || sha256 !== attachment.sha256
+        || !APPROVAL_DIGEST.test(sha256)
+      ) {
+        throw new Error("Invalid attachment material");
+      }
+      totalBytes += attachment.bytes;
+      if (totalBytes > 20 * 1024 * 1024) {
+        throw new Error("Invalid attachment material");
+      }
+      const normalized = {
+        partId: partId,
+        filename: filename,
+        mimeType: mimeType,
+        bytes: attachment.bytes,
+        sha256: sha256
+      };
+      if (Object.hasOwn(attachment, "disposition")) {
+        const disposition = boundedString(
+          attachment.disposition,
+          128
+        );
+        if (disposition !== attachment.disposition) {
+          throw new Error("Invalid attachment material");
+        }
+        normalized.disposition = disposition;
+      }
+      return normalized;
+    });
+  }
+
+  function normalizeCreatedDraftRefs(value, operationCount) {
+    if (value === undefined) return [];
+    const result = record(value);
+    const allowedResult = ["mode", "reason", "error", "batch"];
+    if (
+      !Object.keys(result).length
+      || Object.keys(result).some(function (key) {
+        return !allowedResult.includes(key);
+      })
+      || !boundedString(result.mode, 64)
+    ) {
+      throw new Error("Invalid action result");
+    }
+    if (!Object.hasOwn(result, "batch")) return [];
+    const batch = record(result.batch);
+    const allowedBatch = ["status", "operationCount", "completed"];
+    if (
+      Object.keys(batch).some(function (key) {
+        return !allowedBatch.includes(key);
+      })
+      || !boundedString(batch.status, 64)
+      || !Number.isInteger(batch.operationCount)
+      || batch.operationCount < 0
+      || batch.operationCount > operationCount
+      || !Array.isArray(batch.completed)
+      || batch.completed.length !== batch.operationCount
+    ) {
+      throw new Error("Invalid action result");
+    }
+    const refs = [];
+    batch.completed.forEach(function (candidate, arrayIndex) {
+      const completed = record(candidate);
+      const allowedCompleted = ["index", "type", "status", "receipt"];
+      if (
+        Object.keys(completed).some(function (key) {
+          return !allowedCompleted.includes(key);
+        })
+        || completed.index !== arrayIndex
+        || !Object.hasOwn(ACTION_LABELS, completed.type)
+        || completed.status !== "executed"
+      ) {
+        throw new Error("Invalid action result");
+      }
+      const receipt = record(completed.receipt);
+      const allowedReceipt = [
+        "verifiedByReadback",
+        "manualVerificationRequired",
+        "createdDraftRef",
+        "sourceDraftRef",
+        "sourceDraftRetention",
+        "deliveryStatus",
+        "deliveryConfirmed"
+      ];
+      if (Object.keys(receipt).some(function (key) {
+        return !allowedReceipt.includes(key);
+      })) {
+        throw new Error("Invalid action result");
+      }
+      if (Object.hasOwn(receipt, "createdDraftRef")) {
+        const reference = boundedString(receipt.createdDraftRef, 80);
+        if (
+          completed.type !== "gmail.create_draft"
+          || !EVIDENCE_REF.test(reference)
+        ) {
+          throw new Error("Invalid action result");
+        }
+        refs.push(reference);
+      }
+    });
+    return [...new Set(refs)];
+  }
+
   function assertNoStoreEnvelope(value) {
     const authority = record(record(value).authority);
     if (
@@ -4909,7 +5844,8 @@
       || !validIsoInstant(value.generatedAt)
       || value.ephemeral !== true
       || value.cachePolicy !== "no_store"
-      || authority.mode !== "explicit_chance_approval"
+      || authority.mode !== "explicit_signed_in_employee_approval"
+      || authority.fileScope !== "assigned_only"
       || authority.automaticExecution !== false
       || authority.automaticRetry !== false
       || authority.providerIdentifiersExposed !== false
@@ -5653,6 +6589,7 @@
   }
 
   function renderOverallState() {
+    syncHomeGuidance();
     const metaReady = Boolean(state.meta) && !state.metaError;
     const sessionDenied = state.sessionError &&
       (statusOf(state.sessionError) === 401 || statusOf(state.sessionError) === 403);
@@ -5674,17 +6611,17 @@
     }
 
     if (metaReady && sessionReady) {
-      setConnection("good", "Bridge ready");
+      setConnection("good", "System ready");
       setText(
         elements["load-message"],
         sessionNeedsSignIn
-          ? "Bridge verified. Sign in to check your operating permissions."
+          ? "System verified. Sign in to check your operating permissions."
           : "Fresh platform and session checks complete."
       );
       setText(elements["readiness-score"], sessionNeedsSignIn ? "1/2" : "2/2");
       setText(
         elements["readiness-label"],
-        sessionNeedsSignIn ? "Bridge ready · sign in next" : "Controlled operations ready"
+        sessionNeedsSignIn ? "System ready · sign in next" : "Controlled operations ready"
       );
       setText(
         elements["readiness-summary"],
@@ -5816,6 +6753,21 @@
       day: "numeric",
       hour: "numeric",
       minute: "2-digit"
+    }).format(date);
+  }
+
+  function readableCentralDateTime(value) {
+    if (typeof value !== "string" || !value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat(undefined, {
+      timeZone: "America/Chicago",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
     }).format(date);
   }
 

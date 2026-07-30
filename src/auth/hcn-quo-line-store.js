@@ -652,7 +652,8 @@ function canonicalEmail(value, allowedDomain, persisted = false) {
     normalized !== value
     || Buffer.byteLength(normalized, "utf8") > 254
     || !EMAIL_LOCAL_PATTERN.test(local)
-    || domain !== allowedDomain
+    || !DOMAIN_PATTERN.test(domain)
+    || (allowedDomain && domain !== allowedDomain)
   ) {
     if (persisted) corruptStore("The stored employee email is invalid.");
     invalidInput("email is outside the approved HCN domain.");
@@ -665,6 +666,7 @@ function normalizeDomain(value) {
     throw new TypeError("allowedDomain is required");
   }
   const normalized = value.trim().toLowerCase();
+  if (!normalized) return "";
   if (!DOMAIN_PATTERN.test(normalized)) {
     throw new TypeError("allowedDomain is invalid");
   }

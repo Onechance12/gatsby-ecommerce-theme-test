@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createActiveThresherRuntime } from "./hcn-ops/thresher/active-runtime.js";
+import { createThresherStore } from "./hcn-ops/thresher/store.js";
+
 const PHASE_ZERO_BUILD_SHA = "810802542c35625327662e97fd21f7208532b371";
 const PLATFORM_FIXTURE_SECRET = "platform-fixture-secret-must-not-leak";
 
@@ -421,7 +424,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.match(consoleResponse.headers.get("content-security-policy"), /default-src 'self'/);
   assert.equal(consoleResponse.headers.get("x-frame-options"), "DENY");
   const consoleHtml = await consoleResponse.text();
-  assert.match(consoleHtml, /HCN Operations Console/);
+  assert.match(consoleHtml, /HCN Work Center/);
   assert.doesNotMatch(consoleHtml, /type=["']password["']/i);
 
   const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
@@ -602,7 +605,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.components.securitySchemes.googleOAuth.type, "oauth2");
   assert.equal(
     chatgptSchema.components.securitySchemes.googleOAuth.flows.authorizationCode.authorizationUrl,
-    "https://jobnimbus-chatgpt-bridge.onrender.com/oauth/authorize"
+    `http://127.0.0.1:${port}/oauth/authorize`
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
   assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 28);
@@ -1980,7 +1983,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
         Buffer.alloc(32, 0x32).toString("base64url"),
       WAVE_AUTH_USERS_JSON: "{}",
       AUTO_ENROLL_WAVE_USERS: "true",
-      AUTO_ENROLLED_USER_STORE_PATH: path.join(authMemoryRoot, "auto-enrolled-users.json"),
+      HCN_IDENTITY_PIN_STORE_PATH: path.join(authMemoryRoot, "identity-pins.json"),
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/v1`,
       TWILIO_ACCOUNT_SID: "AC-fixture",
@@ -2254,7 +2257,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "openid",
     "email",
     "profile",
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar.readonly"
   ];
   const hcnConnectorScopeText = hcnConnectorScopes.join(" ");
@@ -2467,6 +2470,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(activeContact));
+      return;
+    }
+    if (
+      url.pathname ===
+        `/contacts/${encodeURIComponent(otherOwnerContact.jnid)}`
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-jobnimbus-api-key"
+      );
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(otherOwnerContact));
       return;
     }
     if (url.pathname === "/activities" && req.method === "POST") {
@@ -2807,6 +2824,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       googleCredentialStorage:
         "encrypted_per_employee_persistent_grant",
       googleSharedMailboxFallback: false,
+      employeeIdentityPins:
+        "authenticated_persistent_immutable",
       quoIdentityBinding:
         "immutable_google_subject_plus_sms_otp",
       quoAuthorizationStoreConfigured: true,
@@ -3723,7 +3742,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(preparedActionEnvelope.ephemeral, true);
   assert.equal(preparedActionEnvelope.cachePolicy, "no_store");
   assert.deepEqual(preparedActionEnvelope.authority, {
-    mode: "explicit_chance_approval",
+    mode: "explicit_signed_in_employee_approval",
+    fileScope: "assigned_only",
     automaticExecution: false,
     automaticRetry: false,
     providerIdentifiersExposed: false
@@ -3909,6 +3929,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.deepEqual(
     employeeBrowserSession.authorizedCapabilities,
     [
+      "hcn.action_plans.execute",
+      "hcn.action_plans.invalidate",
+      "hcn.action_plans.prepare",
+      "hcn.action_plans.read",
+      "hcn.action_receipts.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",
@@ -3998,7 +4023,71 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       body: "{}"
     }
   );
-  assert.equal(employeeActionResponse.status, 403);
+  assert.equal(employeeActionResponse.status, 200);
+  assert.deepEqual(
+    (await employeeActionResponse.json()).plans,
+    []
+  );
+  const employeeCrossFilePrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: "This cross-employee plan must be blocked." }
+        }]
+      })
+    }
+  );
+  assert.equal(employeeCrossFilePrepareResponse.status, 409);
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  const employeeFileRef = employeeWorkCenter.files[0].fileRef;
+  const employeePrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({
+        fileRef: employeeFileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: {
+            note:
+              "Employee fixture reviewed this assigned file."
+          }
+        }]
+      })
+    }
+  );
+  assert.equal(
+    employeePrepareResponse.status,
+    200,
+    await employeePrepareResponse.clone().text()
+  );
+  const employeePreparedPlan =
+    (await employeePrepareResponse.json()).plan;
+  assert.equal(employeePreparedPlan.fileRef, employeeFileRef);
+  assert.equal(employeePreparedPlan.status, "pending");
+  assert.equal(jobNimbusMutationRequests.length, 0);
+  const employeeInvalidateResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/invalidate`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({
+        planId: employeePreparedPlan.planId
+      })
+    }
+  );
+  assert.equal(employeeInvalidateResponse.status, 200);
+  assert.equal(
+    (await employeeInvalidateResponse.json()).plan.status,
+    "invalidated"
+  );
 
   const employeeConnectorStartResponse = await fetch(
     `${origin}/hcn/connect/google/start`,
@@ -4417,6 +4506,17 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     "bridge",
     "action-batches.json"
   );
+  const thresherStorePath = path.join(
+    memoryRoot,
+    "thresher",
+    "state.enc.json"
+  );
+  const thresherStoreKey =
+    Buffer.alloc(32, 0x6c).toString("base64url");
+  const thresherReferenceKey =
+    Buffer.alloc(32, 0x6d).toString("base64url");
+  const thresherSigningKey =
+    Buffer.alloc(32, 0x6e).toString("base64url");
   const legacyCanaryPath = path.join(
     memoryRoot,
     "data",
@@ -4522,6 +4622,15 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       res.end(JSON.stringify(contact));
       return;
     }
+    if (
+      ["/activities", "/tasks", "/files"].includes(url.pathname)
+      && req.method === "GET"
+    ) {
+      const collection = url.pathname.slice(1);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ [collection]: [] }));
+      return;
+    }
     if (url.pathname === "/activities" && req.method === "POST") {
       assert.equal(
         req.headers.authorization,
@@ -4595,6 +4704,11 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       JOBNIMBUS_API_BASE_URL:
         `http://127.0.0.1:${fakeProviderPort}`,
       HCN_OPERATIONS_ROOT: memoryRoot,
+      HCN_THRESHER_ENABLED: "true",
+      HCN_THRESHER_STORE_PATH: thresherStorePath,
+      HCN_THRESHER_STORE_KEY: thresherStoreKey,
+      HCN_THRESHER_REFERENCE_KEY: thresherReferenceKey,
+      HCN_THRESHER_SIGNING_KEY: thresherSigningKey,
       HCN_ACTION_RECEIPT_STORE_PATH: receiptStorePath,
       ACTION_APPROVAL_STORE_PATH:
         path.join(memoryRoot, "bridge", "action-approvals.json"),
@@ -4612,6 +4726,27 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
+  const healthResponse = await fetch(`${origin}/health`);
+  assert.equal(healthResponse.status, 200);
+  const activeHealth = await healthResponse.json();
+  assert.equal(
+    activeHealth.hcnConsole.clientDataPersistence,
+    "thresher_encrypted_minimized_operational_state"
+  );
+  assert.equal(
+    activeHealth.hcnOperationsBrain.mode,
+    "isolated_v2_active"
+  );
+  assert.equal(
+    activeHealth.hcnOperationsBrain.persistenceConfigured,
+    true
+  );
+  assert.equal(activeHealth.hcnOperationsBrain.modelCanExecute, false);
+  assert.equal(activeHealth.hcnOperationsBrain.externalActions, false);
+  assert.equal(
+    activeHealth.platform.boundaries.hcnOperationsBrain,
+    "active_isolated_encrypted_operational_state"
+  );
 
   async function createActionSession(code) {
     const loginResponse = await fetch(`${origin}/hcn/auth/login`, {
@@ -4755,6 +4890,49 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     durableReceiptDocument.records[0].status,
     "completed_pending_verification"
   );
+  const thresherInspector = createActiveThresherRuntime({
+    store: createThresherStore({
+      filePath: thresherStorePath,
+      encryptionKey: thresherStoreKey,
+      tenantRef: "tenant_abcdef0123456789"
+    }),
+    tenantRef: "tenant_abcdef0123456789",
+    referenceKey: thresherReferenceKey,
+    signingKey: thresherSigningKey
+  });
+  const thresherState = await thresherInspector.snapshot({
+    principalRef: durableReceiptDocument.records[0].sessionPrincipalRef,
+    fileRef
+  });
+  thresherInspector.close();
+  assert.equal(thresherState.persistence, "active_encrypted_minimized");
+  assert.equal(thresherState.authority.authorizesAction, false);
+  assert.equal(thresherState.authority.executesAction, false);
+  assert.equal(thresherState.snapshot.receipts.length, 1);
+  assert.equal(
+    thresherState.snapshot.receipts[0].outcomeCode,
+    "uncertain"
+  );
+  const encryptedThresherState = await readFile(
+    thresherStorePath,
+    "utf8"
+  );
+  for (const forbidden of [
+    exactNote,
+    contact.display_name,
+    contact.email,
+    contact.mobile_phone,
+    contact["Claim #"],
+    contact["Policy #"],
+    providerJobId,
+    providerCreatedNoteId
+  ]) {
+    assert.equal(
+      JSON.stringify(thresherState).includes(forbidden),
+      false
+    );
+    assert.equal(encryptedThresherState.includes(forbidden), false);
+  }
   const serializedReceipts = JSON.stringify({
     executionReceipt: execution.receipt,
     receiptFirstObservation,
@@ -4867,7 +5045,12 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
 
   async function appendPriorBatch(row) {
     const rows = JSON.parse(await readFile(actionBatchStorePath, "utf8"));
-    rows.push(row);
+    const principalRef = rows.find((item) => item.principalRef)
+      ?.principalRef;
+    rows.push({
+      ...row,
+      ...(principalRef ? { principalRef } : {})
+    });
     await writeFile(
       actionBatchStorePath,
       `${JSON.stringify(rows, null, 2)}\n`,
@@ -4969,6 +5152,37 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   assert.equal(partialDuplicate.receipt.succeededCount, 1);
   assert.equal(partialDuplicate.receipt.unknownCount, 1);
   assert.equal(jobNimbusMutations.length, 1);
+
+  const persistenceFailureSession = await createActionSession(
+    "hcn-action-execution-code-persistence-failure"
+  );
+  const unavailablePersistencePlan = await preparePlan(
+    persistenceFailureSession,
+    [{
+      type: "jobnimbus.create_note",
+      input: {
+        note: "This action must not reach JobNimbus when Thresher is unavailable."
+      }
+    }]
+  );
+  await writeFile(thresherStorePath, "corrupt", "utf8");
+  const mutationCountBeforeFailure = jobNimbusMutations.length;
+  const unavailablePersistenceExecution = await fetch(
+    `${origin}/hcn/api/v1/action-plans/execute`,
+    {
+      method: "POST",
+      headers: persistenceFailureSession.headers,
+      body: JSON.stringify({
+        planId: unavailablePersistencePlan.planId
+      })
+    }
+  );
+  assert.equal(unavailablePersistenceExecution.status, 503);
+  assert.match(
+    (await unavailablePersistenceExecution.json()).error,
+    /Thresher persistence is unavailable|Nothing was intentionally executed/i
+  );
+  assert.equal(jobNimbusMutations.length, mutationCountBeforeFailure);
 
   assert.deepEqual(await readFile(legacyCanaryPath), legacyCanaryBytes);
   const legacyCanaryAfter = await stat(legacyCanaryPath);

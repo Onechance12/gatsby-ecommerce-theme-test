@@ -75,7 +75,7 @@ const HCN_PERSISTENT_PATH_NAMES = Object.freeze([
   "HCN_ACTION_RECEIPT_STORE_PATH",
   "OUTBOUND_SEND_STORE_PATH",
   "HCN_QUO_LINE_STORE_PATH",
-  "AUTO_ENROLLED_USER_STORE_PATH"
+  "HCN_IDENTITY_PIN_STORE_PATH"
 ]);
 
 test("deployable HCN JavaScript cannot import quarantined memory modules", () => {

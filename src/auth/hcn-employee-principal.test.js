@@ -58,6 +58,33 @@ test("ordinary explicit principals default to employee and assigned scope", () =
   assert.equal(Object.isFrozen(principal), true);
 });
 
+test("unrestricted HCN login accepts any canonical active-employee email domain", () => {
+  const principal = normalizeExplicitHcnEmployeePrincipal({
+    email: "richard@titanrecon.com",
+    name: "Richard",
+    role: "manager",
+    googleSubject: "richard-google-subject",
+    jobNimbusOwnerId: "richard-owner",
+    jobNimbusScope: "assigned"
+  }, {
+    allowedDomain: ""
+  });
+  assert.equal(principal.email, "richard@titanrecon.com");
+  assert.throws(
+    () => normalizeExplicitHcnEmployeePrincipal({
+      email: "not-an-email",
+      name: "Invalid",
+      role: "employee",
+      googleSubject: "invalid-subject",
+      jobNimbusOwnerId: "owner",
+      jobNimbusScope: "assigned"
+    }, {
+      allowedDomain: ""
+    }),
+    /email/i
+  );
+});
+
 test("explicit management principals may receive reviewed company scope", () => {
   const manager = explicit({
     role: " Manager ",

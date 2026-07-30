@@ -467,9 +467,11 @@ function normalizeOptions(options) {
     "HCN employee principal options"
   );
   const allowedDomain = String(
-    options.allowedDomain || DEFAULT_ALLOWED_DOMAIN
+    Object.hasOwn(options, "allowedDomain")
+      ? options.allowedDomain
+      : DEFAULT_ALLOWED_DOMAIN
   ).trim().toLowerCase();
-  if (!DOMAIN_PATTERN.test(allowedDomain)) {
+  if (allowedDomain && !DOMAIN_PATTERN.test(allowedDomain)) {
     fail("HCN employee allowedDomain is invalid");
   }
   return { allowedDomain };
@@ -492,7 +494,8 @@ function normalizeEmail(value, allowedDomain) {
   const domain = at > 0 ? email.slice(at + 1) : "";
   if (
     !LOCAL_EMAIL_PATTERN.test(local)
-    || domain !== allowedDomain
+    || !DOMAIN_PATTERN.test(domain)
+    || (allowedDomain && domain !== allowedDomain)
   ) {
     fail("HCN employee email is outside the approved domain");
   }

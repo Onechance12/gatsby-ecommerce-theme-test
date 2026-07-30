@@ -63,6 +63,7 @@ const DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const HARD_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const HARD_MAX_FUTURE_SKEW_MS = 15 * 60 * 1000;
+const MAX_SNAPSHOT_RECORDS = 512;
 const TEMPORARY_NAME_ATTEMPTS = 4;
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -113,23 +114,46 @@ export function createThresherStore({
   let closed = false;
 
   async function put(value) {
+    const records = await putMany([value]);
+    return records[0];
+  }
+
+  async function putMany(values) {
     assertOpen();
-    let record;
-    try {
-      record = buildThresherRecord(value, {
-        tenantRef: configuredTenantRef
-      });
-    } catch (error) {
-      if (error instanceof ThresherContractError) {
-        invalidInput(error.message);
+    if (
+      !Array.isArray(values)
+      || values.length < 1
+      || values.length > 64
+    ) {
+      invalidInput(
+        "A Thresher atomic write must contain between 1 and 64 records."
+      );
+    }
+    const records = values.map((value) => {
+      try {
+        return buildThresherRecord(value, {
+          tenantRef: configuredTenantRef
+        });
+      } catch (error) {
+        if (error instanceof ThresherContractError) {
+          invalidInput(error.message);
+        }
+        throw error;
       }
-      throw error;
+    });
+    const suppliedReferences = records.map(thresherRecordRef);
+    if (new Set(suppliedReferences).size !== suppliedReferences.length) {
+      invalidInput(
+        "A Thresher atomic write cannot repeat a record reference."
+      );
     }
 
     return enqueueMutation(async () => {
       assertOpen();
       const timestamp = readNow(now);
-      assertRecordClock(record, timestamp, maxFutureSkewMs);
+      records.forEach((record) =>
+        assertRecordClock(record, timestamp, maxFutureSkewMs)
+      );
       const document = await readEncryptedDocument({
         filePath: configuredPath,
         key: derivedKey,
@@ -137,38 +161,53 @@ export function createThresherStore({
         maxRecords,
         maxFileBytes
       });
-      const reference = thresherRecordRef(record);
-      const existing = document.records.find(
-        (candidate) => thresherRecordRef(candidate) === reference
+      let workingRecords = compactOperationalHistory(
+        document.records,
+        timestamp
       );
-      if (existing) {
-        if (canonicalJson(existing) !== canonicalJson(record)) {
-          conflict(
-            "immutable_record_conflict",
-            "A Thresher record reference cannot be reused for different state."
-          );
+      let changed = workingRecords.length !== document.records.length;
+      for (const record of records) {
+        const reference = thresherRecordRef(record);
+        const existing = workingRecords.find(
+          (candidate) => thresherRecordRef(candidate) === reference
+        );
+        if (existing) {
+          if (canonicalJson(existing) !== canonicalJson(record)) {
+            conflict(
+              "immutable_record_conflict",
+              "A Thresher record reference cannot be reused for different state."
+            );
+          }
+          continue;
         }
-        return record;
+
+        enforceAuthoritativeWrite(workingRecords, record, timestamp);
+        workingRecords.push(record);
+        changed = true;
       }
-      if (document.records.length >= maxRecords) {
+
+      workingRecords = compactOperationalHistory(
+        workingRecords,
+        timestamp
+      );
+      if (workingRecords.length > maxRecords) {
         conflict(
           "capacity_exceeded",
           "The bounded Thresher store is at capacity."
         );
       }
-
-      enforceAuthoritativeWrite(document.records, record, timestamp);
-      document.records.push(record);
-      document.records.sort(comparePersistedRecords);
-      await writeEncryptedDocument({
-        filePath: configuredPath,
-        key: derivedKey,
-        document,
-        randomBytes,
-        maxRecords,
-        maxFileBytes
-      });
-      return record;
+      if (changed) {
+        document.records = workingRecords.sort(comparePersistedRecords);
+        await writeEncryptedDocument({
+          filePath: configuredPath,
+          key: derivedKey,
+          document,
+          randomBytes,
+          maxRecords,
+          maxFileBytes
+        });
+      }
+      return Object.freeze([...records]);
     });
   }
 
@@ -224,6 +263,7 @@ export function createThresherStore({
 
   return Object.freeze({
     put,
+    putMany,
     snapshot,
     close
   });
@@ -562,6 +602,12 @@ function projectSnapshot(
         )
         && record.ruleRefs.every((reference) => ruleRefs.has(reference))
     )
+    .sort((left, right) =>
+      left.createdAt === right.createdAt
+        ? left.planRef.localeCompare(right.planRef)
+        : left.createdAt.localeCompare(right.createdAt)
+    )
+    .slice(-MAX_SNAPSHOT_RECORDS)
     .sort((left, right) => left.planRef.localeCompare(right.planRef));
   const receipts = records
     .filter((record) => record.recordType === "receipt")
@@ -569,7 +615,8 @@ function projectSnapshot(
       left.completedAt === right.completedAt
         ? left.receiptRef.localeCompare(right.receiptRef)
         : left.completedAt.localeCompare(right.completedAt)
-    );
+    )
+    .slice(-MAX_SNAPSHOT_RECORDS);
 
   return buildThresherSnapshot(
     {
@@ -586,6 +633,124 @@ function projectSnapshot(
     },
     { tenantRef, fileRef }
   );
+}
+
+/**
+ * Deterministically removes superseded transient state while preserving the
+ * complete receipt audit graph. Receipts are never compacted. Every plan named
+ * by a receipt, plus that plan's rule/evidence dependencies, is retained.
+ * Current unreceipted plans and the newest coded state per file are retained;
+ * only expired unreceipted plans and superseded unreferenced review state can
+ * be removed.
+ */
+function compactOperationalHistory(records, timestamp) {
+  const byReference = new Map(
+    records.map((record) => [thresherRecordRef(record), record])
+  );
+  const retained = new Set();
+  const retain = (record) => {
+    if (record) retained.add(thresherRecordRef(record));
+  };
+
+  const receipts = records.filter(
+    (record) => record.recordType === "receipt"
+  );
+  receipts.forEach(retain);
+  const receiptedPlanRefs = new Set(
+    receipts.map((record) => record.planRef)
+  );
+  records
+    .filter(
+      (record) =>
+        record.recordType === "plan"
+        && (
+          receiptedPlanRefs.has(record.planRef)
+          || (
+            ["proposed", "approved"].includes(record.stateCode)
+            && isFreshAt(record, timestamp)
+          )
+        )
+    )
+    .forEach(retain);
+
+  newestPerOperationalSlot(
+    records,
+    "evidence",
+    (record) =>
+      `${record.tenantRef}\0${record.fileRef}\0${record.sourceCode}\0${record.evidenceCode}`,
+    "checkedAt"
+  ).forEach(retain);
+  newestPerOperationalSlot(
+    records,
+    "rule_state",
+    (record) =>
+      `${record.tenantRef}\0${record.fileRef}\0${record.ruleCode}`,
+    "evaluatedAt"
+  ).forEach(retain);
+  newestPerOperationalSlot(
+    records,
+    "work_state",
+    (record) =>
+      `${record.tenantRef}\0${record.fileRef}\0${record.workCode}`,
+    "updatedAt"
+  ).forEach(retain);
+
+  let addedDependency = true;
+  while (addedDependency) {
+    addedDependency = false;
+    for (const reference of [...retained]) {
+      const record = byReference.get(reference);
+      if (!record) continue;
+      const dependencies =
+        record.recordType === "receipt"
+          ? [record.planRef]
+          : record.recordType === "plan"
+            ? [...record.evidenceRefs, ...record.ruleRefs]
+            : record.recordType === "rule_state"
+              ? record.evidenceRefs
+              : record.recordType === "work_state"
+                ? [...record.evidenceRefs, ...record.ruleRefs]
+                : [];
+      for (const dependency of dependencies) {
+        if (!retained.has(dependency) && byReference.has(dependency)) {
+          retained.add(dependency);
+          addedDependency = true;
+        }
+      }
+    }
+  }
+
+  return records.filter(
+    (record) => retained.has(thresherRecordRef(record))
+  );
+}
+
+function newestPerOperationalSlot(
+  records,
+  recordType,
+  slotFor,
+  timestampField
+) {
+  const newestBySlot = new Map();
+  for (const record of records) {
+    if (record.recordType !== recordType) continue;
+    const slot = slotFor(record);
+    const existing = newestBySlot.get(slot);
+    if (
+      !existing
+      || Date.parse(record[timestampField])
+        > Date.parse(existing[timestampField])
+      || (
+        record[timestampField] === existing[timestampField]
+        && thresherRecordRef(record).localeCompare(
+          thresherRecordRef(existing)
+        ) > 0
+      )
+    ) {
+      newestBySlot.set(slot, record);
+    }
+  }
+  return [...newestBySlot.values()];
 }
 
 function authoritativeEvidenceForScope(

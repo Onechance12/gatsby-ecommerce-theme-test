@@ -9,8 +9,8 @@ actions while a later system-of-record migration remains a separate, measured
 product phase.
 
 The bridge also supports a ChatGPT Custom GPT Action, verified PDF attachments,
-durable private action receipts, a unified Chance-only review/approval
-transaction, the three-adjuster JobNimbus activity-gap management sweep, and
+durable private action receipts, an assigned-file-only employee
+review/approval transaction, the three-adjuster JobNimbus activity-gap management sweep, and
 the isolated HCN Operations v2 contract foundation. Legacy per-client snapshots
 and operational advisories are read-only by default while the v2 operational
 state layer is built.
@@ -29,12 +29,14 @@ transport is unavailable.
   import, fallback, or data flow. Existing legacy-v1 client-memory files remain
   untouched and quarantined; they are not readable or trusted by HCN,
   JobNimbus tools, Custom GPT actions, or local operators.
-- Thresher's isolated HCN Operations Brain currently provides versioned
-  contracts and deterministic rule foundations only. Its dedicated operational
-  persistence layer is not active yet; no documentation or UI should imply
-  otherwise.
-- HCN employee authority is identity-bound and least privilege. An approved
-  `@wavepa.com` Google identity must match an active JobNimbus employee, and
+- Thresher's isolated HCN Operations Brain provides versioned contracts,
+  deterministic rules, and an encrypted minimized operational-state lifecycle
+  on the dedicated HCN service only when `HCN_THRESHER_ENABLED=true` exactly.
+  It stores opaque coded review/work state plus plan/receipt metadata; it has
+  no model tools, autonomous learning, action authority, or external-effect
+  callback.
+- HCN employee authority is identity-bound and least privilege. A verified
+  Google email must exactly match one unique active JobNimbus employee, and
   new employees receive only their assigned JobNimbus scope by default.
   Gmail/Calendar grants and Quo lines are linked separately to that immutable
   employee identity. HCN never borrows another employee's connector or falls
@@ -44,9 +46,10 @@ transport is unavailable.
   measured parity, reconciliation, audit, rollback, and cutover gates.
 - HCN writes, sends, calendar changes, uploads, and calls remain exact-plan,
   explicit-approval operations behind their route capabilities and runtime
-  effect gates. The current HCN action-plan preparation, review, execution, and
-  receipt routes remain Chance-only; employee sign-in or connector linking does
-  not grant action authority.
+  effect gates. Each approved operating role can prepare and review actions
+  only for files freshly proven assigned to that same signed-in employee.
+  Execution requires that employee's unchanged plan plus both global runtime
+  gates; no management role receives company-wide write scope.
 - `GET /api/v1/meta` exposes privacy-safe build, runtime, release-gate drift,
   and boundary metadata. Only a full provider-owned `RENDER_GIT_COMMIT` is
   labeled attested; caller-declared commit values are never deployment proof.
@@ -109,7 +112,9 @@ transport is unavailable.
   approval-gated.
 - Changing one character, recipient, subject, or attachment invalidates the
   approval digest. Duplicate approved action batches are blocked by a persistent ledger.
-- JobNimbus write actions resolve only Chance Pearson-owned insurance files.
+- Legacy operator/Custom GPT write actions resolve only Chance
+  Pearson-owned insurance files. HCN browser actions instead resolve only
+  fresh active insurance files assigned to the same signed-in employee.
 - Existing legacy client snapshots are quarantined historical artifacts, not
   continuity caches or operating authority. No HCN/JobNimbus route may render,
   return, or use them. Fresh JobNimbus/Gmail/Quo evidence is the only client
@@ -156,6 +161,7 @@ Persistent and channel-control variables:
 
 ```text
 HCN_OPERATIONS_ROOT=/var/data/hcn-operations
+HCN_THRESHER_ENABLED=false
 HCN_THRESHER_STORE_PATH=/var/data/hcn-operations/thresher/state.enc.json
 HCN_THRESHER_STORE_KEY=
 HCN_THRESHER_REFERENCE_KEY=
@@ -187,15 +193,17 @@ employee links, handoffs, and artifacts default beneath its `platform/`
 subdirectory. No operational-model provider is configured in this tranche;
 Thresher is deterministic and non-executing.
 
-The four `HCN_THRESHER_*` values reserve the isolated Thresher storage
-contract. `HCN_THRESHER_STORE_KEY` is the dedicated AEAD/HKDF master,
+The exact `HCN_THRESHER_ENABLED=true` gate activates the isolated Thresher
+storage lifecycle only after every dedicated value validates.
+`HCN_THRESHER_STORE_KEY` is the dedicated AEAD/HKDF master,
 `HCN_THRESHER_REFERENCE_KEY` is separate opaque-reference material, and
-`HCN_THRESHER_SIGNING_KEY` is reserved for later cross-process plan/receipt
-signing. None may reuse another HCN, provider, Chance Brain, legacy-memory, or
-Jobrolo secret. Merely configuring these values does not activate Thresher
-persistence. The server validates their path, format, and distinctness now;
-state reads/writes still require a separately reviewed retention, recovery,
-and controlled-rollout phase.
+`HCN_THRESHER_SIGNING_KEY` signs minimized evidence, rule, work, and receipt
+digests. None may reuse another HCN, provider, Chance Brain, legacy-memory, or
+Jobrolo secret. Configuring keys with the gate absent or false validates a
+ready-but-inactive foundation. A missing, partial, malformed, reused, or
+unsafe-path active configuration fails startup. Superseded unreferenced review
+state is compacted deterministically; receipts and their complete
+plan/rule/evidence audit graph are never compacted.
 
 ## HCN Operations Console
 
@@ -212,19 +220,21 @@ employee connectors fail closed and never fall back to Chance's accounts.
 The console is an orchestration and control layer. It does not copy JobNimbus
 into a new CRM or become authoritative for client records. JobNimbus remains
 the system of record, and provider readback remains the truth after an approved
-effect. Current action-plan and receipt routes are a separate Chance-only
-capability. Employee Work Center access and connector linking do not authorize
-writes, sends, calls, uploads, approvals, or execution.
+effect. Current action-plan and receipt routes are identity-bound,
+assigned-file-only capabilities. Employee Work Center access alone never
+authorizes an effect: the exact plan must be reviewed and approved by that same
+signed-in employee, and every relevant global effect gate must also be enabled.
 
 The console is disabled by default. To enable it for one exact HTTPS origin,
 configure:
 
 ```text
 HCN_CONSOLE_ENABLED=true
-HCN_CONSOLE_ORIGIN=https://jobnimbus-chatgpt-bridge.onrender.com
-PUBLIC_BASE_URL=https://jobnimbus-chatgpt-bridge.onrender.com
+HCN_CONSOLE_ORIGIN=https://hcn-operations-platform.onrender.com
+PUBLIC_BASE_URL=https://hcn-operations-platform.onrender.com
 ALLOW_GOOGLE_USER_AUTH=true
 AUTO_ENROLL_WAVE_USERS=true
+HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=true
 HCN_OPERATIONS_ROOT=/var/data/hcn-operations
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
@@ -236,6 +246,7 @@ HCN_TENANT_ID=
 HCN_REFERENCE_KEY=
 HCN_GOOGLE_GRANT_KEY=
 HCN_GOOGLE_GRANT_STORE_PATH=/var/data/hcn-operations/platform/google-grants.enc.json
+HCN_IDENTITY_PIN_STORE_PATH=/var/data/hcn-operations/platform/identity-pins.json
 HCN_MANAGEMENT_ADJUSTERS_JSON=
 WAVE_AUTH_USERS_JSON=
 ```
@@ -243,9 +254,11 @@ WAVE_AUTH_USERS_JSON=
 `HCN_CONSOLE_ORIGIN` must exactly match the origin of `PUBLIC_BASE_URL`.
 Sign-in reuses the existing Google redirect URI at
 `/oauth/google/callback`; no second Google redirect URI is required. With
-`AUTO_ENROLL_WAVE_USERS=true`, a verified `@wavepa.com` identity is admitted
-only when the same email resolves to an active JobNimbus employee. The server
-pins the immutable Google subject and JobNimbus owner identity, assigns role
+`AUTO_ENROLL_WAVE_USERS=true` and
+`HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=true`, a verified Google identity is
+admitted only when the exact same email resolves uniquely to an active
+JobNimbus employee. The authenticated identity-pin store binds the immutable
+Google subject, JobNimbus owner, role, and assigned-file scope. The server assigns role
 `employee` and JobNimbus scope `assigned` by default, and revalidates that
 binding on every browser request. `WAVE_AUTH_USERS_JSON` remains the explicit
 path for disabling a user or granting a reviewed role override; company scope
@@ -254,7 +267,7 @@ is never an auto-enrollment default.
 Console sign-in and Google provider linking are separate ceremonies. Sign-in
 creates only a bounded opaque HCN browser session. Choosing **Connect Google**
 uses the dedicated `HCN_GOOGLE_CLIENT_ID`/`HCN_GOOGLE_CLIENT_SECRET`, requests
-exactly Gmail read-only and Calendar read-only access plus identity scopes, and
+exactly Gmail modify and Calendar read-only access plus identity scopes, and
 stores that employee's refresh grant on the server, encrypted at rest under an
 opaque reference derived from the immutable Google subject. The HCN connector
 client ID and secret must be different from the login/Custom GPT Google client;
@@ -450,11 +463,11 @@ workspace:
 powershell -ExecutionPolicy Bypass -File scripts/check-readiness.ps1
 ```
 
-Review the complete diff and confirm the local branch is aligned with
-`origin/jobnimbus-bridge`. Push, merge, deployment, the Render
+Review the complete diff and confirm the deployment branch is based on the
+current `origin/jobnimbus-bridge`. Push, merge, deployment, the Render
 `HCN_MANAGEMENT_ADJUSTERS_JSON` value, or any other Render environment change
 each requires specific action-time approval. After deployment, verify the
-attested build SHA, live capability manifest, Chance-only session
+attested build SHA, live capability manifest, assigned-file session
 authorization for HCN actions, management-role authorization for the sweep,
 connector health, `no-store` response behavior, and an exact three-adjuster
 synthetic or approved production smoke test. Never place the management
@@ -468,7 +481,9 @@ open tasks, non-photo operational documents, Gmail evidence, Quo evidence, and
 private action receipts. It has no Chance Brain or legacy-client-memory path.
 Live JobNimbus, Gmail, and Quo evidence is authoritative. Thresher may evaluate
 minimized fresh observations through isolated deterministic contracts, but the
-HCN Operations Brain persistence layer is not active yet.
+HCN Operations Brain never overrides a live source or authorizes an action.
+On the explicitly gated HCN service, exact-file review/work state and coded
+plan/receipt lifecycle metadata persist in its separate encrypted store.
 
 The dedicated Codex operator never reads or
 writes Chance Brain client snapshots, episodes, operational state, or action
@@ -503,10 +518,14 @@ server still requires the exact digest, the current unconsumed challenge, and
 ## Custom ChatGPT
 
 A normal ChatGPT experience can use this service through a Custom GPT Action.
-Import `https://jobnimbus-chatgpt-bridge.onrender.com/openapi-chatgpt.json`, configure
-HTTP bearer authentication with `JOBNIMBUS_BRIDGE_TOKEN`, save/publish the GPT,
-and start a new chat after schema changes. Arbitrary standard chats do not gain
-the bridge automatically; the Action must be installed on that GPT.
+Import `https://hcn-operations-platform.onrender.com/openapi-chatgpt.json`,
+configure OAuth with the service's `/oauth/authorize` and `/oauth/token`
+endpoints plus its dedicated `GPT_OAUTH_CLIENT_ID` and
+`GPT_OAUTH_CLIENT_SECRET`, save/publish the GPT, and start a new chat after
+schema changes. Arbitrary standard chats do not gain the HCN platform
+automatically; the Action must be installed on that GPT. Do not reuse the
+shared bridge token, Google client secret, local operator token, or any Chance
+Brain credential for this OAuth client.
 
 The GPT-facing schema is intentionally consolidated to a curated set of
 high-level operations. Chance Brain and legacy-memory routes are not part of
@@ -676,9 +695,10 @@ are explicitly approved.
 ## HCN Employee And Connector Rollout
 
 First-use employee enrollment is enabled with
-`AUTO_ENROLL_WAVE_USERS=true`. A new employee must sign in with a verified
-`@wavepa.com` Google account whose email exactly matches an active JobNimbus
-user. Auto-enrollment pins the immutable Google subject and JobNimbus owner and
+`AUTO_ENROLL_WAVE_USERS=true` and
+`HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=true`. A new employee must sign in
+with a verified Google account whose email exactly matches one unique active
+JobNimbus user. Auto-enrollment pins the immutable Google subject and JobNimbus owner and
 grants only role `employee` with JobNimbus scope `assigned`. Explicit
 `WAVE_AUTH_USERS_JSON` entries remain available for disabling access and
 reviewed role overrides; they are not required for each ordinary active
@@ -696,8 +716,9 @@ Production rollout prerequisites:
 1. Provision a new HCN-only persistent Render disk; do not reuse the legacy
    memory disk or treat a different folder on that disk as isolation. Set
    `HCN_OPERATIONS_ROOT`, `HCN_GOOGLE_GRANT_STORE_PATH`, and
-   `HCN_QUO_LINE_STORE_PATH` to reviewed locations on the new disk. Keep the
-   encrypted Quo authorization and auto-enrollment stores on that same
+   `HCN_QUO_LINE_STORE_PATH`, and `HCN_IDENTITY_PIN_STORE_PATH` to reviewed
+   locations on the new disk. Keep the encrypted Quo authorization and
+   authenticated identity-pin stores on that same
    HCN-only disk.
 2. Add `HCN_GOOGLE_GRANT_KEY` through the Render secret UI. Use a dedicated
    canonical base64url value encoding 32 to 128 random bytes; never reuse or
@@ -705,22 +726,29 @@ Production rollout prerequisites:
 3. Add `HCN_QUO_LINK_KEY` through the Render secret UI with the same
    dedicated-key and non-reuse requirements.
 4. Configure the exact HTTPS console/public origin and the dedicated HCN Google
-   connector client for Gmail/Calendar read-only scopes. Keep it distinct from
+   connector client for Gmail modify and Calendar read-only scopes. Keep it distinct from
    the login/Custom GPT client while registering the same exact callback. Also
-   configure the approved Workspace domain, HCN tenant/reference secrets, and
-   strong OAuth-session secret.
+   configure the verified-active-JobNimbus login rule, HCN tenant/reference
+   secrets, and strong OAuth-session secret. An external Google connector app
+   must complete Google's required production verification before broad rollout.
 5. Confirm the JobNimbus service account can enumerate active users and that
-   each pilot employee's `@wavepa.com` email is exact and unique in JobNimbus.
+   each pilot employee's Google email is exact and unique in JobNimbus.
 6. Configure the company Quo and SMS-verification providers and verify that
    each pilot line is available to only one immutable employee identity.
-7. Keep write/send/call gates disabled during identity and connector smoke
+7. Configure three independently generated Thresher keys and the isolated
+   HCN-only store path. Keep `HCN_THRESHER_ENABLED=false` outside the dedicated
+   HCN service; use exact lowercase `true` only for its reviewed rollout.
+8. Keep write/send/call gates disabled during identity and connector smoke
    tests. Verify two separate employee sessions see only their own assigned
    JobNimbus files and connector status, with no cross-user or Chance fallback.
-8. Verify ordinary employees cannot access management or HCN action routes,
-   then explicitly verify approved management roles separately. Current HCN
-   action-plan preparation, review, execution, invalidation, and receipts must
-   remain Chance-only and exact-plan approval gated.
-9. Record the reviewed SHA, run the full test/readiness suite, deploy only with
+9. Verify ordinary employees cannot access management routes, cannot prepare
+   an action against another employee's file, and can access only their own
+   session-scoped plans and stable principal receipts. Verify management roles
+   separately and prove they still receive no company-wide write scope.
+10. Verify repeated exact-file reviews compact only superseded transient state,
+    receipt audit graphs survive restart, and a corrupted/unavailable Thresher
+    store blocks execution before any provider mutation.
+11. Record the reviewed SHA, run the full test/readiness suite, deploy only with
    action-time approval, and verify encrypted-grant persistence and revocation
    across a controlled restart before expanding the pilot.
 

@@ -238,7 +238,10 @@ test("voice prompt contains no speakable pacing label", () => {
 });
 
 test("IVR controls listen to the full menu without waiting for a repeat", () => {
-  const config = buildRetellLlmFromPacket({});
+  const config = buildRetellLlmFromPacket(
+    {},
+    { guardedEndCallUrl: "https://hcn.example.test/retell/guarded-end-call" }
+  );
   const guardedEnd = config.generalTools.find((tool) => tool.name === "request_guarded_end_call");
   const pressDigit = config.generalTools.find((tool) => tool.name === "press_digit");
   assert.equal(guardedEnd.type, "custom");
@@ -249,6 +252,13 @@ test("IVR controls listen to the full menu without waiting for a repeat", () => 
   assert.equal(pressDigit.speak_after_execution, false);
   assert.match(config.generalPrompt, /wait about 0\.75 to 1 second/i);
   assert.doesNotMatch(config.generalPrompt, /wait a full 3 seconds after the system/i);
+});
+
+test("Retell configuration fails closed without an explicit guarded end-call URL", () => {
+  assert.throws(
+    () => buildRetellLlmFromPacket({}),
+    /guardedEndCallUrl is required/
+  );
 });
 
 test("carrier calls refuse sensitive identity and banking information", () => {

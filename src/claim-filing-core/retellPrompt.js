@@ -7,6 +7,12 @@
 // Build the Retell LLM config (general_prompt + general_tools) from a call
 // packet. Returns the pieces plus a toLlmRequestBody() convenience.
 export function buildRetellLlmFromPacket(packet, options = {}) {
+  const guardedEndCallUrl = String(options.guardedEndCallUrl || "").trim();
+  if (!guardedEndCallUrl) {
+    throw new Error(
+      "guardedEndCallUrl is required; claim calls must not fall back to another deployment."
+    );
+  }
   const generalPrompt = renderRetellPrompt(packet);
   const beginMessage = options.beginMessage || "";
   const generalTools = [
@@ -17,7 +23,7 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
         "Request permission to end the call. This is the only tool that may end a carrier claim call. The bridge " +
         "independently verifies the live transcript, claim/reference number, required closing questions, wait state, " +
         "and representative wrap-up. If denied, remain connected and follow the returned instruction.",
-      url: options.guardedEndCallUrl || "https://jobnimbus-chatgpt-bridge.onrender.com/retell/guarded-end-call",
+      url: guardedEndCallUrl,
       method: "POST",
       headers: options.guardedEndCallAuthorization ? { authorization: options.guardedEndCallAuthorization } : undefined,
       speak_during_execution: false,

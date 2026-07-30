@@ -18,7 +18,7 @@ export const HCN_GOOGLE_CONNECTOR_REQUIRED_SCOPES = Object.freeze([
   "openid",
   "email",
   "profile",
-  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/calendar.readonly"
 ]);
 
@@ -171,10 +171,12 @@ export function createHcnGoogleConnectorOAuthCoordinator({
     );
     authorizationUrl.searchParams.set("access_type", "offline");
     authorizationUrl.searchParams.set("prompt", "consent");
-    authorizationUrl.searchParams.set(
-      "hd",
-      normalizedConfig.allowedDomain
-    );
+    if (normalizedConfig.allowedDomain) {
+      authorizationUrl.searchParams.set(
+        "hd",
+        normalizedConfig.allowedDomain
+      );
+    }
     authorizationUrl.searchParams.set("state", state);
 
     return Object.freeze({
@@ -445,7 +447,10 @@ async function authenticateIdentity({
       403
     );
   }
-  if (hostedDomain !== config.allowedDomain) {
+  if (
+    config.allowedDomain
+    && hostedDomain !== config.allowedDomain
+  ) {
     throw connectorError(
       "access_denied",
       "The connected Google account could not be verified.",
@@ -549,6 +554,7 @@ function normalizeAllowedDomain(value) {
     throw new TypeError("Google allowed domain is required");
   }
   const domain = value.trim().toLowerCase();
+  if (!domain) return "";
   if (!DOMAIN_PATTERN.test(domain)) {
     throw new TypeError("Google allowed domain is invalid");
   }

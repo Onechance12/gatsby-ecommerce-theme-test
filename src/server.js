@@ -84,6 +84,9 @@ import {
   createHcnGoogleGrantStore
 } from "./auth/hcn-google-grant-store.js";
 import {
+  createHcnIdentityPinStore
+} from "./auth/hcn-identity-pin-store.js";
+import {
   createHcnQuoLineStore
 } from "./auth/hcn-quo-line-store.js";
 import {
@@ -183,7 +186,16 @@ const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
 const HCN_ACTION_EXECUTION_ENABLED =
   RELEASE_GATES.HCN_ACTION_EXECUTION_ENABLED;
-const PUBLIC_BASE_URL = stripTrailingSlash(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://jobnimbus-chatgpt-bridge.onrender.com");
+const SERVICE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/.test(
+  String(process.env.HCN_SERVICE_NAME || "").trim()
+)
+  ? String(process.env.HCN_SERVICE_NAME).trim()
+  : "jobnimbus-chatgpt-bridge";
+const PUBLIC_BASE_URL = stripTrailingSlash(
+  process.env.PUBLIC_BASE_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    `http://127.0.0.1:${PORT}`
+);
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const HCN_GOOGLE_CLIENT_ID =
@@ -208,6 +220,16 @@ const GOOGLE_USERINFO_URL = resolveGoogleProviderEndpoint(
   { allowLoopbackForTests: ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS }
 );
 const GOOGLE_OAUTH_ALLOWED_DOMAIN = process.env.GOOGLE_OAUTH_ALLOWED_DOMAIN || "wavepa.com";
+const HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS =
+  process.env.HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS === "true";
+const HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN = String(
+  HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
+    ? ""
+    : (
+        process.env.HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
+        || GOOGLE_OAUTH_ALLOWED_DOMAIN
+      )
+).trim().toLowerCase();
 const ALLOW_GOOGLE_USER_AUTH = process.env.ALLOW_GOOGLE_USER_AUTH === "true";
 const AUTO_ENROLL_WAVE_USERS = process.env.AUTO_ENROLL_WAVE_USERS === "true";
 const GPT_OAUTH_CLIENT_ID = process.env.GPT_OAUTH_CLIENT_ID || "wave-jobnimbus-gpt";
@@ -359,11 +381,11 @@ const HCN_QUO_LINE_STORE_PATH =
   );
 const HCN_QUO_LINK_KEY =
   process.env.HCN_QUO_LINK_KEY || "";
-const AUTO_ENROLLED_USER_STORE_PATH =
-  process.env.AUTO_ENROLLED_USER_STORE_PATH
+const HCN_IDENTITY_PIN_STORE_PATH =
+  process.env.HCN_IDENTITY_PIN_STORE_PATH
   || (
     HCN_OPERATIONS_DATA_DIR
-      ? path.join(HCN_OPERATIONS_DATA_DIR, "auto-enrolled-users.json")
+      ? path.join(HCN_OPERATIONS_DATA_DIR, "identity-pins.json")
       : ""
   );
 const QUO_API_KEY = process.env.QUO_API_KEY || "";
@@ -445,11 +467,11 @@ let hcnConsoleOAuthCoordinatorInstance = null;
 let hcnGoogleConnectorOAuthCoordinatorInstance = null;
 let hcnConsoleFreshReadServiceInstance = null;
 let hcnGoogleGrantStoreInstance = null;
+let hcnIdentityPinStoreInstance = null;
 let hcnQuoLineStoreInstance = null;
 let hcnActionReceiptIndexInstance = null;
 let hcnActionExecutionInFlight = false;
 const HCN_ACTION_SESSION_IN_FLIGHT = new Set();
-let autoEnrolledUserMutationQueue = Promise.resolve();
 let actionBatchMutationQueue = Promise.resolve();
 let actionApprovalMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
@@ -697,7 +719,7 @@ const routes = new Map([
   ["POST /quo/send", quoSend]
 ]);
 
-await hydrateAutoEnrolledWaveUsers();
+await hydrateHcnIdentityPins();
 
 const server = createServer(async (req, res) => {
   try {
@@ -838,7 +860,7 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`JobNimbus ChatGPT bridge listening on http://${HOST}:${PORT}`);
+  console.log(`${SERVICE_NAME} listening on http://${HOST}:${PORT}`);
   console.log(`Auth: ${BRIDGE_TOKEN ? "enabled" : "disabled"}`);
   console.log(`Writes: ${ALLOW_WRITES ? "enabled" : "dry-run only"}`);
   console.log(`Voice stream: ${OPENAI_API_KEY ? "available" : "missing OPENAI_API_KEY"}`);
@@ -847,7 +869,7 @@ server.listen(PORT, HOST, () => {
 function health() {
   const status = {
     ok: true,
-    service: "jobnimbus-chatgpt-bridge",
+    service: SERVICE_NAME,
     jobNimbusConfigured: Boolean(API_KEY),
     gmailConfigured: Boolean(
       GOOGLE_CLIENT_ID
@@ -862,13 +884,22 @@ function health() {
       available: oauthBrokerConfigured() || hcnConsoleAuthConfigured(),
       provider: "google_via_bridge",
       allowedWorkspaceDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+      hcnLoginEligibility:
+        HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
+          ? "verified_google_email_matching_unique_active_jobnimbus_user"
+          : `verified_google_domain_${HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN}`,
       approvedUserCount: WAVE_AUTH_USERS.size,
       automaticEmployeeEnrollment: {
         enabled: AUTO_ENROLL_WAVE_USERS,
         requirements: [
-          "verified_wavepa_google",
-          "exact_active_jobnimbus_user"
+          HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
+            ? "verified_google_identity"
+            : `verified_google_domain_${HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN}`,
+          "exact_active_jobnimbus_user",
+          "immutable_hcn_identity_pin"
         ],
+        identityPinStoreConfigured:
+          hcnIdentityPinStoreConfigured(),
         accessBeforeQuoVerification:
           "assigned_jobnimbus_and_connection_setup",
         accessAfterVerification:
@@ -883,7 +914,7 @@ function health() {
     hcnConsole: {
       enabled: HCN_CONSOLE_ENABLED,
       available: hcnConsoleAuthConfigured(),
-      authentication: "google_workspace_server_session",
+      authentication: "verified_google_server_session",
       sessionStore: "bounded_in_memory_single_instance",
       browserCredential: "secure_http_only_host_cookie",
       csrfProtection: "exact_origin_and_session_token",
@@ -900,6 +931,10 @@ function health() {
         googleCredentialStorage:
           "encrypted_per_employee_persistent_grant",
         googleSharedMailboxFallback: false,
+        employeeIdentityPins:
+          hcnIdentityPinStoreConfigured()
+            ? "authenticated_persistent_immutable"
+            : "unavailable",
         quoIdentityBinding:
           "immutable_google_subject_plus_sms_otp",
         quoAuthorizationStoreConfigured:
@@ -916,7 +951,10 @@ function health() {
         rankingMode: "jobnimbus_activity_only",
         companyCommunicationCoverage: "not_evaluated"
       },
-      clientDataPersistence: "none",
+      clientDataPersistence:
+        HCN_THRESHER_CONFIGURATION.persistenceActive === true
+          ? "thresher_encrypted_minimized_operational_state"
+          : "none",
       referenceConfiguration:
         projectHcnReferenceConfigurationReadiness(
           HCN_REFERENCE_CONFIGURATION
@@ -972,6 +1010,12 @@ function health() {
         HCN_CONSOLE_ENABLED
         && HCN_REFERENCE_CONFIGURATION.ready === true
         && Boolean(API_KEY),
+      authorizedRoles:
+        "assigned_work_roles",
+      fileScope:
+        "signed_in_employee_jobnimbus_assignments_only",
+      approvalMode:
+        "explicit_same_signed_in_employee",
       executionGateEnabled: HCN_ACTION_EXECUTION_ENABLED,
       executionReady:
         ALLOW_WRITES
@@ -1079,12 +1123,18 @@ function health() {
       available: true,
       system: "hcn_operations",
       productName: "Thresher AI",
-      mode: "isolated_v2_foundation",
+      mode:
+        HCN_THRESHER_CONFIGURATION.persistenceActive === true
+          ? "isolated_v2_active"
+          : "isolated_v2_foundation",
       contractsAvailable: true,
       thresherRulesAvailable: true,
       autonomousLearning: false,
       externalActions: false,
-      clientMemory: "not_yet_persistent",
+      clientMemory:
+        HCN_THRESHER_CONFIGURATION.persistenceActive === true
+          ? "encrypted_minimized_operational_state"
+          : "not_yet_persistent",
       deterministicRulesRunOnFreshEvidence: true,
       optionalModelAdvisory: false,
       operationalProviderConfigured: false,
@@ -1094,7 +1144,12 @@ function health() {
       modelCanExecute: false,
       liveSourcesWin: true,
       doesNotAuthorizeActions: true,
-      persistenceConfigured: false,
+      persistenceConfigured:
+        HCN_THRESHER_CONFIGURATION.persistenceActive === true,
+      exactFileReviewPersistence:
+        HCN_THRESHER_CONFIGURATION.persistenceActive === true,
+      actionPlanReceiptPersistence:
+        HCN_THRESHER_CONFIGURATION.persistenceActive === true,
       storeFoundation:
         projectThresherRuntimeConfiguration(
           HCN_THRESHER_CONFIGURATION
@@ -1130,6 +1185,7 @@ function hcnConsoleAuthConfigured() {
     || !HCN_CONSOLE_STATE_CODEC
     || !HCN_CONSOLE_ORIGIN
     || !hcnOperationsStorageConfigured()
+    || !hcnIdentityPinStoreConfigured()
     || !hcnEmployeeProvisioningConfigured()
   ) {
     return false;
@@ -1190,12 +1246,39 @@ function hcnOperationsStorageConfigured() {
     HCN_THRESHER_STORE_PATH,
     HCN_ACTION_RECEIPT_STORE_PATH,
     HCN_QUO_LINE_STORE_PATH,
-    AUTO_ENROLLED_USER_STORE_PATH
+    HCN_IDENTITY_PIN_STORE_PATH
   ].every((candidate) => {
     if (!candidate) return false;
     const resolved = path.resolve(candidate);
     return resolved.startsWith(`${hcnRoot}${path.sep}`);
   });
+}
+
+function hcnIdentityPinStoreConfigured() {
+  if (
+    !hcnOperationsStorageConfigured()
+    || !HCN_REFERENCE_KEY
+    || !HCN_IDENTITY_PIN_STORE_PATH
+  ) {
+    return false;
+  }
+  try {
+    hcnIdentityPinStore();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hcnIdentityPinStore() {
+  if (!hcnIdentityPinStoreInstance) {
+    hcnIdentityPinStoreInstance = createHcnIdentityPinStore({
+      filePath: HCN_IDENTITY_PIN_STORE_PATH,
+      key: HCN_REFERENCE_KEY,
+      allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
+    });
+  }
+  return hcnIdentityPinStoreInstance;
 }
 
 function hcnGoogleGrantStoreConfigured() {
@@ -1249,7 +1332,7 @@ function hcnQuoLineStore() {
     hcnQuoLineStoreInstance = createHcnQuoLineStore({
       filePath: HCN_QUO_LINE_STORE_PATH,
       encryptionKey: HCN_QUO_LINK_KEY,
-      allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN
+      allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
     });
   }
   return hcnQuoLineStoreInstance;
@@ -1346,7 +1429,7 @@ function hcnGoogleConnectorOAuthCoordinator() {
           clientId: HCN_GOOGLE_CLIENT_ID,
           clientSecret: HCN_GOOGLE_CLIENT_SECRET,
           callbackUri: `${PUBLIC_BASE_URL}/oauth/google/callback`,
-          allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+          allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN,
           tokenUrl: GOOGLE_TOKEN_URL,
           allowTestProviderEndpoints:
             ALLOW_TEST_GOOGLE_PROVIDER_ENDPOINTS
@@ -1411,7 +1494,7 @@ function hcnConsoleOAuthCoordinator() {
         tokenUrl: GOOGLE_TOKEN_URL,
         tokenInfoUrl: GOOGLE_TOKENINFO_URL,
         userInfoUrl: GOOGLE_USERINFO_URL,
-        allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+        allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN,
         prompt: "select_account"
       }
     });
@@ -1464,11 +1547,13 @@ async function resolveHcnConsoleApprovedUser(candidate = {}) {
   if (!email || !googleSubject) return null;
 
   let approved = WAVE_AUTH_USERS.get(email);
-  if (!approved) {
+  if (!approved || !String(approved.googleSubject || "").trim()) {
     approved = await resolveFirstUseWaveUser({
       email,
       name: candidate.name,
-      subject: googleSubject
+      subject: googleSubject,
+      hostedDomain: candidate.hostedDomain,
+      existingUser: approved || null
     });
   }
   if (!approved || approved.enabled === false) return null;
@@ -1480,18 +1565,6 @@ async function resolveHcnConsoleApprovedUser(candidate = {}) {
       !== String(approved.jobNimbusOwnerId || "").trim()
   ) {
     return null;
-  }
-  if (!approved.googleSubject) {
-    // Explicitly configured users remain fail-closed until an immutable
-    // subject pin is reviewed. Only auto-enrollment may establish a pin.
-    if (approved.autoEnrolled !== true) return null;
-    approved = {
-      ...approved,
-      googleSubject,
-      role: "employee",
-      jobNimbusScope: "assigned"
-    };
-    await commitAutoEnrolledWaveUser(approved);
   }
   if (String(approved.googleSubject) !== googleSubject) return null;
   if (!String(approved.jobNimbusOwnerId || "").trim()) return null;
@@ -1529,10 +1602,10 @@ function hcnPrincipalForWaveUser(user = {}) {
   };
   return user.autoEnrolled === true
     ? normalizeAutoEnrolledHcnEmployeePrincipal(input, {
-        allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN
+        allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
       })
     : normalizeExplicitHcnEmployeePrincipal(input, {
-        allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN
+        allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
       });
 }
 
@@ -1982,7 +2055,7 @@ async function hcnConnectorStatus(input = {}) {
       const gmailLinked =
         linked
         && scopes.has(
-          "https://www.googleapis.com/auth/gmail.readonly"
+          "https://www.googleapis.com/auth/gmail.modify"
         );
       const calendarLinked =
         linked
@@ -2540,12 +2613,21 @@ function hcnManagementSweepExclusions(providerExclusions, coreExclusions) {
 async function hcnReadFile(input = {}) {
   const principal = assertHcnAssignedReadSession();
   return withHcnReadAdmission(
-    () => hcnConsoleFreshReadService(principal).readFile(input)
+    async () => {
+      const review =
+        await hcnConsoleFreshReadService(principal).readFile(input);
+      if (!hcnThresherPersistenceActive()) return review;
+      const thresher = await hcnRecordFreshReview(review);
+      return Object.freeze({
+        ...review,
+        thresher
+      });
+    }
   );
 }
 
 async function hcnPrepareActionPlan(input = {}) {
-  assertChanceHcnReadSession();
+  const principal = assertHcnActionSession();
   const prepareInput = validateHcnBrowserActionPrepareInput(input);
   assertHcnActionOperationConflicts(prepareInput.operations);
   const sessionBinding = hcnActionSessionBinding();
@@ -2554,9 +2636,19 @@ async function hcnPrepareActionPlan(input = {}) {
     async () => withHcnRestrictedEffects(async () => {
       let approval = null;
       try {
+        if (hcnThresherPersistenceActive()) {
+          const review =
+            await hcnConsoleFreshReadService(principal).readFile({
+              fileRef: prepareInput.fileRef,
+              recentLimit: 20
+            });
+          await hcnRecordFreshReview(review);
+        }
         const scope = await resolveHcnActionScope({
           fileRef: prepareInput.fileRef,
-          taskRefs: hcnTaskRefsFromPrepareInput(prepareInput)
+          taskRefs: hcnTaskRefsFromPrepareInput(prepareInput),
+          eventRefs: hcnEventRefsFromPrepareInput(prepareInput),
+          draftRefs: hcnDraftRefsFromPrepareInput(prepareInput)
         });
         const privateEngineRequest =
           await translateHcnBrowserActionsToPrivateEngineRequest(
@@ -2576,6 +2668,38 @@ async function hcnPrepareActionPlan(input = {}) {
                 const providerTaskId = scope.providerTaskIds.get(taskRef);
                 if (!providerTaskId) throw hcnActionScopeChanged();
                 return providerTaskId;
+              },
+              resolveProviderEventId: ({
+                fileRef,
+                eventRef,
+                providerJobId
+              }) => {
+                if (
+                  fileRef !== scope.fileRef
+                  || providerJobId !== scope.providerJobId
+                ) {
+                  throw hcnActionScopeChanged();
+                }
+                const providerEventId =
+                  scope.providerEventIds.get(eventRef);
+                if (!providerEventId) throw hcnActionScopeChanged();
+                return providerEventId;
+              },
+              resolveProviderDraftId: ({
+                fileRef,
+                draftRef,
+                providerJobId
+              }) => {
+                if (
+                  fileRef !== scope.fileRef
+                  || providerJobId !== scope.providerJobId
+                ) {
+                  throw hcnActionScopeChanged();
+                }
+                const providerDraftId =
+                  scope.providerDraftIds.get(draftRef);
+                if (!providerDraftId) throw hcnActionScopeChanged();
+                return providerDraftId;
               }
             }
           );
@@ -2615,6 +2739,20 @@ async function hcnPrepareActionPlan(input = {}) {
             operations: presentation.operations
           }
         });
+        if (hcnThresherPersistenceActive()) {
+          await hcnThresherRuntime().recordActionPlan({
+            principalRef: hcnActionReceiptPrincipalRef(),
+            fileRef: prepareInput.fileRef,
+            planId: plan.planId,
+            approvalDigest: plan.approvalDigest,
+            approvalExpiresAt: plan.approvalExpiresAt,
+            operationTypes: prepareInput.operations.map(
+              (operation) => operation.type
+            ),
+            stateCode: "proposed",
+            createdAt: plan.createdAt
+          });
+        }
         return hcnActionEnvelope({ plan });
       } catch (error) {
         if (approval?.id) {
@@ -2629,7 +2767,7 @@ async function hcnPrepareActionPlan(input = {}) {
 }
 
 function hcnListActionPlans(input = {}) {
-  assertChanceHcnReadSession();
+  assertHcnActionSession();
   validateHcnBrowserActionListInput(input);
   const plans = HCN_PENDING_ACTION_PLANS.list({
     sessionBinding: hcnActionSessionBinding(),
@@ -2639,7 +2777,7 @@ function hcnListActionPlans(input = {}) {
 }
 
 function hcnReadActionPlan(input = {}) {
-  assertChanceHcnReadSession();
+  assertHcnActionSession();
   const { planId } = validateHcnBrowserActionDetailInput(input);
   const plan = HCN_PENDING_ACTION_PLANS.get({
     sessionBinding: hcnActionSessionBinding(),
@@ -2649,7 +2787,7 @@ function hcnReadActionPlan(input = {}) {
 }
 
 function hcnInvalidateActionPlan(input = {}) {
-  assertChanceHcnReadSession();
+  assertHcnActionSession();
   const { planId } = validateHcnBrowserActionInvalidateInput(input);
   const plan = HCN_PENDING_ACTION_PLANS.invalidate({
     sessionBinding: hcnActionSessionBinding(),
@@ -2659,7 +2797,7 @@ function hcnInvalidateActionPlan(input = {}) {
 }
 
 async function hcnExecuteActionPlan(input = {}) {
-  assertChanceHcnReadSession();
+  assertHcnActionSession();
   const { planId } = validateHcnBrowserActionExecuteInput(input);
   if (!ALLOW_WRITES || !HCN_ACTION_EXECUTION_ENABLED) {
     const error = new Error(
@@ -2680,7 +2818,9 @@ async function hcnExecuteActionPlan(input = {}) {
       });
       const scope = await resolveHcnActionScope({
         fileRef: pending.fileRef,
-        taskRefs: hcnTaskRefsFromPresentation(pending.operations)
+        taskRefs: hcnTaskRefsFromPresentation(pending.operations),
+        eventRefs: hcnEventRefsFromPresentation(pending.operations),
+        draftRefs: hcnDraftRefsFromPresentation(pending.operations)
       });
       const execution = HCN_PENDING_ACTION_PLANS.beginExecution({
         sessionBinding,
@@ -2688,6 +2828,35 @@ async function hcnExecuteActionPlan(input = {}) {
         fileScopeBinding: scope.fileScopeBinding,
         approvalDigest: pending.approvalDigest
       });
+
+      if (hcnThresherPersistenceActive()) {
+        try {
+          await hcnThresherRuntime().recordActionPlan({
+            principalRef: sessionPrincipalRef,
+            fileRef: execution.fileRef,
+            planId: execution.planId,
+            approvalDigest: execution.approvalDigest,
+            approvalExpiresAt: execution.approvalExpiresAt,
+            operationTypes: execution.operations.map(
+              (operation) => operation.type
+            ),
+            stateCode: "approved",
+            createdAt: new Date().toISOString()
+          });
+        } catch {
+          HCN_PENDING_ACTION_PLANS.recoverExecution({
+            sessionBinding,
+            planId,
+            reason:
+              "Execution did not begin because active Thresher persistence was unavailable."
+          });
+          const error = new Error(
+            "Active Thresher persistence is unavailable. Nothing was intentionally executed."
+          );
+          error.statusCode = 503;
+          throw error;
+        }
+      }
 
       let executingReceipt;
       try {
@@ -2745,6 +2914,11 @@ async function hcnExecuteActionPlan(input = {}) {
           succeededCount: outcome.succeededCount
         });
       }
+      const publicCompletedActions = hcnPublicCompletedActions(
+        engineResult,
+        execution.operations,
+        scope
+      );
 
       let receipt;
       try {
@@ -2773,10 +2947,35 @@ async function hcnExecuteActionPlan(input = {}) {
         error.statusCode = 503;
         throw error;
       }
+      if (hcnThresherPersistenceActive()) {
+        try {
+          await hcnRecordActionCloseout({
+            execution,
+            executingReceipt,
+            receipt,
+            outcome
+          });
+        } catch {
+          HCN_PENDING_ACTION_PLANS.recoverExecution({
+            sessionBinding,
+            planId,
+            reason:
+              "The provider outcome is durable, but active Thresher closeout requires reconciliation."
+          });
+          const error = new Error(
+            "The HCN execution outcome requires Thresher reconciliation."
+          );
+          error.statusCode = 503;
+          throw error;
+        }
+      }
       const plan = HCN_PENDING_ACTION_PLANS.finishExecution({
         sessionBinding,
         planId,
-        result: hcnPendingExecutionResult(outcome)
+        result: hcnPendingExecutionResult(
+          outcome,
+          publicCompletedActions
+        )
       });
       return hcnActionEnvelope({ plan, receipt });
     }),
@@ -2785,7 +2984,7 @@ async function hcnExecuteActionPlan(input = {}) {
 }
 
 function hcnListActionReceipts(input = {}) {
-  assertChanceHcnReadSession();
+  assertHcnActionSession();
   validateHcnBrowserActionListInput(input);
   const receipts = hcnActionReceiptIndex().list({
     sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
@@ -2795,7 +2994,7 @@ function hcnListActionReceipts(input = {}) {
 }
 
 function hcnReadActionReceipt(input = {}) {
-  assertChanceHcnReadSession();
+  assertHcnActionSession();
   const { planId } = validateHcnBrowserActionDetailInput(input);
   const receipt = hcnActionReceiptIndex().get({
     sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
@@ -2811,7 +3010,8 @@ function hcnActionEnvelope(value) {
     ephemeral: true,
     cachePolicy: "no_store",
     authority: {
-      mode: "explicit_chance_approval",
+      mode: "explicit_signed_in_employee_approval",
+      fileScope: "assigned_only",
       automaticExecution: false,
       automaticRetry: false,
       providerIdentifiersExposed: false
@@ -2833,7 +3033,7 @@ function hcnActionReceiptPrincipalRef() {
     || !googleSubject
   ) {
     const error = new Error(
-      "Chance HCN browser session authentication is required."
+      "An assigned HCN employee browser session is required."
     );
     error.statusCode = 403;
     throw error;
@@ -2860,7 +3060,7 @@ function hcnSessionDerivedHash(domain) {
     || !sessionId
   ) {
     const error = new Error(
-      "Chance HCN browser session authentication is required."
+      "An assigned HCN employee browser session is required."
     );
     error.statusCode = 403;
     throw error;
@@ -2946,7 +3146,14 @@ function hcnActionReceiptIndex() {
   }
 }
 
-async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
+async function resolveHcnActionScope({
+  fileRef,
+  taskRefs = [],
+  eventRefs = [],
+  draftRefs = []
+} = {}) {
+  const principal = assertHcnActionSession();
+  const assignedOwnerId = principal.jobNimbusOwnerId;
   const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
   let page;
   try {
@@ -2962,7 +3169,7 @@ async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
     return Boolean(
       id
       && isInsuranceFile(contact)
-      && assignedTo(contact, CHANCE_OWNER_ID)
+      && assignedTo(contact, assignedOwnerId)
       && hcnContactIsExplicitlyActive(contact)
       && references.subjectId("jobnimbus", id) === fileRef
     );
@@ -2980,7 +3187,7 @@ async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
   if (
     String(contact?.jnid || contact?.id || "") !== providerJobId
     || !isInsuranceFile(contact)
-    || !assignedTo(contact, CHANCE_OWNER_ID)
+    || !assignedTo(contact, assignedOwnerId)
     || !hcnContactIsExplicitlyActive(contact)
     || references.subjectId("jobnimbus", providerJobId) !== fileRef
   ) {
@@ -3028,6 +3235,109 @@ async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
     }
   }
 
+  const uniqueEventRefs = [...new Set(eventRefs)];
+  if (uniqueEventRefs.length !== eventRefs.length) {
+    throw new HcnBrowserActionContractError(
+      "duplicate_calendar_action",
+      400,
+      "A calendar event may be updated only once in an exact HCN action plan."
+    );
+  }
+  const providerEventIds = new Map();
+  if (uniqueEventRefs.length) {
+    let activityPage;
+    try {
+      activityPage = await listHcnResourceComplete("/activities", {
+        maxRecords: 500,
+        relatedContactId: providerJobId
+      });
+    } catch {
+      throw hcnActionScopeUnavailable();
+    }
+    if (!activityPage.complete) throw hcnActionScopeUnavailable();
+    for (const eventRef of uniqueEventRefs) {
+      const eventMatches = activityPage.rows.filter((activity) => {
+        const id = String(activity?.jnid || activity?.id || "");
+        const recordType = String(
+          activity?.record_type_name
+          || activity?.type_name
+          || activity?.type
+          || ""
+        ).trim().toLowerCase();
+        return Boolean(
+          id
+          && ["event", "appointment"].includes(recordType)
+          && referencesContact(activity, providerJobId)
+          && references.sourceRecordRef("jobnimbus", id) === eventRef
+        );
+      });
+      if (eventMatches.length !== 1) throw hcnActionScopeChanged();
+      providerEventIds.set(
+        eventRef,
+        String(eventMatches[0].jnid || eventMatches[0].id)
+      );
+    }
+  }
+
+  const uniqueDraftRefs = [...new Set(draftRefs)];
+  if (uniqueDraftRefs.length !== draftRefs.length) {
+    throw new HcnBrowserActionContractError(
+      "duplicate_gmail_send",
+      400,
+      "A reviewed Gmail draft may be sent only once in an exact HCN action plan."
+    );
+  }
+  const providerDraftIds = new Map();
+  if (uniqueDraftRefs.length) {
+    let batches;
+    const principalRef = hcnActionReceiptPrincipalRef();
+    try {
+      batches = await readActionBatchLedger();
+    } catch {
+      throw hcnActionScopeUnavailable();
+    }
+    const candidates = [];
+    for (const batch of Array.isArray(batches) ? batches : []) {
+      if (String(batch?.principalRef || "") !== principalRef) {
+        continue;
+      }
+      for (
+        const completed of Array.isArray(batch?.completed)
+          ? batch.completed
+          : []
+      ) {
+        const providerDraftId = String(
+          completed?.receipt?.externalId || ""
+        ).trim();
+        if (
+          completed?.type !== "gmail.create_draft"
+          || completed?.status !== "executed"
+          || String(completed?.receipt?.fileId || "") !== providerJobId
+          || !providerDraftId
+        ) {
+          continue;
+        }
+        let draftRef;
+        try {
+          draftRef = references.sourceRecordRef(
+            "gmail",
+            providerDraftId
+          );
+        } catch {
+          continue;
+        }
+        candidates.push({ draftRef, providerDraftId });
+      }
+    }
+    for (const draftRef of uniqueDraftRefs) {
+      const matches = candidates.filter(
+        (candidate) => candidate.draftRef === draftRef
+      );
+      if (matches.length !== 1) throw hcnActionScopeChanged();
+      providerDraftIds.set(draftRef, matches[0].providerDraftId);
+    }
+  }
+
   const compact = compactContact(contact);
   const rawLabel = `${compact.number || ""} ${compact.name || ""}`
     .replace(/[\x00-\x1f\x7f]+/g, " ")
@@ -3037,17 +3347,23 @@ async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
     .slice(0, 256)
     .join("");
   const fileScopeBinding = createHash("sha256")
-    .update("hcn-console:action-file-scope:v1", "utf8")
+    .update("hcn-console:action-file-scope:v2", "utf8")
     .update("\0", "utf8")
     .update(fileRef, "utf8")
     .update("\0", "utf8")
     .update(providerJobId, "utf8")
     .update("\0", "utf8")
+    .update(assignedOwnerId, "utf8")
+    .update("\0", "utf8")
     .update(
-      [...providerTaskIds.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([taskRef, providerTaskId]) => `${taskRef}:${providerTaskId}`)
-        .join("|"),
+      JSON.stringify({
+        tasks: [...providerTaskIds.entries()]
+          .sort(([left], [right]) => left.localeCompare(right)),
+        events: [...providerEventIds.entries()]
+          .sort(([left], [right]) => left.localeCompare(right)),
+        drafts: [...providerDraftIds.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))
+      }),
       "utf8"
     )
     .digest("hex");
@@ -3055,6 +3371,8 @@ async function resolveHcnActionScope({ fileRef, taskRefs = [] } = {}) {
     fileRef,
     providerJobId,
     providerTaskIds,
+    providerEventIds,
+    providerDraftIds,
     fileDisplayLabel,
     fileScopeBinding
   };
@@ -3071,6 +3389,40 @@ function hcnTaskRefsFromPresentation(operations) {
   return operations
     .filter((operation) => operation?.type === "jobnimbus.update_task")
     .map((operation) => String(operation?.material?.taskRef || ""))
+    .filter(Boolean);
+}
+
+function hcnEventRefsFromPrepareInput(input) {
+  return input.operations
+    .filter(
+      (operation) =>
+        operation.type === "jobnimbus.update_calendar_event"
+    )
+    .map((operation) => operation.input.eventRef);
+}
+
+function hcnEventRefsFromPresentation(operations) {
+  if (!Array.isArray(operations)) throw hcnActionScopeChanged();
+  return operations
+    .filter(
+      (operation) =>
+        operation?.type === "jobnimbus.update_calendar_event"
+    )
+    .map((operation) => String(operation?.material?.eventRef || ""))
+    .filter(Boolean);
+}
+
+function hcnDraftRefsFromPrepareInput(input) {
+  return input.operations
+    .filter((operation) => operation.type === "gmail.send")
+    .map((operation) => operation.input.draftRef);
+}
+
+function hcnDraftRefsFromPresentation(operations) {
+  if (!Array.isArray(operations)) throw hcnActionScopeChanged();
+  return operations
+    .filter((operation) => operation?.type === "gmail.send")
+    .map((operation) => String(operation?.material?.draftRef || ""))
     .filter(Boolean);
 }
 
@@ -3232,13 +3584,14 @@ function hcnValidatedCompletedBatchCount(batch, operationCount) {
   return batch.completed.length;
 }
 
-function hcnPendingExecutionResult(outcome) {
+function hcnPendingExecutionResult(outcome, completed = []) {
   if (outcome.status === "executed") {
     return {
       mode: "executed",
       batch: {
         status: "completed",
-        operationCount: outcome.succeededCount
+        operationCount: outcome.succeededCount,
+        completed
       }
     };
   }
@@ -3247,7 +3600,8 @@ function hcnPendingExecutionResult(outcome) {
       mode: "completed_pending_verification",
       batch: {
         status: "completed_pending_verification",
-        operationCount: outcome.succeededCount
+        operationCount: outcome.succeededCount,
+        completed
       }
     };
   }
@@ -3260,7 +3614,7 @@ function hcnPendingExecutionResult(outcome) {
   };
 }
 
-function reconcileHcnExecution({
+async function reconcileHcnExecution({
   receiptIndex,
   executingReceipt,
   execution,
@@ -3295,6 +3649,28 @@ function reconcileHcnExecution({
     error.statusCode = 503;
     throw error;
   }
+  if (hcnThresherPersistenceActive()) {
+    try {
+      await hcnRecordActionCloseout({
+        execution,
+        executingReceipt,
+        receipt,
+        outcome: { status: "reconciliation_required" }
+      });
+    } catch {
+      HCN_PENDING_ACTION_PLANS.recoverExecution({
+        sessionBinding,
+        planId: execution.planId,
+        reason:
+          "The provider outcome is durable, but active Thresher closeout requires reconciliation."
+      });
+      const error = new Error(
+        "The HCN execution outcome requires Thresher reconciliation."
+      );
+      error.statusCode = 503;
+      throw error;
+    }
+  }
   const plan = HCN_PENDING_ACTION_PLANS.finishExecution({
     sessionBinding,
     planId: execution.planId,
@@ -3307,14 +3683,19 @@ function reconcileHcnExecution({
   return hcnActionEnvelope({ plan, receipt });
 }
 
-function assertChanceHcnReadSession() {
+function assertHcnActionSession() {
   const principal = assertHcnAssignedReadSession();
   if (
-    principal.role !== "chance"
-    || principal.email !== CHANCE_GOOGLE_EMAIL
+    ![
+      "chance",
+      "administrator",
+      "employee",
+      "client_coordinator",
+      "manager"
+    ].includes(principal.role)
   ) {
     const error = new Error(
-      "Chance HCN browser session authentication is required."
+      "An assigned-file HCN employee session is required."
     );
     error.statusCode = 403;
     throw error;
@@ -3352,6 +3733,90 @@ function assertHcnAssignedReadSession() {
     jobNimbusScope: String(identity.jobNimbusScope),
     role: String(identity.role || "employee")
   };
+}
+
+function hcnPublicCompletedActions(result, operations, scope) {
+  try {
+    const completed = result?.batch?.completed;
+    if (
+      !Array.isArray(completed)
+      || !Array.isArray(operations)
+      || completed.length !== operations.length
+      || !scope?.providerJobId
+    ) {
+      return [];
+    }
+    const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+    return completed.map((item, index) => {
+      if (
+        item?.index !== index
+        || item?.status !== "executed"
+        || item?.type !== operations[index]?.type
+      ) {
+        throw new Error("HCN completed action mismatch");
+      }
+      const receipt = {};
+      if (item.receipt?.verifiedByReadback === true) {
+        receipt.verifiedByReadback = true;
+      }
+      if (item.receipt?.manualVerificationRequired === true) {
+        receipt.manualVerificationRequired = true;
+      }
+      if (item.type === "gmail.create_draft") {
+        const providerDraftId = String(
+          item.receipt?.externalId || ""
+        ).trim();
+        if (
+          !providerDraftId
+          || String(item.receipt?.fileId || "")
+            !== String(scope.providerJobId)
+        ) {
+          throw new Error("HCN draft receipt scope mismatch");
+        }
+        receipt.createdDraftRef = references.sourceRecordRef(
+          "gmail",
+          providerDraftId
+        );
+      }
+      if (item.type === "gmail.send") {
+        const providerDraftId = String(
+          item.receipt?.sourceDraftId || ""
+        ).trim();
+        if (!providerDraftId) {
+          throw new Error("HCN source draft receipt is missing");
+        }
+        receipt.sourceDraftRef = references.sourceRecordRef(
+          "gmail",
+          providerDraftId
+        );
+        if (
+          item.receipt?.sourceDraftRetention
+            === "retained_for_separate_cleanup"
+        ) {
+          receipt.sourceDraftRetention =
+            "retained_for_separate_cleanup";
+        }
+      }
+      if (item.type === "quo.send_text") {
+        const deliveryStatus = String(
+          item.receipt?.deliveryStatus || ""
+        ).trim().toLowerCase();
+        if (deliveryStatus) {
+          receipt.deliveryStatus = deliveryStatus.slice(0, 64);
+          receipt.deliveryConfirmed =
+            item.receipt?.deliveryConfirmed === true;
+        }
+      }
+      return {
+        index,
+        type: item.type,
+        status: "executed",
+        ...(Object.keys(receipt).length ? { receipt } : {})
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 function assertHcnManagementSession() {
@@ -3442,18 +3907,27 @@ function operatorCompanyScopeActive() {
 }
 
 function operatorFileScopeLabel() {
+  if (isHcnRestrictedEffectRequest()) {
+    return "signed_in_employee_assigned_file";
+  }
   return operatorCompanyScopeActive()
     ? "explicit_company_file"
     : "chance_assigned_file";
 }
 
 function operatorFileDescription() {
+  if (isHcnRestrictedEffectRequest()) {
+    return "signed-in employee's assigned insurance file";
+  }
   return operatorCompanyScopeActive()
     ? "explicit company insurance file"
     : "Chance-assigned file";
 }
 
 function operatorShortFileDescription() {
+  if (isHcnRestrictedEffectRequest()) {
+    return "assigned file";
+  }
   return operatorCompanyScopeActive() ? "company file" : "Chance file";
 }
 
@@ -3465,6 +3939,27 @@ function isRestrictedEffectRequest() {
   return isCodexOperatorRequest() || isHcnRestrictedEffectRequest();
 }
 
+function hcnRestrictedEffectOwnerId() {
+  if (!isHcnRestrictedEffectRequest()) return "";
+  const identity = currentRequestIdentity();
+  const ownerId = String(identity?.jobNimbusOwnerId || "").trim();
+  if (
+    identity?.type !== "hcn_browser_session"
+    || !ownerId
+  ) {
+    const error = new Error(
+      "The signed-in employee's JobNimbus assignment is unavailable."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  return ownerId;
+}
+
+function restrictedAssignedOwnerId() {
+  return hcnRestrictedEffectOwnerId() || CHANCE_OWNER_ID;
+}
+
 async function withHcnRestrictedEffects(callback) {
   const context = currentRequestAuthentication();
   if (
@@ -3473,7 +3968,7 @@ async function withHcnRestrictedEffects(callback) {
     || !context.hcnSessionId
   ) {
     const error = new Error(
-      "Chance HCN browser session authentication is required."
+      "An assigned HCN employee browser session is required."
     );
     error.statusCode = 403;
     throw error;
@@ -3488,22 +3983,88 @@ async function withHcnRestrictedEffects(callback) {
 }
 
 function thresherBrainBoundary() {
+  const active = hcnThresherPersistenceActive();
   return {
-    status: "isolated_foundation",
+    status: active ? "active" : "isolated_foundation",
     systemId: "hcn_operations",
     productName: "Thresher AI",
     scope: "fresh_evidence_only",
-    persistedClientMemory: false,
+    persistedClientMemory: active,
     chanceBrainDependency: false,
     modelCanExecute: false,
-    authority: "Fresh JobNimbus, Gmail, Quo, calendar, call, and document evidence is authoritative. Thresher does not yet persist client operational state and cannot authorize or execute an action."
+    authority: active
+      ? "Fresh provider evidence is authoritative. Thresher persists only encrypted opaque coded operational state and cannot authorize or execute an action."
+      : "Fresh JobNimbus, Gmail, Quo, calendar, call, and document evidence is authoritative. Thresher persistence is not active and cannot authorize or execute an action."
   };
 }
 
+function hcnThresherPersistenceActive() {
+  return HCN_THRESHER_CONFIGURATION.persistenceActive === true;
+}
+
+function hcnThresherRuntime() {
+  try {
+    return HCN_THRESHER_CONFIGURATION.requireRuntime();
+  } catch {
+    const error = new Error(
+      "The active isolated Thresher operational state service is unavailable."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+}
+
+async function hcnRecordFreshReview(review) {
+  const fileRef = String(review?.file?.fileRef || "");
+  if (!fileRef) {
+    const error = new Error(
+      "Fresh exact-file evidence is unavailable for Thresher."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  return hcnThresherRuntime().recordFileReview({
+    principalRef: hcnActionReceiptPrincipalRef(),
+    fileRef,
+    review
+  });
+}
+
+async function hcnRecordActionCloseout({
+  execution,
+  executingReceipt,
+  receipt,
+  outcome
+}) {
+  const status = String(outcome?.status || "");
+  const outcomeCode =
+    status === "executed"
+      ? "succeeded"
+      : status === "failed"
+        ? "failed"
+        : status === "partial_failure"
+          ? "partial"
+          : "uncertain";
+  return hcnThresherRuntime().recordActionReceipts({
+    principalRef: hcnActionReceiptPrincipalRef(),
+    fileRef: execution.fileRef,
+    planId: execution.planId,
+    operationTypes: execution.operations.map(
+      (operation) => operation.type
+    ),
+    outcomeCode,
+    startedAt: executingReceipt.executingAt,
+    completedAt: receipt.terminalAt || receipt.updatedAt
+  });
+}
+
 function thresherEphemeralContinuity(file, sourceStatus = {}, counts = {}) {
+  const active = hcnThresherPersistenceActive();
   return {
     systemId: "hcn_operations",
-    persistence: "not_yet_persistent",
+    persistence: active
+      ? "active_for_hcn_exact_file_lifecycle"
+      : "not_active_for_this_route",
     persisted: false,
     existingClientMemoryRead: false,
     snapshot: {
@@ -3519,16 +4080,23 @@ function thresherEphemeralContinuity(file, sourceStatus = {}, counts = {}) {
       sourceStatus: cleanObject(sourceStatus),
       counts: cleanObject(counts)
     },
-    authority: "Ephemeral response metadata only. It is not persisted by Thresher and never authorizes an action."
+    authority: active
+      ? "This legacy-route response remains ephemeral; active Thresher state is written only by the assigned HCN exact-file lifecycle and never authorizes an action."
+      : "Ephemeral response metadata only. It is not persisted by Thresher and never authorizes an action."
   };
 }
 
 function thresherActionCloseoutBoundary() {
+  const active = hcnThresherPersistenceActive();
   return {
     recorded: false,
     systemId: "hcn_operations",
-    reason: "thresher_client_state_not_yet_persistent",
-    authority: "The bridge execution and provider readback ledgers remain authoritative. Thresher client-state persistence is not enabled."
+    reason: active
+      ? "legacy_route_not_in_active_hcn_lifecycle"
+      : "thresher_persistence_not_active",
+    authority: active
+      ? "The bridge execution and provider readback ledgers remain authoritative. Active Thresher receipt persistence is limited to the HCN assigned-file action lifecycle."
+      : "The bridge execution and provider readback ledgers remain authoritative. Thresher persistence is not active."
   };
 }
 
@@ -6731,11 +7299,11 @@ async function createCalendarEvent(input) {
   validateDateRange(dateStart, dateEnd);
   const { contact } = await findChanceContact(query);
   if (
-    currentRequestIdentity()?.type === "codex_operator_token"
+    isRestrictedEffectRequest()
     && input.recordTypeName !== undefined
     && String(input.recordTypeName).trim().toLowerCase() !== "event"
   ) {
-    badRequest("The Codex operator can create only JobNimbus Event records through this action.");
+    badRequest("This restricted action can create only JobNimbus Event records.");
   }
   const ownerId = operatorActionOwnerId(contact);
   const body = cleanObject({
@@ -6745,7 +7313,7 @@ async function createCalendarEvent(input) {
     description: input.description || input.note || "",
     date_start: dateStart,
     date_end: dateEnd,
-    record_type_name: currentRequestIdentity()?.type === "codex_operator_token"
+    record_type_name: isRestrictedEffectRequest()
       ? "Event"
       : input.recordTypeName || "Event",
     owners: [{ id: ownerId }],
@@ -6773,7 +7341,7 @@ async function updateCalendarEvent(input) {
   if (!eventId) badRequest("eventId is required");
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
-  const scopedRecord = currentRequestIdentity()?.type === "codex_operator_token"
+  const scopedRecord = isRestrictedEffectRequest()
     ? await requireOperatorRelatedRecord({
         query: input.query,
         resource: "calendar event",
@@ -6807,7 +7375,14 @@ async function updateCalendarEvent(input) {
   const memoryCloseout = file
     ? await closeoutJobNimbusAction(file, "update_calendar_event", result, `Updated approved JobNimbus calendar event ${eventId}.`)
     : thresherActionCloseoutBoundary();
-  return { mode: "executed", ...(file ? { file } : {}), eventId, result, memoryCloseout };
+  return {
+    mode: "executed",
+    ...(file ? { file } : {}),
+    eventId,
+    result,
+    verifiedByReadback: Boolean(scopedRecord),
+    memoryCloseout
+  };
 }
 
 async function gmailSearch(input) {
@@ -6988,7 +7563,7 @@ async function operatorCommunicationFile(input, label) {
 }
 
 async function operatorGmailActionFile(input, label) {
-  if (currentRequestIdentity()?.type !== "codex_operator_token") return null;
+  if (!isRestrictedEffectRequest()) return null;
   const fileQuery = required(input?.query || input?.fileQuery, `${label} query`);
   return compactContact((await findChanceContact(fileQuery)).contact);
 }
@@ -7057,8 +7632,8 @@ async function gmailDraft(input) {
       bodyTemplate: resolvedMessage.template,
       bodyMatches,
       instruction: bodyMatches
-        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId; the reviewed source draft remains for separately approved cleanup."
-        : "A Gmail draft already exists for this file and subject, but its body does not match the current approved carrier template. Do not send it and do not create a duplicate. Show Chance the mismatch and obtain approval before replacing the existing draft.",
+        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After the approving user authorizes sending it, use gmail.send with this exact draftId; the reviewed source draft remains for separately approved cleanup."
+        : "A Gmail draft already exists for this file and subject, but its body does not match the current approved carrier template. Do not send it and do not create a duplicate. Show the approving user the mismatch and obtain approval before replacing the existing draft.",
       sendPayload: cleanObject({
         query: input.query || input.fileQuery || "",
         draftId: reusable.snapshot.id
@@ -7167,7 +7742,7 @@ async function gmailSend(input) {
       mode: "dry_run",
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After Chance approves this exact plan, repeat with execute:true and this approvalDigest."
+      instruction: "Nothing was sent. After the signed-in user approves this exact plan, repeat with execute:true and this approvalDigest."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
@@ -7280,7 +7855,7 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
       mode: "dry_run",
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After Chance approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. The bridge sends only the immutable reviewed snapshot and retains the source draft; deleting it is a separate approval-gated action."
+      instruction: "Nothing was sent. After the signed-in user approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. The bridge sends only the immutable reviewed snapshot and retains the source draft; deleting it is a separate approval-gated action."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
@@ -7355,7 +7930,7 @@ async function assertOperatorDraftProvenance(file, draftId) {
       && String(row.receipt?.externalId || "") === String(draftId)
     ));
   if (!receipt) {
-    operatorScopeError(`The Codex operator may send only a Gmail draft created by this bridge for the resolved ${operatorFileDescription()}.`);
+    operatorScopeError(`This restricted action may send only a Gmail draft created by this bridge for the resolved ${operatorFileDescription()}.`);
   }
   return receipt;
 }
@@ -7536,11 +8111,12 @@ async function assertUniqueChanceFilePhone(file, label) {
   const phone = normalizePhone(file?.phone);
   if (!phone) badRequest(`The resolved ${operatorFileDescription()} has no phone number for ${label}.`);
   const contacts = await listContacts({ maxPages: 25 });
+  const assignedOwnerId = restrictedAssignedOwnerId();
   const matchingFiles = contacts
     .filter(isInsuranceFile)
     .filter((contact) => (
       operatorCompanyScopeActive()
-      || assignedTo(contact, CHANCE_OWNER_ID)
+      || assignedTo(contact, assignedOwnerId)
     ))
     .filter((contact) => normalizePhone(compactContact(contact).phone) === phone);
   if (matchingFiles.length !== 1 || String(compactContact(matchingFiles[0]).id) !== String(file.id)) {
@@ -7607,16 +8183,16 @@ async function quoSend(input = {}) {
   const file = compactContact(contact);
   const to = String(input.to || file.phone || "").trim();
   const content = required(input.content || input.message || input.text, "content");
-  if (currentRequestIdentity()?.type === "codex_operator_token") {
+  if (isRestrictedEffectRequest()) {
     await assertUniqueChanceFilePhone(file, "Quo sending");
     if (input.userId !== undefined && String(input.userId || "").trim()) {
-      badRequest("The Codex operator cannot select an arbitrary Quo userId.");
+      badRequest("This restricted action cannot select an arbitrary Quo userId.");
     }
     const allowedRecipients = new Set(
       [file.phone, file.adjusterPhone].map(normalizePhone).filter(Boolean)
     );
     if (!allowedRecipients.has(normalizePhone(to))) {
-      badRequest("The Codex operator may text only a freshly verified client or desk-adjuster phone on the resolved file.");
+      badRequest("This restricted action may text only a freshly verified client or desk-adjuster phone on the resolved file.");
     }
   }
   const authorizedLine = await authorizedQuoLine();
@@ -7626,7 +8202,7 @@ async function quoSend(input = {}) {
     from,
     to,
     content,
-    userId: currentRequestIdentity()?.type === "codex_operator_token" ? undefined : input.userId,
+    userId: isRestrictedEffectRequest() ? undefined : input.userId,
     execute: false
   });
   const plan = { ...preview.plan, attemptId: String(input.attemptId || "initial") };
@@ -7637,7 +8213,7 @@ async function quoSend(input = {}) {
       file,
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After Chance approves this exact text and recipient, repeat with execute:true and this approvalDigest."
+      instruction: "Nothing was sent. After the signed-in user approves this exact text and recipient, repeat with execute:true and this approvalDigest."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Quo texts.");
@@ -7650,7 +8226,7 @@ async function quoSend(input = {}) {
       from: preview.plan.from,
       to: preview.plan.to,
       content: preview.plan.content,
-      userId: currentRequestIdentity()?.type === "codex_operator_token" ? undefined : input.userId,
+      userId: isRestrictedEffectRequest() ? undefined : input.userId,
       execute: true
     });
     const acceptedStatus = String(result.message.status || "accepted").toLowerCase();
@@ -8434,14 +9010,23 @@ async function processActionBatch(input = {}) {
       approvalDigest,
       approvalChallenge: approval.challenge,
       approvalExpiresAt: approval.expiresAt,
-      instruction: "Nothing was executed. Show Chance every exact action. After approval, repeat unchanged before expiry with execute:true, this approvalDigest, and the single-use approval challenge."
+      instruction: "Nothing was executed. Show the approving user every exact action. After approval by that signed-in user, repeat unchanged before expiry with execute:true, this approvalDigest, and the single-use approval challenge."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true before executing an approved batch.");
   requireApprovalDigest(input.approvalDigest, approvalDigest, "action batch");
   const approval = await consumeActionApprovalChallenge(input.approvalChallenge, approvalDigest);
 
-  const reservation = await reserveActionBatch(approval.id, approvalDigest, operations.length);
+  const reservation = await reserveActionBatch(
+    approval.id,
+    approvalDigest,
+    operations.length,
+    {
+      principalRef: isHcnRestrictedEffectRequest()
+        ? hcnActionReceiptPrincipalRef()
+        : ""
+    }
+  );
   if (reservation.existing) {
     return {
       mode: "blocked_duplicate",
@@ -8503,11 +9088,22 @@ async function findChanceContact(query) {
   const lower = needle.toLowerCase();
   const contacts = await listContacts({ maxPages: 25 });
   const companyScope = operatorCompanyScopeActive();
+  const assignedOwnerId = restrictedAssignedOwnerId();
+  const scopeLabel = companyScope
+    ? "company"
+    : isHcnRestrictedEffectRequest()
+      ? "signed-in employee"
+      : "Chance";
+  const scopeOwnerLabel = companyScope
+    ? "company"
+    : isHcnRestrictedEffectRequest()
+      ? "signed-in employee"
+      : "Chance Pearson";
   const matches = contacts
     .filter(isInsuranceFile)
     .filter((contact) => (
       companyScope
-      || assignedTo(contact, CHANCE_OWNER_ID)
+      || assignedTo(contact, assignedOwnerId)
     ))
     .filter((contact) => contactMatches(contact, lower))
     .map((contact) => ({ contact, score: chanceMatchScore(contact, needle) }))
@@ -8516,27 +9112,25 @@ async function findChanceContact(query) {
 
   if (!matches.length) {
     badRequest(
-      `No ${
-        companyScope ? "company" : "Chance Pearson"
-      } JobNimbus insurance file found for: ${needle}`
+      `No ${scopeOwnerLabel} JobNimbus insurance file found for: ${needle}`
     );
   }
   if (matches.length > 1 && matches[0].score === matches[1].score) {
     const choices = matches.slice(0, 5).map(({ contact }) => `${contact.number || contact.recid || "?"}: ${contact.display_name || contact.name || "Unnamed"}`);
-    badRequest(`Ambiguous ${companyScope ? "company" : "Chance"} file query: ${needle}. Use the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
+    badRequest(`Ambiguous ${scopeLabel} file query: ${needle}. Use the JobNimbus number, claim number, or exact address. Matches: ${choices.join("; ")}`);
   }
 
   const selectedId = matches[0].contact.jnid || matches[0].contact.id;
   const contact = await jobNimbus(`/contacts/${encodeURIComponent(selectedId)}`);
   if (
     !isInsuranceFile(contact)
-    || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
+    || (!companyScope && !assignedTo(contact, assignedOwnerId))
     || (
       isHcnRestrictedEffectRequest()
       && !hcnContactIsExplicitlyActive(contact)
     )
   ) {
-    badRequest(`Resolved record is not ${companyScope ? "a company" : "a Chance Pearson"} insurance file: ${needle}`);
+    badRequest(`Resolved record is not an authorized ${scopeOwnerLabel} insurance file: ${needle}`);
   }
   const knownStatusNames = [...new Set(contacts
     .filter(isInsuranceFile)
@@ -10418,6 +11012,15 @@ function assignedTo(contact, ownerId) {
 }
 
 function operatorActionOwnerId(contact) {
+  if (isHcnRestrictedEffectRequest()) {
+    const ownerId = hcnRestrictedEffectOwnerId();
+    if (!assignedTo(contact, ownerId)) {
+      conflictError(
+        "The refreshed JobNimbus record is no longer assigned to the signed-in employee."
+      );
+    }
+    return ownerId;
+  }
   if (!operatorCompanyScopeActive()) return CHANCE_OWNER_ID;
   const ownerId = (Array.isArray(contact?.owners) ? contact.owners : [])
     .map((owner) => String(owner?.id || owner?.jnid || owner || "").trim())
@@ -11802,9 +12405,10 @@ function assertCodexOperatorFields(fields, allowed, label, options = {}) {
 function assertOperatorContactScope(contact) {
   if (!isRestrictedEffectRequest()) return;
   const companyScope = operatorCompanyScopeActive();
+  const assignedOwnerId = restrictedAssignedOwnerId();
   if (
     !isInsuranceFile(contact)
-    || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
+    || (!companyScope && !assignedTo(contact, assignedOwnerId))
     || (
       isHcnRestrictedEffectRequest()
       && !hcnContactIsExplicitlyActive(contact)
@@ -12217,11 +12821,20 @@ function withActionBatchMutation(callback) {
   return run;
 }
 
-async function reserveActionBatch(approvalId, approvalDigest, operationCount) {
+async function reserveActionBatch(
+  approvalId,
+  approvalDigest,
+  operationCount,
+  { principalRef = "" } = {}
+) {
   return withActionBatchMutation(async () => {
     const ledger = await readActionBatchLedger();
     const existing = ledger.find((row) => (
-      row.approvalId === approvalId || row.approvalDigest === approvalDigest
+      row.approvalId === approvalId
+      || (
+        row.approvalDigest === approvalDigest
+        && String(row.principalRef || "") === principalRef
+      )
     ));
     if (existing) return { existing };
 
@@ -12232,7 +12845,8 @@ async function reserveActionBatch(approvalId, approvalDigest, operationCount) {
       status: "in_progress",
       createdAt: new Date().toISOString(),
       operationCount,
-      completed: []
+      completed: [],
+      ...(principalRef ? { principalRef } : {})
     };
     ledger.push(batch);
     await writeActionBatchLedger(ledger);
@@ -12461,7 +13075,7 @@ async function authenticateRequest(req) {
     }
     const expectedBinding = principal
       ? createHcnEmployeeAuthorizationBinding(principal, {
-          allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN
+          allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
         })
       : null;
     const sessionBinding = expectedBinding
@@ -12487,7 +13101,7 @@ async function authenticateRequest(req) {
       || !hcnEmployeeAuthorizationBindingMatches(
         sessionBinding,
         principal,
-        { allowedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN }
+        { allowedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN }
       )
     ) {
       HCN_CONSOLE_SESSION_STORE.revokeSession(hcnSessionId);
@@ -12500,7 +13114,7 @@ async function authenticateRequest(req) {
         email: principal.email,
         name: principal.displayName,
         role: principal.role,
-        hostedDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+        hostedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN,
         scopes: [],
         googleAccessToken: "",
         jobNimbusOwnerId: principal.jobNimbusOwnerId,
@@ -12745,33 +13359,98 @@ function googleBrokerAuthorizationVersion(user, subject) {
     .digest("hex")}`;
 }
 
-async function hydrateAutoEnrolledWaveUsers() {
-  if (!AUTO_ENROLL_WAVE_USERS) return;
-  const rows = await readJsonFile(AUTO_ENROLLED_USER_STORE_PATH, []);
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const email = String(row?.email || "").trim().toLowerCase();
-    if (!email || WAVE_AUTH_USERS.has(email) || row?.enabled === false) continue;
-    WAVE_AUTH_USERS.set(email, {
-      email,
-      name: String(row.name || email).trim(),
-      role: String(row.googleSubject || "").trim()
-        ? "employee"
-        : "onboarding",
+async function hydrateHcnIdentityPins() {
+  if (!hcnIdentityPinStoreConfigured()) return;
+  const rows = await hcnIdentityPinStore().list();
+  for (const row of rows) {
+    const configured = WAVE_AUTH_USERS.get(row.email);
+    if (configured) {
+      if (
+        configured.enabled === false
+        || String(configured.role || "").trim().toLowerCase() !== row.role
+        || String(configured.jobNimbusOwnerId || "").trim()
+          !== row.jobNimbusOwnerId
+        || String(configured.jobNimbusScope || "").trim().toLowerCase()
+          !== row.jobNimbusScope
+        || (
+          String(configured.googleSubject || "").trim()
+          && String(configured.googleSubject).trim() !== row.googleSubject
+        )
+      ) {
+        throw new Error(
+          `Stored HCN identity authority no longer matches ${row.email}.`
+        );
+      }
+      WAVE_AUTH_USERS.set(row.email, {
+        ...configured,
+        googleSubject: row.googleSubject,
+        identityPinned: true,
+        autoEnrolled: row.source === "employee_auto_enroll"
+      });
+      continue;
+    }
+    if (
+      !AUTO_ENROLL_WAVE_USERS
+      || row.source !== "employee_auto_enroll"
+      || row.role !== "employee"
+      || row.jobNimbusScope !== "assigned"
+    ) {
+      throw new Error(
+        `Stored HCN identity ${row.email} is not currently authorized.`
+      );
+    }
+    WAVE_AUTH_USERS.set(row.email, {
+      email: row.email,
+      name: row.displayName,
+      role: "employee",
       enabled: true,
-      jobNimbusOwnerId: String(row.jobNimbusOwnerId || "").trim(),
+      jobNimbusOwnerId: row.jobNimbusOwnerId,
       jobNimbusScope: "assigned",
       quoLineId: "",
-      googleSubject: String(row.googleSubject || "").trim(),
-      autoEnrolled: true
+      googleSubject: row.googleSubject,
+      autoEnrolled: true,
+      identityPinned: true
     });
   }
 }
 
-async function resolveFirstUseWaveUser({ email, name, subject = "" }) {
-  if (!AUTO_ENROLL_WAVE_USERS) return null;
+async function resolveFirstUseWaveUser({
+  email,
+  name,
+  subject = "",
+  hostedDomain = "",
+  existingUser = null
+}) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const domain = normalizedEmail.split("@")[1] || "";
-  if (!normalizedEmail || domain !== GOOGLE_OAUTH_ALLOWED_DOMAIN.toLowerCase()) return null;
+  const normalizedHostedDomain =
+    String(hostedDomain || "")
+      .trim()
+      .toLowerCase();
+  const googleSubject = String(subject || "").trim();
+  const configured =
+    existingUser || WAVE_AUTH_USERS.get(normalizedEmail) || null;
+  if (
+    !normalizedEmail
+    || !/^[^\s@]+@[^\s@]+$/.test(normalizedEmail)
+    || (
+      HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
+      && (
+        domain !== HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
+        || normalizedHostedDomain !== HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
+      )
+    )
+    || !/^[A-Za-z0-9._~-]{1,255}$/.test(googleSubject)
+    || configured?.enabled === false
+    || (
+      configured
+      && String(configured.googleSubject || "").trim()
+    )
+    || (!configured && !AUTO_ENROLL_WAVE_USERS)
+    || !hcnIdentityPinStoreConfigured()
+  ) {
+    return null;
+  }
 
   const jobNimbusUser = await findActiveJobNimbusUser(normalizedEmail);
   if (!jobNimbusUser) {
@@ -12781,18 +13460,57 @@ async function resolveFirstUseWaveUser({ email, name, subject = "" }) {
     error.statusCode = 403;
     throw error;
   }
-  const user = {
+  const jobNimbusOwnerId = String(jobNimbusUser.id || "").trim();
+  if (
+    configured
+    && (
+      !String(configured.jobNimbusOwnerId || "").trim()
+      || String(configured.jobNimbusOwnerId).trim() !== jobNimbusOwnerId
+      || String(configured.jobNimbusScope || "").trim().toLowerCase()
+        !== "assigned"
+    )
+  ) {
+    const error = new Error(
+      "The configured HCN employee authority does not match JobNimbus."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const source = configured
+    ? "explicit_first_use"
+    : "employee_auto_enroll";
+  const role = configured
+    ? String(configured.role || "").trim().toLowerCase()
+    : "employee";
+  const displayName = String(
+    configured?.name
+    || jobNimbusUser.name
+    || name
+    || normalizedEmail
+  ).trim();
+  const pin = await hcnIdentityPinStore().pin({
     email: normalizedEmail,
-    name: String(jobNimbusUser.name || name || normalizedEmail).trim(),
-    role: String(subject || "").trim() ? "employee" : "onboarding",
-    enabled: true,
-    jobNimbusOwnerId: String(jobNimbusUser.id || "").trim(),
+    displayName,
+    googleSubject,
+    jobNimbusOwnerId,
     jobNimbusScope: "assigned",
-    quoLineId: "",
-    googleSubject: String(subject || "").trim(),
-    autoEnrolled: true
+    role,
+    source
+  });
+  const user = {
+    ...(configured || {}),
+    email: normalizedEmail,
+    name: displayName,
+    role: pin.role,
+    enabled: true,
+    jobNimbusOwnerId: pin.jobNimbusOwnerId,
+    jobNimbusScope: "assigned",
+    quoLineId: String(configured?.quoLineId || "").trim(),
+    googleSubject: pin.googleSubject,
+    autoEnrolled: source === "employee_auto_enroll",
+    identityPinned: true
   };
-  await commitAutoEnrolledWaveUser(user);
+  WAVE_AUTH_USERS.set(normalizedEmail, user);
   return user;
 }
 
@@ -12822,37 +13540,6 @@ async function listCompleteJobNimbusUsers() {
     fetchPage: ({ offset, size }) =>
       jobNimbus(`/account/users?size=${size}&from=${offset}`)
   });
-}
-
-async function commitAutoEnrolledWaveUser(user) {
-  const operation = autoEnrolledUserMutationQueue.then(
-    async () => {
-      const nextUsers = new Map(WAVE_AUTH_USERS);
-      nextUsers.set(user.email, user);
-      await persistAutoEnrolledWaveUsers(nextUsers);
-      WAVE_AUTH_USERS.set(user.email, user);
-      return user;
-    }
-  );
-  autoEnrolledUserMutationQueue = operation.catch(() => {});
-  return operation;
-}
-
-async function persistAutoEnrolledWaveUsers(
-  users = WAVE_AUTH_USERS
-) {
-  if (!AUTO_ENROLL_WAVE_USERS) return;
-  const rows = [...users.values()]
-    .filter((user) => user.autoEnrolled === true || user.role === "onboarding")
-    .map((user) => ({
-      email: user.email,
-      name: user.name,
-      enabled: user.enabled !== false,
-      jobNimbusOwnerId: user.jobNimbusOwnerId,
-      jobNimbusScope: "assigned",
-      googleSubject: String(user.googleSubject || "")
-    }));
-  await writePrivateJsonFile(AUTO_ENROLLED_USER_STORE_PATH, rows);
 }
 
 async function effectiveEmployeeIdentity(identity) {
@@ -13855,8 +14542,13 @@ function clamp(value, min, max) {
 
 const OPENAPI = {
   openapi: "3.1.0",
-  info: { title: "JobNimbus ChatGPT Bridge", version: "0.1.0" },
-  servers: [{ url: "https://jobnimbus-chatgpt-bridge.onrender.com" }],
+  info: {
+    title: SERVICE_NAME === "hcn-operations-platform"
+      ? "HCN Operations Platform"
+      : "JobNimbus ChatGPT Bridge",
+    version: "0.1.0"
+  },
+  servers: [{ url: PUBLIC_BASE_URL }],
   security: [{ bearerAuth: [] }],
   components: {
     securitySchemes: {
@@ -13872,7 +14564,7 @@ const OPENAPI = {
         type: "object",
         additionalProperties: false,
         properties: {
-          service: { type: "string", const: "jobnimbus-chatgpt-bridge" },
+          service: { type: "string", const: SERVICE_NAME },
           apiVersion: { type: "string", const: "v1" },
           schemaVersion: { type: "string", const: "0.1.0" },
           sourceCommit: {
@@ -14105,7 +14797,13 @@ const OPENAPI = {
               chanceBrain: { type: "string", const: "disconnected_no_route" },
               hcnChanceBrainDataFlow: { type: "string", const: "none" },
               jobrolo: { type: "string", const: "disconnected" },
-              hcnOperationsBrain: { type: "string", const: "foundation_persistence_pending" },
+              hcnOperationsBrain: {
+                type: "string",
+                enum: [
+                  "foundation_persistence_pending",
+                  "active_isolated_encrypted_operational_state"
+                ]
+              },
               legacyClientMemory: { type: "string", const: "quarantined_unreachable" }
             },
             required: [
@@ -15247,7 +15945,7 @@ const OPENAPI = {
       post: {
         operationId: "prepareHcnActionPlan",
         security: [{ hcnBrowserSession: [] }],
-        description: "Prepares one exact, single-file JobNimbus action plan from fresh active Chance-assigned evidence. Provider identifiers and the server approval challenge never enter the browser response.",
+        description: "Prepares one exact, single-file action plan for allowlisted JobNimbus, Gmail, and Quo work from fresh active evidence assigned to the signed-in employee. Provider identifiers and the server approval challenge never enter the browser response.",
         requestBody: hcnActionRequestBody("prepare"),
         responses: hcnActionOpenApiResponses({
           success:
@@ -15284,7 +15982,7 @@ const OPENAPI = {
       post: {
         operationId: "executeHcnActionPlan",
         security: [{ hcnBrowserSession: [] }],
-        description: "Consumes one unchanged pending plan after a separate explicit Chance approval. Both the global write gate and HCN execution gate must be enabled. Effects are single-flight, receipt-first, fail-stop, and never automatically retried.",
+        description: "Consumes one unchanged pending plan after separate explicit approval by the same signed-in employee. Both the global write gate and HCN execution gate must be enabled. Effects remain assigned-file-only, single-flight, receipt-first, fail-stop, and never automatically retried.",
         "x-openai-isConsequential": true,
         requestBody: hcnActionRequestBody("plan"),
         responses: hcnActionOpenApiResponses({
@@ -15311,10 +16009,10 @@ const OPENAPI = {
       post: {
         operationId: "listHcnActionReceipts",
         security: [{ hcnBrowserSession: [] }],
-        description: "Lists bounded metadata-only action receipts for the stable pinned Chance HCN operator principal. No client bodies, provider identifiers, credentials, or challenges are stored.",
+        description: "Lists bounded metadata-only action receipts for the stable pinned signed-in employee principal. No client bodies, provider identifiers, credentials, or challenges are stored.",
         requestBody: hcnActionRequestBody("empty"),
         responses: hcnActionOpenApiResponses({
-          success: "Stable Chance-operator durable receipt summaries.",
+          success: "Stable signed-in-employee durable receipt summaries.",
           bodyLimit: "4 KiB"
         })
       }
@@ -15323,7 +16021,7 @@ const OPENAPI = {
       post: {
         operationId: "readHcnActionReceipt",
         security: [{ hcnBrowserSession: [] }],
-        description: "Reads one metadata-only durable action receipt by its action plan reference for the stable pinned Chance HCN operator principal.",
+        description: "Reads one metadata-only durable action receipt by its action plan reference for the stable pinned signed-in employee principal.",
         requestBody: hcnActionRequestBody("plan"),
         responses: hcnActionOpenApiResponses({
           success: "Exact metadata-only durable receipt.",
@@ -15847,10 +16545,20 @@ function hcnActionRequestBody(kind) {
       type: "string",
       pattern: "^ref_[a-f0-9]{32}$"
     };
+    const evidenceRef = {
+      type: "string",
+      pattern: "^ref_[a-f0-9]{32}$"
+    };
     const isoDate = {
       type: "string",
       format: "date",
       pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+    };
+    const isoInstant = {
+      type: "string",
+      format: "date-time",
+      pattern:
+        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
     };
     const operation = (type, input) => ({
       type: "object",
@@ -15916,6 +16624,94 @@ function hcnActionRequestBody(kind) {
                 additionalProperties: false,
                 properties: { dateOfLoss: isoDate },
                 required: ["dateOfLoss"]
+              }),
+              operation("jobnimbus.create_calendar_event", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  title: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 256
+                  },
+                  description: {
+                    type: "string",
+                    maxLength: 4096
+                  },
+                  startsAt: isoInstant,
+                  endsAt: isoInstant
+                },
+                required: ["title", "startsAt", "endsAt"]
+              }),
+              operation("jobnimbus.update_calendar_event", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  eventRef: evidenceRef,
+                  title: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 256
+                  },
+                  description: {
+                    type: "string",
+                    maxLength: 4096
+                  },
+                  startsAt: isoInstant,
+                  endsAt: isoInstant
+                },
+                required: ["eventRef"],
+                dependentRequired: {
+                  startsAt: ["endsAt"],
+                  endsAt: ["startsAt"]
+                },
+                minProperties: 2
+              }),
+              operation("gmail.create_draft", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  to: {
+                    type: "string",
+                    minLength: 3,
+                    maxLength: 2048
+                  },
+                  cc: { type: "string", maxLength: 2048 },
+                  bcc: { type: "string", maxLength: 2048 },
+                  subject: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 998
+                  },
+                  body: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 49152
+                  }
+                },
+                required: ["to", "subject", "body"]
+              }),
+              operation("gmail.send", {
+                type: "object",
+                additionalProperties: false,
+                properties: { draftRef: evidenceRef },
+                required: ["draftRef"]
+              }),
+              operation("quo.send_text", {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  to: {
+                    type: "string",
+                    pattern: "^\\+[1-9]\\d{7,14}$"
+                  },
+                  content: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 1600
+                  }
+                },
+                required: ["to", "content"]
               })
             ]
           }
@@ -15980,7 +16776,7 @@ function hcnActionOpenApiResponses({ success, bodyLimit }) {
     "400": { description: "Strict browser action contract validation failed." },
     "401": { description: "HCN browser session required." },
     "403": {
-      description: "Chance-only session, exact Origin, or CSRF check failed."
+      description: "Assigned-employee session, exact Origin, or CSRF check failed."
     },
     "404": {
       description:

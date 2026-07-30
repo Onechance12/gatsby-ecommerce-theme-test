@@ -1,33 +1,51 @@
 services:
   - type: web
-    name: jobnimbus-chatgpt-bridge
+    name: hcn-operations-platform
     runtime: docker
     plan: starter
+    branch: codex/hcn-platform-foundation
     dockerfilePath: ./Dockerfile
+    autoDeploy: false
     healthCheckPath: /health
     disk:
       name: hcn-operations-data
       mountPath: /var/data/hcn-operations
       sizeGB: 1
     envVars:
+      # JobNimbus remains the client system of record.
       - key: JOBNIMBUS_API_BASE_URL
         value: https://app.jobnimbus.com/api1
       - key: JOBNIMBUS_FILE_BASE_URL
         value: https://app.jobnimbus.com/files
       - key: JOBNIMBUS_API_KEY
         sync: false
-      - key: JOBNIMBUS_BRIDGE_TOKEN
-        sync: false
-      - key: CODEX_OPERATOR_TOKEN
-        sync: false
-      - key: CODEX_MAC_OPERATOR_TOKEN
-        sync: false
+
+      # Every external effect starts fail-closed. Exact-plan approval remains
+      # mandatory if a gate is enabled in a later controlled rollout.
       - key: BRIDGE_ALLOW_WRITES
         value: "false"
       - key: HCN_ACTION_EXECUTION_ENABLED
         value: "false"
+      - key: ALLOW_GMAIL_SEND
+        value: "false"
+      - key: ALLOW_QUO_SEND
+        value: "false"
+      - key: ALLOW_VOICE_CALLS
+        value: "false"
+      - key: ALLOW_RETELL_CALLS
+        value: "false"
+      - key: ALLOW_CLIENT_COORDINATOR_CALLS
+        value: "false"
+      - key: ALLOW_CARRIER_FOLLOWUP_CALLS
+        value: "false"
+
+      # Isolated HCN-only identity, storage, and Thresher operational state.
+      - key: HCN_SERVICE_NAME
+        value: hcn-operations-platform
       - key: HCN_OPERATIONS_ROOT
         value: /var/data/hcn-operations
+      - key: HCN_THRESHER_ENABLED
+        value: "true"
       - key: HCN_THRESHER_STORE_PATH
         value: /var/data/hcn-operations/thresher/state.enc.json
       - key: HCN_THRESHER_STORE_KEY
@@ -36,94 +54,71 @@ services:
         sync: false
       - key: HCN_THRESHER_SIGNING_KEY
         sync: false
-      - key: MAX_ARTIFACT_BYTES
-        value: "5242880"
-      - key: MAX_CHATGPT_FILE_BYTES
-        value: "8388608"
-      - key: ARTIFACT_TTL_HOURS
-        value: "72"
+      - key: HCN_TENANT_ID
+        sync: false
+      - key: HCN_REFERENCE_KEY
+        sync: false
+      # Dedicated least-privilege credential used only by the HP HCN operator.
+      # Never reuse the shared bridge token or a Chance Brain credential.
+      - key: CODEX_OPERATOR_TOKEN
+        sync: false
+
+      # Employee sign-in and each employee's separate Gmail/Calendar grant.
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
-        sync: false
-      - key: GOOGLE_REFRESH_TOKEN
         sync: false
       - key: HCN_GOOGLE_CLIENT_ID
         sync: false
       - key: HCN_GOOGLE_CLIENT_SECRET
         sync: false
-      - key: ALLOW_GOOGLE_USER_AUTH
-        value: "true"
-      - key: GOOGLE_OAUTH_ALLOWED_DOMAIN
-        value: wavepa.com
-      - key: AUTO_ENROLL_WAVE_USERS
-        value: "true"
-      - key: CHANCE_GOOGLE_EMAIL
-        value: cpearson@wavepa.com
-      - key: WAVE_AUTH_USERS_JSON
-        sync: false
-      - key: GPT_OAUTH_CLIENT_ID
-        value: wave-jobnimbus-gpt
-      - key: GPT_OAUTH_CLIENT_SECRET
-        sync: false
-      - key: OAUTH_SESSION_SECRET
-        sync: false
-      - key: HCN_CONSOLE_ENABLED
-        value: "true"
-      - key: HCN_CONSOLE_ORIGIN
-        value: https://jobnimbus-chatgpt-bridge.onrender.com
-      - key: CHANCE_GOOGLE_SUBJECT
-        sync: false
-      - key: HCN_TENANT_ID
-        sync: false
-      - key: HCN_REFERENCE_KEY
-        sync: false
       - key: HCN_GOOGLE_GRANT_KEY
         sync: false
       - key: HCN_GOOGLE_GRANT_STORE_PATH
         value: /var/data/hcn-operations/platform/google-grants.enc.json
+      - key: ALLOW_GOOGLE_USER_AUTH
+        value: "true"
+      - key: GOOGLE_OAUTH_ALLOWED_DOMAIN
+        value: wavepa.com
+      - key: HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
+        value: "true"
+      - key: AUTO_ENROLL_WAVE_USERS
+        value: "true"
+      - key: CHANCE_GOOGLE_EMAIL
+        value: cpearson@wavepa.com
+      - key: CHANCE_GOOGLE_SUBJECT
+        sync: false
+      - key: WAVE_AUTH_USERS_JSON
+        sync: false
+      - key: OAUTH_SESSION_SECRET
+        sync: false
+      # Custom GPTs use the HCN service's OAuth facade. Keep this client
+      # credential distinct from Google login, employee connectors, and the
+      # local HP operator credential.
+      - key: GPT_OAUTH_CLIENT_ID
+        value: hcn-operations-gpt
+      - key: GPT_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: HCN_CONSOLE_ENABLED
+        value: "true"
+      - key: HCN_CONSOLE_ORIGIN
+        value: https://hcn-operations-platform.onrender.com
+      - key: PUBLIC_BASE_URL
+        value: https://hcn-operations-platform.onrender.com
       - key: GMAIL_USER
         value: me
-      - key: ALLOW_GMAIL_SEND
-        value: "false"
-      - key: STANDARD_W9_GMAIL_MESSAGE_ID
+      - key: GOOGLE_CALENDAR_ID
+        value: primary
+      # Dedicated server-side fallback for the HP operator. Interactive
+      # employees continue to use their own encrypted Google grants.
+      - key: GOOGLE_REFRESH_TOKEN
         sync: false
-      - key: STANDARD_W9_GMAIL_ATTACHMENT_ID
-        sync: false
-      - key: STANDARD_W9_SHA256
-        sync: false
+
+      # Each employee proves control of a company Quo line by OTP.
       - key: QUO_API_KEY
         sync: false
       - key: QUO_API_BASE_URL
         value: https://api.quo.com/v1
-      - key: QUO_DEFAULT_FROM_NUMBER
-        sync: false
-      - key: ALLOW_QUO_SEND
-        value: "false"
-      - key: GOOGLE_CALENDAR_ID
-        value: primary
-      - key: SCHEDULING_HORIZON_DAYS
-        value: "21"
-      - key: SCHEDULING_APPOINTMENT_MINUTES
-        value: "120"
-      - key: SCHEDULING_TRAVEL_BUFFER_MINUTES
-        value: "60"
-      - key: SCHEDULING_MIN_LEAD_HOURS
-        value: "24"
-      - key: SCHEDULING_WORKDAY_START
-        value: "08:00"
-      - key: SCHEDULING_WORKDAY_END
-        value: "18:00"
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_REALTIME_MODEL
-        value: gpt-realtime
-      - key: OPENAI_VOICE
-        value: marin
-      - key: VOICE_PUBLIC_BASE_URL
-        value: https://jobnimbus-chatgpt-bridge.onrender.com
-      - key: VOICE_STREAM_TOKEN
-        sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
@@ -132,32 +127,14 @@ services:
         sync: false
       - key: QUO_VERIFICATION_FROM_NUMBER
         sync: false
-      - key: TWILIO_VERIFIED_TEST_NUMBER
+      - key: HCN_QUO_LINK_KEY
         sync: false
-      - key: TWILIO_STATUS_CALLBACK_URL
+      - key: HCN_QUO_LINE_STORE_PATH
+        value: /var/data/hcn-operations/platform/quo-line-store.enc.json
+      - key: QUO_DEFAULT_FROM_NUMBER
         sync: false
-      - key: ALLOW_VOICE_CALLS
-        value: "false"
-      - key: RETELL_API_KEY
-        sync: false
-      - key: RETELL_AGENT_ID
-        sync: false
-      - key: RETELL_HOMEOWNER_AGENT_ID
-        sync: false
-      - key: RETELL_CLIENT_COORDINATOR_AGENT_ID
-        sync: false
-      - key: RETELL_CARRIER_FOLLOWUP_AGENT_ID
-        sync: false
-      - key: RETELL_FROM_NUMBER
-        sync: false
-      - key: ALLOW_RETELL_CALLS
-        value: "false"
-      - key: ALLOW_CLIENT_COORDINATOR_CALLS
-        value: "false"
-      - key: ALLOW_CARRIER_FOLLOWUP_CALLS
-        value: "false"
-      - key: RETELL_CALLBACK_TTL_HOURS
-        value: "72"
+
+      # Company management sweep and assigned-file employee action plane.
       - key: CHANCE_JOBNIMBUS_OWNER_ID
         value: fc95a213f70e4c9daddc5fa366be9941
       - key: HCN_MANAGEMENT_ADJUSTERS_JSON
@@ -170,21 +147,23 @@ services:
         value: "4"
       - key: HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET
         value: "750"
-      - key: CLAIM_CALL_STORE_PATH
-        value: /var/data/hcn-operations/platform/claim-call-ledger.json
       - key: ACTION_BATCH_STORE_PATH
         value: /var/data/hcn-operations/platform/action-batches.json
       - key: ACTION_APPROVAL_STORE_PATH
         value: /var/data/hcn-operations/platform/action-approvals.json
       - key: HCN_ACTION_RECEIPT_STORE_PATH
         value: /var/data/hcn-operations/platform/action-receipts.json
-      - key: ACTION_APPROVAL_TTL_SECONDS
-        value: "900"
       - key: OUTBOUND_SEND_STORE_PATH
         value: /var/data/hcn-operations/platform/outbound-sends.json
-      - key: HCN_QUO_LINE_STORE_PATH
-        value: /var/data/hcn-operations/platform/quo-line-store.enc.json
-      - key: HCN_QUO_LINK_KEY
-        sync: false
-      - key: AUTO_ENROLLED_USER_STORE_PATH
-        value: /var/data/hcn-operations/platform/auto-enrolled-users.json
+      - key: CLAIM_CALL_STORE_PATH
+        value: /var/data/hcn-operations/platform/claim-call-ledger.json
+      - key: HCN_IDENTITY_PIN_STORE_PATH
+        value: /var/data/hcn-operations/platform/identity-pins.json
+      - key: ACTION_APPROVAL_TTL_SECONDS
+        value: "900"
+      - key: MAX_ARTIFACT_BYTES
+        value: "5242880"
+      - key: MAX_CHATGPT_FILE_BYTES
+        value: "8388608"
+      - key: ARTIFACT_TTL_HOURS
+        value: "72"

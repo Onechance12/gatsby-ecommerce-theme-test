@@ -103,6 +103,24 @@ test("build info is explicit when no source revision is available", () => {
   assert.equal(result.attested, false);
 });
 
+test("build info identifies the isolated HCN service from an allowlisted name", () => {
+  const result = getBuildInfo({
+    env: { HCN_SERVICE_NAME: "hcn-operations-platform" },
+    runtime: FIXED_RUNTIME
+  });
+
+  assert.equal(result.service, "hcn-operations-platform");
+});
+
+test("build info rejects unsafe service-name overrides", () => {
+  const result = getBuildInfo({
+    env: { HCN_SERVICE_NAME: "HCN service; leak" },
+    runtime: FIXED_RUNTIME
+  });
+
+  assert.equal(result.service, "jobnimbus-chatgpt-bridge");
+});
+
 test("caller-declared short commits are visible but never provider-attested", () => {
   const result = getBuildInfo({
     env: { SOURCE_COMMIT: "deadbee" },

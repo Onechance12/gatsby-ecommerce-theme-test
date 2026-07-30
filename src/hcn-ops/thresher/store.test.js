@@ -312,6 +312,31 @@ test("records are immutable by reference and exact replays are idempotent", asyn
   );
 });
 
+test("putMany commits one dependency-checked transaction or leaves no partial state", async (t) => {
+  const { store } = await fixture(t);
+  await assert.rejects(
+    store.putMany([
+      evidence(),
+      rule({
+        evidenceRefs: [`evidence_${"f".repeat(32)}`]
+      })
+    ]),
+    (error) => assertStoreError(error, "missing_fresh_evidence")
+  );
+  const empty = await store.snapshot(scope());
+  assert.equal(empty.authoritativeEvidence.length, 0);
+
+  const inserted = await store.putMany([
+    evidence(),
+    rule()
+  ]);
+  assert.equal(Object.isFrozen(inserted), true);
+  assert.equal(inserted.length, 2);
+  const committed = await store.snapshot(scope());
+  assert.equal(committed.authoritativeEvidence.length, 1);
+  assert.equal(committed.activeRuleStates.length, 1);
+});
+
 test("newer fresh evidence becomes authoritative and older evidence cannot race backward", async (t) => {
   const { store, setTime } = await fixture(t);
   await store.put(evidence());
@@ -425,6 +450,79 @@ test("receipts require an approved current plan, exact operation, and one termin
     ),
     (error) => assertStoreError(error, "duplicate_operation_receipt")
   );
+});
+
+test("compaction preserves every receipted plan dependency while replacing transient review state", async (t) => {
+  const { filePath, store, setTime } = await fixture(
+    t,
+    { maxRecords: 7 }
+  );
+  await store.putMany([
+    evidence(),
+    rule(),
+    work(),
+    plan(),
+    receipt()
+  ]);
+
+  setTime(Date.parse("2026-07-29T12:06:00.000Z"));
+  const newerEvidence = evidence({
+    evidenceRef: refs.evidence2,
+    sourceRecordRef: refs.source2,
+    evidenceDigest: digest("f"),
+    stateCode: "absent",
+    observedAt: "2026-07-29T12:05:00.000Z",
+    checkedAt: "2026-07-29T12:06:00.000Z",
+    validUntil: "2026-07-29T12:12:00.000Z",
+    recordedAt: "2026-07-29T12:06:00.000Z"
+  });
+  const newerRuleRef = `rule_${"a".repeat(32)}`;
+  const newerRule = rule({
+    ruleRef: newerRuleRef,
+    evidenceRefs: [refs.evidence2],
+    decisionDigest: digest("1"),
+    evaluatedAt: "2026-07-29T12:06:00.000Z",
+    validUntil: "2026-07-29T12:12:00.000Z",
+    recordedAt: "2026-07-29T12:06:00.000Z"
+  });
+  const newerWork = work({
+    workRef: `work_${"b".repeat(32)}`,
+    evidenceRefs: [refs.evidence2],
+    ruleRefs: [newerRuleRef],
+    decisionDigest: digest("2"),
+    createdAt: "2026-07-29T12:06:00.000Z",
+    updatedAt: "2026-07-29T12:06:00.000Z",
+    validUntil: "2026-07-29T12:12:00.000Z",
+    recordedAt: "2026-07-29T12:06:00.000Z"
+  });
+  await store.putMany([
+    newerEvidence,
+    newerRule,
+    newerWork
+  ]);
+
+  const current = await store.snapshot(scope());
+  assert.deepEqual(
+    current.authoritativeEvidence.map((item) => item.evidenceRef),
+    [refs.evidence2]
+  );
+  assert.equal(current.activeRuleStates[0].ruleRef, newerRuleRef);
+  assert.equal(current.receipts.length, 1);
+  assert.equal(current.receipts[0].planRef, refs.plan);
+
+  store.close();
+  const reopened = createThresherStore({
+    filePath,
+    encryptionKey: KEY,
+    tenantRef: refs.tenant,
+    now: () => Date.parse("2026-07-29T12:06:00.000Z"),
+    maxRecords: 7
+  });
+  t.after(() => reopened.close());
+  const durable = await reopened.snapshot(scope());
+  assert.equal(durable.receipts.length, 1);
+  assert.equal(durable.receipts[0].planRef, refs.plan);
+  assert.equal(durable.authoritativeEvidence[0].evidenceRef, refs.evidence2);
 });
 
 test("wrong key, ciphertext tampering, malformed envelope, and oversize files fail closed", async (t) => {

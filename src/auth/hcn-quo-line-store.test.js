@@ -82,6 +82,23 @@ test("a correct one-time code atomically creates one immutable employee binding"
   );
 });
 
+test("unrestricted HCN sign-in supports an externally hosted employee email", async (t) => {
+  const fixture = await createFixture(t, { allowedDomain: "" });
+  const identity = {
+    ...IDENTITY,
+    email: "richard@titanrecon.com"
+  };
+  const challenge = await fixture.store.createChallenge({
+    ...identity,
+    ...LINE
+  });
+  const binding = await fixture.store.verifyChallenge({
+    ...identity,
+    code: challenge.code
+  });
+  assert.equal(binding.state, "linked");
+});
+
 test("incorrect attempts persist and the configured limit locks the challenge", async (t) => {
   const fixture = await createFixture(t, { maxAttempts: 2 });
   await fixture.store.createChallenge({ ...IDENTITY, ...LINE });
