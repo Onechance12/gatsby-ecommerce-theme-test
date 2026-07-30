@@ -6898,7 +6898,7 @@
   function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("/hcn/sw.js", { scope: "/hcn/" }).catch(function () {
+      navigator.serviceWorker.register("/hcn/sw.js?shell=v9", { scope: "/hcn/" }).catch(function () {
         // Offline support is optional; readiness remains sourced from live API checks.
       });
     });

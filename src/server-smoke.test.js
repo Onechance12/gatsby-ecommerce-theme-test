@@ -416,8 +416,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const rootRedirectResponse = await fetch(`http://127.0.0.1:${port}/`, {
     redirect: "manual"
   });
-  assert.equal(rootRedirectResponse.status, 308);
-  assert.equal(rootRedirectResponse.headers.get("location"), "/hcn/");
+  assert.equal(rootRedirectResponse.status, 302);
+  assert.equal(
+    rootRedirectResponse.headers.get("location"),
+    "/hcn/?shell=v9"
+  );
   assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
   assert.match(
     rootRedirectResponse.headers.get("content-security-policy"),
@@ -428,8 +431,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const consoleRedirectResponse = await fetch(`http://127.0.0.1:${port}/hcn`, {
     redirect: "manual"
   });
-  assert.equal(consoleRedirectResponse.status, 308);
-  assert.equal(consoleRedirectResponse.headers.get("location"), "/hcn/");
+  assert.equal(consoleRedirectResponse.status, 302);
+  assert.equal(
+    consoleRedirectResponse.headers.get("location"),
+    "/hcn/?shell=v9"
+  );
   assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
 
   const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`);

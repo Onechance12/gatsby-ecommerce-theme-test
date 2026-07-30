@@ -81,6 +81,20 @@ test("console serves only its fixed application-shell allowlist", async () => {
     assert.equal(asset.body.length > 0, true);
   }
 
+  const [htmlAsset, manifestAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/manifest.webmanifest")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const manifest = JSON.parse(
+    manifestAsset.body.toString("utf8")
+  );
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v9/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v9/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v9/);
+  assert.match(html, /href="\/hcn\/\?shell=v9"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v9");
+
   for (const pathname of [
     "/hcn",
     "/hcn/auth/login",
@@ -162,7 +176,8 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   const script = scriptAsset.body.toString("utf8");
   const worker = workerAsset.body.toString("utf8");
 
-  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v8";/);
+  assert.match(worker, /const CACHE_NAME = CACHE_PREFIX \+ "v9";/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v9/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
   const browserAuthority = script.slice(
     script.indexOf("function hasBrowserAuthority()"),

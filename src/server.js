@@ -737,9 +737,9 @@ const server = createServer(async (req, res) => {
       req.method === "GET" &&
       (url.pathname === "/" || url.pathname === "/hcn")
     ) {
-      res.writeHead(308, {
+      res.writeHead(302, {
         ...HCN_CONSOLE_SECURITY_HEADERS,
-        location: "/hcn/"
+        location: "/hcn/?shell=v9"
       });
       return res.end();
     }

@@ -1,7 +1,7 @@
 "use strict";
 
 const CACHE_PREFIX = "hcn-console-shell-";
-const CACHE_NAME = CACHE_PREFIX + "v8";
+const CACHE_NAME = CACHE_PREFIX + "v9";
 const SHELL_PATHS = Object.freeze([
   "/hcn/",
   "/hcn/app.css",
