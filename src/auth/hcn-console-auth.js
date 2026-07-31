@@ -152,7 +152,8 @@ export function createHcnConsoleOAuthCoordinator({
     state,
     code = "",
     error = "",
-    loginBinding
+    loginBinding,
+    approvalContext = null
   } = {}) {
     const timestamp = readNow(now);
     const statePayload = await decodeConsoleState(openState, state);
@@ -224,7 +225,8 @@ export function createHcnConsoleOAuthCoordinator({
       resolveApprovedUser,
       fetchImpl,
       config,
-      accessToken: tokens.accessToken
+      accessToken: tokens.accessToken,
+      approvalContext
     });
 
     let session;
@@ -381,7 +383,8 @@ async function authenticateCurrentApprovedIdentity({
   resolveApprovedUser,
   fetchImpl,
   config,
-  accessToken
+  accessToken,
+  approvalContext
 }) {
   let resolution = null;
   let resolverCalls = 0;
@@ -405,7 +408,14 @@ async function authenticateCurrentApprovedIdentity({
           );
         }
         const safeCandidate = normalizeGoogleCandidate(candidate);
-        const approved = await resolveApprovedUser(safeCandidate);
+        const approved = await resolveApprovedUser(
+          approvalContext === null
+            ? safeCandidate
+            : {
+                ...safeCandidate,
+                approvalContext
+              }
+        );
         resolution = { candidate: safeCandidate, approved };
         return approved;
       },
@@ -798,8 +808,8 @@ function normalizeEmail(value) {
 
 function normalizeDomain(value) {
   const domain = String(value || "").trim().toLowerCase();
+  if (!domain) return "";
   if (
-    !domain ||
     domain.length > 253 ||
     !/^[a-z0-9.-]+$/.test(domain)
   ) {

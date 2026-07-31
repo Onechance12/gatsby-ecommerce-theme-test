@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import {
+  createHcnInvitationStore
+} from "./auth/hcn-invitation-store.js";
 import { createActiveThresherRuntime } from "./hcn-ops/thresher/active-runtime.js";
 import { createThresherStore } from "./hcn-ops/thresher/store.js";
 
@@ -1990,12 +1993,23 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   assert.match((await unrelatedTranscriptResponse.json()).error, /not present in the current history/i);
 });
 
-test("employee Google OAuth keeps Gmail identity isolated and enforces the employee role", async (t) => {
+test("invited employee Google OAuth keeps Gmail identity isolated and enforces the employee role", async (t) => {
   const bridgePort = 18890;
   const fakeGooglePort = 18891;
   const gmailTokens = [];
   const authMemoryRoot = await mkdtemp(path.join(tmpdir(), "wave-auth-"));
   t.after(() => rm(authMemoryRoot, { recursive: true, force: true }));
+  const hcnReferenceKey =
+    Buffer.alloc(32, 0x31).toString("base64url");
+  await seedAcceptedEmployeeInvitation({
+    root: authMemoryRoot,
+    key: hcnReferenceKey,
+    email: "andrea@wavepa.com",
+    displayName: "Andrea Ramirez",
+    role: "employee",
+    jobNimbusOwnerId: "andrea-owner-id",
+    googleSubject: "google-andrea-1"
+  });
   let verificationSmsBody = "";
   const fakeGoogle = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
@@ -2076,12 +2090,11 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
       OAUTH_SESSION_SECRET: "fixture-session-encryption-secret",
       HCN_OPERATIONS_ROOT: authMemoryRoot,
       HCN_TENANT_ID: "tenant_a1b2c3d4e5f60718",
-      HCN_REFERENCE_KEY:
-        Buffer.alloc(32, 0x31).toString("base64url"),
+      HCN_REFERENCE_KEY: hcnReferenceKey,
       HCN_QUO_LINK_KEY:
         Buffer.alloc(32, 0x32).toString("base64url"),
       WAVE_AUTH_USERS_JSON: "{}",
-      AUTO_ENROLL_WAVE_USERS: "true",
+      AUTO_ENROLL_WAVE_USERS: "false",
       HCN_IDENTITY_PIN_STORE_PATH: path.join(authMemoryRoot, "identity-pins.json"),
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/v1`,
@@ -2347,6 +2360,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     Buffer.alloc(32, 0x4c).toString("base64url");
   const hcnQuoLinkKey =
     Buffer.alloc(32, 0x6d).toString("base64url");
+  await seedAcceptedEmployeeInvitation({
+    root: memoryRoot,
+    key: hcnReferenceKey,
+    email: "adjuster@wavepa.com",
+    displayName: "Employee Fixture",
+    role: "employee",
+    jobNimbusOwnerId: otherOwnerId,
+    googleSubject: "hcn-employee-google-subject"
+  });
   const hcnGoogleGrantStorePath = path.join(
     memoryRoot,
     "bridge",
@@ -3064,8 +3086,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(callbackResponse.status, 302);
   assert.equal(callbackResponse.headers.get("location"), "/hcn");
   const callbackCookies = callbackResponse.headers.getSetCookie();
-  assert.equal(callbackCookies.length, 2);
+  assert.equal(callbackCookies.length, 3);
   assert.match(callbackCookies[0], /^__Host-hcn_login=;/);
+  assert.ok(
+    callbackCookies.some((value) =>
+      value.startsWith("hcn_invitation=;")
+    )
+  );
   const sessionSetCookie = callbackCookies.find((value) =>
     value.startsWith("__Host-hcn_session=")
   );
@@ -3185,7 +3212,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     browserSession.browserSession.expiresAt
   );
   const serializedBrowserSession = JSON.stringify(browserSession);
-  assert.doesNotMatch(serializedBrowserSession, /chance@wavepa|hcn-google-subject|hcn-google-access-token/);
+  assert.equal(browserSession.profile.email, "chance@wavepa.com");
+  assert.doesNotMatch(
+    serializedBrowserSession,
+    /hcn-google-subject|hcn-google-access-token/
+  );
   const hcnReadHeaders = {
     cookie: sessionCookie,
     origin,
@@ -3257,7 +3288,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   assert.equal(
     connectorAuthorize.searchParams.get("hd"),
-    "wavepa.com"
+    null
   );
   assert.notEqual(
     connectorAuthorize.searchParams.get("state"),
@@ -3355,9 +3386,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   });
   const serializedConnectedStatus =
     JSON.stringify(connectedStatus);
+  assert.deepEqual(connectedStatus.profile, {
+    displayName: "Chance Fixture",
+    email: "chance@wavepa.com",
+    role: "chance"
+  });
   for (const forbidden of [
     "hcn-google-subject",
-    "chance@wavepa.com",
     chanceOwnerId,
     "hcn-google-connector-access-token",
     "hcn-google-connector-refresh-token",
@@ -4296,6 +4331,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     await employeeBrowserSessionResponse.json();
   assert.deepEqual(employeeBrowserSession.profile, {
     displayName: "Employee Fixture",
+    email: "adjuster@wavepa.com",
     role: "employee"
   });
   assert.deepEqual(
@@ -4320,7 +4356,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     JSON.stringify(employeeBrowserSession);
   assert.doesNotMatch(
     serializedEmployeeSession,
-    /adjuster@wavepa|hcn-employee-google-subject|fixture-other-owner/
+    /hcn-employee-google-subject|fixture-other-owner/
   );
   const employeeHeaders = {
     cookie: employeeSessionCookie,
@@ -4518,9 +4554,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     calendar: "connected",
     connectUrl: "/hcn/connect/google/start"
   });
+  assert.equal(
+    employeeConnectedStatus.profile.email,
+    "adjuster@wavepa.com"
+  );
   assert.doesNotMatch(
     JSON.stringify(employeeConnectedStatus),
-    /hcn-employee-google-subject|adjuster@wavepa|hcn-employee-connector-(?:access|refresh)-token/
+    /hcn-employee-google-subject|hcn-employee-connector-(?:access|refresh)-token/
   );
 
   const chanceStillConnectedResponse = await fetch(
@@ -6977,6 +7017,45 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const rejected = await rejectedResponse.json();
   assert.match(rejected.error, /No Chance Pearson/);
 });
+
+async function seedAcceptedEmployeeInvitation({
+  root,
+  key,
+  email,
+  displayName,
+  role,
+  jobNimbusOwnerId,
+  googleSubject
+}) {
+  const timestamp = Date.now();
+  const store = createHcnInvitationStore({
+    filePath: path.join(
+      root,
+      "platform",
+      "employee-invitations.enc.json"
+    ),
+    key,
+    allowedDomain: "",
+    now: () => timestamp
+  });
+  const invitation = await store.createInvitation({
+    email,
+    displayName,
+    role,
+    jobNimbusOwnerId,
+    jobNimbusScope: "assigned",
+    invitedByRef: `principal_${"a".repeat(64)}`,
+    expiresAt: new Date(
+      timestamp + 72 * 60 * 60_000
+    ).toISOString()
+  });
+  await store.acceptInvitation({
+    invitationRef: invitation.invitationRef,
+    email,
+    googleSubject,
+    inviteToken: invitation.inviteToken
+  });
+}
 
 async function expectBridgeStartupFailure(environment, pattern) {
   const child = spawn(process.execPath, ["src/server.js"], {

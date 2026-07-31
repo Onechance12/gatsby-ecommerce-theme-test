@@ -91,6 +91,59 @@ test("callback consumes the transaction, exchanges with its verifier, and create
     new RegExp(`^${HCN_SESSION_COOKIE_NAME}=[A-Za-z0-9_-]{43};`));
 });
 
+test("exact-email approval supports Google accounts without a hosted-domain claim", async () => {
+  const externalEmail = "manager@outside.example";
+  const externalSubject = "external-google-subject";
+  const fixture = createFixture({
+    googleAllowedDomain: "",
+    resolveApprovedUser: async () => ({
+      email: externalEmail,
+      name: "External Manager",
+      role: "manager",
+      enabled: true,
+      googleSubject: externalSubject,
+      authorizationVersion: AUTHORIZATION_VERSION
+    }),
+    authenticateGoogleAccessToken: async (options) => {
+      const candidate = {
+        subject: externalSubject,
+        email: externalEmail,
+        name: "External Manager",
+        hostedDomain: ""
+      };
+      const approved = await options.resolveUser(candidate);
+      return {
+        type: "google_oauth",
+        ...candidate,
+        role: approved.role,
+        googleAccessToken: options.token
+      };
+    }
+  });
+  const begin = await fixture.coordinator.beginAuthorization({
+    returnTo: "/hcn/"
+  });
+  const authorizationUrl = new URL(begin.redirectUrl);
+  assert.equal(authorizationUrl.searchParams.has("hd"), false);
+
+  const completed = await fixture.coordinator.completeCallback({
+    state: authorizationUrl.searchParams.get("state"),
+    code: "external-google-code",
+    loginBinding: cookieValue(
+      begin.setCookies[0],
+      HCN_LOGIN_COOKIE_NAME
+    )
+  });
+
+  assert.equal(completed.redirectPath, "/hcn/");
+  assert.deepEqual(fixture.sessionInputs, [{
+    subject: externalEmail,
+    googleSubject: externalSubject,
+    role: "manager",
+    authorizationVersion: AUTHORIZATION_VERSION
+  }]);
+});
+
 test("return paths are confined to the HCN console", async () => {
   const fixture = createFixture();
   for (const unsafe of [
@@ -312,7 +365,8 @@ function createFixture({
     googleSubject: "google-subject-1",
     authorizationVersion: AUTHORIZATION_VERSION
   }),
-  authenticateGoogleAccessToken = defaultAuthenticator
+  authenticateGoogleAccessToken = defaultAuthenticator,
+  googleAllowedDomain = "wavepa.com"
 } = {}) {
   let timestamp = START;
   let randomCounter = 0;
@@ -365,7 +419,7 @@ function createFixture({
     google: {
       clientId: "google-client-id",
       clientSecret: GOOGLE_CLIENT_SECRET,
-      allowedDomain: "wavepa.com"
+      allowedDomain: googleAllowedDomain
     }
   });
   return {

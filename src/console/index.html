@@ -69,6 +69,15 @@
           <p class="nav-label">More</p>
           <a
             class="nav-item"
+            href="#team"
+            data-hcn-team-invitations
+            hidden
+          >
+            <span class="nav-glyph glyph-team" aria-hidden="true"></span>
+            <span>Team</span>
+          </a>
+          <a
+            class="nav-item"
             href="#approvals"
             data-hcn-capability="hcn.action_plans.read"
             hidden
@@ -1322,7 +1331,10 @@
                 <p class="eyebrow">Signed-in employee</p>
                 <strong id="connections-profile-name">—</strong>
               </div>
-              <span id="connections-profile-role">—</span>
+              <div class="connections-profile-meta">
+                <strong id="connections-profile-email">—</strong>
+                <span id="connections-profile-role">—</span>
+              </div>
             </div>
 
             <div class="connections-grid">
@@ -1459,6 +1471,202 @@
                 </form>
               </article>
             </div>
+          </div>
+        </section>
+
+        <section
+          id="team"
+          class="operations-section team-section console-view"
+          aria-labelledby="team-title"
+          data-hcn-team-invitations
+          hidden
+        >
+          <div class="operations-section-heading">
+            <div>
+              <p class="eyebrow">Chance only</p>
+              <h2 id="team-title">Team</h2>
+              <p>
+                Invite an HCN employee with their exact work email. People
+                cannot create their own account.
+              </p>
+            </div>
+            <div class="work-center-actions">
+              <span id="team-status" class="card-status" data-tone="neutral">
+                Checking
+              </span>
+              <button
+                id="team-refresh"
+                class="button button-surface"
+                type="button"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          <div
+            id="team-alert"
+            class="operations-alert"
+            data-tone="neutral"
+            role="status"
+            aria-live="polite"
+          >
+            Checking invitation access.
+          </div>
+
+          <div id="team-workspace" class="team-workspace">
+            <section class="team-invite-panel" aria-labelledby="team-invite-title">
+              <div class="team-panel-heading">
+                <div>
+                  <p class="eyebrow">Add one person</p>
+                  <h3 id="team-invite-title">Create an invitation</h3>
+                </div>
+                <span class="team-step">1</span>
+              </div>
+              <p class="team-panel-copy">
+                Use the Google Workspace email they will use to sign in.
+              </p>
+              <form
+                id="team-invite-form"
+                class="team-invite-form"
+                autocomplete="off"
+                novalidate
+              >
+                <label class="field">
+                  <span>Work email</span>
+                  <input
+                    id="team-invite-email"
+                    name="email"
+                    type="email"
+                    inputmode="email"
+                    autocomplete="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    maxlength="254"
+                    placeholder="name@wavepa.com"
+                    required
+                  >
+                </label>
+                <label class="field">
+                  <span>Role</span>
+                  <select id="team-invite-role" name="role" required>
+                    <option value="employee">Employee</option>
+                    <option value="client_coordinator">Client coordinator</option>
+                    <option value="manager">Manager</option>
+                  </select>
+                </label>
+                <button
+                  id="team-invite-prepare"
+                  class="button button-primary"
+                  type="submit"
+                >
+                  Prepare invite
+                </button>
+              </form>
+              <p class="team-safety-note">
+                This checks the employee and prepares an exact review. It does
+                not create an account or send an email.
+              </p>
+              <p class="team-oauth-note">
+                <strong>Google setup:</strong> while HCN Google sign-in remains
+                in testing, add this exact email as an approved Google OAuth
+                test user before sharing the invite link.
+              </p>
+            </section>
+
+            <section
+              id="team-invite-review"
+              class="team-review-panel"
+              aria-labelledby="team-invite-review-title"
+              hidden
+            >
+              <div class="team-panel-heading">
+                <div>
+                  <p class="eyebrow">Exact review</p>
+                  <h3 id="team-invite-review-title">Approve this invitation</h3>
+                </div>
+                <span class="team-step">2</span>
+              </div>
+              <dl id="team-invite-review-fields" class="team-review-fields"></dl>
+              <p class="team-review-warning">
+                Nothing is sent automatically. Approving creates one invite
+                link for this exact email and role.
+              </p>
+              <div class="team-review-actions">
+                <button
+                  id="team-invite-cancel"
+                  class="button button-surface"
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="team-invite-create"
+                  class="button button-primary"
+                  type="button"
+                >
+                  Approve &amp; create invite
+                </button>
+              </div>
+            </section>
+
+            <section
+              id="team-revoke-review"
+              class="team-review-panel team-review-panel-danger"
+              aria-labelledby="team-revoke-review-title"
+              hidden
+            >
+              <div class="team-panel-heading">
+                <div>
+                  <p class="eyebrow">Exact review</p>
+                  <h3 id="team-revoke-review-title">Revoke this invitation?</h3>
+                </div>
+                <span class="team-step">Review</span>
+              </div>
+              <dl id="team-revoke-review-fields" class="team-review-fields"></dl>
+              <p class="team-review-warning">
+                This stops the exact invitation from being used. The action
+                cannot be assumed complete until HCN confirms it.
+              </p>
+              <div class="team-review-actions">
+                <button
+                  id="team-revoke-cancel"
+                  class="button button-surface"
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="team-revoke-approve"
+                  class="button button-danger"
+                  type="button"
+                >
+                  Approve &amp; revoke
+                </button>
+              </div>
+            </section>
+
+            <section class="team-list-panel" aria-labelledby="team-list-title">
+              <div class="team-list-heading">
+                <div>
+                  <p class="eyebrow">Invitation access</p>
+                  <h3 id="team-list-title">Invitations</h3>
+                </div>
+                <span id="team-invitation-count">0</span>
+              </div>
+              <p class="team-panel-copy">
+                Share a link yourself after approval. HCN never emails it
+                automatically.
+              </p>
+              <div
+                id="team-invitation-list"
+                class="team-invitation-list"
+                aria-live="polite"
+                aria-busy="false"
+              >
+                <p class="empty-state">No invitation list is loaded.</p>
+              </div>
+            </section>
           </div>
         </section>
 

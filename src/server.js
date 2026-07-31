@@ -87,6 +87,13 @@ import {
   createHcnIdentityPinStore
 } from "./auth/hcn-identity-pin-store.js";
 import {
+  createHcnInvitationStore,
+  hcnInvitationPublicRecord
+} from "./auth/hcn-invitation-store.js";
+import {
+  createHcnInvitationApprovalStore
+} from "./auth/hcn-invitation-approvals.js";
+import {
   createHcnQuoLineStore
 } from "./auth/hcn-quo-line-store.js";
 import {
@@ -252,12 +259,7 @@ const GOOGLE_OAUTH_ALLOWED_DOMAIN = process.env.GOOGLE_OAUTH_ALLOWED_DOMAIN || "
 const HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS =
   process.env.HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS === "true";
 const HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN = String(
-  HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
-    ? ""
-    : (
-        process.env.HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
-        || GOOGLE_OAUTH_ALLOWED_DOMAIN
-      )
+  process.env.HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN || ""
 ).trim().toLowerCase();
 const ALLOW_GOOGLE_USER_AUTH = process.env.ALLOW_GOOGLE_USER_AUTH === "true";
 const AUTO_ENROLL_WAVE_USERS = process.env.AUTO_ENROLL_WAVE_USERS === "true";
@@ -426,6 +428,18 @@ const HCN_IDENTITY_PIN_STORE_PATH =
       ? path.join(HCN_OPERATIONS_DATA_DIR, "identity-pins.json")
       : ""
   );
+const HCN_INVITATION_STORE_PATH =
+  process.env.HCN_INVITATION_STORE_PATH
+  || (
+    HCN_OPERATIONS_DATA_DIR
+      ? path.join(
+          HCN_OPERATIONS_DATA_DIR,
+          "employee-invitations.enc.json"
+        )
+      : ""
+  );
+const HCN_INVITATION_COOKIE_NAME = "hcn_invitation";
+const HCN_INVITATION_COOKIE_TTL_MS = 15 * 60_000;
 const QUO_API_KEY = process.env.QUO_API_KEY || "";
 const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
@@ -462,6 +476,14 @@ const HCN_CONSOLE_SESSION_STORE = createHcnConsoleSessionStore();
 const HCN_GOOGLE_GRANT_OPERATIONS =
   createKeyedOperationQueue({ maxKeys: 512 });
 const HCN_CONSOLE_LOGIN_ADMISSION = createHcnConsoleLoginAdmission();
+const HCN_INVITATION_CLAIM_ADMISSION =
+  createHcnConsoleLoginAdmission({
+    perSourceLimit: 12,
+    perSourceWindowMs: 10 * 60_000,
+    globalLimit: 256,
+    globalWindowMs: 10 * 60_000,
+    maxUniqueSources: 128
+  });
 const HCN_CONSOLE_READ_ADMISSION = createHcnReadAdmissionController();
 const HCN_GOOGLE_CONNECTOR_SESSION_ADMISSION =
   createHcnReadAdmissionController({
@@ -522,6 +544,8 @@ const HCN_ASSISTANT_MAX_HISTORY_MESSAGES = 8;
 const HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES = 8 * 1024;
 const HCN_ASSISTANT_CONVERSATION_TTL_MS = 30 * 60_000;
 const HCN_PENDING_ACTION_PLANS = createHcnPendingActionPlanStore();
+const HCN_INVITATION_APPROVALS =
+  createHcnInvitationApprovalStore();
 const HCN_CONSOLE_STATE_CODEC = OAUTH_SESSION_SECRET
   ? createHcnConsoleStateCodec({ secret: OAUTH_SESSION_SECRET })
   : null;
@@ -530,6 +554,7 @@ let hcnGoogleConnectorOAuthCoordinatorInstance = null;
 let hcnConsoleFreshReadServiceInstance = null;
 let hcnGoogleGrantStoreInstance = null;
 let hcnIdentityPinStoreInstance = null;
+let hcnInvitationStoreInstance = null;
 let hcnQuoLineStoreInstance = null;
 let hcnActionReceiptIndexInstance = null;
 let hcnActionExecutionInFlight = false;
@@ -537,6 +562,7 @@ const HCN_ACTION_SESSION_IN_FLIGHT = new Set();
 let actionBatchMutationQueue = Promise.resolve();
 let actionApprovalMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
+let HCN_LEGACY_IDENTITY_REVIEWS = [];
 
 for (const [name, token] of [
   ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
@@ -752,6 +778,10 @@ const routes = new Map([
   ["POST /hcn/api/v1/action-plans/invalidate", hcnInvalidateActionPlan],
   ["POST /hcn/api/v1/action-receipts/list", hcnListActionReceipts],
   ["POST /hcn/api/v1/action-receipts/detail", hcnReadActionReceipt],
+  ["POST /hcn/api/v1/team/invitations/list", hcnListTeamInvitations],
+  ["POST /hcn/api/v1/team/invitations/prepare", hcnPrepareTeamInvitation],
+  ["POST /hcn/api/v1/team/invitations/create", hcnCreateTeamInvitation],
+  ["POST /hcn/api/v1/team/invitations/revoke", hcnRevokeTeamInvitation],
   ["GET /auth/whoami", authWhoAmI],
   ["POST /auth/quo-line", quoLineLink],
   ["GET /openapi.json", openapi],
@@ -834,6 +864,22 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/oauth/token") return oauthToken(req, res);
     if (req.method === "GET" && url.pathname === "/hcn/auth/login") {
       return hcnConsoleLogin(req, res, url);
+    }
+    if (req.method === "GET" && url.pathname === "/hcn/invite") {
+      return sendHcnInvitationLanding(res);
+    }
+    if (
+      req.method === "GET"
+      && url.pathname === "/hcn/auth/invitation.js"
+    ) {
+      return sendHcnInvitationClient(res);
+    }
+    if (
+      req.method === "POST"
+      && url.pathname === "/hcn/auth/invitation"
+    ) {
+      const body = await readJson(req, HCN_CONSOLE_API_BODY_BYTES);
+      return hcnClaimInvitation(req, res, body);
     }
     if (
       HCN_CONSOLE_ENABLED &&
@@ -1009,27 +1055,63 @@ function health() {
     userOAuth: {
       available: oauthBrokerConfigured() || hcnConsoleAuthConfigured(),
       provider: "google_via_bridge",
-      allowedWorkspaceDomain: GOOGLE_OAUTH_ALLOWED_DOMAIN,
+      legacyGoogleBrokerAllowedWorkspaceDomain:
+        GOOGLE_OAUTH_ALLOWED_DOMAIN,
+      hcnLoginBlanketDomainRestriction:
+        HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN || "none_exact_invite_only",
       hcnLoginEligibility:
-        HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
-          ? "verified_google_email_matching_unique_active_jobnimbus_user"
-          : `verified_google_domain_${HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN}`,
+        "chance_bootstrap_or_preexisting_authenticated_pin_compatibility_or_chance_invitation_plus_exact_verified_google_email_plus_unique_active_jobnimbus_user",
       approvedUserCount: WAVE_AUTH_USERS.size,
       automaticEmployeeEnrollment: {
-        enabled: AUTO_ENROLL_WAVE_USERS,
+        enabled: false,
+        configuredLegacyFlagIgnored: AUTO_ENROLL_WAVE_USERS,
+        configuredActiveJobNimbusLegacyFlagIgnored:
+          HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS,
+        admissionMode: "chance_invitation_only_for_new_users",
+        publicSelfRegistration: false,
         requirements: [
-          HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
-            ? "verified_google_identity"
-            : `verified_google_domain_${HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN}`,
+          "active_unexpired_one_shot_invitation",
+          "exact_verified_google_email",
           "exact_active_jobnimbus_user",
-          "immutable_hcn_identity_pin"
+          "immutable_encrypted_hcn_identity_authority"
         ],
         identityPinStoreConfigured:
           hcnIdentityPinStoreConfigured(),
+        invitationAuthorizationStoreConfigured:
+          hcnInvitationStoreConfigured(),
         accessBeforeQuoVerification:
           "assigned_jobnimbus_and_connection_setup",
         accessAfterVerification:
           "assigned_jobnimbus_plus_verified_employee_quo_line"
+      },
+      invitationOnlyAdmission: {
+        configured: hcnInvitationStoreConfigured(),
+        encryptedAtRest: true,
+        managedByRole: "chance",
+        defaultJobNimbusScope: "assigned",
+        invitationEmailDelivery: false,
+        inviteTokenTransport:
+          "url_fragment_then_short_lived_http_only_cookie",
+        legacyReviewRequiredCount:
+          HCN_LEGACY_IDENTITY_REVIEWS.length,
+        legacyPinMigration: {
+          compatibilityActive:
+            HCN_LEGACY_IDENTITY_REVIEWS.some(
+              (review) =>
+                review.access === "preserved_existing_pin"
+            ),
+          preservedExistingAccessCount:
+            HCN_LEGACY_IDENTITY_REVIEWS.filter(
+              (review) =>
+                review.access === "preserved_existing_pin"
+            ).length,
+          admission:
+            "preexisting_authenticated_identity_pins_only",
+          newSelfEnrollment: false
+        },
+        googleOAuthExternalTestingPrerequisite:
+          "Every invited Google account must be an OAuth test user until the app is published.",
+        googleOAuthTestUserReadinessAttested: false
       },
       sharedBridgeTokenFallback: Boolean(BRIDGE_TOKEN),
       perUserGmail: "custom_gpt_broker_and_hcn_connector",
@@ -1363,6 +1445,7 @@ function hcnConsoleAuthConfigured() {
     || !HCN_CONSOLE_ORIGIN
     || !hcnOperationsStorageConfigured()
     || !hcnIdentityPinStoreConfigured()
+    || !hcnInvitationStoreConfigured()
     || !hcnEmployeeProvisioningConfigured()
   ) {
     return false;
@@ -1382,8 +1465,17 @@ function hcnConsoleAuthConfigured() {
 }
 
 function hcnEmployeeProvisioningConfigured() {
-  if (AUTO_ENROLL_WAVE_USERS) return true;
+  if (!hcnInvitationStoreConfigured()) return false;
   for (const user of WAVE_AUTH_USERS.values()) {
+    if (
+      user.enabled !== false
+      && user.role === "chance"
+      && String(user.jobNimbusOwnerId || "").trim()
+      && String(user.jobNimbusScope || "").trim().toLowerCase()
+        === "assigned"
+    ) {
+      return true;
+    }
     try {
       hcnPrincipalForWaveUser(user);
       return true;
@@ -1423,7 +1515,8 @@ function hcnOperationsStorageConfigured() {
     HCN_THRESHER_STORE_PATH,
     HCN_ACTION_RECEIPT_STORE_PATH,
     HCN_QUO_LINE_STORE_PATH,
-    HCN_IDENTITY_PIN_STORE_PATH
+    HCN_IDENTITY_PIN_STORE_PATH,
+    HCN_INVITATION_STORE_PATH
   ].every((candidate) => {
     if (!candidate) return false;
     const resolved = path.resolve(candidate);
@@ -1456,6 +1549,35 @@ function hcnIdentityPinStore() {
     });
   }
   return hcnIdentityPinStoreInstance;
+}
+
+function hcnInvitationStoreConfigured() {
+  if (
+    !hcnOperationsStorageConfigured()
+    || !HCN_REFERENCE_KEY
+    || !HCN_INVITATION_STORE_PATH
+  ) {
+    return false;
+  }
+  try {
+    hcnInvitationStore();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hcnInvitationStore() {
+  if (!hcnInvitationStoreInstance) {
+    hcnInvitationStoreInstance = createHcnInvitationStore({
+      filePath: HCN_INVITATION_STORE_PATH,
+      key: HCN_REFERENCE_KEY,
+      // Exact Chance-approved email matching replaces blanket domain
+      // enrollment, so invited employees may use a different Google domain.
+      allowedDomain: ""
+    });
+  }
+  return hcnInvitationStoreInstance;
 }
 
 function hcnGoogleGrantStoreConfigured() {
@@ -1718,22 +1840,235 @@ async function hcnConsoleLogin(req, res, url) {
   }
 }
 
+function sendHcnInvitationLanding(res) {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HCN invitation</title>
+</head>
+<body>
+  <main>
+    <h1>Home Claim Network</h1>
+    <p id="invite-status">Checking your invitation…</p>
+    <noscript>This invitation requires JavaScript to continue securely.</noscript>
+  </main>
+  <script src="/hcn/auth/invitation.js" defer></script>
+</body>
+</html>`;
+  res.writeHead(200, {
+    ...hcnNoStoreSecurityHeaders(),
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy":
+      "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "referrer-policy": "no-referrer",
+    "permissions-policy":
+      "camera=(), microphone=(), geolocation=(), payment=()"
+  });
+  res.end(html);
+}
+
+function sendHcnInvitationClient(res) {
+  const script = `(() => {
+  "use strict";
+  const status = document.getElementById("invite-status");
+  const fail = () => {
+    status.textContent = "This invitation is invalid, expired, or already used. Ask Chance for a new invitation.";
+  };
+  const raw = new URLSearchParams(location.hash.slice(1)).get("invite") || "";
+  history.replaceState(null, "", location.pathname);
+  const separator = raw.indexOf(".");
+  const invitationRef = separator > 0 ? raw.slice(0, separator) : "";
+  let inviteToken = separator > 0 ? raw.slice(separator + 1) : "";
+  if (!/^invite_[a-f0-9]{32}$/.test(invitationRef) || !/^[A-Za-z0-9_-]{43}$/.test(inviteToken)) {
+    fail();
+    return;
+  }
+  const requestBody = JSON.stringify({ invitationRef, inviteToken });
+  inviteToken = "";
+  fetch("/hcn/auth/invitation", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: requestBody
+  }).then(async (response) => {
+    if (!response.ok) throw new Error("invalid");
+    const payload = await response.json();
+    if (!payload || payload.continueUrl !== "/hcn/auth/login?returnTo=%2Fhcn%2F") {
+      throw new Error("invalid");
+    }
+    status.textContent = "Invitation accepted. Opening secure Google sign-in…";
+    location.replace(payload.continueUrl);
+  }).catch(fail);
+})();`;
+  res.writeHead(200, {
+    ...hcnNoStoreSecurityHeaders(),
+    "content-type": "text/javascript; charset=utf-8",
+    "content-security-policy": "default-src 'none'",
+    "referrer-policy": "no-referrer"
+  });
+  res.end(script);
+}
+
+async function hcnClaimInvitation(req, res, input = {}) {
+  const responseHeaders = {
+    ...hcnNoStoreSecurityHeaders(),
+    vary: "Origin"
+  };
+  if (
+    !validateExactHcnOrigin(
+      String(req.headers.origin || ""),
+      HCN_CONSOLE_ORIGIN
+    )
+    || (
+      req.headers["sec-fetch-site"]
+      && req.headers["sec-fetch-site"] !== "same-origin"
+    )
+    || !/^application\/json(?:\s*;|$)/i.test(
+      String(req.headers["content-type"] || "")
+    )
+  ) {
+    return send(res, 403, {
+      error: "Invitation claim requires the exact HCN origin."
+    }, responseHeaders);
+  }
+  const admission = HCN_INVITATION_CLAIM_ADMISSION.admit(
+    hcnLoginSourceFromRequest(req, {
+      renderProxy: Boolean(process.env.RENDER)
+    })
+  );
+  if (!admission.allowed) {
+    return send(
+      res,
+      429,
+      {
+        error: "rate_limited",
+        retryAfterSeconds: admission.retryAfterSeconds
+      },
+      {
+        ...responseHeaders,
+        "retry-after": String(admission.retryAfterSeconds)
+      }
+    );
+  }
+  if (!hcnInvitationStoreConfigured() || !HCN_CONSOLE_STATE_CODEC) {
+    return send(res, 503, {
+      error: "HCN employee invitations are unavailable."
+    }, responseHeaders);
+  }
+  let invitation;
+  try {
+    invitation = await hcnInvitationStore().validateInviteToken(input);
+  } catch {
+    invitation = null;
+  }
+  if (!invitation) {
+    return send(res, 403, {
+      error: "This HCN employee invitation is invalid or expired."
+    }, responseHeaders);
+  }
+  const expiresAt = Math.min(
+    Date.parse(invitation.expiresAt),
+    Date.now() + HCN_INVITATION_COOKIE_TTL_MS
+  );
+  const sealed = HCN_CONSOLE_STATE_CODEC.seal({
+    kind: "hcn_invitation_credential",
+    invitationRef: invitation.invitationRef,
+    inviteToken: String(input.inviteToken || ""),
+    exp: expiresAt
+  });
+  return send(
+    res,
+    200,
+    {
+      status: "invitation_verified",
+      continueUrl: "/hcn/auth/login?returnTo=%2Fhcn%2F"
+    },
+    {
+      ...responseHeaders,
+      "set-cookie": createHcnInvitationCookie(sealed)
+    }
+  );
+}
+
+function createHcnInvitationCookie(value) {
+  return `${HCN_INVITATION_COOKIE_NAME}=${String(value || "")}; Max-Age=${Math.floor(HCN_INVITATION_COOKIE_TTL_MS / 1000)}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
+function clearHcnInvitationCookie() {
+  return `${HCN_INVITATION_COOKIE_NAME}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
+function readHcnInvitationCredential(req) {
+  const sealed = readHcnCookie(
+    req.headers.cookie,
+    HCN_INVITATION_COOKIE_NAME
+  );
+  if (!sealed || !HCN_CONSOLE_STATE_CODEC) return null;
+  let payload;
+  try {
+    payload = HCN_CONSOLE_STATE_CODEC.open(sealed);
+  } catch {
+    return null;
+  }
+  if (
+    !payload
+    || Object.keys(payload).sort().join(",")
+      !== "exp,invitationRef,inviteToken,kind"
+    || payload.kind !== "hcn_invitation_credential"
+    || !Number.isSafeInteger(payload.exp)
+    || payload.exp <= Date.now()
+    || !/^invite_[a-f0-9]{32}$/.test(
+      String(payload.invitationRef || "")
+    )
+    || !/^[A-Za-z0-9_-]{43}$/.test(
+      String(payload.inviteToken || "")
+    )
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    invitationRef: payload.invitationRef,
+    inviteToken: payload.inviteToken
+  });
+}
+
 async function resolveHcnConsoleApprovedUser(candidate = {}) {
   const email = String(candidate.email || "").trim().toLowerCase();
   const googleSubject = String(candidate.subject || "").trim();
   if (!email || !googleSubject) return null;
 
   let approved = WAVE_AUTH_USERS.get(email);
+  if (
+    approved?.legacyPinned === true
+    && candidate.approvalContext
+  ) {
+    approved = await convertLegacyPinnedHcnUser({
+      user: approved,
+      email,
+      googleSubject,
+      approvalContext: candidate.approvalContext
+    });
+  }
   if (!approved || !String(approved.googleSubject || "").trim()) {
     approved = await resolveFirstUseWaveUser({
       email,
       name: candidate.name,
       subject: googleSubject,
       hostedDomain: candidate.hostedDomain,
-      existingUser: approved || null
+      existingUser: approved || null,
+      approvalContext: candidate.approvalContext || null
     });
   }
   if (!approved || approved.enabled === false) return null;
+  if (
+    approved.invitationManaged === true
+    && !await hcnInvitationAuthorizationMatchesUser(approved)
+  ) {
+    WAVE_AUTH_USERS.delete(email);
+    return null;
+  }
   const activeJobNimbusUser =
     await findActiveJobNimbusUser(email);
   if (
@@ -1765,6 +2100,114 @@ async function resolveHcnConsoleApprovedUser(candidate = {}) {
     jobNimbusScope: principal.jobNimbusScope,
     authorizationVersion: principal.authorizationVersion
   };
+}
+
+async function convertLegacyPinnedHcnUser({
+  user,
+  email,
+  googleSubject,
+  approvalContext
+}) {
+  if (
+    !user
+    || user.legacyPinned !== true
+    || !approvalContext
+    || typeof approvalContext !== "object"
+    || Array.isArray(approvalContext)
+    || Object.keys(approvalContext).sort().join(",")
+      !== "invitationRef,inviteToken"
+  ) {
+    return user;
+  }
+  const [pin, invitation, activeJobNimbusUser] = await Promise.all([
+    hcnIdentityPinStore().get(email),
+    hcnInvitationStore().getByRef(approvalContext.invitationRef),
+    findActiveJobNimbusUser(email, { fresh: true })
+  ]);
+  const exactBinding = Boolean(
+    pin
+    && invitation
+    && invitation.state === "pending"
+    && invitation.email === email
+    && invitation.googleSubject === ""
+    && pin.googleSubject === googleSubject
+    && String(user.googleSubject || "").trim() === googleSubject
+    && invitation.role === pin.role
+    && invitation.role
+      === String(user.role || "").trim().toLowerCase()
+    && invitation.jobNimbusScope === "assigned"
+    && pin.jobNimbusScope === "assigned"
+    && invitation.jobNimbusOwnerId === pin.jobNimbusOwnerId
+    && invitation.jobNimbusOwnerId
+      === String(user.jobNimbusOwnerId || "").trim()
+    && activeJobNimbusUser
+    && String(activeJobNimbusUser.id || "").trim()
+      === invitation.jobNimbusOwnerId
+  );
+  if (!exactBinding) {
+    const error = new Error(
+      "This invitation does not match the existing HCN employee authority."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const accepted = await hcnInvitationStore().acceptInvitation({
+    invitationRef: invitation.invitationRef,
+    email,
+    googleSubject,
+    inviteToken: approvalContext.inviteToken
+  });
+  const migrated = {
+    ...user,
+    email: accepted.email,
+    name: accepted.displayName,
+    role: accepted.role,
+    enabled: true,
+    jobNimbusOwnerId: accepted.jobNimbusOwnerId,
+    jobNimbusScope: "assigned",
+    googleSubject: accepted.googleSubject,
+    autoEnrolled: false,
+    identityPinned: true,
+    invitationManaged: true,
+    invitationRef: accepted.invitationRef,
+    legacyPinned: false
+  };
+  WAVE_AUTH_USERS.set(email, migrated);
+  removeHcnLegacyIdentityReview(email);
+  return migrated;
+}
+
+async function hcnInvitationAuthorizationMatchesUser(user) {
+  if (
+    !user
+    || user.invitationManaged !== true
+    || !hcnInvitationStoreConfigured()
+  ) {
+    return false;
+  }
+  let authorization;
+  try {
+    authorization =
+      await hcnInvitationStore().getAuthorizationByEmail(
+        user.email
+      );
+  } catch {
+    return false;
+  }
+  return Boolean(
+    authorization
+    && authorization.state === "accepted"
+    && authorization.invitationRef === user.invitationRef
+    && authorization.email
+      === String(user.email || "").trim().toLowerCase()
+    && authorization.googleSubject
+      === String(user.googleSubject || "").trim()
+    && authorization.jobNimbusOwnerId
+      === String(user.jobNimbusOwnerId || "").trim()
+    && authorization.jobNimbusScope === "assigned"
+    && authorization.role
+      === String(user.role || "").trim().toLowerCase()
+  );
 }
 
 function hcnPrincipalForWaveUser(user = {}) {
@@ -1846,7 +2289,10 @@ async function oauthGoogleCallback(req, res, url) {
         res,
         "auth",
         error,
-        [clearHcnLoginCookie()]
+        [
+          clearHcnLoginCookie(),
+          clearHcnInvitationCookie()
+        ]
       );
     }
   }
@@ -1934,13 +2380,17 @@ async function oauthHcnConsoleCallback(req, res, url, sealedState) {
       state: sealedState,
       code: url.searchParams.get("code") || "",
       error: url.searchParams.get("error") || "",
-      loginBinding
+      loginBinding,
+      approvalContext: readHcnInvitationCredential(req)
     });
     res.writeHead(302, {
       ...hcnNoStoreSecurityHeaders(),
       vary: "Cookie, Authorization",
       location: result.redirectPath,
-      "set-cookie": result.setCookies
+      "set-cookie": [
+        ...result.setCookies,
+        clearHcnInvitationCookie()
+      ]
     });
     res.end();
   } catch (error) {
@@ -1948,7 +2398,10 @@ async function oauthHcnConsoleCallback(req, res, url, sealedState) {
       res,
       "auth",
       error,
-      [clearHcnLoginCookie()]
+      [
+        clearHcnLoginCookie(),
+        clearHcnInvitationCookie()
+      ]
     );
   }
 }
@@ -2092,11 +2545,19 @@ function hcnBrowserSession() {
     error.statusCode = 403;
     throw error;
   }
+  const platformSession = hcnPlatformSession();
   return {
-    ...hcnPlatformSession(),
+    ...platformSession,
     profile: {
       displayName: String(identity?.name || "HCN employee").slice(0, 120),
+      email: String(identity?.email || "").trim().toLowerCase(),
       role: String(identity?.role || "employee").slice(0, 64)
+    },
+    capabilities: {
+      ...(platformSession.capabilities || {}),
+      teamInvitations: {
+        manage: identity?.role === "chance"
+      }
     },
     browserSession: {
       schemaVersion: "hcn.console.browser-session.v1",
@@ -2279,6 +2740,7 @@ async function hcnConnectorStatus(input = {}) {
     generatedAt: new Date().toISOString(),
     profile: {
       displayName: principal.displayName,
+      email: principal.email,
       role: principal.role
     },
     jobNimbus: {
@@ -2382,6 +2844,557 @@ function assertHcnEmptyObject(input, label) {
     || Object.keys(input).length !== 0
   ) {
     badRequest(`${label} requires an empty JSON object.`);
+  }
+}
+
+function assertHcnChanceTeamSession() {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  if (
+    context?.authenticationMethod !== "hcn_cookie"
+    || identity?.type !== "hcn_browser_session"
+    || identity.role !== "chance"
+    || !identity.subject
+    || !identity.email
+  ) {
+    const error = new Error(
+      "Chance's current HCN browser session is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  return {
+    identity,
+    actorRef: hcnGooglePrincipalRef(identity.subject),
+    sessionBinding: hcnSessionDerivedHash(
+      "team-invitation-approval:v1"
+    )
+  };
+}
+
+async function hcnListTeamInvitations(input = {}) {
+  assertHcnEmptyObject(input, "Team invitation list");
+  assertHcnChanceTeamSession();
+  return hcnTeamInvitationEnvelope();
+}
+
+async function hcnPrepareTeamInvitation(input = {}) {
+  const actor = assertHcnChanceTeamSession();
+  if (
+    !input
+    || typeof input !== "object"
+    || Array.isArray(input)
+  ) {
+    badRequest("Team invitation preparation is invalid.");
+  }
+  const action = String(input.action || "").trim().toLowerCase();
+  let plan;
+  if (action === "create") {
+    assertExactHcnKeys(
+      input,
+      ["action", "email", "expiresInHours", "role"],
+      "Team invitation creation"
+    );
+    const email = normalizeHcnInvitationEmail(input.email);
+    if (email === CHANCE_GOOGLE_EMAIL) {
+      badRequest("Chance's bootstrap account cannot be invited.");
+    }
+    const role = normalizeHcnInvitationRole(input.role);
+    const expiresInHours = Number(input.expiresInHours);
+    if (
+      !Number.isSafeInteger(expiresInHours)
+      || expiresInHours < 2
+      || expiresInHours > 72
+    ) {
+      badRequest(
+        "Team invitation expiresInHours must be an integer from 2 to 72."
+      );
+    }
+    const existingAuthorization =
+      await hcnInvitationStore().getAuthorizationByEmail(email);
+    const existingPending =
+      await hcnInvitationStore().getPendingByEmail(email);
+    if (existingAuthorization || existingPending) {
+      const error = new Error(
+        "This employee already has a pending invitation or active authorization."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    const jobNimbusUser = await findActiveJobNimbusUser(email);
+    if (!jobNimbusUser) {
+      const error = new Error(
+        "No unique active JobNimbus employee account exactly matches this Google email."
+      );
+      error.statusCode = 403;
+      throw error;
+    }
+    const displayName = String(
+      jobNimbusUser.name || email
+    ).trim().slice(0, 256);
+    const jobNimbusOwnerId = String(
+      jobNimbusUser.id || ""
+    ).trim();
+    if (!displayName || !jobNimbusOwnerId) {
+      const error = new Error(
+        "The matching JobNimbus employee record is incomplete."
+      );
+      error.statusCode = 503;
+      throw error;
+    }
+    const legacyIdentityPin = await hcnIdentityPinStore().get(email);
+    if (
+      legacyIdentityPin
+      && (
+        legacyIdentityPin.jobNimbusOwnerId !== jobNimbusOwnerId
+        || legacyIdentityPin.jobNimbusScope !== "assigned"
+        || legacyIdentityPin.role !== role
+      )
+    ) {
+      const error = new Error(
+        "This existing HCN identity is pinned to different authority. Use its current role or complete a separately reviewed role migration."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    plan = Object.freeze({
+      action: "create",
+      email,
+      displayName,
+      role,
+      jobNimbusOwnerId,
+      jobNimbusScope: "assigned",
+      managementVisibility:
+        role === "manager"
+          ? "company_configured_adjuster_activity_sweep_read"
+          : "none",
+      legacyIdentityPin:
+        legacyIdentityPin
+          ? Object.freeze({
+              present: true,
+              googleSubject: legacyIdentityPin.googleSubject,
+              jobNimbusOwnerId: legacyIdentityPin.jobNimbusOwnerId,
+              jobNimbusScope: legacyIdentityPin.jobNimbusScope,
+              role: legacyIdentityPin.role,
+              source: legacyIdentityPin.source
+            })
+          : Object.freeze({ present: false }),
+      invitationExpiresAt: new Date(
+        Date.now() + expiresInHours * 60 * 60_000
+      ).toISOString(),
+      jobNimbusMatch: Object.freeze({
+        verified: true,
+        active: true
+      })
+    });
+  } else if (action === "revoke") {
+    assertExactHcnKeys(
+      input,
+      ["action", "invitationRef"],
+      "Team invitation revocation"
+    );
+    const invitation = await hcnInvitationStore().getByRef(
+      input.invitationRef
+    );
+    if (
+      !invitation
+      || !["pending", "accepted"].includes(invitation.state)
+    ) {
+      const error = new Error(
+        "This invitation or employee authorization is not active."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    plan = Object.freeze({
+      action: "revoke",
+      invitationRef: invitation.invitationRef,
+      email: invitation.email,
+      displayName: invitation.displayName,
+      role: invitation.role,
+      jobNimbusScope: "assigned",
+      managementVisibility:
+        invitation.role === "manager"
+          ? "company_configured_adjuster_activity_sweep_read"
+          : "none",
+      currentState: invitation.state,
+      connectorGrant: "revoke_if_present",
+      quoBinding: "revoke_if_present"
+    });
+  } else {
+    badRequest(
+      "Team invitation action must be create or revoke."
+    );
+  }
+  const approval = HCN_INVITATION_APPROVALS.prepare({
+    sessionBinding: actor.sessionBinding,
+    actorRef: actor.actorRef,
+    action,
+    plan
+  });
+  return {
+    schema: "hcn.team.invitation-approval.v1",
+    mode: "dry_run",
+    approval,
+    plan: projectHcnTeamInvitationApprovalPlan(plan),
+    instruction:
+      "Nothing changed. Review this exact plan, then approve it before the short-lived approval expires."
+  };
+}
+
+function projectHcnTeamInvitationApprovalPlan(plan) {
+  if (plan.action === "create") {
+    return {
+      action: "create",
+      email: plan.email,
+      displayName: plan.displayName,
+      role: plan.role,
+      jobNimbusScope: "assigned",
+      managementVisibility: plan.managementVisibility,
+      invitationExpiresAt: plan.invitationExpiresAt,
+      jobNimbusMatch: {
+        verified: true,
+        active: true
+      },
+      existingAccessMigration:
+        plan.legacyIdentityPin?.present === true
+    };
+  }
+  return {
+    action: "revoke",
+    invitationRef: plan.invitationRef,
+    email: plan.email,
+    displayName: plan.displayName,
+    role: plan.role,
+    jobNimbusScope: "assigned",
+    managementVisibility: plan.managementVisibility,
+    currentState: plan.currentState,
+    connectorGrant: plan.connectorGrant,
+    quoBinding: plan.quoBinding
+  };
+}
+
+async function hcnCreateTeamInvitation(input = {}) {
+  const actor = assertHcnChanceTeamSession();
+  assertExactHcnKeys(
+    input,
+    ["approvalDigest", "approvalId"],
+    "Team invitation approval"
+  );
+  const consumed = HCN_INVITATION_APPROVALS.consume({
+    sessionBinding: actor.sessionBinding,
+    actorRef: actor.actorRef,
+    action: "create",
+    approvalId: input.approvalId,
+    approvalDigest: input.approvalDigest
+  });
+  const plan = consumed.plan;
+  const jobNimbusUser = await findActiveJobNimbusUser(
+    plan.email,
+    { fresh: true }
+  );
+  if (
+    !jobNimbusUser
+    || String(jobNimbusUser.id || "").trim()
+      !== plan.jobNimbusOwnerId
+  ) {
+    const error = new Error(
+      "The exact JobNimbus employee match changed. Nothing was invited; review a fresh plan."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  await assertHcnLegacyIdentityPlanUnchanged(plan);
+  const invitation = await hcnInvitationStore().createInvitation({
+    email: plan.email,
+    displayName: plan.displayName,
+    role: plan.role,
+    jobNimbusOwnerId: plan.jobNimbusOwnerId,
+    jobNimbusScope: "assigned",
+    invitedByRef: actor.actorRef,
+    expiresAt: plan.invitationExpiresAt
+  });
+  const inviteUrl = hcnOneTimeInviteUrl(
+    invitation.invitationRef,
+    invitation.inviteToken
+  );
+  return {
+    ...await hcnTeamInvitationEnvelope(),
+    invitation: projectHcnTeamInvitation(invitation),
+    inviteUrl,
+    emailSent: false,
+    approval: {
+      approvalId: consumed.approvalId,
+      approvalDigest: consumed.approvalDigest,
+      consumed: true
+    }
+  };
+}
+
+async function hcnRevokeTeamInvitation(input = {}) {
+  const actor = assertHcnChanceTeamSession();
+  assertExactHcnKeys(
+    input,
+    ["approvalDigest", "approvalId"],
+    "Team invitation revocation approval"
+  );
+  const consumed = HCN_INVITATION_APPROVALS.consume({
+    sessionBinding: actor.sessionBinding,
+    actorRef: actor.actorRef,
+    action: "revoke",
+    approvalId: input.approvalId,
+    approvalDigest: input.approvalDigest
+  });
+  const plan = consumed.plan;
+  const current = await hcnInvitationStore().getByRef(
+    plan.invitationRef
+  );
+  if (
+    !current
+    || current.email !== plan.email
+    || current.role !== plan.role
+    || current.state !== plan.currentState
+  ) {
+    const error = new Error(
+      "The employee authorization changed. Nothing was revoked; review a fresh plan."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  const invitation =
+    await hcnInvitationStore().revokeInvitation({
+      invitationRef: plan.invitationRef,
+      revokedByRef: actor.actorRef
+    });
+
+  const currentUser = WAVE_AUTH_USERS.get(invitation.email);
+  if (
+    currentUser?.invitationManaged === true
+    && currentUser.invitationRef === invitation.invitationRef
+  ) {
+    WAVE_AUTH_USERS.delete(invitation.email);
+  }
+  const revokedSessionCount =
+    HCN_CONSOLE_SESSION_STORE.revokeSubject(invitation.email);
+
+  let googleConnectorGrant = "not_present";
+  if (
+    current.googleSubject
+    && hcnGoogleGrantStoreConfigured()
+  ) {
+    const principalRef = hcnGooglePrincipalRef(
+      current.googleSubject
+    );
+    try {
+      const result = await HCN_GOOGLE_GRANT_OPERATIONS.run(
+        principalRef,
+        async () => {
+          const store = hcnGoogleGrantStore();
+          const grant = await store.get({ principalRef });
+          let providerRevocation = "not_linked";
+          let status;
+          try {
+            if (grant) {
+              const providerResult =
+                await revokeHcnGoogleRefreshGrant({
+                  fetchImpl: fetch,
+                  endpoint: GOOGLE_REVOKE_URL,
+                  refreshToken: grant.refreshToken
+                });
+              providerRevocation = providerResult.status;
+            }
+          } catch {
+            providerRevocation = "failed";
+          } finally {
+            // Tombstone local tokens even when Google's network/provider
+            // cleanup fails. The response keeps the external cleanup open.
+            status = await store.revoke({ principalRef });
+          }
+          return { providerRevocation, status };
+        }
+      );
+      googleConnectorGrant =
+        result.status.state === "revoked"
+        || result.status.state === "not_linked"
+          ? result.providerRevocation === "failed"
+            ? "cleanup_required"
+            : "revoked"
+          : "cleanup_required";
+    } catch {
+      // Employee authorization and sessions are already fail-closed. Keep
+      // the encrypted grant unreachable and surface the cleanup open loop.
+      googleConnectorGrant = "cleanup_required";
+    }
+  }
+  let quoBinding = "not_present";
+  if (
+    current.googleSubject
+    && hcnQuoLineStoreConfigured()
+  ) {
+    try {
+      const result = await hcnQuoLineStore().revokeBinding(
+        hcnQuoStoreIdentity({
+          subject: current.googleSubject,
+          email: current.email
+        })
+      );
+      quoBinding = result.revoked === true
+        ? "revoked"
+        : "not_present";
+    } catch {
+      quoBinding = "cleanup_required";
+    }
+  }
+  return {
+    ...await hcnTeamInvitationEnvelope(),
+    invitation: projectHcnTeamInvitation(invitation),
+    inviteUrl: "",
+    emailSent: false,
+    googleConnectorGrant,
+    revokedSessionCount,
+    quoBinding,
+    approval: {
+      approvalId: consumed.approvalId,
+      approvalDigest: consumed.approvalDigest,
+      consumed: true
+    }
+  };
+}
+
+async function hcnTeamInvitationEnvelope() {
+  if (!hcnInvitationStoreConfigured()) {
+    const error = new Error(
+      "The encrypted HCN employee invitation store is unavailable."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const invitations = await hcnInvitationStore().list();
+  return {
+    schema: "hcn.team.invitations.v1",
+    canManage: true,
+    invitations: invitations.map(projectHcnTeamInvitation),
+    legacyReviewRequiredCount:
+      HCN_LEGACY_IDENTITY_REVIEWS.length,
+    legacyReviewRequired:
+      HCN_LEGACY_IDENTITY_REVIEWS.map(
+        projectHcnLegacyIdentityReview
+      ),
+    delivery: {
+      automaticEmail: false,
+      instruction:
+        "Copy the one-time invite link returned only when an invitation is created."
+    },
+    googleOAuth: {
+      externalTestingPrerequisite:
+        "Add each invited Google account as an OAuth test user until the Google app is published.",
+      readinessAttested: false
+    }
+  };
+}
+
+function projectHcnLegacyIdentityReview(review) {
+  return {
+    email: String(review?.email || ""),
+    displayName: String(review?.displayName || "").slice(0, 256),
+    role: String(review?.role || ""),
+    status:
+      review?.access === "preserved_existing_pin"
+        ? "migration_required_access_preserved"
+        : "explicit_review_required",
+    reason: String(review?.reason || "explicit_review_required")
+  };
+}
+
+function projectHcnTeamInvitation(invitation) {
+  return hcnInvitationPublicRecord(invitation);
+}
+
+function hcnOneTimeInviteUrl(invitationRef, inviteToken) {
+  if (
+    !/^invite_[a-f0-9]{32}$/.test(String(invitationRef || ""))
+    || !/^[A-Za-z0-9_-]{43}$/.test(String(inviteToken || ""))
+  ) {
+    const error = new Error(
+      "The one-time HCN invitation link could not be created."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const destination = new URL("/hcn/invite", PUBLIC_BASE_URL);
+  destination.hash =
+    `invite=${invitationRef}.${inviteToken}`;
+  return destination.toString();
+}
+
+function assertExactHcnKeys(input, expected, label) {
+  if (
+    !input
+    || typeof input !== "object"
+    || Array.isArray(input)
+    || Object.keys(input).sort().join(",")
+      !== [...expected].sort().join(",")
+  ) {
+    badRequest(`${label} contains unsupported or missing fields.`);
+  }
+}
+
+function normalizeHcnInvitationEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  const domain = email.split("@").at(-1);
+  if (
+    email.length > 320
+    || !/^[^\s@]+@[^\s@]+$/.test(email)
+    || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain)
+  ) {
+    badRequest("The invited Google email is invalid.");
+  }
+  return email;
+}
+
+function normalizeHcnInvitationRole(value) {
+  const role = String(value || "").trim().toLowerCase();
+  if (
+    !["employee", "client_coordinator", "manager"].includes(role)
+  ) {
+    badRequest(
+      "The invited role must be employee, client_coordinator, or manager."
+    );
+  }
+  return role;
+}
+
+async function assertHcnLegacyIdentityPlanUnchanged(plan) {
+  const expected = plan?.legacyIdentityPin;
+  if (
+    !expected
+    || typeof expected !== "object"
+    || Array.isArray(expected)
+    || typeof expected.present !== "boolean"
+  ) {
+    const error = new Error(
+      "The reviewed legacy identity binding is unavailable. Nothing was invited; review a fresh plan."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  const current = await hcnIdentityPinStore().get(plan.email);
+  const unchanged = expected.present === true
+    ? Boolean(
+        current
+        && current.googleSubject === expected.googleSubject
+        && current.jobNimbusOwnerId === expected.jobNimbusOwnerId
+        && current.jobNimbusScope === expected.jobNimbusScope
+        && current.role === expected.role
+        && current.source === expected.source
+      )
+    : !current;
+  if (!unchanged) {
+    const error = new Error(
+      "The existing HCN identity binding changed. Nothing was invited; review a fresh plan."
+    );
+    error.statusCode = 409;
+    throw error;
   }
 }
 
@@ -13899,9 +14912,18 @@ async function authenticateRequest(req) {
     if (!hcnConsoleAuthConfigured()) return null;
     const session = HCN_CONSOLE_SESSION_STORE.touchSession(hcnSessionId);
     if (!session) return null;
-    const approvedUser = WAVE_AUTH_USERS.get(
+    let approvedUser = WAVE_AUTH_USERS.get(
       String(session.subject || "").trim().toLowerCase()
     );
+    if (
+      approvedUser?.invitationManaged === true
+      && !await hcnInvitationAuthorizationMatchesUser(approvedUser)
+    ) {
+      WAVE_AUTH_USERS.delete(
+        String(session.subject || "").trim().toLowerCase()
+      );
+      approvedUser = null;
+    }
     const activeJobNimbusUser = approvedUser
       ? await findActiveJobNimbusUser(session.subject)
       : null;
@@ -14161,6 +15183,18 @@ function approvedIdentityFromPayload(payload = {}) {
 
 async function approvedActiveIdentityFromPayload(payload = {}) {
   const identity = approvedIdentityFromPayload(payload);
+  const approvedUser = WAVE_AUTH_USERS.get(identity.email);
+  if (
+    approvedUser?.invitationManaged === true
+    && !await hcnInvitationAuthorizationMatchesUser(approvedUser)
+  ) {
+    WAVE_AUTH_USERS.delete(identity.email);
+    throw oauthError(
+      "access_denied",
+      "This employee's HCN invitation authorization is no longer current.",
+      403
+    );
+  }
   const activeJobNimbusUser =
     await findActiveJobNimbusUser(identity.email);
   if (
@@ -14200,58 +15234,220 @@ function googleBrokerAuthorizationVersion(user, subject) {
 }
 
 async function hydrateHcnIdentityPins() {
-  if (!hcnIdentityPinStoreConfigured()) return;
-  const rows = await hcnIdentityPinStore().list();
-  for (const row of rows) {
-    const configured = WAVE_AUTH_USERS.get(row.email);
-    if (configured) {
-      if (
-        configured.enabled === false
-        || String(configured.role || "").trim().toLowerCase() !== row.role
-        || String(configured.jobNimbusOwnerId || "").trim()
-          !== row.jobNimbusOwnerId
-        || String(configured.jobNimbusScope || "").trim().toLowerCase()
-          !== row.jobNimbusScope
-        || (
-          String(configured.googleSubject || "").trim()
-          && String(configured.googleSubject).trim() !== row.googleSubject
-        )
-      ) {
-        throw new Error(
-          `Stored HCN identity authority no longer matches ${row.email}.`
-        );
-      }
-      WAVE_AUTH_USERS.set(row.email, {
-        ...configured,
-        googleSubject: row.googleSubject,
-        identityPinned: true,
-        autoEnrolled: row.source === "employee_auto_enroll"
+  if (
+    !hcnIdentityPinStoreConfigured()
+    || !hcnInvitationStoreConfigured()
+  ) {
+    return;
+  }
+  const [pins, invitations] = await Promise.all([
+    hcnIdentityPinStore().list(),
+    hcnInvitationStore().list()
+  ]);
+  const pinByEmail = new Map(
+    pins.map((pin) => [pin.email, pin])
+  );
+  const configuredUsers = new Map(WAVE_AUTH_USERS);
+  const acceptedInvitations = new Map(
+    invitations
+      .filter((invitation) => invitation.state === "accepted")
+      .map((invitation) => [invitation.email, invitation])
+  );
+  const reviews = new Map();
+  const addReview = ({
+    email,
+    displayName,
+    role = "",
+    reason,
+    access = "not_preserved"
+  }) => {
+    const key = String(email || "").trim().toLowerCase();
+    if (!key || reviews.has(key)) return;
+    reviews.set(key, Object.freeze({
+      email: key,
+      displayName: String(displayName || key).slice(0, 256),
+      role: String(role || "").trim().toLowerCase(),
+      reason,
+      access
+    }));
+  };
+
+  // Chance and accepted invitations are authoritative. All other configured
+  // rows are removed first; only a pre-existing authenticated identity pin
+  // can receive the bounded one-release compatibility path below. This never
+  // creates a pin and cannot admit a new employee.
+  for (const [email, configured] of configuredUsers) {
+    if (
+      configured.enabled !== false
+      && configured.role === "chance"
+      && email === CHANCE_GOOGLE_EMAIL
+    ) {
+      continue;
+    }
+    WAVE_AUTH_USERS.delete(email);
+  }
+
+  const configuredChance =
+    configuredUsers.get(CHANCE_GOOGLE_EMAIL);
+  const chancePin = pinByEmail.get(CHANCE_GOOGLE_EMAIL);
+  if (configuredChance && chancePin) {
+    if (
+      configuredChance.enabled === false
+      || chancePin.role !== "chance"
+      || chancePin.jobNimbusScope !== "assigned"
+      || chancePin.jobNimbusOwnerId
+        !== String(configuredChance.jobNimbusOwnerId || "").trim()
+      || (
+        String(configuredChance.googleSubject || "").trim()
+        && String(configuredChance.googleSubject).trim()
+          !== chancePin.googleSubject
+      )
+    ) {
+      throw new Error(
+        "Chance's stored HCN identity authority no longer matches its bootstrap configuration."
+      );
+    }
+    WAVE_AUTH_USERS.set(CHANCE_GOOGLE_EMAIL, {
+      ...configuredChance,
+      googleSubject: chancePin.googleSubject,
+      identityPinned: true,
+      autoEnrolled: false
+    });
+  }
+
+  for (const invitation of acceptedInvitations.values()) {
+    if (invitation.email === CHANCE_GOOGLE_EMAIL) continue;
+    const pin = pinByEmail.get(invitation.email);
+    if (
+      pin
+      && (
+        pin.googleSubject !== invitation.googleSubject
+        || pin.jobNimbusOwnerId !== invitation.jobNimbusOwnerId
+        || pin.jobNimbusScope !== "assigned"
+        || pin.role !== invitation.role
+      )
+    ) {
+      addReview({
+        email: invitation.email,
+        displayName: invitation.displayName,
+        role: invitation.role,
+        reason: "accepted_invitation_identity_pin_mismatch"
       });
       continue;
     }
-    if (
-      !AUTO_ENROLL_WAVE_USERS
-      || row.source !== "employee_auto_enroll"
-      || row.role !== "employee"
-      || row.jobNimbusScope !== "assigned"
-    ) {
-      throw new Error(
-        `Stored HCN identity ${row.email} is not currently authorized.`
-      );
-    }
-    WAVE_AUTH_USERS.set(row.email, {
-      email: row.email,
-      name: row.displayName,
-      role: "employee",
+    WAVE_AUTH_USERS.set(invitation.email, {
+      email: invitation.email,
+      name: invitation.displayName,
+      role: invitation.role,
       enabled: true,
-      jobNimbusOwnerId: row.jobNimbusOwnerId,
+      jobNimbusOwnerId: invitation.jobNimbusOwnerId,
       jobNimbusScope: "assigned",
       quoLineId: "",
-      googleSubject: row.googleSubject,
-      autoEnrolled: true,
-      identityPinned: true
+      googleSubject: invitation.googleSubject,
+      autoEnrolled: false,
+      identityPinned: true,
+      invitationManaged: true,
+      invitationRef: invitation.invitationRef,
+      legacyPinned: false
     });
   }
+
+  for (const pin of pins) {
+    if (
+      pin.email === CHANCE_GOOGLE_EMAIL
+      || acceptedInvitations.has(pin.email)
+    ) {
+      continue;
+    }
+    const configured = configuredUsers.get(pin.email) || null;
+    if (
+      configured?.enabled === false
+      || !hcnConfiguredUserMatchesLegacyPin(configured, pin)
+    ) {
+      addReview({
+        email: pin.email,
+        displayName: configured?.name || pin.displayName,
+        role: pin.role,
+        reason: configured?.enabled === false
+          ? "configured_identity_disabled"
+          : "configured_identity_pin_mismatch"
+      });
+      continue;
+    }
+    WAVE_AUTH_USERS.set(pin.email, {
+      ...(configured || {}),
+      email: pin.email,
+      name: String(
+        configured?.name || pin.displayName || pin.email
+      ).slice(0, 256),
+      role: pin.role,
+      enabled: true,
+      jobNimbusOwnerId: pin.jobNimbusOwnerId,
+      jobNimbusScope: "assigned",
+      quoLineId: String(configured?.quoLineId || "").trim(),
+      googleSubject: pin.googleSubject,
+      autoEnrolled: false,
+      identityPinned: true,
+      invitationManaged: false,
+      invitationRef: "",
+      legacyPinned: true
+    });
+    addReview({
+      email: pin.email,
+      displayName: configured?.name || pin.displayName,
+      role: pin.role,
+      reason: pin.source === "employee_auto_enroll"
+        ? "legacy_auto_enrollment_requires_invitation"
+        : "legacy_explicit_identity_requires_invitation",
+      access: "preserved_existing_pin"
+    });
+  }
+
+  for (const [email, configured] of configuredUsers) {
+    if (
+      email === CHANCE_GOOGLE_EMAIL
+      || configured.enabled === false
+      || acceptedInvitations.has(email)
+      || pinByEmail.has(email)
+    ) {
+      continue;
+    }
+    addReview({
+      email,
+      displayName: configured.name,
+      role: configured.role,
+      reason: "explicit_invitation_required"
+    });
+  }
+  HCN_LEGACY_IDENTITY_REVIEWS = Object.freeze(
+    [...reviews.values()].sort(
+      (left, right) => left.email.localeCompare(right.email)
+    )
+  );
+}
+
+function hcnConfiguredUserMatchesLegacyPin(configured, pin) {
+  if (!configured) return true;
+  const configuredSubject = String(
+    configured.googleSubject || ""
+  ).trim();
+  return (
+    String(configured.role || "").trim().toLowerCase() === pin.role
+    && String(configured.jobNimbusOwnerId || "").trim()
+      === pin.jobNimbusOwnerId
+    && String(configured.jobNimbusScope || "").trim().toLowerCase()
+      === "assigned"
+    && (!configuredSubject || configuredSubject === pin.googleSubject)
+  );
+}
+
+function removeHcnLegacyIdentityReview(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  HCN_LEGACY_IDENTITY_REVIEWS = Object.freeze(
+    HCN_LEGACY_IDENTITY_REVIEWS.filter(
+      (review) => review.email !== normalizedEmail
+    )
+  );
 }
 
 async function resolveFirstUseWaveUser({
@@ -14259,40 +15455,62 @@ async function resolveFirstUseWaveUser({
   name,
   subject = "",
   hostedDomain = "",
-  existingUser = null
+  existingUser = null,
+  approvalContext = null
 }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
-  const domain = normalizedEmail.split("@")[1] || "";
-  const normalizedHostedDomain =
-    String(hostedDomain || "")
-      .trim()
-      .toLowerCase();
   const googleSubject = String(subject || "").trim();
   const configured =
     existingUser || WAVE_AUTH_USERS.get(normalizedEmail) || null;
   if (
     !normalizedEmail
     || !/^[^\s@]+@[^\s@]+$/.test(normalizedEmail)
-    || (
-      HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
-      && (
-        domain !== HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
-        || normalizedHostedDomain !== HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN
-      )
-    )
     || !/^[A-Za-z0-9._~-]{1,255}$/.test(googleSubject)
     || configured?.enabled === false
     || (
       configured
       && String(configured.googleSubject || "").trim()
     )
-    || (!configured && !AUTO_ENROLL_WAVE_USERS)
     || !hcnIdentityPinStoreConfigured()
+    || !hcnInvitationStoreConfigured()
   ) {
     return null;
   }
 
-  const jobNimbusUser = await findActiveJobNimbusUser(normalizedEmail);
+  const chanceBootstrap = Boolean(
+    configured
+    && normalizedEmail === CHANCE_GOOGLE_EMAIL
+    && configured.role === "chance"
+    && String(configured.jobNimbusScope || "").trim().toLowerCase()
+      === "assigned"
+  );
+  let invitation = null;
+  if (!chanceBootstrap) {
+    if (
+      !approvalContext
+      || typeof approvalContext !== "object"
+      || Array.isArray(approvalContext)
+      || Object.keys(approvalContext).sort().join(",")
+        !== "invitationRef,inviteToken"
+    ) {
+      return null;
+    }
+    invitation = await hcnInvitationStore().getByRef(
+      approvalContext.invitationRef
+    );
+    if (
+      !invitation
+      || invitation.state !== "pending"
+      || invitation.email !== normalizedEmail
+    ) {
+      return null;
+    }
+  }
+
+  const jobNimbusUser = await findActiveJobNimbusUser(
+    normalizedEmail,
+    { fresh: true }
+  );
   if (!jobNimbusUser) {
     const error = new Error(
       "No unique active JobNimbus employee account matched this Wave email address."
@@ -14302,12 +15520,25 @@ async function resolveFirstUseWaveUser({
   }
   const jobNimbusOwnerId = String(jobNimbusUser.id || "").trim();
   if (
-    configured
-    && (
-      !String(configured.jobNimbusOwnerId || "").trim()
-      || String(configured.jobNimbusOwnerId).trim() !== jobNimbusOwnerId
-      || String(configured.jobNimbusScope || "").trim().toLowerCase()
-        !== "assigned"
+    (
+      chanceBootstrap
+      && configured
+      && (
+        !String(configured.jobNimbusOwnerId || "").trim()
+        || String(configured.jobNimbusOwnerId).trim()
+          !== jobNimbusOwnerId
+      )
+    )
+    || (
+      invitation
+      && invitation.jobNimbusOwnerId !== jobNimbusOwnerId
+    )
+    || (
+      configured
+      && (
+        String(configured.jobNimbusScope || "").trim().toLowerCase()
+          !== "assigned"
+      )
     )
   ) {
     const error = new Error(
@@ -14316,48 +15547,100 @@ async function resolveFirstUseWaveUser({
     error.statusCode = 403;
     throw error;
   }
-  const source = configured
-    ? "explicit_first_use"
-    : "employee_auto_enroll";
-  const role = configured
-    ? String(configured.role || "").trim().toLowerCase()
-    : "employee";
+  const role = chanceBootstrap
+    ? "chance"
+    : invitation.role;
   const displayName = String(
     configured?.name
+    || invitation?.displayName
     || jobNimbusUser.name
     || name
     || normalizedEmail
   ).trim();
-  const pin = await hcnIdentityPinStore().pin({
-    email: normalizedEmail,
-    displayName,
-    googleSubject,
-    jobNimbusOwnerId,
-    jobNimbusScope: "assigned",
-    role,
-    source
-  });
+  let pin = await hcnIdentityPinStore().get(normalizedEmail);
+  if (pin) {
+    if (
+      pin.googleSubject !== googleSubject
+      || pin.jobNimbusOwnerId !== jobNimbusOwnerId
+      || pin.jobNimbusScope !== "assigned"
+      || pin.role !== role
+    ) {
+      const error = new Error(
+        "This HCN employee identity is pinned to different authority."
+      );
+      error.statusCode = 403;
+      throw error;
+    }
+  } else if (chanceBootstrap) {
+    pin = await hcnIdentityPinStore().pin({
+      email: normalizedEmail,
+      displayName,
+      googleSubject,
+      jobNimbusOwnerId,
+      jobNimbusScope: "assigned",
+      role,
+      source: "explicit_first_use"
+    });
+  }
+  let acceptedInvitation = null;
+  if (invitation) {
+    acceptedInvitation =
+      await hcnInvitationStore().acceptInvitation({
+        invitationRef: invitation.invitationRef,
+        email: normalizedEmail,
+        googleSubject,
+        inviteToken: approvalContext.inviteToken
+      });
+  }
   const user = {
     ...(configured || {}),
     email: normalizedEmail,
     name: displayName,
-    role: pin.role,
+    role:
+      acceptedInvitation?.role
+      || pin?.role
+      || role,
     enabled: true,
-    jobNimbusOwnerId: pin.jobNimbusOwnerId,
+    jobNimbusOwnerId:
+      acceptedInvitation?.jobNimbusOwnerId
+      || pin?.jobNimbusOwnerId
+      || jobNimbusOwnerId,
     jobNimbusScope: "assigned",
     quoLineId: String(configured?.quoLineId || "").trim(),
-    googleSubject: pin.googleSubject,
-    autoEnrolled: source === "employee_auto_enroll",
-    identityPinned: true
+    googleSubject:
+      acceptedInvitation?.googleSubject
+      || pin?.googleSubject
+      || googleSubject,
+    autoEnrolled: false,
+    identityPinned: Boolean(
+      acceptedInvitation?.googleSubject || pin?.googleSubject
+    ),
+    invitationManaged: Boolean(acceptedInvitation),
+    invitationRef:
+      acceptedInvitation?.invitationRef
+      || String(configured?.invitationRef || ""),
+    legacyPinned: false
   };
   WAVE_AUTH_USERS.set(normalizedEmail, user);
+  if (acceptedInvitation) {
+    removeHcnLegacyIdentityReview(normalizedEmail);
+  }
   return user;
 }
 
-async function findActiveJobNimbusUser(email) {
+async function findActiveJobNimbusUser(
+  email,
+  { fresh = false } = {}
+) {
   const key = String(email || "").trim().toLowerCase();
   const cached = JOBNIMBUS_USER_CACHE.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.user;
+  if (
+    !fresh
+    && cached
+    && cached.expiresAt > Date.now()
+  ) {
+    return cached.user;
+  }
 
   let rows;
   try {

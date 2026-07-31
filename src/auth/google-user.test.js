@@ -504,7 +504,11 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-plans/execute",
     "POST /hcn/api/v1/action-plans/invalidate",
     "POST /hcn/api/v1/action-receipts/list",
-    "POST /hcn/api/v1/action-receipts/detail"
+    "POST /hcn/api/v1/action-receipts/detail",
+    "POST /hcn/api/v1/team/invitations/list",
+    "POST /hcn/api/v1/team/invitations/prepare",
+    "POST /hcn/api/v1/team/invitations/create",
+    "POST /hcn/api/v1/team/invitations/revoke"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(routeAllowed(browser, method, pathname), true, route);
@@ -536,7 +540,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-receipts/detail",
     "POST /hcn/api/v1/action-receipts/list"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 18);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 22);
 
   for (const role of [
     "administrator",
@@ -569,6 +573,18 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
       role !== "onboarding",
       role
     );
+    for (const pathname of [
+      "/hcn/api/v1/team/invitations/list",
+      "/hcn/api/v1/team/invitations/prepare",
+      "/hcn/api/v1/team/invitations/create",
+      "/hcn/api/v1/team/invitations/revoke"
+    ]) {
+      assert.equal(
+        routeAllowed(otherBrowser, "POST", pathname),
+        false,
+        `${role} ${pathname}`
+      );
+    }
     assert.equal(
       routeAllowed(otherBrowser, "POST", "/hcn/api/v1/management-sweep"),
       role === "administrator" || role === "manager",

@@ -185,6 +185,89 @@ function evaluateAssistantSources(functionSource, value) {
   return JSON.parse(JSON.stringify(context.result));
 }
 
+function invitationFunctionBundle(script, names) {
+  return names.map((name) => extractConsoleFunction(script, name)).join("\n");
+}
+
+function invitationEvaluationContext(overrides = {}) {
+  return {
+    INVITATION_REF: /^invite_[a-f0-9]{32}$/,
+    INVITATION_APPROVAL_ID: /^[A-Za-z0-9_-]{8,128}$/,
+    INVITATION_APPROVAL_DIGEST: /^[a-f0-9]{64}$/,
+    INVITATION_ROLES: new Set([
+      "employee",
+      "client_coordinator",
+      "manager",
+      "administrator"
+    ]),
+    INVITATION_FORM_ROLES: new Set([
+      "employee",
+      "client_coordinator",
+      "manager"
+    ]),
+    INVITATION_STATES: new Set([
+      "pending",
+      "accepted",
+      "revoked",
+      "expired"
+    ]),
+    URL,
+    window: {
+      location: {
+        origin: "https://hcn.example"
+      }
+    },
+    result: null,
+    ...overrides
+  };
+}
+
+function evaluateInvitationApproval(script, value) {
+  const source = invitationFunctionBundle(script, [
+    "normalizeTeamInvitationApproval",
+    "objectHasOnlyKeys",
+    "objectHasAllKeys",
+    "objectHasExactKeys",
+    "canonicalInviteEmail",
+    "validIsoInstant",
+    "boundedString",
+    "record",
+    "isRecord"
+  ]);
+  const context = invitationEvaluationContext({ value });
+  runInNewContext(
+    `${source}\nresult = normalizeTeamInvitationApproval(value);`,
+    context
+  );
+  return JSON.parse(JSON.stringify(context.result));
+}
+
+function evaluateInvitationEnvelope(script, value, mode, expectedReview) {
+  const source = invitationFunctionBundle(script, [
+    "normalizeTeamInvitationEnvelope",
+    "normalizeTeamInvitation",
+    "canonicalInviteEmail",
+    "safeTeamInviteUrl",
+    "objectHasOnlyKeys",
+    "objectHasAllKeys",
+    "objectHasExactKeys",
+    "validIsoInstant",
+    "boundedString",
+    "record",
+    "isRecord"
+  ]);
+  const context = invitationEvaluationContext({
+    value,
+    mode,
+    expectedReview
+  });
+  runInNewContext(
+    `${source}\nresult = normalizeTeamInvitationEnvelope(value, mode, expectedReview);`,
+    context
+  );
+  return JSON.parse(JSON.stringify(context.result));
+}
+
 test("console serves only its fixed application-shell allowlist", async () => {
   const expected = new Map([
     ["/hcn/", "text/html; charset=utf-8"],
@@ -514,6 +597,7 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(html, /href="#connections"/);
   assert.match(html, /id="connections"[\s\S]*aria-labelledby="connections-title"/);
   assert.match(html, /id="connections-profile-name"/);
+  assert.match(html, /id="connections-profile-email"/);
   assert.match(html, /id="connections-profile-role"/);
   assert.match(html, /id="jobnimbus-connection-status"/);
   assert.match(html, /id="google-connect-action"/);
@@ -551,6 +635,11 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(script, /\{ mode: "verify", code: code \}/);
   assert.match(script, /window\.location\.assign\(ENDPOINTS\.googleConnectStart\)/);
   assert.match(script, /function safeMaskedPhone\(value\)/);
+  assert.match(
+    script,
+    /canonicalInviteEmail\(profile\.email\) \|\| "Email not verified"/
+  );
+  assert.doesNotMatch(html, /googleSubject|Google subject/i);
   assert.match(script, /return digits\.length <= 4 \? masked : ""/);
   const safeLineNormalizer = script.slice(
     script.indexOf("function normalizeSafeQuoLine"),
@@ -571,7 +660,7 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(script, /if \(!outcome \|\| authenticated\) return null/);
   assert.match(script, /That sign-in attempt expired or could not be verified/);
   assert.match(script, /Google sign-in did not finish/);
-  assert.match(script, /active JobNimbus employee profile/);
+  assert.match(script, /Google account matching your HCN invitation/);
   assert.match(script, /const outcomes = current\.searchParams\.getAll\("google"\)/);
   assert.match(script, /GOOGLE_CALLBACK_OUTCOMES\.has\(outcomes\[0\]\)/);
   assert.match(script, /"temporarily_unavailable"/);
@@ -619,6 +708,336 @@ test("Connections links each authenticated employee to safe, memory-only work ac
     script.indexOf("function hasActionPrepareAuthority()")
   );
   assert.match(actionAccess, /ACTION_READ_CAPABILITY/);
+});
+
+test("Chance-only Team uses exact invite reviews without self-signup or automatic email", async () => {
+  const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(
+    html,
+    /href="#team"[\s\S]*data-hcn-team-invitations[\s\S]*hidden/
+  );
+  assert.match(
+    html,
+    /id="team"[\s\S]*data-hcn-team-invitations[\s\S]*hidden/
+  );
+  assert.match(html, /People[\s\S]*cannot create their own account/i);
+  assert.match(html, /id="team-invite-email"[\s\S]*type="email"/);
+  assert.match(html, /id="team-invite-role"/);
+  assert.match(html, /value="employee"/);
+  assert.match(html, /value="client_coordinator"/);
+  assert.match(html, /value="manager"/);
+  assert.doesNotMatch(
+    html.slice(
+      html.indexOf('id="team-invite-role"'),
+      html.indexOf("</select>", html.indexOf('id="team-invite-role"'))
+    ),
+    /value="administrator"/
+  );
+  assert.match(html, /Prepare invite/);
+  assert.match(html, /Approve &amp; create invite/);
+  assert.match(html, /Approve &amp; revoke/);
+  assert.match(script, /Copy invite link/i);
+  assert.match(html, /Google OAuth[\s\S]*test user/i);
+  assert.match(html, /does[\s\S]*not create an account or send an email/i);
+  assert.doesNotMatch(html, /mailto:/i);
+
+  for (const route of [
+    "/hcn/api/v1/team/invitations/list",
+    "/hcn/api/v1/team/invitations/prepare",
+    "/hcn/api/v1/team/invitations/create",
+    "/hcn/api/v1/team/invitations/revoke"
+  ]) {
+    assert.match(script, new RegExp(route.replaceAll("/", "\\/")));
+  }
+  const teamAuthority = script.slice(
+    script.indexOf("function hasTeamInvitationAuthority()"),
+    script.indexOf("function hasGoogleLinkAuthority()")
+  );
+  assert.match(teamAuthority, /profile\.role === "chance"/);
+  assert.match(teamAuthority, /teamInvitations/);
+  assert.match(teamAuthority, /invitationCapabilities\.manage === true/);
+
+  assert.match(script, /action: "create"/);
+  assert.match(script, /expiresInHours: 72/);
+  assert.match(script, /action: "revoke", invitationRef: invitationRef/);
+  assert.match(
+    script,
+    /approvalId: review\.approvalId,\s*approvalDigest: review\.approvalDigest/
+  );
+  assert.match(script, /"hcn\.team\.invitation-approval\.v1"/);
+  assert.match(script, /value\.mode !== "dry_run"/);
+  assert.match(script, /match\.verified !== true/);
+  assert.match(script, /match\.active !== true/);
+  assert.match(script, /"assigned"/);
+  const scopeLabel = script.slice(
+    script.indexOf("function teamInvitationScopeLabel(role)"),
+    script.indexOf("function teamInvitationStateTone(value)")
+  );
+  assert.match(scopeLabel, /role === "manager"/);
+  assert.match(
+    scopeLabel,
+    /Assigned-file actions \+ company sweep visibility/
+  );
+  assert.match(scopeLabel, /Assigned files only/);
+  assert.match(
+    script,
+    /\["File access", teamInvitationScopeLabel\(review\.plan\.role\)\]/
+  );
+  assert.match(
+    script,
+    /teamInvitationScopeLabel\(invitation\.role\)/
+  );
+  assert.match(script, /navigator\.clipboard\.writeText\(inviteUrl\)/);
+  assert.match(
+    script,
+    /one-time invite link is no longer available[\s\S]*Revoke the pending invitation and create a new one/i
+  );
+  assert.doesNotMatch(
+    script,
+    /Refresh the invitation list and try again/i
+  );
+  assert.match(script, /url\.origin !== window\.location\.origin/);
+  assert.match(script, /\|\| url\.search/);
+  assert.match(script, /\|\| !url\.hash/);
+  assert.match(script, /state\.teamInviteReview = null/);
+  assert.match(script, /state\.teamRevokeReview = null/);
+  assert.match(script, /clearTeamInvitationData\(message\)/);
+  assert.match(script, /handleOperationalAuthLoss\(\)/);
+  assert.match(script, /credentials: "same-origin"/);
+  assert.match(script, /cache: "no-store"/);
+  assert.match(script, /"X-HCN-CSRF": csrfToken/);
+  assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
+
+  const teamNormalizer = script.slice(
+    script.indexOf("function normalizeTeamInvitation(value)"),
+    script.indexOf("function canonicalInviteEmail(value)")
+  );
+  assert.doesNotMatch(
+    teamNormalizer,
+    /jobNimbusOwnerId|googleSubject|providerId/
+  );
+  assert.doesNotMatch(
+    worker,
+    /team\/invitations|addEventListener\("fetch"/
+  );
+});
+
+test("Team reviews and offboarding accept only the exact material contract", async () => {
+  const asset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = asset.body.toString("utf8");
+  const approvalId = `invite_approval_${"a".repeat(32)}`;
+  const approvalDigest = "b".repeat(64);
+  const managerVisibility =
+    "company_configured_adjuster_activity_sweep_read";
+  const baseApproval = {
+    schema: "hcn.team.invitation-approval.v1",
+    approvalId,
+    approvalDigest,
+    action: "create",
+    expiresAt: "2026-07-30T15:05:00.000Z"
+  };
+  const createReview = {
+    schema: "hcn.team.invitation-approval.v1",
+    mode: "dry_run",
+    approval: baseApproval,
+    plan: {
+      action: "create",
+      email: "manager@example.com",
+      displayName: "HCN Manager",
+      role: "manager",
+      jobNimbusScope: "assigned",
+      managementVisibility: managerVisibility,
+      invitationExpiresAt: "2026-08-02T15:00:00.000Z",
+      jobNimbusMatch: {
+        verified: true,
+        active: true
+      }
+    },
+    instruction: "Review the exact invitation."
+  };
+
+  assert.equal(
+    evaluateInvitationApproval(script, createReview)
+      .plan.managementVisibility,
+    managerVisibility
+  );
+  assert.throws(
+    () => evaluateInvitationApproval(script, {
+      ...createReview,
+      plan: {
+        ...createReview.plan,
+        jobNimbusOwnerId: "must-not-reach-browser"
+      }
+    }),
+    /Invalid invitation approval/
+  );
+  assert.throws(
+    () => evaluateInvitationApproval(script, {
+      ...createReview,
+      plan: {
+        ...createReview.plan,
+        managementVisibility: "none"
+      }
+    }),
+    /Invalid invitation approval/
+  );
+
+  const revokeReview = {
+    ...createReview,
+    approval: {
+      ...baseApproval,
+      action: "revoke"
+    },
+    plan: {
+      action: "revoke",
+      invitationRef: `invite_${"c".repeat(32)}`,
+      email: "manager@example.com",
+      displayName: "HCN Manager",
+      role: "manager",
+      jobNimbusScope: "assigned",
+      managementVisibility: managerVisibility,
+      currentState: "accepted",
+      connectorGrant: "revoke_if_present",
+      quoBinding: "revoke_if_present"
+    }
+  };
+  const normalizedRevokeReview =
+    evaluateInvitationApproval(script, revokeReview);
+  assert.equal(
+    normalizedRevokeReview.plan.connectorGrant,
+    "revoke_if_present"
+  );
+  assert.equal(
+    normalizedRevokeReview.plan.quoBinding,
+    "revoke_if_present"
+  );
+  assert.throws(
+    () => evaluateInvitationApproval(script, {
+      ...revokeReview,
+      plan: {
+        ...revokeReview.plan,
+        quoBinding: "retained"
+      }
+    }),
+    /Invalid invitation approval/
+  );
+
+  const revokedInvitation = {
+    invitationRef: `invite_${"c".repeat(32)}`,
+    email: "manager@example.com",
+    displayName: "HCN Manager",
+    role: "manager",
+    jobNimbusScope: "assigned",
+    state: "revoked",
+    invitedAt: "2026-07-29T15:00:00.000Z",
+    expiresAt: "2026-08-01T15:00:00.000Z",
+    acceptedAt: "2026-07-29T16:00:00.000Z",
+    revokedAt: "2026-07-30T15:00:00.000Z"
+  };
+  const revokeResult = {
+    schema: "hcn.team.invitations.v1",
+    canManage: true,
+    invitations: [revokedInvitation],
+    legacyReviewRequiredCount: 0,
+    legacyReviewRequired: [],
+    delivery: {
+      automaticEmail: false,
+      instruction: "Copy a link only after create."
+    },
+    googleOAuth: {
+      externalTestingPrerequisite: "Add invited accounts as test users.",
+      readinessAttested: false
+    },
+    invitation: revokedInvitation,
+    inviteUrl: "",
+    emailSent: false,
+    approval: {
+      approvalId,
+      approvalDigest,
+      consumed: true
+    },
+    googleConnectorGrant: "cleanup_required",
+    revokedSessionCount: 3,
+    quoBinding: "revoked"
+  };
+  const normalizedResult = evaluateInvitationEnvelope(
+    script,
+    revokeResult,
+    "revoke",
+    {
+      approvalId,
+      approvalDigest
+    }
+  );
+  assert.deepEqual(normalizedResult.revocationOutcome, {
+    googleConnectorGrant: "cleanup_required",
+    revokedSessionCount: 3,
+    quoBinding: "revoked",
+    cleanupRequired: true
+  });
+  assert.throws(
+    () => evaluateInvitationEnvelope(
+      script,
+      { ...revokeResult, unexpectedMaterial: true },
+      "revoke",
+      { approvalId, approvalDigest }
+    ),
+    /Invalid invitation list/
+  );
+  assert.throws(
+    () => evaluateInvitationEnvelope(
+      script,
+      { ...revokeResult, googleConnectorGrant: "unknown" },
+      "revoke",
+      { approvalId, approvalDigest }
+    ),
+    /Invalid invitation revocation result/
+  );
+  assert.throws(
+    () => evaluateInvitationEnvelope(
+      script,
+      {
+        ...revokeResult,
+        legacyReviewRequiredCount: 1,
+        legacyReviewRequired: [{
+          status: "explicit_review_required",
+          email: "must-not-be-rendered@example.com"
+        }]
+      },
+      "revoke",
+      { approvalId, approvalDigest }
+    ),
+    /Invalid invitation list/
+  );
+
+  const listFallback = {
+    schema: revokeResult.schema,
+    canManage: true,
+    invitations: revokeResult.invitations,
+    legacyReviewRequired: [],
+    delivery: revokeResult.delivery,
+    googleOAuth: revokeResult.googleOAuth
+  };
+  assert.equal(
+    evaluateInvitationEnvelope(script, listFallback, "list", null)
+      .legacyReviewCount,
+    0
+  );
+
+  assert.match(script, /Google Gmail & Calendar", "Revoke connection if present"/);
+  assert.match(script, /Quo work line", "Revoke binding if present"/);
+  assert.match(script, /revokedSessionCount/);
+  assert.match(script, /External connector cleanup is still open/);
+  assert.match(script, /cleanupRequired \? "Cleanup needed" : "Revoked"/);
 });
 
 test("employee sign-in outcomes are consumed once without disturbing other URL state", async () => {
@@ -702,7 +1121,7 @@ test("employee sign-in guidance is accurate and suppressed for valid sessions", 
   );
   assert.match(
     evaluateAuthMessage(message, "access_denied", false).text,
-    /active JobNimbus employee profile/
+    /Google account matching your HCN invitation/
   );
   assert.match(
     evaluateAuthMessage(message, "invalid_request", false).text,

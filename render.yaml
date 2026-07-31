@@ -90,9 +90,9 @@ services:
       - key: GOOGLE_OAUTH_ALLOWED_DOMAIN
         value: wavepa.com
       - key: HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS
-        value: "true"
+        value: "false"
       - key: AUTO_ENROLL_WAVE_USERS
-        value: "true"
+        value: "false"
       - key: CHANCE_GOOGLE_EMAIL
         value: cpearson@wavepa.com
       - key: CHANCE_GOOGLE_SUBJECT
@@ -168,6 +168,8 @@ services:
         value: /var/data/hcn-operations/platform/claim-call-ledger.json
       - key: HCN_IDENTITY_PIN_STORE_PATH
         value: /var/data/hcn-operations/platform/identity-pins.json
+      - key: HCN_INVITATION_STORE_PATH
+        value: /var/data/hcn-operations/platform/employee-invitations.enc.json
       - key: ACTION_APPROVAL_TTL_SECONDS
         value: "900"
       - key: MAX_ARTIFACT_BYTES

@@ -112,7 +112,11 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "POST /hcn/api/v1/action-plans/execute",
   "POST /hcn/api/v1/action-plans/invalidate",
   "POST /hcn/api/v1/action-receipts/list",
-  "POST /hcn/api/v1/action-receipts/detail"
+  "POST /hcn/api/v1/action-receipts/detail",
+  "POST /hcn/api/v1/team/invitations/list",
+  "POST /hcn/api/v1/team/invitations/prepare",
+  "POST /hcn/api/v1/team/invitations/create",
+  "POST /hcn/api/v1/team/invitations/revoke"
 ]);
 
 const HCN_ASSIGNED_WORK_ROLES = new Set([
@@ -132,6 +136,7 @@ const HCN_MANAGEMENT_ROLES = new Set([
   "manager"
 ]);
 const HCN_ASSIGNED_ACTION_ROLES = HCN_ASSIGNED_WORK_ROLES;
+const HCN_TEAM_INVITATION_ROLES = new Set(["chance"]);
 
 export const HCN_BROWSER_ROUTE_ROLES = new Map([
   ["GET /hcn/connect/google/start", HCN_CONNECTION_ROLES],
@@ -148,7 +153,11 @@ export const HCN_BROWSER_ROUTE_ROLES = new Map([
   ["POST /hcn/api/v1/action-plans/execute", HCN_ASSIGNED_ACTION_ROLES],
   ["POST /hcn/api/v1/action-plans/invalidate", HCN_ASSIGNED_ACTION_ROLES],
   ["POST /hcn/api/v1/action-receipts/list", HCN_ASSIGNED_ACTION_ROLES],
-  ["POST /hcn/api/v1/action-receipts/detail", HCN_ASSIGNED_ACTION_ROLES]
+  ["POST /hcn/api/v1/action-receipts/detail", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/list", HCN_TEAM_INVITATION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/prepare", HCN_TEAM_INVITATION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/create", HCN_TEAM_INVITATION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/revoke", HCN_TEAM_INVITATION_ROLES]
 ]);
 
 export const HCN_BROWSER_ASSIGNED_ACTION_ROUTES = new Set([

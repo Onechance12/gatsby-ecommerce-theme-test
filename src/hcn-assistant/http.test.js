@@ -13,11 +13,17 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
+import {
+  createHcnInvitationStore
+} from "../auth/hcn-invitation-store.js";
+
 const ASSISTANT_RESPONSE =
   "You are signed in. I can review assigned files and prepare actions for approval; nothing was changed.";
 const EMPLOYEE_EMAIL = "assigned.employee@wavepa.com";
 const EMPLOYEE_SUBJECT = "assigned-employee-google-subject";
 const EMPLOYEE_OWNER_ID = "assigned-employee-jobnimbus-owner";
+const HCN_REFERENCE_KEY =
+  Buffer.alloc(32, 0x41).toString("base64url");
 
 test("enabled assistant route uses fixed routed reasoning without external mutation", async (t) => {
   const temporaryRoot = await mkdtemp(
@@ -29,6 +35,34 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "openai-requests.ndjson"
   );
   await writeFile(providerRecordPath, "", "utf8");
+  const invitationTimestamp = Date.now();
+  const invitationStore = createHcnInvitationStore({
+    filePath: path.join(
+      temporaryRoot,
+      "platform",
+      "employee-invitations.enc.json"
+    ),
+    key: HCN_REFERENCE_KEY,
+    allowedDomain: "",
+    now: () => invitationTimestamp
+  });
+  const invitation = await invitationStore.createInvitation({
+    email: EMPLOYEE_EMAIL,
+    displayName: "Assigned Employee",
+    role: "employee",
+    jobNimbusOwnerId: EMPLOYEE_OWNER_ID,
+    jobNimbusScope: "assigned",
+    invitedByRef: `principal_${"a".repeat(64)}`,
+    expiresAt: new Date(
+      invitationTimestamp + 72 * 60 * 60_000
+    ).toISOString()
+  });
+  await invitationStore.acceptInvitation({
+    invitationRef: invitation.invitationRef,
+    email: EMPLOYEE_EMAIL,
+    googleSubject: EMPLOYEE_SUBJECT,
+    inviteToken: invitation.inviteToken
+  });
 
   const providerObservations = [];
   const externalMutations = [];
@@ -154,8 +188,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         HCN_TEST_OPENAI_RECORD_PATH: providerRecordPath,
         HCN_TEST_OPENAI_RESPONSE_TEXT: ASSISTANT_RESPONSE,
         HCN_TENANT_ID: "tenant_0123456789abcdef",
-        HCN_REFERENCE_KEY:
-          Buffer.alloc(32, 0x41).toString("base64url"),
+        HCN_REFERENCE_KEY,
         HCN_GOOGLE_GRANT_KEY:
           Buffer.alloc(32, 0x42).toString("base64url"),
         HCN_QUO_LINK_KEY:
@@ -181,17 +214,9 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         OAUTH_SESSION_SECRET:
           "hcn-route-session-sealing-secret-123456789",
         GPT_OAUTH_CLIENT_SECRET: "",
-        WAVE_AUTH_USERS_JSON: JSON.stringify([
-          {
-            email: EMPLOYEE_EMAIL,
-            name: "Assigned Employee",
-            role: "employee",
-            enabled: true,
-            googleSubject: EMPLOYEE_SUBJECT,
-            jobNimbusOwnerId: EMPLOYEE_OWNER_ID,
-            jobNimbusScope: "assigned"
-          }
-        ]),
+        // Non-Chance employees must be admitted by an accepted invitation,
+        // never by the legacy configuration roster.
+        WAVE_AUTH_USERS_JSON: "[]",
         JOBNIMBUS_API_KEY: "hcn-assistant-jobnimbus-key",
         JOBNIMBUS_API_BASE_URL:
           `http://127.0.0.1:${providerPort}`,

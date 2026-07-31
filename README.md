@@ -273,8 +273,8 @@ HCN_CONSOLE_ENABLED=true
 HCN_CONSOLE_ORIGIN=https://hcn-operations-platform.onrender.com
 PUBLIC_BASE_URL=https://hcn-operations-platform.onrender.com
 ALLOW_GOOGLE_USER_AUTH=true
-AUTO_ENROLL_WAVE_USERS=true
-HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=true
+AUTO_ENROLL_WAVE_USERS=false
+HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=false
 HCN_OPERATIONS_ROOT=/var/data/hcn-operations
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
@@ -287,22 +287,30 @@ HCN_REFERENCE_KEY=
 HCN_GOOGLE_GRANT_KEY=
 HCN_GOOGLE_GRANT_STORE_PATH=/var/data/hcn-operations/platform/google-grants.enc.json
 HCN_IDENTITY_PIN_STORE_PATH=/var/data/hcn-operations/platform/identity-pins.json
+HCN_INVITATION_STORE_PATH=/var/data/hcn-operations/platform/employee-invitations.enc.json
 HCN_MANAGEMENT_ADJUSTERS_JSON=
 WAVE_AUTH_USERS_JSON=
 ```
 
 `HCN_CONSOLE_ORIGIN` must exactly match the origin of `PUBLIC_BASE_URL`.
 Sign-in reuses the existing Google redirect URI at
-`/oauth/google/callback`; no second Google redirect URI is required. With
-`AUTO_ENROLL_WAVE_USERS=true` and
-`HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=true`, a verified Google identity is
-admitted only when the exact same email resolves uniquely to an active
-JobNimbus employee. The authenticated identity-pin store binds the immutable
-Google subject, JobNimbus owner, role, and assigned-file scope. The server assigns role
-`employee` and JobNimbus scope `assigned` by default, and revalidates that
-binding on every browser request. `WAVE_AUTH_USERS_JSON` remains the explicit
-path for disabling a user or granting a reviewed role override; company scope
-is never an auto-enrollment default.
+`/oauth/google/callback`; no second Google redirect URI is required. Public
+self-registration and active-JobNimbus auto-enrollment are disabled.
+Only Chance's signed-in HCN role can prepare and approve an invitation. The
+invited Google email must then be verified by Google and exactly match one
+unique active JobNimbus employee. The encrypted invitation registry pins the
+accepted Google subject, exact email, JobNimbus owner, reviewed role, and
+assigned-file scope, and the server revalidates that authorization on every
+request. An invitation link is valid for at most 72 hours, carries its
+one-time token only in the URL fragment, and is returned only once after
+Chance approves creation. HCN does not automatically email the link.
+During the invite-only cutover, an existing non-Chance employee keeps access
+only when the authenticated identity-pin store already proves the exact email,
+Google subject, JobNimbus owner, assigned-file scope, and role. These
+temporarily compatible identities are shown to Chance in **Team** for explicit
+migration into an invitation-managed account. The compatibility window cannot
+create a new pin, change a role or owner, or admit an unknown user; all new
+access remains invitation-only.
 
 Console sign-in and Google provider linking are separate ceremonies on the
 dedicated `HCN_GOOGLE_CLIENT_ID`/`HCN_GOOGLE_CLIENT_SECRET`. Sign-in requests
@@ -764,15 +772,28 @@ are explicitly approved.
 
 ## HCN Employee And Connector Rollout
 
-First-use employee enrollment is enabled with
-`AUTO_ENROLL_WAVE_USERS=true` and
-`HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=true`. A new employee must sign in
-with a verified Google account whose email exactly matches one unique active
-JobNimbus user. Auto-enrollment pins the immutable Google subject and JobNimbus owner and
-grants only role `employee` with JobNimbus scope `assigned`. Explicit
-`WAVE_AUTH_USERS_JSON` entries remain available for disabling access and
-reviewed role overrides; they are not required for each ordinary active
-employee when auto-enrollment is enabled.
+Employee admission is invite-only. Keep `AUTO_ENROLL_WAVE_USERS=false` and
+`HCN_ALLOW_ACTIVE_JOBNIMBUS_GOOGLE_USERS=false`. Chance opens **Team**,
+prepares an exact employee invitation, reviews the email, role, assigned-file
+scope, management visibility, and expiration, then approves the unchanged
+short-lived dry run. The employee must sign in with the exact verified Google
+email from that invitation, and that email must still resolve to one unique
+active JobNimbus user. The accepted Google subject is immutably pinned inside
+the encrypted invitation registry. No public registration or domain-wide
+admission path exists.
+
+Existing authenticated identity pins are a temporary migration exception, not
+self-registration. **Team** identifies each remaining legacy-pinned employee.
+Chance must invite that exact email with its existing role; successful Google
+acceptance converts the employee to invitation-managed authority and removes
+the migration warning immediately. Remove the compatibility path in a later
+reviewed release after the remaining count reaches zero.
+
+The one-time invite URL is returned only by the approved create response and
+puts the token in the fragment so it cannot enter HTTP request logs. HCN sends
+no invitation email. While the Google OAuth app remains External/Testing,
+each invited Google account must also be added as a Google OAuth test user;
+an HCN invitation does not bypass that provider prerequisite.
 
 After HCN sign-in, the employee separately links Gmail/Calendar through the
 Connections view and separately links one company Quo line by SMS OTP. The
@@ -786,9 +807,10 @@ Production rollout prerequisites:
 1. Provision a new HCN-only persistent Render disk; do not reuse the legacy
    memory disk or treat a different folder on that disk as isolation. Set
    `HCN_OPERATIONS_ROOT`, `HCN_GOOGLE_GRANT_STORE_PATH`, and
-   `HCN_QUO_LINE_STORE_PATH`, and `HCN_IDENTITY_PIN_STORE_PATH` to reviewed
-   locations on the new disk. Keep the encrypted Quo authorization and
-   authenticated identity-pin stores on that same
+   `HCN_QUO_LINE_STORE_PATH`, `HCN_IDENTITY_PIN_STORE_PATH`, and
+   `HCN_INVITATION_STORE_PATH` to reviewed locations on the new disk. Keep
+   the encrypted Quo authorization and employee invitation stores, plus the
+   legacy authenticated identity-pin store, on that same
    HCN-only disk.
 2. Add `HCN_GOOGLE_GRANT_KEY` through the Render secret UI. Use a dedicated
    canonical base64url value encoding 32 to 128 random bytes; never reuse or
@@ -798,9 +820,11 @@ Production rollout prerequisites:
 4. Configure the exact HTTPS console/public origin and the dedicated HCN Google
    connector client for Gmail modify and Calendar read-only scopes. Keep it distinct from
    the login/Custom GPT client while registering the same exact callback. Also
-   configure the verified-active-JobNimbus login rule, HCN tenant/reference
-   secrets, and strong OAuth-session secret. An external Google connector app
-   must complete Google's required production verification before broad rollout.
+   configure the exact-invite/unique-active-JobNimbus login rule, HCN
+   tenant/reference secrets, and strong OAuth-session secret. While an
+   External Google app is in Testing, every invited account must be an OAuth
+   test user; complete Google's required production verification before broad
+   rollout.
 5. Confirm the JobNimbus service account can enumerate active users and that
    each pilot employee's Google email is exact and unique in JobNimbus.
 6. Configure the company Quo and SMS-verification providers and verify that

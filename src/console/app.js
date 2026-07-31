@@ -11,6 +11,10 @@
     quoLine: "/hcn/api/v1/connectors/quo-line",
     assistantTurns: "/hcn/api/v1/assistant/turns",
     managementSweep: "/hcn/api/v1/management-sweep",
+    teamInvitationList: "/hcn/api/v1/team/invitations/list",
+    teamInvitationPrepare: "/hcn/api/v1/team/invitations/prepare",
+    teamInvitationCreate: "/hcn/api/v1/team/invitations/create",
+    teamInvitationRevoke: "/hcn/api/v1/team/invitations/revoke",
     workCenter: "/hcn/api/v1/work-center",
     fileReview: "/hcn/api/v1/file-review",
     actionPrepare: "/hcn/api/v1/action-plans/prepare",
@@ -111,6 +115,26 @@
   const ACTION_EXECUTE_CAPABILITY = "hcn.action_plans.execute";
   const ACTION_INVALIDATE_CAPABILITY = "hcn.action_plans.invalidate";
   const RECEIPT_READ_CAPABILITY = "hcn.action_receipts.read";
+  const INVITATION_REF = /^invite_[a-f0-9]{32}$/;
+  const INVITATION_APPROVAL_ID = /^[A-Za-z0-9_-]{8,128}$/;
+  const INVITATION_APPROVAL_DIGEST = /^[a-f0-9]{64}$/;
+  const INVITATION_ROLES = new Set([
+    "employee",
+    "client_coordinator",
+    "manager",
+    "administrator"
+  ]);
+  const INVITATION_FORM_ROLES = new Set([
+    "employee",
+    "client_coordinator",
+    "manager"
+  ]);
+  const INVITATION_STATES = new Set([
+    "pending",
+    "accepted",
+    "revoked",
+    "expired"
+  ]);
   const FILE_REF = /^subject_[a-f0-9]{32}$/;
   const TASK_REF = /^ref_[a-f0-9]{32}$/;
   const EVIDENCE_REF = /^ref_[a-f0-9]{32}$/;
@@ -271,6 +295,12 @@
     quoController: null,
     quoMutationLoading: false,
     quoChallengePending: false,
+    teamInvitations: null,
+    teamLegacyReviewCount: 0,
+    teamInviteReview: null,
+    teamRevokeReview: null,
+    teamLoading: false,
+    teamController: null,
     authCallbackOutcome: "",
     googleCallbackOutcome: "",
     workCenter: null,
@@ -489,6 +519,7 @@
       "connections-locked",
       "connections-workspace",
       "connections-profile-name",
+      "connections-profile-email",
       "connections-profile-role",
       "jobnimbus-connection-status",
       "jobnimbus-connection-detail",
@@ -505,7 +536,25 @@
       "quo-verify-form",
       "quo-code",
       "quo-verify",
-      "quo-restart"
+      "quo-restart",
+      "team-status",
+      "team-refresh",
+      "team-alert",
+      "team-workspace",
+      "team-invite-form",
+      "team-invite-email",
+      "team-invite-role",
+      "team-invite-prepare",
+      "team-invite-review",
+      "team-invite-review-fields",
+      "team-invite-cancel",
+      "team-invite-create",
+      "team-revoke-review",
+      "team-revoke-review-fields",
+      "team-revoke-cancel",
+      "team-revoke-approve",
+      "team-invitation-count",
+      "team-invitation-list"
     ].forEach(function (id) {
       elements[id] = document.getElementById(id);
     });
@@ -599,6 +648,27 @@
     elements["quo-verify-form"].addEventListener("submit", verifyQuoConnection);
     elements["quo-use-code"].addEventListener("click", showQuoCodeEntry);
     elements["quo-restart"].addEventListener("click", restartQuoConnection);
+    elements["team-refresh"].addEventListener("click", loadTeamInvitations);
+    elements["team-invite-form"].addEventListener(
+      "submit",
+      prepareTeamInvitation
+    );
+    elements["team-invite-cancel"].addEventListener(
+      "click",
+      cancelTeamInviteReview
+    );
+    elements["team-invite-create"].addEventListener(
+      "click",
+      createTeamInvitation
+    );
+    elements["team-revoke-cancel"].addEventListener(
+      "click",
+      cancelTeamRevokeReview
+    );
+    elements["team-revoke-approve"].addEventListener(
+      "click",
+      revokeTeamInvitation
+    );
     window.addEventListener("online", handleNetworkChange);
     window.addEventListener("offline", handleNetworkChange);
     window.addEventListener("hashchange", syncActiveNavigation);
@@ -665,7 +735,7 @@
     }
     if (outcome === "access_denied") {
       return {
-        text: "HCN could not sign you in. Choose the Google account tied to your active JobNimbus employee profile. If that is the right account, ask an HCN manager to check the email on your JobNimbus user.",
+        text: "HCN could not sign you in. Choose the Google account matching your HCN invitation. If you were not invited, ask Chance to add your exact work email.",
         tone: "bad"
       };
     }
@@ -733,6 +803,12 @@
       );
       element.hidden = !authorized || !capabilities.has(capability);
     });
+    const canManageTeam = hasTeamInvitationAuthority();
+    document.querySelectorAll("[data-hcn-team-invitations]").forEach(
+      function (element) {
+        element.hidden = !canManageTeam;
+      }
+    );
 
     let preferredHash = window.location.hash;
     if (state.googleCallbackOutcome && hasConnectorReadAuthority()) {
@@ -1787,6 +1863,10 @@
       boundedString(profile.displayName, 100) || "Signed-in employee"
     );
     setText(
+      elements["connections-profile-email"],
+      canonicalInviteEmail(profile.email) || "Email not verified"
+    );
+    setText(
       elements["connections-profile-role"],
       humanize(boundedString(profile.role, 64) || role)
     );
@@ -1954,6 +2034,19 @@
     );
   }
 
+  function hasTeamInvitationAuthority() {
+    const session = record(state.session);
+    const profile = record(session.profile);
+    const invitationCapabilities = record(
+      record(session.capabilities).teamInvitations
+    );
+    return (
+      hasBrowserAuthority()
+      && profile.role === "chance"
+      && invitationCapabilities.manage === true
+    );
+  }
+
   function hasGoogleLinkAuthority() {
     return (
       hasBrowserAuthority()
@@ -2028,6 +2121,7 @@
 
     syncConnectionsAccess();
     syncManagementSweepAccess();
+    syncTeamInvitationAccess();
 
     if (!hasWorkCenterAuthority()) {
       const session = record(state.session);
@@ -2136,6 +2230,7 @@
       message || "The conversation was cleared because operating authority changed."
     );
     clearConnectionsData(message);
+    clearTeamInvitationData(message);
     clearManagementSweepData(message);
     if (state.workCenterController) state.workCenterController.abort();
     if (state.fileController) state.fileController.abort();
@@ -2274,6 +2369,7 @@
     elements["quo-phone-form"].reset();
     elements["quo-verify-form"].reset();
     setText(elements["connections-profile-name"], "—");
+    setText(elements["connections-profile-email"], "—");
     setText(elements["connections-profile-role"], "—");
     badge(elements["jobnimbus-connection-status"], "Not loaded", "neutral");
     badge(elements["google-connection-status"], "Not loaded", "neutral");
@@ -2462,6 +2558,10 @@
       boundedString(profile.displayName, 100) || "Signed-in employee"
     );
     setText(
+      elements["connections-profile-email"],
+      canonicalInviteEmail(profile.email) || "Email not verified"
+    );
+    setText(
       elements["connections-profile-role"],
       humanize(boundedString(profile.role, 64) || "HCN employee")
     );
@@ -2518,6 +2618,7 @@
       generatedAt: generatedAt,
       profile: {
         displayName: boundedString(value.profile.displayName, 100),
+        email: canonicalInviteEmail(value.profile.email),
         role: boundedString(value.profile.role, 64)
       },
       jobNimbus: {
@@ -2590,6 +2691,12 @@
     setText(
       elements["connections-profile-name"],
       connections.profile.displayName || "Signed-in employee"
+    );
+    setText(
+      elements["connections-profile-email"],
+      connections.profile.email
+        || canonicalInviteEmail(record(record(state.session).profile).email)
+        || "Email not verified"
     );
     setText(
       elements["connections-profile-role"],
@@ -2871,6 +2978,1077 @@
       return "Work-account connection status is temporarily unavailable.";
     }
     return "Your work-account connections could not be verified.";
+  }
+
+  function syncTeamInvitationAccess() {
+    if (!navigator.onLine || !hasTeamInvitationAuthority()) {
+      clearTeamInvitationData(
+        navigator.onLine
+          ? "Team invitations are only available to Chance."
+          : "Reconnect to verify invitation access."
+      );
+      return;
+    }
+    elements["team-workspace"].hidden = false;
+    syncTeamInvitationControls();
+    badge(
+      elements["team-status"],
+      state.teamLoading ? "Working" : "Chance only",
+      state.teamLoading ? "neutral" : "good"
+    );
+    if (!state.teamInvitations && !state.teamLoading) {
+      loadTeamInvitations();
+    }
+  }
+
+  function clearTeamInvitationData(message) {
+    if (state.teamController) state.teamController.abort();
+    state.teamController = null;
+    state.teamInvitations = null;
+    state.teamLegacyReviewCount = 0;
+    state.teamInviteReview = null;
+    state.teamRevokeReview = null;
+    state.teamLoading = false;
+    elements["team-invite-form"].reset();
+    elements["team-invite-role"].value = "employee";
+    elements["team-invite-review"].hidden = true;
+    elements["team-revoke-review"].hidden = true;
+    elements["team-invite-review-fields"].replaceChildren();
+    elements["team-revoke-review-fields"].replaceChildren();
+    elements["team-invitation-list"].setAttribute("aria-busy", "false");
+    setText(elements["team-invitation-count"], "0");
+    renderWorkspaceEmpty(
+      elements["team-invitation-list"],
+      message || "No invitation details are retained on this page."
+    );
+    badge(elements["team-status"], "Not loaded", "neutral");
+    notice(
+      elements["team-alert"],
+      message || "No invitation details are retained on this page.",
+      "neutral"
+    );
+    syncTeamInvitationControls();
+  }
+
+  function syncTeamInvitationControls() {
+    const authorized = (
+      navigator.onLine
+      && hasTeamInvitationAuthority()
+      && !state.teamLoading
+    );
+    const reviewingCreate = Boolean(state.teamInviteReview);
+    const reviewingRevoke = Boolean(state.teamRevokeReview);
+    elements["team-refresh"].disabled = !authorized;
+    elements["team-invite-email"].disabled = (
+      !authorized || reviewingCreate || reviewingRevoke
+    );
+    elements["team-invite-role"].disabled = (
+      !authorized || reviewingCreate || reviewingRevoke
+    );
+    elements["team-invite-prepare"].disabled = (
+      !authorized || reviewingCreate || reviewingRevoke
+    );
+    elements["team-invite-cancel"].disabled = !authorized;
+    elements["team-invite-create"].disabled = !authorized || !reviewingCreate;
+    elements["team-revoke-cancel"].disabled = !authorized;
+    elements["team-revoke-approve"].disabled = !authorized || !reviewingRevoke;
+  }
+
+  async function loadTeamInvitations() {
+    if (
+      state.teamLoading
+      || !navigator.onLine
+      || !hasTeamInvitationAuthority()
+    ) {
+      return;
+    }
+    if (state.teamController) state.teamController.abort();
+    const controller = new AbortController();
+    state.teamController = controller;
+    state.teamLoading = true;
+    elements["team-invitation-list"].setAttribute("aria-busy", "true");
+    badge(elements["team-status"], "Loading", "neutral");
+    notice(
+      elements["team-alert"],
+      "Loading current HCN invitations.",
+      "neutral"
+    );
+    syncTeamInvitationControls();
+
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.teamInvitationList,
+        {},
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
+      const result = normalizeTeamInvitationEnvelope(response, "list");
+      state.teamInvitations = result.invitations;
+      state.teamLegacyReviewCount = result.legacyReviewCount;
+      renderTeamInvitations();
+      badge(
+        elements["team-status"],
+        result.invitations.length + " invitation"
+          + (result.invitations.length === 1 ? "" : "s"),
+        "good"
+      );
+      notice(
+        elements["team-alert"],
+        result.legacyReviewCount
+          ? result.legacyReviewCount
+            + " older account"
+            + (result.legacyReviewCount === 1 ? " needs" : "s need")
+            + " separate review. No access change was made."
+          : "Invitation access is current. No email is sent automatically.",
+        result.legacyReviewCount ? "warn" : "good"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      state.teamInvitations = null;
+      state.teamLegacyReviewCount = 0;
+      renderWorkspaceEmpty(
+        elements["team-invitation-list"],
+        "The invitation list could not be verified. No stale list is shown."
+      );
+      setText(elements["team-invitation-count"], "0");
+      badge(elements["team-status"], "Unavailable", "bad");
+      notice(
+        elements["team-alert"],
+        teamInvitationErrorMessage(error, "list"),
+        "bad"
+      );
+    } finally {
+      if (state.teamController === controller) {
+        state.teamController = null;
+        state.teamLoading = false;
+        elements["team-invitation-list"].setAttribute("aria-busy", "false");
+        syncTeamInvitationControls();
+      }
+    }
+  }
+
+  async function prepareTeamInvitation(event) {
+    event.preventDefault();
+    if (
+      state.teamLoading
+      || !navigator.onLine
+      || !hasTeamInvitationAuthority()
+    ) {
+      notice(
+        elements["team-alert"],
+        "Invitation preparation is not available for this HCN session.",
+        "warn"
+      );
+      return;
+    }
+    const email = canonicalInviteEmail(elements["team-invite-email"].value);
+    const role = boundedString(elements["team-invite-role"].value, 64);
+    if (!email) {
+      notice(
+        elements["team-alert"],
+        "Enter the exact Google work email this person will use to sign in.",
+        "warn"
+      );
+      elements["team-invite-email"].focus();
+      return;
+    }
+    if (!INVITATION_FORM_ROLES.has(role)) {
+      notice(elements["team-alert"], "Choose an HCN employee role.", "warn");
+      return;
+    }
+    elements["team-invite-email"].value = email;
+    await prepareTeamInvitationAction(
+      {
+        action: "create",
+        email: email,
+        role: role,
+        expiresInHours: 72
+      },
+      function (review) {
+        if (
+          review.action !== "create"
+          || review.plan.email !== email
+          || review.plan.role !== role
+        ) {
+          throw new Error("Invitation review did not match");
+        }
+        state.teamInviteReview = review;
+        state.teamRevokeReview = null;
+        renderTeamInviteReview(review);
+        elements["team-invite-review"].hidden = false;
+        elements["team-revoke-review"].hidden = true;
+        elements["team-invite-review"].scrollIntoView({ block: "nearest" });
+        notice(
+          elements["team-alert"],
+          "Review the exact email, role, scope, and expiry before approving.",
+          "warn"
+        );
+      }
+    );
+  }
+
+  async function prepareTeamInvitationRevoke(invitationRef) {
+    if (
+      state.teamLoading
+      || !navigator.onLine
+      || !hasTeamInvitationAuthority()
+      || !INVITATION_REF.test(String(invitationRef || ""))
+    ) {
+      return;
+    }
+    await prepareTeamInvitationAction(
+      { action: "revoke", invitationRef: invitationRef },
+      function (review) {
+        if (
+          review.action !== "revoke"
+          || review.plan.invitationRef !== invitationRef
+        ) {
+          throw new Error("Invitation revoke review did not match");
+        }
+        state.teamInviteReview = null;
+        state.teamRevokeReview = review;
+        elements["team-invite-review"].hidden = true;
+        renderTeamRevokeReview(review);
+        elements["team-revoke-review"].hidden = false;
+        elements["team-revoke-review"].scrollIntoView({ block: "nearest" });
+        notice(
+          elements["team-alert"],
+          "Review the exact invitation before revoking it.",
+          "warn"
+        );
+      }
+    );
+  }
+
+  async function prepareTeamInvitationAction(body, onSuccess) {
+    if (state.teamController) state.teamController.abort();
+    const controller = new AbortController();
+    state.teamController = controller;
+    state.teamLoading = true;
+    badge(elements["team-status"], "Preparing review", "neutral");
+    notice(
+      elements["team-alert"],
+      "Checking the exact employee and preparing an immutable review.",
+      "neutral"
+    );
+    syncTeamInvitationControls();
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.teamInvitationPrepare,
+        body,
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
+      onSuccess(normalizeTeamInvitationApproval(response));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["team-alert"],
+        teamInvitationErrorMessage(error, "prepare"),
+        "bad"
+      );
+      badge(elements["team-status"], "Review unavailable", "bad");
+    } finally {
+      if (state.teamController === controller) {
+        state.teamController = null;
+        state.teamLoading = false;
+        syncTeamInvitationControls();
+      }
+    }
+  }
+
+  function cancelTeamInviteReview() {
+    if (state.teamLoading) return;
+    state.teamInviteReview = null;
+    elements["team-invite-review"].hidden = true;
+    elements["team-invite-review-fields"].replaceChildren();
+    notice(
+      elements["team-alert"],
+      "Invitation review canceled. No invitation was created.",
+      "neutral"
+    );
+    syncTeamInvitationControls();
+  }
+
+  function cancelTeamRevokeReview() {
+    if (state.teamLoading) return;
+    state.teamRevokeReview = null;
+    elements["team-revoke-review"].hidden = true;
+    elements["team-revoke-review-fields"].replaceChildren();
+    notice(
+      elements["team-alert"],
+      "Revoke review canceled. No invitation was changed.",
+      "neutral"
+    );
+    syncTeamInvitationControls();
+  }
+
+  async function createTeamInvitation() {
+    const review = state.teamInviteReview;
+    if (!review || review.action !== "create") return;
+    await executeTeamInvitationApproval(
+      ENDPOINTS.teamInvitationCreate,
+      review,
+      "Creating the exact invitation.",
+      function (result) {
+        state.teamInviteReview = null;
+        elements["team-invite-review"].hidden = true;
+        elements["team-invite-review-fields"].replaceChildren();
+        elements["team-invite-form"].reset();
+        elements["team-invite-role"].value = "employee";
+        state.teamInvitations = result.invitations;
+        state.teamLegacyReviewCount = result.legacyReviewCount;
+        renderTeamInvitations();
+        notice(
+          elements["team-alert"],
+          "Invite created. Add the exact email as a Google OAuth test user, then copy and share the invite link.",
+          "good"
+        );
+      }
+    );
+  }
+
+  async function revokeTeamInvitation() {
+    const review = state.teamRevokeReview;
+    if (!review || review.action !== "revoke") return;
+    await executeTeamInvitationApproval(
+      ENDPOINTS.teamInvitationRevoke,
+      review,
+      "Revoking the exact invitation.",
+      function (result) {
+        state.teamRevokeReview = null;
+        elements["team-revoke-review"].hidden = true;
+        elements["team-revoke-review-fields"].replaceChildren();
+        state.teamInvitations = result.invitations;
+        state.teamLegacyReviewCount = result.legacyReviewCount;
+        renderTeamInvitations();
+        renderTeamRevocationOutcome(result.revocationOutcome);
+      }
+    );
+  }
+
+  async function executeTeamInvitationApproval(
+    endpoint,
+    review,
+    pendingMessage,
+    onSuccess
+  ) {
+    if (
+      state.teamLoading
+      || !navigator.onLine
+      || !hasTeamInvitationAuthority()
+    ) {
+      return;
+    }
+    if (state.teamController) state.teamController.abort();
+    const controller = new AbortController();
+    state.teamController = controller;
+    state.teamLoading = true;
+    badge(elements["team-status"], "Applying approval", "neutral");
+    notice(elements["team-alert"], pendingMessage, "neutral");
+    syncTeamInvitationControls();
+    try {
+      const response = await postOperationalJson(
+        endpoint,
+        {
+          approvalId: review.approvalId,
+          approvalDigest: review.approvalDigest
+        },
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
+      const result = normalizeTeamInvitationEnvelope(
+        response,
+        review.action,
+        review
+      );
+      onSuccess(result);
+      if (!record(result.revocationOutcome).cleanupRequired) {
+        badge(elements["team-status"], "Current", "good");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["team-alert"],
+        teamInvitationErrorMessage(error, "approve"),
+        "bad"
+      );
+      badge(elements["team-status"], "Not confirmed", "bad");
+    } finally {
+      if (state.teamController === controller) {
+        state.teamController = null;
+        state.teamLoading = false;
+        syncTeamInvitationControls();
+      }
+    }
+  }
+
+  function normalizeTeamInvitationEnvelope(value, mode, expectedReview) {
+    const baseKeys = [
+      "schema",
+      "canManage",
+      "invitations",
+      "legacyReviewRequiredCount",
+      "legacyReviewRequired",
+      "delivery",
+      "googleOAuth"
+    ];
+    const requiredBaseKeys = baseKeys.filter(function (key) {
+      return key !== "legacyReviewRequiredCount";
+    });
+    const mutationKeys = [
+      "invitation",
+      "inviteUrl",
+      "emailSent",
+      "approval"
+    ];
+    const revokeKeys = [
+      "googleConnectorGrant",
+      "revokedSessionCount",
+      "quoBinding"
+    ];
+    const allowedKeys = mode === "list"
+      ? baseKeys
+      : mode === "create"
+        ? baseKeys.concat(mutationKeys)
+        : mode === "revoke"
+          ? baseKeys.concat(mutationKeys, revokeKeys)
+          : [];
+    if (
+      !allowedKeys.length
+      || !objectHasOnlyKeys(value, allowedKeys)
+      || !objectHasAllKeys(value, requiredBaseKeys)
+      || value.schema !== "hcn.team.invitations.v1"
+      || value.canManage !== true
+      || !Array.isArray(value.invitations)
+      || value.invitations.length > 500
+      || !objectHasExactKeys(
+        value.delivery,
+        ["automaticEmail", "instruction"]
+      )
+      || value.delivery.automaticEmail !== false
+      || boundedString(value.delivery.instruction, 500)
+        !== value.delivery.instruction
+      || !objectHasExactKeys(
+        value.googleOAuth,
+        ["externalTestingPrerequisite", "readinessAttested"]
+      )
+      || boundedString(
+        value.googleOAuth.externalTestingPrerequisite,
+        500
+      ) !== value.googleOAuth.externalTestingPrerequisite
+      || typeof value.googleOAuth.readinessAttested !== "boolean"
+    ) {
+      throw new Error("Invalid invitation list");
+    }
+
+    const legacyEntries = Array.isArray(value.legacyReviewRequired)
+      ? value.legacyReviewRequired
+      : null;
+    const reportedLegacyCount = Number.isSafeInteger(
+      value.legacyReviewRequiredCount
+    )
+      ? value.legacyReviewRequiredCount
+      : legacyEntries
+        ? legacyEntries.length
+        : -1;
+    if (
+      !legacyEntries
+      || legacyEntries.length > 500
+      || reportedLegacyCount < 0
+      || reportedLegacyCount > 500
+      || reportedLegacyCount !== legacyEntries.length
+      || legacyEntries.some(function (entry) {
+        return (
+          !objectHasExactKeys(entry, ["status"])
+          || entry.status !== "explicit_review_required"
+        );
+      })
+    ) {
+      throw new Error("Invalid invitation list");
+    }
+
+    let invitations = value.invitations.map(normalizeTeamInvitation);
+    if (
+      new Set(invitations.map(function (item) {
+        return item.invitationRef;
+      })).size !== invitations.length
+    ) {
+      throw new Error("Invalid invitation list");
+    }
+
+    let revocationOutcome = null;
+    if (mode !== "list") {
+      if (
+        !objectHasAllKeys(value, mutationKeys)
+        || !objectHasExactKeys(
+          value.approval,
+          ["approvalId", "approvalDigest", "consumed"]
+        )
+        || value.emailSent !== false
+        || value.approval.consumed !== true
+        || !expectedReview
+        || value.approval.approvalId !== expectedReview.approvalId
+        || value.approval.approvalDigest !== expectedReview.approvalDigest
+      ) {
+        throw new Error("Invalid invitation result");
+      }
+      const changedInvitation = normalizeTeamInvitation(value.invitation);
+      const matchingInvitation = invitations.find(function (item) {
+        return item.invitationRef === changedInvitation.invitationRef;
+      });
+      if (
+        !matchingInvitation
+        || (
+          mode === "create"
+            ? changedInvitation.state !== "pending"
+              || !safeTeamInviteUrl(value.inviteUrl)
+            : changedInvitation.state !== "revoked"
+              || value.inviteUrl !== ""
+        )
+      ) {
+        throw new Error("Invalid invitation result");
+      }
+      if (mode === "create") {
+        const createdInviteUrl = safeTeamInviteUrl(value.inviteUrl);
+        invitations = invitations.map(function (item) {
+          return item.invitationRef === changedInvitation.invitationRef
+            ? { ...item, inviteUrl: createdInviteUrl }
+            : item;
+        });
+      } else {
+        const googleConnectorGrant = boundedString(
+          value.googleConnectorGrant,
+          32
+        );
+        const quoBinding = boundedString(value.quoBinding, 32);
+        const revokedSessionCount = value.revokedSessionCount;
+        if (
+          !["not_present", "revoked", "cleanup_required"].includes(
+            googleConnectorGrant
+          )
+          || !["not_present", "revoked", "cleanup_required"].includes(
+            quoBinding
+          )
+          || !Number.isSafeInteger(revokedSessionCount)
+          || revokedSessionCount < 0
+          || revokedSessionCount > 10_000
+        ) {
+          throw new Error("Invalid invitation revocation result");
+        }
+        revocationOutcome = {
+          googleConnectorGrant: googleConnectorGrant,
+          revokedSessionCount: revokedSessionCount,
+          quoBinding: quoBinding,
+          cleanupRequired:
+            googleConnectorGrant === "cleanup_required"
+            || quoBinding === "cleanup_required"
+        };
+      }
+    }
+    return {
+      invitations: invitations,
+      legacyReviewCount: reportedLegacyCount,
+      revocationOutcome: revocationOutcome
+    };
+  }
+
+  function normalizeTeamInvitation(value) {
+    const candidate = record(value);
+    if (
+      !objectHasExactKeys(candidate, [
+        "invitationRef",
+        "email",
+        "displayName",
+        "role",
+        "jobNimbusScope",
+        "state",
+        "invitedAt",
+        "expiresAt",
+        "acceptedAt",
+        "revokedAt"
+      ])
+    ) {
+      throw new Error("Invalid invitation");
+    }
+    const invitationRef = boundedString(candidate.invitationRef, 64);
+    const email = canonicalInviteEmail(candidate.email);
+    const displayName = boundedString(candidate.displayName, 256).trim();
+    const role = boundedString(candidate.role, 64);
+    const scope = boundedString(candidate.jobNimbusScope, 32);
+    const stateValue = boundedString(candidate.state, 32);
+    const invitedAt = boundedString(candidate.invitedAt, 40);
+    const expiresAt = boundedString(candidate.expiresAt, 40);
+    const acceptedAt = boundedString(candidate.acceptedAt, 40);
+    const revokedAt = boundedString(candidate.revokedAt, 40);
+    if (
+      !INVITATION_REF.test(invitationRef)
+      || !email
+      || !displayName
+      || !INVITATION_ROLES.has(role)
+      || scope !== "assigned"
+      || !INVITATION_STATES.has(stateValue)
+      || !validIsoInstant(invitedAt)
+      || !validIsoInstant(expiresAt)
+      || (acceptedAt && !validIsoInstant(acceptedAt))
+      || (revokedAt && !validIsoInstant(revokedAt))
+    ) {
+      throw new Error("Invalid invitation");
+    }
+    return {
+      invitationRef: invitationRef,
+      email: email,
+      displayName: displayName,
+      role: role,
+      jobNimbusScope: scope,
+      state: stateValue,
+      invitedAt: invitedAt,
+      expiresAt: expiresAt,
+      acceptedAt: acceptedAt,
+      revokedAt: revokedAt,
+      inviteUrl: ""
+    };
+  }
+
+  function normalizeTeamInvitationApproval(value) {
+    const approval = record(value.approval);
+    const plan = record(value.plan);
+    const action = boundedString(approval.action, 16);
+    const approvalId = boundedString(approval.approvalId, 128);
+    const approvalDigest = boundedString(approval.approvalDigest, 64);
+    const approvalExpiresAt = boundedString(approval.expiresAt, 40);
+    if (
+      !objectHasExactKeys(
+        value,
+        ["schema", "mode", "approval", "plan", "instruction"]
+      )
+      || !objectHasExactKeys(
+        approval,
+        [
+          "schema",
+          "approvalId",
+          "approvalDigest",
+          "action",
+          "expiresAt"
+        ]
+      )
+      || value.schema !== "hcn.team.invitation-approval.v1"
+      || value.mode !== "dry_run"
+      || approval.schema !== "hcn.team.invitation-approval.v1"
+      || boundedString(value.instruction, 500) !== value.instruction
+      || !["create", "revoke"].includes(action)
+      || action !== boundedString(plan.action, 16)
+      || !INVITATION_APPROVAL_ID.test(approvalId)
+      || !INVITATION_APPROVAL_DIGEST.test(approvalDigest)
+      || !validIsoInstant(approvalExpiresAt)
+    ) {
+      throw new Error("Invalid invitation approval");
+    }
+
+    const email = canonicalInviteEmail(plan.email);
+    const displayName = boundedString(plan.displayName, 256).trim();
+    const role = boundedString(plan.role, 64);
+    const scope = boundedString(plan.jobNimbusScope, 32);
+    const managementVisibility = boundedString(
+      plan.managementVisibility,
+      80
+    );
+    const expectedManagementVisibility = role === "manager"
+      ? "company_configured_adjuster_activity_sweep_read"
+      : "none";
+    if (
+      !email
+      || !displayName
+      || !INVITATION_ROLES.has(role)
+      || scope !== "assigned"
+      || managementVisibility !== expectedManagementVisibility
+    ) {
+      throw new Error("Invalid invitation approval");
+    }
+
+    const normalizedPlan = {
+      action: action,
+      email: email,
+      displayName: displayName,
+      role: role,
+      jobNimbusScope: scope,
+      managementVisibility: managementVisibility
+    };
+    if (action === "create") {
+      const invitationExpiresAt = boundedString(
+        plan.invitationExpiresAt,
+        40
+      );
+      const match = record(plan.jobNimbusMatch);
+      if (
+        !objectHasExactKeys(
+          plan,
+          [
+            "action",
+            "email",
+            "displayName",
+            "role",
+            "jobNimbusScope",
+            "managementVisibility",
+            "invitationExpiresAt",
+            "jobNimbusMatch"
+          ]
+        )
+        || !objectHasExactKeys(match, ["verified", "active"])
+        || !INVITATION_FORM_ROLES.has(role)
+        || !validIsoInstant(invitationExpiresAt)
+        || match.verified !== true
+        || match.active !== true
+      ) {
+        throw new Error("Invalid invitation approval");
+      }
+      normalizedPlan.invitationExpiresAt = invitationExpiresAt;
+    } else {
+      const invitationRef = boundedString(plan.invitationRef, 64);
+      const currentState = boundedString(plan.currentState, 32);
+      const connectorGrant = boundedString(plan.connectorGrant, 32);
+      const quoBinding = boundedString(plan.quoBinding, 32);
+      if (
+        !objectHasExactKeys(
+          plan,
+          [
+            "action",
+            "invitationRef",
+            "email",
+            "displayName",
+            "role",
+            "jobNimbusScope",
+            "managementVisibility",
+            "currentState",
+            "connectorGrant",
+            "quoBinding"
+          ]
+        )
+        || !INVITATION_REF.test(invitationRef)
+        || !["pending", "accepted"].includes(currentState)
+        || connectorGrant !== "revoke_if_present"
+        || quoBinding !== "revoke_if_present"
+      ) {
+        throw new Error("Invalid invitation approval");
+      }
+      normalizedPlan.invitationRef = invitationRef;
+      normalizedPlan.currentState = currentState;
+      normalizedPlan.connectorGrant = connectorGrant;
+      normalizedPlan.quoBinding = quoBinding;
+    }
+    return {
+      action: action,
+      approvalId: approvalId,
+      approvalDigest: approvalDigest,
+      approvalExpiresAt: approvalExpiresAt,
+      plan: normalizedPlan
+    };
+  }
+
+  function objectHasOnlyKeys(value, allowedKeys) {
+    if (!isRecord(value)) return false;
+    const allowed = new Set(allowedKeys);
+    return Object.keys(value).every(function (key) {
+      return allowed.has(key);
+    });
+  }
+
+  function objectHasAllKeys(value, requiredKeys) {
+    if (!isRecord(value)) return false;
+    return requiredKeys.every(function (key) {
+      return Object.prototype.hasOwnProperty.call(value, key);
+    });
+  }
+
+  function objectHasExactKeys(value, expectedKeys) {
+    return (
+      objectHasOnlyKeys(value, expectedKeys)
+      && objectHasAllKeys(value, expectedKeys)
+      && Object.keys(value).length === expectedKeys.length
+    );
+  }
+
+  function canonicalInviteEmail(value) {
+    const email = boundedString(value, 254).trim().toLowerCase();
+    if (
+      email.length < 3
+      || email.includes("..")
+      || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ) {
+      return "";
+    }
+    return email;
+  }
+
+  function safeTeamInviteUrl(value) {
+    const raw = boundedString(value, 1200);
+    if (!raw) return "";
+    try {
+      const url = new URL(raw, window.location.origin);
+      if (
+        url.origin !== window.location.origin
+        || !url.pathname.startsWith("/hcn/")
+        || url.search
+        || !url.hash
+        || url.username
+        || url.password
+      ) {
+        return "";
+      }
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+
+  function renderTeamInviteReview(review) {
+    renderTeamReviewFields(
+      elements["team-invite-review-fields"],
+      [
+        ["Work email", review.plan.email],
+        ["Employee", review.plan.displayName],
+        ["Role", humanize(review.plan.role)],
+        ["File access", teamInvitationScopeLabel(review.plan.role)],
+        [
+          "Invite expires",
+          readableCentralDateTime(review.plan.invitationExpiresAt)
+        ],
+        [
+          "Review expires",
+          readableCentralDateTime(review.approvalExpiresAt)
+        ]
+      ]
+    );
+  }
+
+  function renderTeamRevokeReview(review) {
+    renderTeamReviewFields(
+      elements["team-revoke-review-fields"],
+      [
+        ["Work email", review.plan.email],
+        ["Employee", review.plan.displayName],
+        ["Role", humanize(review.plan.role)],
+        ["File access", teamInvitationScopeLabel(review.plan.role)],
+        ["Current state", teamInvitationStateLabel(review.plan.currentState)],
+        ["Google Gmail & Calendar", "Revoke connection if present"],
+        ["Quo work line", "Revoke binding if present"],
+        [
+          "Review expires",
+          readableCentralDateTime(review.approvalExpiresAt)
+        ]
+      ]
+    );
+  }
+
+  function renderTeamReviewFields(container, rows) {
+    const fragment = document.createDocumentFragment();
+    rows.forEach(function (row) {
+      const wrapper = document.createElement("div");
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      setText(term, row[0]);
+      setText(detail, row[1]);
+      wrapper.append(term, detail);
+      fragment.append(wrapper);
+    });
+    container.replaceChildren(fragment);
+  }
+
+  function renderTeamInvitations() {
+    const invitations = Array.isArray(state.teamInvitations)
+      ? state.teamInvitations
+      : [];
+    setText(elements["team-invitation-count"], String(invitations.length));
+    if (!invitations.length) {
+      renderWorkspaceEmpty(
+        elements["team-invitation-list"],
+        "No HCN invitations have been created."
+      );
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    invitations.forEach(function (invitation) {
+      const item = document.createElement("article");
+      const heading = document.createElement("div");
+      const copy = document.createElement("div");
+      const name = document.createElement("strong");
+      const email = document.createElement("span");
+      const status = document.createElement("span");
+      const meta = document.createElement("p");
+      const actions = document.createElement("div");
+
+      item.className = "team-invitation-item";
+      heading.className = "team-invitation-heading";
+      copy.className = "team-invitation-copy";
+      status.className = "card-status";
+      status.dataset.tone = teamInvitationStateTone(invitation.state);
+      meta.className = "team-invitation-meta";
+      actions.className = "team-invitation-actions";
+      setText(name, invitation.displayName);
+      setText(email, invitation.email);
+      setText(status, teamInvitationStateLabel(invitation.state));
+      setText(
+        meta,
+        humanize(invitation.role)
+          + " · " + teamInvitationScopeLabel(invitation.role) + " · Expires "
+          + readableCentralDateTime(invitation.expiresAt)
+      );
+      copy.append(name, email);
+      heading.append(copy, status);
+
+      if (invitation.state === "pending" && invitation.inviteUrl) {
+        const copyButton = document.createElement("button");
+        copyButton.type = "button";
+        copyButton.className = "button button-surface";
+        setText(copyButton, "Copy invite link");
+        copyButton.addEventListener("click", function () {
+          copyTeamInviteLink(invitation);
+        });
+        actions.append(copyButton);
+      }
+      if (["pending", "accepted"].includes(invitation.state)) {
+        const revokeButton = document.createElement("button");
+        revokeButton.type = "button";
+        revokeButton.className = "button button-surface";
+        setText(revokeButton, "Review revoke");
+        revokeButton.addEventListener("click", function () {
+          prepareTeamInvitationRevoke(invitation.invitationRef);
+        });
+        actions.append(revokeButton);
+      }
+      item.append(heading, meta);
+      if (actions.childElementCount) item.append(actions);
+      fragment.append(item);
+    });
+    elements["team-invitation-list"].replaceChildren(fragment);
+  }
+
+  async function copyTeamInviteLink(invitation) {
+    const inviteUrl = safeTeamInviteUrl(record(invitation).inviteUrl);
+    if (!inviteUrl || record(invitation).state !== "pending") {
+      notice(
+        elements["team-alert"],
+        "This one-time invite link is no longer available. Revoke the pending invitation and create a new one.",
+        "bad"
+      );
+      return;
+    }
+    if (
+      !navigator.clipboard
+      || typeof navigator.clipboard.writeText !== "function"
+    ) {
+      notice(
+        elements["team-alert"],
+        "This browser cannot copy the one-time invite link. Keep this page open and try again in a supported browser, or revoke the invitation and create a new one.",
+        "bad"
+      );
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      notice(
+        elements["team-alert"],
+        "Invite link copied. Confirm the exact email is a Google OAuth test user before sharing it.",
+        "good"
+      );
+    } catch {
+      notice(
+        elements["team-alert"],
+        "The browser blocked copying. Keep this page open and allow clipboard access, or revoke the invitation and create a new one.",
+        "bad"
+      );
+    }
+  }
+
+  function teamInvitationStateLabel(value) {
+    if (value === "accepted") return "Active";
+    return humanize(value);
+  }
+
+  function renderTeamRevocationOutcome(outcome) {
+    const result = record(outcome);
+    const sessions = Number(result.revokedSessionCount);
+    const googleStatus = cleanupResultLabel(
+      result.googleConnectorGrant,
+      "Google Gmail & Calendar connection"
+    );
+    const quoStatus = cleanupResultLabel(
+      result.quoBinding,
+      "Quo work-line binding"
+    );
+    const cleanupRequired = result.cleanupRequired === true;
+    notice(
+      elements["team-alert"],
+      "HCN revoked the employee authorization and closed "
+        + sessions + " browser session" + (sessions === 1 ? "" : "s")
+        + ". " + googleStatus + ". " + quoStatus + "."
+        + (
+          cleanupRequired
+            ? " External connector cleanup is still open and needs follow-up."
+            : ""
+        ),
+      cleanupRequired ? "warn" : "good"
+    );
+    badge(
+      elements["team-status"],
+      cleanupRequired ? "Cleanup needed" : "Revoked",
+      cleanupRequired ? "warn" : "good"
+    );
+  }
+
+  function cleanupResultLabel(value, label) {
+    if (value === "revoked") return label + ": revoked";
+    if (value === "not_present") return label + ": not present";
+    return label + ": cleanup required";
+  }
+
+  function teamInvitationScopeLabel(role) {
+    return role === "manager"
+      ? "Assigned-file actions + company sweep visibility"
+      : "Assigned files only";
+  }
+
+  function teamInvitationStateTone(value) {
+    if (value === "accepted") return "good";
+    if (value === "pending") return "warn";
+    if (value === "revoked" || value === "expired") return "neutral";
+    return "bad";
+  }
+
+  function teamInvitationErrorMessage(error, action) {
+    if (!navigator.onLine) {
+      return "The connection went offline. No invitation change is assumed.";
+    }
+    const status = statusOf(error);
+    if (status === 409) {
+      return "That invitation review changed or expired. Prepare a fresh review.";
+    }
+    if (status === 422) {
+      return "HCN could not verify one active JobNimbus employee for that exact email.";
+    }
+    if (status === 429) {
+      return "Invitation controls are busy. Wait a moment and try again.";
+    }
+    if (status === 502 || status === 503 || status === 507) {
+      return "Invitation controls are temporarily unavailable. No change is assumed.";
+    }
+    return action === "list"
+      ? "The invitation list could not be verified."
+      : action === "prepare"
+        ? "The exact invitation review could not be prepared."
+        : "The invitation change was not confirmed. Prepare a fresh review before trying again.";
   }
 
   async function loadManagementSweep() {
