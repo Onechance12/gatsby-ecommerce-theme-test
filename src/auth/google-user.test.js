@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CODEX_HP_MANAGEMENT_SWEEP_SCOPE,
+  CODEX_HP_OPERATOR_SUBJECT,
   CODEX_OPERATOR_ALLOWED_ROUTES,
   HCN_BROWSER_ASSIGNED_ACTION_ROUTES,
   HCN_BROWSER_ALLOWED_ROUTES,
@@ -462,6 +464,69 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
 
   assert.equal(routeAllowed(spoofedGoogleOperator, "POST", "/ops/action-batch"), false);
   assert.equal(routeAllowed({ type: "codex_operator_token", role: "chance" }, "POST", "/ops/action-batch"), false);
+});
+
+test("fixed management sweep admits only the exact scoped HP operator or an existing management browser role", () => {
+  const route = "/hcn/api/v1/management-sweep";
+  const hpOperator = {
+    type: "codex_operator_token",
+    subject: CODEX_HP_OPERATOR_SUBJECT,
+    role: "codex_operator",
+    scopes: [
+      "client_evidence:read",
+      CODEX_HP_MANAGEMENT_SWEEP_SCOPE
+    ]
+  };
+
+  assert.equal(routeAllowed(hpOperator, "POST", route), true);
+  assert.equal(
+    CODEX_OPERATOR_ALLOWED_ROUTES.has(`POST ${route}`),
+    false,
+    "the fixed report must not broaden the generic Codex operator route set"
+  );
+
+  for (const identity of [
+    { ...hpOperator, subject: "codex-mac-operator" },
+    { ...hpOperator, subject: "codex-other-operator" },
+    {
+      ...hpOperator,
+      scopes: ["client_evidence:read"]
+    },
+    { ...hpOperator, role: "chance" },
+    { ...hpOperator, type: "bridge_token" },
+    { type: "codex_operator_token", role: "codex_operator" },
+    { type: "google_oauth", role: "chance" },
+    { type: "hcn_browser_session", role: "employee" }
+  ]) {
+    assert.equal(routeAllowed(identity, "POST", route), false);
+  }
+
+  for (const role of ["chance", "administrator", "manager"]) {
+    assert.equal(
+      routeAllowed(
+        { type: "hcn_browser_session", role },
+        "POST",
+        route
+      ),
+      true,
+      role
+    );
+  }
+
+  for (const effectRoute of [
+    "POST /jobnimbus/create-note",
+    "POST /jobnimbus/create-task",
+    "POST /gmail/send",
+    "POST /quo/send",
+    "POST /voice/outbound-call"
+  ]) {
+    const [method, pathname] = effectRoute.split(" ");
+    assert.equal(
+      routeAllowed(hpOperator, method, pathname),
+      false,
+      effectRoute
+    );
+  }
 });
 
 test("shared bridge token preserves legacy routes but cannot read scoped session metadata", () => {

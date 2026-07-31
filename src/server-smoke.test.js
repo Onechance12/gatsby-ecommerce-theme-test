@@ -863,7 +863,13 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(identity.identity.role, "codex_operator");
   assert.equal(identity.identity.subject, "codex-hp-operator");
   assert.equal(identity.identity.email, "");
-  assert.deepEqual(identity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
+  assert.deepEqual(identity.identity.scopes, [
+    "client_evidence:read",
+    "management_sweep:read",
+    "approval_batches:prepare_execute"
+  ]);
+  assert.equal(identity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(identity.operatorAccess.fixedManagementSweepRead, true);
   assert.match(identity.instruction, /dedicated least-privilege Codex operator/i);
 
   const macIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
@@ -886,6 +892,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(macIdentity.operatorAccess.defaultScope, "chance_assigned");
   assert.equal(macIdentity.operatorAccess.companyExactFileScope, true);
   assert.equal(macIdentity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(macIdentity.operatorAccess.fixedManagementSweepRead, false);
   assert.match(macIdentity.instruction, /dedicated least-privilege Codex Mac Operator/i);
 
   const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
@@ -900,6 +907,12 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(platformSession.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
   assert.equal(platformSession.build.sourceCommitTrust, "provider_attested");
   assert.equal(platformSession.authorizedCapabilities.includes("platform.session.read"), true);
+  assert.equal(
+    platformSession.authorizedCapabilities.includes(
+      "hcn.management_sweep.read"
+    ),
+    true
+  );
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".send")), false);
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".upload")), false);
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.startsWith("brain.")), false);
@@ -2950,7 +2963,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       ]),
       AUTO_ENROLL_WAVE_USERS: "false",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-for-ambiguity",
-      CODEX_OPERATOR_TOKEN: "",
+      CODEX_OPERATOR_TOKEN:
+        "fixture-hcn-hp-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN:
+        "fixture-hcn-mac-operator-token-1234567890",
       JOBNIMBUS_API_KEY: "hcn-jobnimbus-api-key",
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
       RETELL_API_KEY: "",
@@ -2988,6 +3004,19 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(
     managementHealth.userOAuth.perUserGmail,
     "custom_gpt_broker_and_hcn_connector"
+  );
+  assert.deepEqual(
+    managementHealth.codexOperator.fixedManagementSweepRead,
+    {
+      hpOperatorConfigured: true,
+      hpOperatorReady: true,
+      macOperatorAuthorized: false,
+      readOnly: true
+    }
+  );
+  assert.equal(
+    managementHealth.codexOperator.companyWideIndexOrSweep,
+    false
   );
   assert.equal(managementHealth.gmailConfigured, true);
   assert.deepEqual(managementHealth.hcnAssistant, {
@@ -3818,6 +3847,92 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     1
   );
 
+  const hpManagementRequestsBefore = hcnProviderRequests.length;
+  const hpMutationRequestsBefore = jobNimbusMutationRequests.length;
+  const hpManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer fixture-hcn-hp-operator-token-1234567890",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  assert.equal(hpManagementSweepResponse.status, 200);
+  assert.equal(
+    hpManagementSweepResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const hpManagementSweep = await hpManagementSweepResponse.json();
+  assert.equal(
+    hpManagementSweep.schema,
+    "hcn.console.management-sweep.v1"
+  );
+  assert.equal(hpManagementSweep.ephemeral, true);
+  assert.equal(hpManagementSweep.adjusters.length, 3);
+  assert.equal(
+    jobNimbusMutationRequests.length,
+    hpMutationRequestsBefore
+  );
+  assert.equal(
+    hcnProviderRequests
+      .slice(hpManagementRequestsBefore)
+      .every((request) => request.startsWith("jobnimbus:")),
+    true
+  );
+  const serializedHpManagementSweep =
+    JSON.stringify(hpManagementSweep);
+  for (const forbidden of [
+    exactFileId,
+    otherOwnerContact.jnid,
+    thirdOwnerContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    chanceOwnerId,
+    otherOwnerId,
+    thirdOwnerId,
+    "active.homeowner@example.test",
+    "2145551212",
+    "HCN-POLICY-1001",
+    "Fresh synthetic carrier activity"
+  ]) {
+    assert.equal(
+      serializedHpManagementSweep.includes(forbidden),
+      false,
+      `HP management sweep leaked ${forbidden}`
+    );
+  }
+
+  const deniedManagementRequestsBefore =
+    hcnProviderRequests.length;
+  for (const authorization of [
+    "Bearer fixture-hcn-mac-operator-token-1234567890",
+    "Bearer fixture-shared-bridge-token-for-ambiguity"
+  ]) {
+    const deniedManagementSweepResponse = await fetch(
+      `${origin}/hcn/api/v1/management-sweep`,
+      {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ limitPerAdjuster: 10 })
+      }
+    );
+    assert.equal(deniedManagementSweepResponse.status, 403);
+  }
+  assert.equal(
+    hcnProviderRequests.length,
+    deniedManagementRequestsBefore
+  );
+  assert.equal(
+    jobNimbusMutationRequests.length,
+    hpMutationRequestsBefore
+  );
+
   const managementRequestsBefore = hcnProviderRequests.length;
   hcnManagementActivityFilters.length = 0;
   const managementSweepResponse = await fetch(
@@ -3876,12 +3991,21 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     Array.from({ length: 3 }, () => ({
       fetchedEventCount: 1,
       acceptedEventCount: 1,
+      ambiguousReferenceEventCount: 0,
       communicationActivityCount: 0,
       operationalActivityCount: 1,
       noiseCount: 0,
       unsupportedEventCount: 0,
       ignoredUnfreshEventCount: 0
     }))
+  );
+  assert.equal(
+    managementSweep.summary.unsupportedActivityRecordCount,
+    0
+  );
+  assert.equal(
+    managementSweep.summary.ambiguousActivityReferenceCount,
+    0
   );
   assert.equal(managementSweep.completeness.status, "complete");
   assert.deepEqual(
@@ -3996,7 +4120,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     nonInsuranceContact.jnid
   ]) {
     ambiguousManagementReferenceId = secondFileId;
-    const ambiguousManagementSweepResponse = await fetch(
+    const outOfScopeReferenceResponse = await fetch(
       `${origin}/hcn/api/v1/management-sweep`,
       {
         method: "POST",
@@ -4005,19 +4129,105 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       }
     );
     ambiguousManagementReferenceId = "";
-    assert.equal(ambiguousManagementSweepResponse.status, 503);
-    const ambiguousManagementSweepBody =
-      await ambiguousManagementSweepResponse.json();
+    assert.equal(outOfScopeReferenceResponse.status, 200);
+    const outOfScopeReferenceSweep =
+      await outOfScopeReferenceResponse.json();
     assert.equal(
-      ambiguousManagementSweepBody.error,
-      "One or more JobNimbus activities have ambiguous file scope."
+      outOfScopeReferenceSweep.completeness.status,
+      "complete"
+    );
+    assert.equal(
+      outOfScopeReferenceSweep.sourceHealth[0].status,
+      "complete"
+    );
+    assert.equal(
+      outOfScopeReferenceSweep.summary.ambiguousActivityReferenceCount,
+      0
+    );
+    const outOfScopeReferenceChanceItem =
+      outOfScopeReferenceSweep.adjusters[0].items[0];
+    assert.equal(
+      outOfScopeReferenceChanceItem.eventSummary.acceptedEventCount,
+      1
+    );
+    assert.equal(
+      outOfScopeReferenceChanceItem.eventSummary
+        .ambiguousReferenceEventCount,
+      0
+    );
+    assert.equal(
+      outOfScopeReferenceChanceItem.gaps.operationalActivity.lastAt,
+      "2026-07-27T14:00:00.000Z"
     );
     assert.doesNotMatch(
-      JSON.stringify(ambiguousManagementSweepBody),
+      JSON.stringify(outOfScopeReferenceSweep),
       /jn-fixture|fixture-(?:chance|other|third|unconfigured)-owner/
     );
     assert.equal(jobNimbusMutationRequests.length, 0);
   }
+
+  ambiguousManagementReferenceId = otherOwnerContact.jnid;
+  const crossFileManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  ambiguousManagementReferenceId = "";
+  assert.equal(crossFileManagementSweepResponse.status, 200);
+  const crossFileManagementSweep =
+    await crossFileManagementSweepResponse.json();
+  assert.equal(crossFileManagementSweep.completeness.status, "partial");
+  assert.equal(crossFileManagementSweep.sourceHealth[0].status, "partial");
+  assert.equal(
+    crossFileManagementSweep.summary.ambiguousActivityReferenceCount,
+    1
+  );
+  assert.match(
+    crossFileManagementSweep.completeness.summary,
+    /multiple eligible files and were conservatively excluded/
+  );
+  const crossFileChanceItem =
+    crossFileManagementSweep.adjusters[0].items[0];
+  assert.equal(crossFileChanceItem.eventSummary.fetchedEventCount, 1);
+  assert.equal(crossFileChanceItem.eventSummary.acceptedEventCount, 0);
+  assert.equal(
+    crossFileChanceItem.eventSummary.operationalActivityCount,
+    0
+  );
+  assert.equal(crossFileChanceItem.eventSummary.unsupportedEventCount, 0);
+  assert.equal(
+    crossFileChanceItem.eventSummary.ambiguousReferenceEventCount,
+    1
+  );
+  assert.equal(crossFileChanceItem.evidenceHealth.status, "partial");
+  assert.match(
+    crossFileChanceItem.evidenceHealth.summary,
+    /cross-file activity reference was conservatively excluded/
+  );
+  assert.equal(
+    crossFileChanceItem.gaps.operationalActivity.lastAt,
+    null
+  );
+  assert.equal(
+    crossFileChanceItem.gaps.operationalActivity.basis,
+    "active_since"
+  );
+  assert.equal(
+    crossFileChanceItem.lastTouch.summary,
+    "No verified JobNimbus activity was found"
+  );
+  const crossFileCompanyItem = crossFileManagementSweep.companyWorst.find(
+    (item) => item.fileRef === crossFileChanceItem.fileRef
+  );
+  assert.equal(crossFileCompanyItem.evidenceHealth.status, "partial");
+  assert.doesNotMatch(
+    JSON.stringify(crossFileManagementSweep),
+    /jn-fixture|fixture-(?:chance|other|third|unconfigured)-owner|Fresh synthetic carrier activity|active\.homeowner@example\.test|2145551212/
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
 
   managementActivityOverride = {
     record_type_name: "Email",
@@ -4044,6 +4254,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(
     unsupportedManagementSweep.summary.unsupportedActivityRecordCount,
     1
+  );
+  assert.equal(
+    unsupportedManagementSweep.summary.ambiguousActivityReferenceCount,
+    0
   );
   const chanceManagementItem =
     unsupportedManagementSweep.adjusters[0].items[0];
