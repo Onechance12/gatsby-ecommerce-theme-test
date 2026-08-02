@@ -1,15 +1,23 @@
-import {
-  HCN_ASSISTANT_ACTION_PLAN_SCHEMA,
-  translateAssistantActionPlan
-} from "./action-plan.js";
-
 const FILE_REF_PATTERN = /^subject_[a-f0-9]{32}$/;
+const EVIDENCE_REF_PATTERN = /^ref_[a-f0-9]{32}$/;
 
+/**
+ * The complete model-facing Thresher toolbelt.
+ *
+ * Every entry is a read. There is intentionally no plan, approval, send,
+ * write, upload, call, delete, credential, identity-selection, or generic
+ * HTTP tool in this registry. The server injects and rechecks the signed-in
+ * employee identity for every call.
+ */
 export const HCN_ASSISTANT_TOOL_NAMES = Object.freeze([
   "read_work_center",
   "review_file",
+  "read_file_document_catalog",
+  "read_file_document",
+  "read_file_photo_catalog",
+  "research_file_hail_dates",
   "run_management_sweep",
-  "prepare_action_plan"
+  "read_closed_file_benchmark"
 ]);
 
 const TOOL_NAME_SET = new Set(HCN_ASSISTANT_TOOL_NAMES);
@@ -18,7 +26,8 @@ export const HCN_ASSISTANT_TOOLS = deepFreeze([
   {
     type: "function",
     name: "read_work_center",
-    description: "Read one page of the signed-in employee's assigned work center. Page through results when an exact file is not in the first page.",
+    description:
+      "Read one page of the signed-in employee's active assigned JobNimbus files. Page through results to locate an exact file_ref.",
     strict: true,
     parameters: {
       type: "object",
@@ -41,7 +50,84 @@ export const HCN_ASSISTANT_TOOLS = deepFreeze([
   {
     type: "function",
     name: "review_file",
-    description: "Read fresh evidence for one exact assigned HCN file.",
+    description:
+      "Read fresh JobNimbus, Gmail, and Quo evidence plus deterministic HCN workflow intelligence for one exact active file assigned to the signed-in employee.",
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        file_ref: {
+          type: "string",
+          pattern: "^subject_[a-f0-9]{32}$"
+        }
+      },
+      required: ["file_ref"]
+    }
+  },
+  {
+    type: "function",
+    name: "read_file_document_catalog",
+    description:
+      "Read the complete opaque metadata catalog of operational JobNimbus documents for one exact assigned file, including older documents not present in the recent file review.",
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        file_ref: {
+          type: "string",
+          pattern: "^subject_[a-f0-9]{32}$"
+        }
+      },
+      required: ["file_ref"]
+    }
+  },
+  {
+    type: "function",
+    name: "read_file_document",
+    description:
+      "Read and analyze one exact JobNimbus document already listed by review_file or read_file_document_catalog. Requires both opaque file_ref and document_ref and never uploads or changes the document.",
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        file_ref: {
+          type: "string",
+          pattern: "^subject_[a-f0-9]{32}$"
+        },
+        document_ref: {
+          type: "string",
+          pattern: "^ref_[a-f0-9]{32}$"
+        }
+      },
+      required: ["file_ref", "document_ref"]
+    }
+  },
+  {
+    type: "function",
+    name: "read_file_photo_catalog",
+    description:
+      "Read an opaque metadata catalog of JobNimbus photos for one exact assigned file. This proves what photo batches exist but does not claim visual findings.",
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        file_ref: {
+          type: "string",
+          pattern: "^subject_[a-f0-9]{32}$"
+        }
+      },
+      required: ["file_ref"]
+    }
+  },
+  {
+    type: "function",
+    name: "research_file_hail_dates",
+    description:
+      "Research bounded hail-date candidates for the exact assigned file's verified JobNimbus property address. Results are research evidence only and never update a date of loss.",
     strict: true,
     parameters: {
       type: "object",
@@ -58,7 +144,8 @@ export const HCN_ASSISTANT_TOOLS = deepFreeze([
   {
     type: "function",
     name: "run_management_sweep",
-    description: "Run the authorized management activity-gap sweep.",
+    description:
+      "Run the role-authorized company activity-gap sweep. The server rejects this tool unless the signed-in HCN role has management access.",
     strict: true,
     parameters: {
       type: "object",
@@ -75,11 +162,22 @@ export const HCN_ASSISTANT_TOOLS = deepFreeze([
   },
   {
     type: "function",
-    name: "prepare_action_plan",
+    name: "read_closed_file_benchmark",
     description:
-      "Prepare exact file actions for human review; this never executes them.",
+      "Read the role-authorized four-year JobNimbus closed-file benchmark and repeatability leaders. The server rejects this tool unless the signed-in HCN role has management access.",
     strict: true,
-    parameters: HCN_ASSISTANT_ACTION_PLAN_SCHEMA
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        limit: {
+          type: "integer",
+          minimum: 5,
+          maximum: 30
+        }
+      },
+      required: ["limit"]
+    }
   }
 ]);
 
@@ -119,14 +217,31 @@ export function normalizeHcnAssistantToolCall(name, input) {
         limit: input.limit
       });
     case "review_file":
-      exactRecord(input, ["file_ref"], "review_file input");
-      if (
-        typeof input.file_ref !== "string"
-        || !FILE_REF_PATTERN.test(input.file_ref)
-      ) {
-        malformed("review_file requires one opaque file_ref");
-      }
+    case "read_file_document_catalog":
+    case "read_file_photo_catalog":
+    case "research_file_hail_dates":
+      exactRecord(input, ["file_ref"], `${name} input`);
+      requireFileRef(input.file_ref, name);
       return Object.freeze({ fileRef: input.file_ref });
+    case "read_file_document":
+      exactRecord(
+        input,
+        ["file_ref", "document_ref"],
+        "read_file_document input"
+      );
+      requireFileRef(input.file_ref, "read_file_document");
+      if (
+        typeof input.document_ref !== "string"
+        || !EVIDENCE_REF_PATTERN.test(input.document_ref)
+      ) {
+        malformed(
+          "read_file_document requires one opaque document_ref"
+        );
+      }
+      return Object.freeze({
+        fileRef: input.file_ref,
+        documentRef: input.document_ref
+      });
     case "run_management_sweep":
       exactRecord(
         input,
@@ -138,13 +253,23 @@ export function normalizeHcnAssistantToolCall(name, input) {
         || input.limit_per_adjuster < 1
         || input.limit_per_adjuster > 10
       ) {
-        malformed("limit_per_adjuster must be an integer from 1 through 10");
+        malformed(
+          "limit_per_adjuster must be an integer from 1 through 10"
+        );
       }
       return Object.freeze({
         limitPerAdjuster: input.limit_per_adjuster
       });
-    case "prepare_action_plan":
-      return translateAssistantActionPlan(input);
+    case "read_closed_file_benchmark":
+      exactRecord(input, ["limit"], "read_closed_file_benchmark input");
+      if (
+        !Number.isSafeInteger(input.limit)
+        || input.limit < 5
+        || input.limit > 30
+      ) {
+        malformed("limit must be an integer from 5 through 30");
+      }
+      return Object.freeze({ limit: input.limit });
     default:
       throw new HcnAssistantToolError(
         "unknown_tool",
@@ -158,6 +283,12 @@ export class HcnAssistantToolError extends TypeError {
     super(message);
     this.name = "HcnAssistantToolError";
     this.code = code;
+  }
+}
+
+function requireFileRef(value, toolName) {
+  if (typeof value !== "string" || !FILE_REF_PATTERN.test(value)) {
+    malformed(`${toolName} requires one opaque file_ref`);
   }
 }
 
@@ -180,7 +311,9 @@ function exactRecord(value, keys, label) {
   }
   if (
     ownKeys.length !== keys.length
-    || ownKeys.some((key) => typeof key !== "string" || !keys.includes(key))
+    || ownKeys.some(
+      (key) => typeof key !== "string" || !keys.includes(key)
+    )
   ) {
     malformed(`${label} must contain only its documented fields`);
   }

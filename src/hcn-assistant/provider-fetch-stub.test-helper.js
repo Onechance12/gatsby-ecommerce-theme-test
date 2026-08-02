@@ -7,6 +7,8 @@ const recordPath =
   String(process.env.HCN_TEST_THRESHER_RECORD_PATH || "").trim();
 const responseText =
   String(process.env.HCN_TEST_THRESHER_RESPONSE_TEXT || "").trim();
+const toolPromptMarker =
+  String(process.env.HCN_TEST_THRESHER_TOOL_PROMPT_MARKER || "").trim();
 
 if (!recordPath || !responseText) {
   throw new Error("HCN test provider stub is not configured.");
@@ -31,6 +33,50 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
     })}\n`,
     "utf8"
   );
+
+  const serializedInput = JSON.stringify(body.input || []);
+  const latestUserMessage = Array.isArray(body.input)
+    ? [...body.input].reverse().find(
+      (item) => item?.role === "user" && typeof item?.content === "string"
+    )?.content || ""
+    : "";
+  if (toolPromptMarker && latestUserMessage.includes(toolPromptMarker)) {
+    const hasToolOutput = Array.isArray(body.input)
+      && body.input.some(
+        (item) => item?.type === "function_call_output"
+      );
+    if (!hasToolOutput) {
+      const fileRef = serializedInput.match(/subject_[a-f0-9]{32}/)?.[0];
+      if (!fileRef) {
+        throw new Error("HCN test document-catalog tool call is missing file_ref.");
+      }
+      return new Response(
+        JSON.stringify({
+          status: "completed",
+          output: [
+            {
+              id: "rs_catalog_fixture",
+              type: "reasoning",
+              summary: [],
+              encrypted_content: "encrypted_catalog_fixture"
+            },
+            {
+              id: "fc_catalog_fixture",
+              type: "function_call",
+              call_id: "call_catalog_fixture",
+              name: "read_file_document_catalog",
+              arguments: JSON.stringify({ file_ref: fileRef }),
+              status: "completed"
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        }
+      );
+    }
+  }
 
   return new Response(
     JSON.stringify({

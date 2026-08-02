@@ -8,8 +8,10 @@ import {
   runHcnAssistant
 } from "./core.js";
 import {
+  HcnAssistantToolError,
   HCN_ASSISTANT_TOOL_NAMES,
-  HCN_ASSISTANT_TOOLS
+  HCN_ASSISTANT_TOOLS,
+  normalizeHcnAssistantToolCall
 } from "./tools.js";
 
 const FILE_REF = `subject_${"a".repeat(32)}`;
@@ -75,12 +77,16 @@ function defaultRun(overrides = {}) {
   });
 }
 
-test("assistant exposes only read and prepare tools, never an execute or approval tool", () => {
+test("assistant exposes only fixed read tools", () => {
   assert.deepEqual(HCN_ASSISTANT_TOOL_NAMES, [
     "read_work_center",
     "review_file",
+    "read_file_document_catalog",
+    "read_file_document",
+    "read_file_photo_catalog",
+    "research_file_hail_dates",
     "run_management_sweep",
-    "prepare_action_plan"
+    "read_closed_file_benchmark"
   ]);
   assert.deepEqual(
     HCN_ASSISTANT_TOOLS.map((tool) => tool.name),
@@ -94,7 +100,9 @@ test("assistant exposes only read and prepare tools, never an execute or approva
   }
   assert.equal(
     HCN_ASSISTANT_TOOLS.some((tool) =>
-      /execute|approve/i.test(tool.name)
+      /prepare|plan|execute|approve|send|write|upload|call|delete/i.test(
+        tool.name
+      )
     ),
     false
   );
@@ -103,11 +111,69 @@ test("assistant exposes only read and prepare tools, never an execute or approva
   );
   assert.equal(
     parameterNames.some((name) =>
-      /identity|execute|approve|approvalDigest|challenge/i.test(name)
+      /identity|provider|execute|approve|approvalDigest|challenge/i.test(
+        name
+      )
     ),
     false
   );
-  assert.match(DEFAULT_HCN_ASSISTANT_INSTRUCTIONS, /cannot execute/i);
+  assert.match(DEFAULT_HCN_ASSISTANT_INSTRUCTIONS, /read-only/i);
+  assert.match(
+    DEFAULT_HCN_ASSISTANT_INSTRUCTIONS,
+    /cannot prepare or store an action plan/i
+  );
+});
+
+test("read-tool contracts accept only opaque scoped references and bounds", () => {
+  const documentRef = `ref_${"b".repeat(32)}`;
+  assert.deepEqual(
+    normalizeHcnAssistantToolCall("read_file_document_catalog", {
+      file_ref: FILE_REF
+    }),
+    { fileRef: FILE_REF }
+  );
+  assert.deepEqual(
+    normalizeHcnAssistantToolCall("read_file_document", {
+      file_ref: FILE_REF,
+      document_ref: documentRef
+    }),
+    { fileRef: FILE_REF, documentRef }
+  );
+  assert.deepEqual(
+    normalizeHcnAssistantToolCall("read_file_photo_catalog", {
+      file_ref: FILE_REF
+    }),
+    { fileRef: FILE_REF }
+  );
+  assert.deepEqual(
+    normalizeHcnAssistantToolCall("research_file_hail_dates", {
+      file_ref: FILE_REF
+    }),
+    { fileRef: FILE_REF }
+  );
+  assert.deepEqual(
+    normalizeHcnAssistantToolCall("read_closed_file_benchmark", {
+      limit: 10
+    }),
+    { limit: 10 }
+  );
+  for (const fixture of [
+    ["read_file_document", {
+      file_ref: FILE_REF,
+      document_ref: "provider-document-id"
+    }],
+    ["review_file", {
+      file_ref: FILE_REF,
+      owner_id: "attacker-owner"
+    }],
+    ["read_closed_file_benchmark", { limit: 31 }],
+    ["prepare_action_plan", {}]
+  ]) {
+    assert.throws(
+      () => normalizeHcnAssistantToolCall(fixture[0], fixture[1]),
+      (error) => error instanceof HcnAssistantToolError
+    );
+  }
 });
 
 test("every Responses API round uses store:false and manually replays provider output plus function output", async () => {
@@ -224,45 +290,17 @@ test("assigned identity is server-injected and never model-supplied", async () =
   assert.equal(executionCount, 0);
 });
 
-test("latest prepared action result is returned for the server's review envelope", async () => {
-  const emptyInput = {
-    note: "Andrea needs to review the settlement.",
-    title: null,
-    description: null,
-    due_date: null,
-    task_ref: null,
-    completed: null,
-    status: null,
-    date_of_loss: null,
-    event_ref: null,
-    starts_at: null,
-    ends_at: null,
-    to: null,
-    cc: null,
-    bcc: null,
-    subject: null,
-    body: null,
-    draft_ref: null,
-    content: null
-  };
-  const prepared = {
-    schema: "hcn-browser-action-plan/v1",
-    planId: `plan_${"b".repeat(32)}`
-  };
+test("exact document reads retain only opaque file and evidence references", async () => {
+  const documentRef = `ref_${"b".repeat(32)}`;
   const responses = [
     functionCallResponse({
-      name: "prepare_action_plan",
+      name: "read_file_document",
       arguments: JSON.stringify({
         file_ref: FILE_REF,
-        actions: [
-          {
-            type: "jobnimbus.create_note",
-            input: emptyInput
-          }
-        ]
+        document_ref: documentRef
       })
     }),
-    finalResponse("I prepared one note for review. Nothing was changed.")
+    finalResponse("The policy extraction shows a wind deductible.")
   ];
   let executionInput;
 
@@ -272,21 +310,15 @@ test("latest prepared action result is returned for the server's review envelope
     },
     async executeTool(call) {
       executionInput = call.input;
-      return prepared;
+      return { document: { reference: call.input.documentRef } };
     }
   });
 
   assert.deepEqual(executionInput, {
     fileRef: FILE_REF,
-    operations: [
-      {
-        type: "jobnimbus.create_note",
-        input: { note: "Andrea needs to review the settlement." }
-      }
-    ]
+    documentRef
   });
-  assert.deepEqual(result.preparedPlan, prepared);
-  assert.equal(Object.isFrozen(result.preparedPlan), true);
+  assert.equal(result.preparedPlan, null);
 });
 
 test("unknown, malformed, and unsupported provider calls fail before tool execution", async (t) => {
@@ -294,6 +326,11 @@ test("unknown, malformed, and unsupported provider calls fail before tool execut
     {
       name: "unknown tool",
       response: functionCallResponse({ name: "execute_action_plan" }),
+      code: "malformed_tool_call"
+    },
+    {
+      name: "removed plan tool",
+      response: functionCallResponse({ name: "prepare_action_plan" }),
       code: "malformed_tool_call"
     },
     {

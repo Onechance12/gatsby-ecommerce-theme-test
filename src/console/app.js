@@ -91,7 +91,7 @@
     "quo",
     "google_calendar",
     "retell",
-    "action_plan"
+    "weather"
   ]);
   const ASSISTANT_SOURCE_STATUSES = new Set([
     "fresh",
@@ -324,8 +324,6 @@
     receiptLoading: false,
     assistantController: null,
     assistantLoading: false,
-    assistantPlanId: null,
-    assistantPreparedPlanCount: 0,
     leavingForLogin: false,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
@@ -383,8 +381,7 @@
       "assistant-mode-deep",
       "assistant-pilot-route",
       "assistant-pilot-sources",
-      "assistant-pilot-plans",
-      "assistant-review-action",
+      "assistant-pilot-authority",
       "management-sweep-refresh",
       "management-sweep-hero-message",
       "management-sweep-status",
@@ -572,10 +569,6 @@
         elements["assistant-form"].requestSubmit();
       }
     });
-    elements["assistant-review-action"].addEventListener(
-      "click",
-      reviewAssistantPlan
-    );
     document.querySelectorAll("[data-assistant-starter]").forEach(function (button) {
       button.addEventListener("click", function () {
         const prompt = boundedString(
@@ -1088,11 +1081,6 @@
       "aria-busy",
       state.assistantLoading ? "true" : "false"
     );
-    elements["assistant-review-action"].disabled = (
-      state.assistantLoading
-      || !state.assistantPlanId
-      || !hasActionReadAuthority()
-    );
     if (runtimeStatus === "direct_only") {
       elements["assistant-mode-auto"].checked = true;
       elements["assistant-mode-deep"].checked = false;
@@ -1136,8 +1124,6 @@
     const controller = new AbortController();
     state.assistantController = controller;
     state.assistantLoading = true;
-    state.assistantPlanId = null;
-    elements["assistant-review-action"].hidden = true;
     elements["assistant-prompt"].value = "";
     appendAssistantMessage("user", prompt);
     const pending = appendAssistantMessage(
@@ -1158,17 +1144,10 @@
       const turn = normalizeAssistantTurnResponse(response);
       pending.remove();
       appendAssistantMessage("assistant", turn.message);
-      if (turn.planId) {
-        state.assistantPlanId = turn.planId;
-        state.assistantPreparedPlanCount += 1;
-        elements["assistant-review-action"].hidden = false;
-      }
       renderAssistantPilot(turn);
       notice(
         elements["assistant-alert"],
-        turn.planId
-          ? "Thresher prepared an action. Review every detail before approval."
-          : "Thresher finished the review.",
+        "Thresher finished the read-only review.",
         "good"
       );
     } catch (error) {
@@ -1232,19 +1211,19 @@
       || authorityKeys.some(function (key) {
         return !allowedAuthority.has(key);
       })
-      || value.schema !== "hcn.console.assistant-turn.v2"
+      || value.schema !== "hcn.console.assistant-turn.v3"
       || !validIsoInstant(value.generatedAt)
       || value.ephemeral !== true
       || value.cachePolicy !== "no_store"
       || authority.fileScope !== "signed_in_employee_assignments_only"
       || authority.liveSourcesWin !== true
       || authority.canRead !== true
-      || authority.canPrepareActionPlans !== true
+      || authority.canPrepareActionPlans !== false
       || authority.canExecuteActions !== false
       || authority.exactHumanApprovalRequired !== true
       || typeof value.message !== "string"
       || value.message.length > 16000
-      || !(value.plan === null || isRecord(value.plan))
+      || value.plan !== null
     ) {
       throw new Error("Invalid assistant response");
     }
@@ -1254,16 +1233,10 @@
       throw new Error("Invalid assistant response");
     }
 
-    let planId = "";
-    if (isRecord(value.plan)) {
-      planId = normalizeActionPlan(value.plan, true).planId;
-    }
     return {
       message: message,
-      planId: planId,
-      sourceCount: sources.filter(function (source) {
-        return source.key !== "action_plan";
-      }).length,
+      planId: "",
+      sourceCount: sources.length,
       routing: routing
     };
   }
@@ -1374,10 +1347,7 @@
       routeLabels[turn.routing.route] || "Unavailable"
     );
     setText(elements["assistant-pilot-sources"], String(turn.sourceCount));
-    setText(
-      elements["assistant-pilot-plans"],
-      String(state.assistantPreparedPlanCount)
-    );
+    setText(elements["assistant-pilot-authority"], "Read only");
   }
 
   function appendAssistantMessage(speaker, message, options) {
@@ -1402,38 +1372,18 @@
     if (state.assistantController) state.assistantController.abort();
     state.assistantController = null;
     state.assistantLoading = false;
-    state.assistantPlanId = null;
-    state.assistantPreparedPlanCount = 0;
     elements["assistant-prompt"].value = "";
     elements["assistant-mode-auto"].checked = true;
     elements["assistant-mode-deep"].checked = false;
-    elements["assistant-review-action"].hidden = true;
     setText(elements["assistant-pilot-route"], "Not run yet");
     setText(elements["assistant-pilot-sources"], "0");
-    setText(elements["assistant-pilot-plans"], "0");
+    setText(elements["assistant-pilot-authority"], "Read only");
     elements["assistant-transcript"].replaceChildren();
     appendAssistantMessage(
       "assistant",
       "What do you need help with?"
     );
     syncAssistantControls();
-  }
-
-  async function reviewAssistantPlan() {
-    const planId = state.assistantPlanId;
-    if (!PLAN_ID.test(String(planId || "")) || !hasActionReadAuthority()) {
-      notice(
-        elements["assistant-alert"],
-        "That proposed action is not available for review in this session.",
-        "warn"
-      );
-      return;
-    }
-    window.location.hash = "#approvals";
-    syncActiveNavigation();
-    const approvals = document.getElementById("approvals");
-    if (approvals) approvals.scrollIntoView({ block: "start" });
-    await loadActionPlans({ selectPlanId: planId });
   }
 
   function assistantErrorMessage(error) {
@@ -1447,7 +1397,7 @@
     if (status === 502 || status === 503) {
       return "Thresher or a live work source is temporarily unavailable.";
     }
-    return "No result or proposed action was accepted. Please try again.";
+    return "No verified read-only result was returned. Please try again.";
   }
 
   async function loadPlatformState() {
@@ -1764,7 +1714,7 @@
     setText(title, "HCN data protection");
     setText(
       status,
-      "Active · your account controls what you can see and propose"
+      "Active · your account controls what Thresher can read"
     );
     mark.className = "boundary-state";
     mark.dataset.tone = "good";

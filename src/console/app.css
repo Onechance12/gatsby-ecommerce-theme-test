@@ -1290,10 +1290,6 @@ h1 {
   box-shadow: 0 0 0 3px rgba(160, 193, 70, 0.18);
 }
 
-.assistant-review-action {
-  width: fit-content;
-}
-
 .company-hero-summary {
   padding: 24px;
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -4012,10 +4008,6 @@ h1 {
 
   .assistant-compose-row .button {
     min-height: 48px;
-  }
-
-  .assistant-review-action {
-    width: 100%;
   }
 
   .home-action-grid {

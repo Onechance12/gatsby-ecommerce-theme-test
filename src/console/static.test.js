@@ -147,7 +147,7 @@ function evaluateAssistantSources(functionSource, value) {
       "quo",
       "google_calendar",
       "retell",
-      "action_plan"
+      "weather"
     ]),
     ASSISTANT_SOURCE_STATUSES: new Set([
       "fresh",
@@ -358,7 +358,7 @@ test("employee console shows one simple HCN data-protection status", async () =>
   assert.match(html, /HCN data protection/);
   assert.match(html, /Your HCN account controls what you can see/);
   assert.match(script, /HCN data protection/);
-  assert.match(script, /your account controls what you can see and propose/);
+  assert.match(script, /your account controls what Thresher can read/);
   assert.doesNotMatch(html, /Chance Brain|Jobrolo|legacy client memory/i);
   assert.doesNotMatch(script, /Chance Brain|Jobrolo|legacy client memory/i);
 });
@@ -380,7 +380,7 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /id="assistant-prompt"[\s\S]*maxlength="2000"/);
   assert.match(html, /id="assistant-send"/);
   assert.match(html, /id="assistant-alert"[\s\S]*role="status"/);
-  assert.match(html, /id="assistant-review-action"/);
+  assert.doesNotMatch(html, /id="assistant-review-action"/);
   assert.match(html, /id="assistant-mode"[\s\S]*<legend>Thinking mode<\/legend>/);
   assert.match(
     html,
@@ -390,7 +390,8 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /id="assistant-pilot"[\s\S]*Pilot check/);
   assert.match(html, /id="assistant-pilot-route"/);
   assert.match(html, /id="assistant-pilot-sources"/);
-  assert.match(html, /id="assistant-pilot-plans"/);
+  assert.match(html, /id="assistant-pilot-authority"/);
+  assert.match(html, /Model authority[\s\S]*Read only/);
   assert.match(html, /Nothing executes in chat/);
   for (const label of [
     "Work my files",
@@ -411,7 +412,7 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   );
   assert.match(script, /ASSISTANT_TURN_CAPABILITY/);
   assert.match(script, /postOperationalJson\(/);
-  assert.match(script, /"hcn\.console\.assistant-turn\.v2"/);
+  assert.match(script, /"hcn\.console\.assistant-turn\.v3"/);
   assert.match(script, /function normalizeAssistantTurnResponse\(value\)/);
   assert.match(script, /function normalizeAssistantRouting\(value\)/);
   assert.match(script, /const ASSISTANT_MODES = new Set\(\["auto", "deep"\]\)/);
@@ -425,14 +426,14 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(script, /function normalizeAssistantSources\(value\)/);
   assert.match(script, /function selectedAssistantMode\(\)/);
   assert.match(script, /function renderAssistantPilot\(turn\)/);
-  assert.match(script, /state\.assistantPreparedPlanCount \+= 1/);
+  assert.doesNotMatch(script, /assistantPreparedPlanCount/);
   assert.match(script, /keys\.length !== allowed\.size/);
   assert.match(script, /value\.ephemeral !== true/);
   assert.match(script, /value\.cachePolicy !== "no_store"/);
+  assert.match(script, /authority\.canPrepareActionPlans !== false/);
   assert.match(script, /authority\.canExecuteActions !== false/);
   assert.match(script, /authority\.exactHumanApprovalRequired !== true/);
-  assert.match(script, /value\.plan === null \|\| isRecord\(value\.plan\)/);
-  assert.match(script, /normalizeActionPlan\(value\.plan, true\)\.planId/);
+  assert.match(script, /value\.plan !== null/);
   assert.match(
     script,
     /elements\["assistant-prompt"\]\.disabled = \(\s*!available \|\| runtimeStatus === "direct_only"\s*\)/
@@ -443,12 +444,10 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   );
   assert.match(script, /setText\(paragraph, boundedString\(message, 16000\)\)/);
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
-  assert.match(script, /window\.location\.hash = "#approvals"/);
-  assert.match(script, /loadActionPlans\(\{ selectPlanId: planId \}\)/);
   assert.match(script, /state\.assistantController\.abort\(\)/);
   assert.match(script, /elements\["assistant-transcript"\]\.replaceChildren\(\)/);
   assert.match(script, /elements\["assistant-mode-auto"\]\.checked = true/);
-  assert.match(script, /state\.assistantPreparedPlanCount = 0/);
+  assert.match(script, /assistant-pilot-authority"\], "Read only"/);
   assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /assistant\/turns/);

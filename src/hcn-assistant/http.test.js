@@ -18,7 +18,7 @@ import {
 } from "../auth/hcn-invitation-store.js";
 
 const ASSISTANT_RESPONSE =
-  "You are signed in. I can review assigned files and prepare actions for approval; nothing was changed.";
+  "You are signed in. I can review assigned files and recommend next steps; this chat cannot prepare or execute actions.";
 const EMPLOYEE_EMAIL = "assigned.employee@wavepa.com";
 const EMPLOYEE_SUBJECT = "assigned-employee-google-subject";
 const EMPLOYEE_OWNER_ID = "assigned-employee-jobnimbus-owner";
@@ -137,6 +137,44 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         ]
       });
     }
+    if (
+      url.pathname === "/contacts/assigned-file-provider-id"
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-assistant-jobnimbus-key"
+      );
+      return json(res, 200, {
+        jnid: "assigned-file-provider-id",
+        number: 2739,
+        record_type_name: "Insurance",
+        owners: [{ id: EMPLOYEE_OWNER_ID }],
+        display_name: "Assigned File Fixture",
+        status_name: "Ready for Review",
+        stage_name: "Carrier Review",
+        is_active: true,
+        date_updated: 1785261000
+      });
+    }
+    if (url.pathname === "/files" && req.method === "GET") {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-assistant-jobnimbus-key"
+      );
+      return json(res, 200, {
+        files: [
+          {
+            jnid: "assigned-document-provider-id",
+            name: "Policy declarations.pdf",
+            record_type_name: "File",
+            content_type: "application/pdf",
+            date_created: "2026-07-01T12:00:00.000Z",
+            related: { id: "assigned-file-provider-id" }
+          }
+        ]
+      });
+    }
 
     if (
       ["/contacts", "/activities", "/tasks", "/files"].some(
@@ -187,6 +225,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         HCN_ASSISTANT_MAX_OUTPUT_TOKENS: "1200",
         HCN_TEST_THRESHER_RECORD_PATH: providerRecordPath,
         HCN_TEST_THRESHER_RESPONSE_TEXT: ASSISTANT_RESPONSE,
+        HCN_TEST_THRESHER_TOOL_PROMPT_MARKER:
+          "fixture-document-catalog",
         HCN_TENANT_ID: "tenant_0123456789abcdef",
         HCN_REFERENCE_KEY,
         HCN_GOOGLE_GRANT_KEY:
@@ -248,6 +288,10 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(health.hcnAssistant.ready, true);
   assert.equal(health.hcnAssistant.deterministicReady, true);
   assert.equal(health.hcnAssistant.identity, "hcn.thresher-ai.v1");
+  assert.equal(
+    health.hcnAssistant.instructionsVersion,
+    "hcn.thresher-ai.instructions.v2"
+  );
   assert.equal(health.hcnAssistant.provider, "groq_responses_api");
   assert.equal(health.hcnAssistant.model, "openai/gpt-oss-20b");
   assert.equal(
@@ -267,7 +311,23 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "high"
   );
   assert.equal(health.hcnAssistant.modelHasReadTools, true);
-  assert.equal(health.hcnAssistant.modelCanPrepareActionPlans, true);
+  assert.equal(health.hcnAssistant.modelCanPrepareActionPlans, false);
+  assert.deepEqual(health.hcnAssistant.modelTools, [
+    "read_work_center",
+    "review_file",
+    "read_file_document_catalog",
+    "read_file_document",
+    "read_file_photo_catalog",
+    "research_file_hail_dates",
+    "run_management_sweep",
+    "read_closed_file_benchmark"
+  ]);
+  assert.equal(
+    health.hcnAssistant.modelSkills.includes(
+      "claim_filing_readiness"
+    ),
+    true
+  );
   assert.equal(health.hcnAssistant.modelCanExecute, false);
   assert.equal(health.hcnAssistant.responsesApiStore, false);
 
@@ -339,7 +399,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const deterministic = await deterministicResponse.json();
   assert.equal(
     deterministic.schema,
-    "hcn.console.assistant-turn.v2"
+    "hcn.console.assistant-turn.v3"
   );
   assert.equal(deterministic.routing.route, "deterministic");
   assert.equal(deterministic.routing.profileId, "hcn.deterministic.v1");
@@ -373,7 +433,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "no-store, max-age=0"
   );
   const assistant = await assistantResponse.json();
-  assert.equal(assistant.schema, "hcn.console.assistant-turn.v2");
+  assert.equal(assistant.schema, "hcn.console.assistant-turn.v3");
   assert.equal(assistant.message, ASSISTANT_RESPONSE);
   assert.equal(assistant.plan, null);
   assert.deepEqual(assistant.sources, []);
@@ -383,7 +443,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     fileScope: "signed_in_employee_assignments_only",
     liveSourcesWin: true,
     canRead: true,
-    canPrepareActionPlans: true,
+    canPrepareActionPlans: false,
     canExecuteActions: false,
     exactHumanApprovalRequired: true
   });
@@ -396,6 +456,63 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "general_assistance"
   ]);
   assert.equal(assistant.routing.modelUsed, true);
+
+  const workCenterResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ offset: 0, limit: 1 })
+    }
+  );
+  assert.equal(workCenterResponse.status, 200);
+  const workCenter = await workCenterResponse.json();
+  const fileRef = workCenter.files[0].fileRef;
+  assert.match(fileRef, /^subject_[a-f0-9]{32}$/);
+
+  const catalogResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        prompt:
+          `fixture-document-catalog: review documents for ${fileRef}`,
+        mode: "auto"
+      })
+    }
+  );
+  const catalogBody = await catalogResponse.text();
+  assert.equal(
+    catalogResponse.status,
+    200,
+    `${catalogBody}\n${JSON.stringify(providerObservations)}`
+  );
+  const catalog = JSON.parse(catalogBody);
+  assert.equal(catalog.message, ASSISTANT_RESPONSE);
+  assert.equal(catalog.plan, null);
+  assert.deepEqual(
+    catalog.sources.map(({ key, label, status }) => ({
+      key,
+      label,
+      status
+    })),
+    [{
+      key: "jobnimbus",
+      label: "JobNimbus document catalog",
+      status: "fresh"
+    }]
+  );
 
   const deepResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
@@ -415,7 +532,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   assert.equal(deepResponse.status, 200);
   const deep = await deepResponse.json();
-  assert.equal(deep.schema, "hcn.console.assistant-turn.v2");
+  assert.equal(deep.schema, "hcn.console.assistant-turn.v3");
   assert.equal(deep.routing.route, "deep");
   assert.equal(
     deep.routing.profileId,
@@ -448,7 +565,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerLines = (
     await readFile(providerRecordPath, "utf8")
   ).trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(providerLines.length, 2);
+  assert.equal(providerLines.length, 4);
   const providerRequest = JSON.parse(providerLines[0]);
   assert.equal(
     providerRequest.url,
@@ -470,8 +587,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     [
       "read_work_center",
       "review_file",
+      "read_file_document_catalog",
+      "read_file_document",
+      "read_file_photo_catalog",
+      "research_file_hail_dates",
       "run_management_sweep",
-      "prepare_action_plan"
+      "read_closed_file_benchmark"
     ]
   );
   assert.equal(
@@ -480,7 +601,21 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     ),
     false
   );
-  const deepProviderRequest = JSON.parse(providerLines[1]);
+  const catalogToolRequest = JSON.parse(providerLines[1]);
+  const catalogToolOutputRequest = JSON.parse(providerLines[2]);
+  assert.match(
+    JSON.stringify(catalogToolRequest.body.input),
+    /fixture-document-catalog/
+  );
+  assert.match(
+    JSON.stringify(catalogToolOutputRequest.body.input),
+    /hcn\.assistant\.document-catalog\.v1/
+  );
+  assert.doesNotMatch(
+    JSON.stringify(catalogToolOutputRequest),
+    /assigned-file-provider-id|assigned-document-provider-id/
+  );
+  const deepProviderRequest = JSON.parse(providerLines[3]);
   assert.equal(deepProviderRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(deepProviderRequest.body.reasoning.effort, "high");
   assert.equal(deepProviderRequest.body.max_output_tokens, 2400);
@@ -501,6 +636,10 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     [
       "GET /account/users",
       "GET /contacts",
+      "GET /contacts",
+      "GET /contacts",
+      "GET /contacts/assigned-file-provider-id",
+      "GET /files",
       "GET /tokeninfo",
       "GET /userinfo",
       "POST /token"
@@ -508,12 +647,16 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   assert.deepEqual(
     providerObservations.filter(({ pathname }) =>
-      ["/activities", "/tasks", "/files"].some(
+      ["/activities", "/tasks"].some(
         (prefix) =>
           pathname === prefix || pathname.startsWith(`${prefix}/`)
       )
     ),
     []
+  );
+  assert.deepEqual(
+    providerObservations.filter(({ pathname }) => pathname === "/files"),
+    [{ method: "GET", pathname: "/files" }]
   );
 });
 

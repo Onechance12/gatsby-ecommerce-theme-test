@@ -50,7 +50,6 @@ const CAPABILITIES = Object.freeze([
   "file_status",
   "interpret_evidence",
   "draft_communication",
-  "prepare_action_plan",
   "live_call",
   "upload",
   "delete",

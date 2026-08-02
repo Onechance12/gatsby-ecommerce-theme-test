@@ -524,6 +524,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     health.hcnOperationsBrain.modelRuntimeIdentity,
     "hcn.thresher-ai.v1"
   );
+  assert.equal(
+    health.hcnOperationsBrain.modelInstructionsVersion,
+    "hcn.thresher-ai.instructions.v2"
+  );
   assert.equal(health.hcnOperationsBrain.optionalModelAdvisory, false);
   assert.equal(health.hcnOperationsBrain.operationalProviderConfigured, false);
   assert.equal(health.hcnOperationsBrain.operationalProvider, "groq");
@@ -536,7 +540,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.hcnOperationsBrain.modelHasTools, false);
   assert.equal(
     health.hcnOperationsBrain.modelToolAuthority,
-    "read_and_prepare_only"
+    "read_only"
+  );
+  assert.equal(
+    health.hcnOperationsBrain.modelCanPrepareActionPlans,
+    false
   );
   assert.equal(health.hcnOperationsBrain.modelCanExecute, false);
   assert.equal(health.hcnOperationsBrain.doesNotAuthorizeActions, true);
@@ -3034,6 +3042,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(managementHealth.gmailConfigured, true);
   assert.deepEqual(managementHealth.hcnAssistant, {
     identity: "hcn.thresher-ai.v1",
+    instructionsVersion: "hcn.thresher-ai.instructions.v2",
     enabled: false,
     configured: false,
     ready: false,
@@ -3070,6 +3079,33 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       "bounded_in_memory_no_durable_client_transcript",
     assignedFileScopeOnly: true,
     modelHasReadTools: false,
+    modelTools: [
+      "read_work_center",
+      "review_file",
+      "read_file_document_catalog",
+      "read_file_document",
+      "read_file_photo_catalog",
+      "research_file_hail_dates",
+      "run_management_sweep",
+      "read_closed_file_benchmark"
+    ],
+    modelSkills: [
+      "work_center_triage",
+      "exact_file_sweep",
+      "activity_gap_management",
+      "claim_filing_readiness",
+      "representation_readiness",
+      "inspection_coordination",
+      "communication_recovery",
+      "carrier_follow_up",
+      "document_review",
+      "photo_inventory",
+      "date_of_loss_research",
+      "settlement_and_payment_review",
+      "closed_file_benchmarking",
+      "natural_hcn_drafting",
+      "evidence_and_safety"
+    ],
     modelCanPrepareActionPlans: false,
     modelCanExecute: false,
     exactHumanApprovalRequired: true
