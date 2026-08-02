@@ -2580,13 +2580,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         req.headers.authorization,
         "Bearer hcn-jobnimbus-api-key"
       );
-      assert.equal(url.searchParams.get("size"), "1000");
-      assert.equal(url.searchParams.get("from"), "0");
+      assert.equal(url.search, "");
       res.writeHead(200, {
         "content-type": "application/json"
       });
       res.end(JSON.stringify({
-        total: 2,
         users: [
           {
             jnid: chanceOwnerId,

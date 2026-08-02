@@ -109,6 +109,47 @@ export async function loadCompleteJobNimbusUsers({
   );
 }
 
+/**
+ * Validate the complete snapshot returned by JobNimbus `/account/users`.
+ *
+ * Unlike the list endpoints that honor `size`/`from`, this account endpoint
+ * returns the full employee array and ignores pagination parameters. Treating
+ * it as a paginated endpoint causes the second request to repeat the first
+ * page and incorrectly denies every employee login. The endpoint contract is
+ * therefore modeled explicitly as a single bounded snapshot.
+ */
+export function validateCompleteJobNimbusUserSnapshot(
+  payload,
+  { maxRecords = DEFAULT_MAX_RECORDS } = {}
+) {
+  assertPositiveInteger(maxRecords, "maxRecords");
+  const rows = userRows(payload);
+  if (rows.length > maxRecords) {
+    throw directoryError(
+      "JobNimbus employee directory exceeds its reviewed bound."
+    );
+  }
+
+  const payloadTotal = authoritativeTotal(payload);
+  if (payloadTotal !== null && payloadTotal !== rows.length) {
+    throw directoryError(
+      "JobNimbus employee snapshot does not match its reported total."
+    );
+  }
+
+  const seenIds = new Set();
+  for (const row of rows) {
+    const id = userRecordId(row);
+    if (!id || seenIds.has(id)) {
+      throw directoryError(
+        "JobNimbus employee snapshot repeated or omitted a stable user id."
+      );
+    }
+    seenIds.add(id);
+  }
+  return Object.freeze([...rows]);
+}
+
 export function resolveUniqueActiveJobNimbusUser(
   users,
   email

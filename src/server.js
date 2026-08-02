@@ -55,8 +55,8 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import {
-  loadCompleteJobNimbusUsers,
-  resolveUniqueActiveJobNimbusUser
+  resolveUniqueActiveJobNimbusUser,
+  validateCompleteJobNimbusUserSnapshot
 } from "./jobnimbus/user-directory.js";
 import { createLorPdf } from "./documents/lor.js";
 import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } from "./documents/photo-review.js";
@@ -16469,10 +16469,9 @@ async function findActiveJobNimbusUser(
 }
 
 async function listCompleteJobNimbusUsers() {
-  return loadCompleteJobNimbusUsers({
-    fetchPage: ({ offset, size }) =>
-      jobNimbus(`/account/users?size=${size}&from=${offset}`)
-  });
+  return validateCompleteJobNimbusUserSnapshot(
+    await jobNimbus("/account/users")
+  );
 }
 
 async function effectiveEmployeeIdentity(identity) {

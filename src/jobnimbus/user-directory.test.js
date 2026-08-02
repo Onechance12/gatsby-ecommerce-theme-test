@@ -4,7 +4,8 @@ import test from "node:test";
 import {
   JobNimbusUserDirectoryError,
   loadCompleteJobNimbusUsers,
-  resolveUniqueActiveJobNimbusUser
+  resolveUniqueActiveJobNimbusUser,
+  validateCompleteJobNimbusUserSnapshot
 } from "./user-directory.js";
 
 test("short pages continue by actual offset until an empty page proves completion", async () => {
@@ -135,6 +136,54 @@ test("repeated ids, changing totals, and unproven bounds fail closed", async () 
       })
     }),
     /completeness could not be proven/
+  );
+});
+
+test("the account users endpoint is validated as one complete snapshot", () => {
+  const users = validateCompleteJobNimbusUserSnapshot([
+    {
+      jnid: "user-1",
+      email: "one@wavepa.com",
+      is_active: true
+    },
+    {
+      jnid: "user-2",
+      email: "two@wavepa.com",
+      is_active: true
+    }
+  ]);
+  assert.equal(users.length, 2);
+  assert.equal(Object.isFrozen(users), true);
+
+  assert.throws(
+    () => validateCompleteJobNimbusUserSnapshot({
+      total: 3,
+      users: [
+        { jnid: "user-1" },
+        { jnid: "user-2" }
+      ]
+    }),
+    /does not match its reported total/
+  );
+  assert.throws(
+    () => validateCompleteJobNimbusUserSnapshot([
+      { jnid: "same-user" },
+      { jnid: "same-user" }
+    ]),
+    /repeated or omitted/
+  );
+  assert.throws(
+    () => validateCompleteJobNimbusUserSnapshot([
+      { email: "missing-id@wavepa.com" }
+    ]),
+    /repeated or omitted/
+  );
+  assert.throws(
+    () => validateCompleteJobNimbusUserSnapshot(
+      [{ jnid: "user-1" }, { jnid: "user-2" }],
+      { maxRecords: 1 }
+    ),
+    /reviewed bound/
   );
 });
 
