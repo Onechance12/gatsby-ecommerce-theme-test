@@ -72,7 +72,7 @@ test("server classifier keeps communication review and drafting model-backed", (
     assert.equal(serverSignals.operation, operation);
     assert.equal(serverSignals.factOnly, false);
     assert.equal(routed.route, "standard");
-    assert.equal(routed.providerProfile.model, "gpt-5.6-sol");
+    assert.equal(routed.providerProfile.model, "openai/gpt-oss-20b");
     assert.equal(routed.providerProfile.reasoningEffort, "medium");
     assert.deepEqual(routed.reasonCodes, [reason]);
   }
@@ -101,7 +101,7 @@ test("requested deep mode elevates a turn without relying on prompt keywords", (
   assert.equal(serverSignals.factOnly, true);
   assert.equal(routed.route, "deep");
   assert.deepEqual(routed.reasonCodes, ["explicit_deep_review"]);
-  assert.equal(routed.providerProfile.model, "gpt-5.6-sol");
+  assert.equal(routed.providerProfile.model, "openai/gpt-oss-20b");
   assert.equal(routed.providerProfile.reasoningEffort, "high");
 });
 
@@ -187,7 +187,7 @@ test("factOnly cannot suppress reasoning for an unapproved operation", () => {
   });
 
   assert.equal(routed.route, "standard");
-  assert.equal(routed.providerProfile.model, "gpt-5.6-sol");
+  assert.equal(routed.providerProfile.model, "openai/gpt-oss-20b");
   assert.deepEqual(routed.reasonCodes, ["ordinary_interpretation"]);
 });
 
@@ -209,14 +209,14 @@ test("ordinary interpretation and drafting use the hardcoded standard profile", 
 
   for (const routed of [interpretation, drafting]) {
     assert.equal(routed.route, "standard");
-    assert.equal(routed.providerProfile.profileId, "hcn.openai.gpt-5.6-sol.medium.v1");
+    assert.equal(routed.providerProfile.profileId, "hcn.thresher.groq.gpt-oss-20b.medium.v1");
     assert.equal(routed.providerProfile.reasoningEffort, "medium");
   }
   assert.deepEqual(interpretation.reasonCodes, ["ordinary_interpretation"]);
   assert.deepEqual(drafting.reasonCodes, ["ordinary_drafting"]);
 });
 
-test("explicit deep review and high-stakes server signals route to Sol high", () => {
+test("explicit deep review and high-stakes server signals route to Thresher high", () => {
   const cases = [
     {
       userRequest: "Please do a deep review of this file.",
@@ -267,7 +267,7 @@ test("explicit deep review and high-stakes server signals route to Sol high", ()
     const routed = routeHcnAssistantReasoning(item);
     assert.equal(routed.route, "deep");
     assert.ok(routed.reasonCodes.includes(item.reason));
-    assert.equal(routed.providerProfile.model, "gpt-5.6-sol");
+    assert.equal(routed.providerProfile.model, "openai/gpt-oss-20b");
     assert.equal(routed.providerProfile.reasoningEffort, "high");
   }
 });
@@ -374,7 +374,7 @@ test("browser lookalike signal objects are rejected", () => {
 
 test("server signals are strict and bounded", () => {
   assert.throws(
-    () => signals({ model: "gpt-5.6-sol" }),
+    () => signals({ model: "openai/gpt-oss-20b" }),
     /unsupported field/
   );
   assert.throws(

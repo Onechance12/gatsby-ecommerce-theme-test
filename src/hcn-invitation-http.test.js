@@ -201,7 +201,7 @@ test("HCN invitation HTTP flow is Chance-only, exact-email, one-shot, and revoca
       JOBNIMBUS_API_BASE_URL:
         `http://127.0.0.1:${providerPort}`,
       HCN_THRESHER_ENABLED: "false",
-      HCN_ASSISTANT_ENABLED: "false",
+      HCN_THRESHER_AI_ENABLED: "false",
       BRIDGE_ALLOW_WRITES: "false",
       GPT_OAUTH_CLIENT_SECRET: "",
       RETELL_API_KEY: "",

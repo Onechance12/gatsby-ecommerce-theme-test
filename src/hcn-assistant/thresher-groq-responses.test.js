@@ -2,18 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  HCN_OPENAI_RESPONSES_URL,
-  createHcnOpenAIResponsesClient
-} from "./openai-responses.js";
+  THRESHER_GROQ_RESPONSES_URL,
+  createThresherGroqResponsesClient
+} from "./thresher-groq-responses.js";
+import { THRESHER_AI_MODEL } from "./thresher-ai-runtime.js";
 
-const API_KEY = ["sk", "hcn-assistant-fixture-key", "1234567890"].join("-");
-const MODEL = "gpt-5.6-terra";
+const API_KEY = ["gsk", "hcn-thresher-fixture-key", "1234567890"].join("_");
 
-test("HCN provider adapter uses only the fixed Responses endpoint and store:false", async () => {
+test("Thresher AI adapter uses only the fixed Groq endpoint and model", async () => {
   const requests = [];
-  const client = createHcnOpenAIResponsesClient({
+  const client = createThresherGroqResponsesClient({
     apiKey: API_KEY,
-    model: MODEL,
     reasoningEffort: "low",
     maxOutputTokens: 1600,
     fetchImpl: async (url, options) => {
@@ -37,28 +36,34 @@ test("HCN provider adapter uses only the fixed Responses endpoint and store:fals
   const response = await client(fixedRequest());
   assert.equal(response.output[0].type, "message");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, HCN_OPENAI_RESPONSES_URL);
+  assert.equal(requests[0].url, THRESHER_GROQ_RESPONSES_URL);
   assert.equal(requests[0].options.redirect, "error");
   assert.equal(
     requests[0].options.headers.authorization,
     `Bearer ${API_KEY}`
   );
   const body = JSON.parse(requests[0].options.body);
-  assert.equal(body.store, false);
-  assert.equal(body.stream, false);
+  assert.equal(body.model, THRESHER_AI_MODEL);
   assert.equal(body.parallel_tool_calls, false);
   assert.equal(body.max_output_tokens, 1600);
   assert.deepEqual(body.reasoning, { effort: "low" });
-  assert.equal(Object.hasOwn(body, "previous_response_id"), false);
-  assert.equal(Object.hasOwn(body, "conversation"), false);
-  assert.equal(Object.hasOwn(body, "background"), false);
+  for (const forbidden of [
+    "store",
+    "stream",
+    "previous_response_id",
+    "conversation",
+    "background",
+    "include",
+    "prompt"
+  ]) {
+    assert.equal(Object.hasOwn(body, forbidden), false);
+  }
 });
 
-test("HCN provider adapter rejects caller-selected provider state before fetch", async () => {
+test("Thresher AI adapter rejects caller-selected provider state or model", async () => {
   let fetchCount = 0;
-  const client = createHcnOpenAIResponsesClient({
+  const client = createThresherGroqResponsesClient({
     apiKey: API_KEY,
-    model: MODEL,
     reasoningEffort: "low",
     maxOutputTokens: 1600,
     fetchImpl: async () => {
@@ -84,10 +89,34 @@ test("HCN provider adapter rejects caller-selected provider state before fetch",
   assert.equal(fetchCount, 0);
 });
 
-test("HCN provider adapter exposes only a generic bounded provider error", async () => {
-  const client = createHcnOpenAIResponsesClient({
+test("Thresher AI adapter rejects built-in or remote provider tools", async () => {
+  let fetchCount = 0;
+  const client = createThresherGroqResponsesClient({
     apiKey: API_KEY,
-    model: MODEL,
+    reasoningEffort: "medium",
+    maxOutputTokens: 1600,
+    fetchImpl: async () => {
+      fetchCount += 1;
+      throw new Error("must not fetch");
+    }
+  });
+
+  for (const tool of [
+    { type: "browser_search" },
+    { type: "code_interpreter" },
+    { type: "mcp", server_url: "https://example.com/mcp" }
+  ]) {
+    await assert.rejects(
+      () => client({ ...fixedRequest(), tools: [tool] }),
+      /fixed HCN contract/
+    );
+  }
+  assert.equal(fetchCount, 0);
+});
+
+test("Thresher AI adapter exposes only a generic bounded provider error", async () => {
+  const client = createThresherGroqResponsesClient({
+    apiKey: API_KEY,
     reasoningEffort: "low",
     maxOutputTokens: 1600,
     fetchImpl: async (_url, options) => {
@@ -106,7 +135,7 @@ test("HCN provider adapter exposes only a generic bounded provider error", async
   await assert.rejects(
     () => client(fixedRequest()),
     (error) => {
-      assert.equal(error.code, "HCN_ASSISTANT_PROVIDER_FAILED");
+      assert.equal(error.code, "THRESHER_AI_PROVIDER_FAILED");
       assert.equal(error.statusCode, 401);
       assert.equal(error.message, "Provider request failed.");
       assert.doesNotMatch(
@@ -120,7 +149,7 @@ test("HCN provider adapter exposes only a generic bounded provider error", async
 
 function fixedRequest() {
   return {
-    model: MODEL,
+    model: THRESHER_AI_MODEL,
     instructions: "Use fresh HCN evidence.",
     input: [{ role: "user", content: "Work my files." }],
     tools: [],

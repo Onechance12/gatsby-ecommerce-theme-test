@@ -1,11 +1,12 @@
 import { appendFileSync } from "node:fs";
 
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const THRESHER_GROQ_RESPONSES_URL =
+  "https://api.groq.com/openai/v1/responses";
 const originalFetch = globalThis.fetch;
 const recordPath =
-  String(process.env.HCN_TEST_OPENAI_RECORD_PATH || "").trim();
+  String(process.env.HCN_TEST_THRESHER_RECORD_PATH || "").trim();
 const responseText =
-  String(process.env.HCN_TEST_OPENAI_RESPONSE_TEXT || "").trim();
+  String(process.env.HCN_TEST_THRESHER_RESPONSE_TEXT || "").trim();
 
 if (!recordPath || !responseText) {
   throw new Error("HCN test provider stub is not configured.");
@@ -16,7 +17,7 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
     typeof input === "string" || input instanceof URL
       ? String(input)
       : String(input?.url || "");
-  if (url !== OPENAI_RESPONSES_URL) {
+  if (url !== THRESHER_GROQ_RESPONSES_URL) {
     return originalFetch(input, init);
   }
 

@@ -1,7 +1,8 @@
 import { fetchBoundedJson } from "../http/bounded-json.js";
+import { THRESHER_AI_MODEL } from "./thresher-ai-runtime.js";
 
-export const HCN_OPENAI_RESPONSES_URL =
-  "https://api.openai.com/v1/responses";
+export const THRESHER_GROQ_RESPONSES_URL =
+  "https://api.groq.com/openai/v1/responses";
 
 const REQUEST_FIELDS = Object.freeze([
   "model",
@@ -15,20 +16,22 @@ const REQUEST_FIELDS = Object.freeze([
 ]);
 
 /**
- * Create the dedicated HCN Responses API adapter.
+ * Create HCN's dedicated Groq-backed Thresher AI Responses adapter.
  *
- * The endpoint is intentionally fixed. The caller cannot supply provider
- * state, a response id, background mode, streaming, files, or hosted tools.
+ * Provider, endpoint, and model are deliberately fixed in source. The caller
+ * cannot supply provider state, built-in tools, MCP servers, background mode,
+ * files, streaming, or an alternate model. Groq currently does not accept the
+ * Responses API `store` request field, so the adapter requires `store:false`
+ * at the HCN boundary and deliberately omits that unsupported field on the
+ * provider request. Conversation replay remains bounded and HCN-controlled.
  */
-export function createHcnOpenAIResponsesClient({
+export function createThresherGroqResponsesClient({
   apiKey,
-  model,
   reasoningEffort,
   maxOutputTokens,
   fetchImpl = fetch
 } = {}) {
   const key = boundedApiKey(apiKey);
-  const configuredModel = boundedModel(model);
   const effort = boundedReasoningEffort(reasoningEffort);
   integerBetween(maxOutputTokens, 256, 4096, "maxOutputTokens");
   if (typeof fetchImpl !== "function") {
@@ -36,13 +39,10 @@ export function createHcnOpenAIResponsesClient({
   }
 
   return Object.freeze(async function createResponse(request) {
-    validateRequest(request, {
-      model: configuredModel,
-      maxOutputTokens
-    });
+    validateRequest(request, { maxOutputTokens });
     return fetchBoundedJson(
       fetchImpl,
-      HCN_OPENAI_RESPONSES_URL,
+      THRESHER_GROQ_RESPONSES_URL,
       {
         method: "POST",
         headers: {
@@ -51,10 +51,11 @@ export function createHcnOpenAIResponsesClient({
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          ...request,
-          model: configuredModel,
-          store: false,
-          stream: false,
+          model: THRESHER_AI_MODEL,
+          instructions: request.instructions,
+          input: request.input,
+          tools: request.tools,
+          tool_choice: "auto",
           parallel_tool_calls: false,
           max_output_tokens: maxOutputTokens,
           reasoning: { effort }
@@ -63,16 +64,16 @@ export function createHcnOpenAIResponsesClient({
       {
         timeoutMs: 55_000,
         maxBytes: 2 * 1024 * 1024,
-        errorCode: "HCN_ASSISTANT_PROVIDER_FAILED"
+        errorCode: "THRESHER_AI_PROVIDER_FAILED"
       }
     );
   });
 }
 
-function validateRequest(request, { model, maxOutputTokens }) {
-  exactRecord(request, REQUEST_FIELDS, "assistant provider request");
+function validateRequest(request, { maxOutputTokens }) {
+  exactRecord(request, REQUEST_FIELDS, "Thresher AI provider request");
   if (
-    request.model !== model
+    request.model !== THRESHER_AI_MODEL
     || request.store !== false
     || request.parallel_tool_calls !== false
     || request.tool_choice !== "auto"
@@ -81,9 +82,10 @@ function validateRequest(request, { model, maxOutputTokens }) {
     || !request.instructions
     || !Array.isArray(request.input)
     || !Array.isArray(request.tools)
+    || request.tools.some((tool) => tool?.type !== "function")
   ) {
     throw new TypeError(
-      "assistant provider request does not match the fixed HCN contract"
+      "Thresher AI provider request does not match the fixed HCN contract"
     );
   }
 }
@@ -98,17 +100,9 @@ function boundedApiKey(value) {
   return key;
 }
 
-function boundedModel(value) {
-  const model = String(value || "").trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(model)) {
-    throw new TypeError("model must be a bounded model identifier");
-  }
-  return model;
-}
-
 function boundedReasoningEffort(value) {
   const effort = String(value || "").trim().toLowerCase();
-  if (!["none", "minimal", "low", "medium", "high"].includes(effort)) {
+  if (!["low", "medium", "high"].includes(effort)) {
     throw new TypeError("reasoningEffort is not enabled");
   }
   return effort;
@@ -145,9 +139,7 @@ function exactRecord(value, keys, label) {
       (key) => typeof key !== "string" || !keys.includes(key)
     )
   ) {
-    throw new TypeError(
-      `${label} must contain only its fixed fields`
-    );
+    throw new TypeError(`${label} must contain only its fixed fields`);
   }
   for (const key of ownKeys) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);

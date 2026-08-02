@@ -159,7 +159,7 @@ JOBNIMBUS_API_KEY=
 JOBNIMBUS_BRIDGE_TOKEN=
 CODEX_OPERATOR_TOKEN=
 CODEX_MAC_OPERATOR_TOKEN=
-HCN_ASSISTANT_OPENAI_API_KEY=
+HCN_THRESHER_AI_GROQ_API_KEY=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
@@ -175,7 +175,7 @@ HCN_THRESHER_STORE_PATH=/var/data/hcn-operations/thresher/state.enc.json
 HCN_THRESHER_STORE_KEY=
 HCN_THRESHER_REFERENCE_KEY=
 HCN_THRESHER_SIGNING_KEY=
-HCN_ASSISTANT_ENABLED=false
+HCN_THRESHER_AI_ENABLED=false
 ALLOW_GMAIL_SEND=false
 QUO_DEFAULT_FROM_NUMBER=
 ALLOW_QUO_SEND=false
@@ -201,24 +201,27 @@ dedicated persistent directory that is not shared with Chance Brain, legacy
 client memory, or Jobrolo. All bridge security ledgers, connector grants,
 employee links, handoffs, and artifacts default beneath its `platform/`
 subdirectory. Thresher's operational-state/rules layer remains deterministic
-and non-executing. Ask Thresher's model connection is configured separately
-with `HCN_ASSISTANT_*`; it never receives an execution tool.
+and non-executing. Ask Thresher's dedicated model runtime is configured
+separately with `HCN_THRESHER_AI_*`; it never receives an execution tool.
 
-`HCN_ASSISTANT_OPENAI_API_KEY` must be dedicated to HCN and must not equal the
-realtime voice key, an HCN encryption key, an OAuth secret, or an operator
-credential. Ask Thresher sends each prompt and the allowlisted fresh evidence
-needed for that turn to the OpenAI Responses API with `store:false`. That
-disables Responses application-state storage, but OpenAI project data controls
-and abuse-monitoring retention policies still apply. Zero Data Retention or
-Modified Abuse Monitoring is a separate project-level approval and
-configuration.
+`HCN_THRESHER_AI_GROQ_API_KEY` must belong to a dedicated HCN Groq project and
+must not equal another product/provider key, the realtime voice key, an HCN
+encryption key, an OAuth secret, or an operator credential. Provider, endpoint,
+and model are fixed in source as Groq Responses API plus
+`openai/gpt-oss-20b`; neither the browser nor an environment variable may
+select a different model. Ask Thresher sends each turn's bounded conversation
+and allowlisted fresh evidence without a provider conversation id. Groq's
+Responses API does not accept a `store` request field, so the adapter omits it
+and keeps bounded conversation replay inside the HCN process. Groq project data
+controls and retention terms still apply.
 
 The reasoning router is fixed in server code, not selected by the browser or
 environment variables. In Auto mode, narrow Work Center, exact-file status,
 and authorized activity-gap reports use deterministic fresh reads with no
-model call. Ordinary interpretation and drafting use GPT-5.6 Sol with medium
-reasoning. The explicit Deep Review control and high-stakes settlement,
-policy, coverage, or claim-strategy work use GPT-5.6 Sol with high reasoning.
+model call. Ordinary interpretation and drafting use Thresher AI's fixed Groq
+`openai/gpt-oss-20b` runtime with medium reasoning. The explicit Deep Review
+control and high-stakes settlement, policy, coverage, or claim-strategy work
+use the same dedicated Thresher runtime with high reasoning.
 Unsupported live
 calls, uploads, deletions, financial actions, and legal actions fail closed to
 the protected operator workflow.
@@ -537,8 +540,8 @@ or repository.
 
 Before cutover, confirm the full test and readiness suites pass, record the
 exact candidate SHA, and obtain action-time approval for every external
-change. Store a dedicated, funded HCN OpenAI project key directly in Render as
-`HCN_ASSISTANT_OPENAI_API_KEY`; never reuse `OPENAI_API_KEY` or another HCN
+change. Store a dedicated, funded HCN Groq project key directly in Render as
+`HCN_THRESHER_AI_GROQ_API_KEY`; never reuse another product key or another HCN
 secret. Confirm the checked-in model, reasoning, and token settings, add the
 exact Google Web OAuth redirect
 `https://hcn-operations-platform.onrender.com/oauth/google/callback`, push the
@@ -557,7 +560,7 @@ sweep, and exact action-plan preparation. Do not execute the smoke-test plan;
 verify JobNimbus, Gmail, Quo, and Calendar remain unchanged.
 
 If readiness, scope, or model behavior fails, set
-`HCN_ASSISTANT_ENABLED=false` and restart the service. If the release affects
+`HCN_THRESHER_AI_ENABLED=false` and restart the service. If the release affects
 existing HCN operations, roll Render back to the previously verified attested
 SHA. Revoke the assistant key only if exposure is suspected; do not rotate
 unrelated HCN credentials.

@@ -183,12 +183,15 @@ import {
   isClosedBenchmarkContact
 } from "./hcn-ops/closed-file-benchmark/core.js";
 import {
-  DEFAULT_HCN_ASSISTANT_INSTRUCTIONS,
+  DEFAULT_THRESHER_AI_INSTRUCTIONS,
   runHcnAssistant
 } from "./hcn-assistant/core.js";
 import {
-  createHcnOpenAIResponsesClient
-} from "./hcn-assistant/openai-responses.js";
+  createThresherGroqResponsesClient
+} from "./hcn-assistant/thresher-groq-responses.js";
+import {
+  THRESHER_AI_RUNTIME
+} from "./hcn-assistant/thresher-ai-runtime.js";
 import {
   HCN_ASSISTANT_OPERATIONS_PLAYBOOK
 } from "./hcn-assistant/operations-playbook.js";
@@ -345,13 +348,13 @@ const HCN_CONSOLE_API_BODY_BYTES = 4 * 1024;
 const HCN_ACTION_PREPARE_BODY_BYTES = 64 * 1024;
 const HCN_ASSISTANT_BODY_BYTES = 16 * 1024;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const HCN_ASSISTANT_ENABLED =
-  process.env.HCN_ASSISTANT_ENABLED === "true";
-const HCN_ASSISTANT_OPENAI_API_KEY =
-  process.env.HCN_ASSISTANT_OPENAI_API_KEY || "";
-const HCN_ASSISTANT_RESPONSE_CLIENTS =
-  createHcnAssistantResponseClients(
-    HCN_ASSISTANT_OPENAI_API_KEY
+const HCN_THRESHER_AI_ENABLED =
+  process.env.HCN_THRESHER_AI_ENABLED === "true";
+const HCN_THRESHER_AI_GROQ_API_KEY =
+  process.env.HCN_THRESHER_AI_GROQ_API_KEY || "";
+const HCN_THRESHER_AI_RESPONSE_CLIENTS =
+  createThresherAiResponseClients(
+    HCN_THRESHER_AI_GROQ_API_KEY
   );
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
 const OPENAI_VOICE = process.env.OPENAI_VOICE || "marin";
@@ -611,11 +614,11 @@ if (
   );
 }
 if (
-  HCN_ASSISTANT_OPENAI_API_KEY
-  && !/^[\x21-\x7E]{20,512}$/.test(HCN_ASSISTANT_OPENAI_API_KEY)
+  HCN_THRESHER_AI_GROQ_API_KEY
+  && !/^[\x21-\x7E]{20,512}$/.test(HCN_THRESHER_AI_GROQ_API_KEY)
 ) {
   throw new Error(
-    "HCN_ASSISTANT_OPENAI_API_KEY must contain 20 to 512 printable non-space ASCII characters."
+    "HCN_THRESHER_AI_GROQ_API_KEY must contain 20 to 512 printable non-space ASCII characters."
   );
 }
 for (const [label, otherSecret] of [
@@ -637,12 +640,12 @@ for (const [label, otherSecret] of [
   ["RETELL_API_KEY", RETELL_API_KEY]
 ]) {
   if (
-    HCN_ASSISTANT_OPENAI_API_KEY
+    HCN_THRESHER_AI_GROQ_API_KEY
     && otherSecret
-    && secureEqual(HCN_ASSISTANT_OPENAI_API_KEY, otherSecret)
+    && secureEqual(HCN_THRESHER_AI_GROQ_API_KEY, otherSecret)
   ) {
     throw new Error(
-      `HCN_ASSISTANT_OPENAI_API_KEY must be different from ${label}.`
+      `HCN_THRESHER_AI_GROQ_API_KEY must be different from ${label}.`
     );
   }
 }
@@ -662,7 +665,7 @@ for (const [label, otherSecret] of [
   ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
   ["RETELL_API_KEY", RETELL_API_KEY],
   ["OPENAI_API_KEY", OPENAI_API_KEY],
-  ["HCN_ASSISTANT_OPENAI_API_KEY", HCN_ASSISTANT_OPENAI_API_KEY]
+  ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY]
 ]) {
   if (
     HCN_GOOGLE_GRANT_KEY
@@ -689,7 +692,7 @@ for (const [label, otherSecret] of [
   ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
   ["RETELL_API_KEY", RETELL_API_KEY],
   ["OPENAI_API_KEY", OPENAI_API_KEY],
-  ["HCN_ASSISTANT_OPENAI_API_KEY", HCN_ASSISTANT_OPENAI_API_KEY]
+  ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY]
 ]) {
   if (
     HCN_REFERENCE_KEY
@@ -720,7 +723,7 @@ for (const [label, otherSecret] of [
   ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
   ["RETELL_API_KEY", RETELL_API_KEY],
   ["OPENAI_API_KEY", OPENAI_API_KEY],
-  ["HCN_ASSISTANT_OPENAI_API_KEY", HCN_ASSISTANT_OPENAI_API_KEY]
+  ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY]
 ]) {
   if (
     HCN_QUO_LINK_KEY
@@ -756,7 +759,7 @@ const HCN_THRESHER_CONFIGURATION = loadThresherRuntimeConfiguration(
       ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
       ["RETELL_API_KEY", RETELL_API_KEY],
       ["OPENAI_API_KEY", OPENAI_API_KEY],
-      ["HCN_ASSISTANT_OPENAI_API_KEY", HCN_ASSISTANT_OPENAI_API_KEY]
+      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY]
     ].map(([name, value]) => ({ name, value }))
   }
 );
@@ -1171,19 +1174,23 @@ function health() {
         companyCommunicationCoverage: "not_evaluated"
       },
       assistant: {
-        enabled: HCN_ASSISTANT_ENABLED,
-        configured: Boolean(HCN_ASSISTANT_OPENAI_API_KEY),
+        identity: THRESHER_AI_RUNTIME.identity,
+        enabled: HCN_THRESHER_AI_ENABLED,
+        configured: Boolean(HCN_THRESHER_AI_GROQ_API_KEY),
         ready: hcnAssistantConfigured(),
         deterministicReady: hcnAssistantFoundationConfigured(),
-        provider: "openai_responses_api",
-        model: HCN_ASSISTANT_REASONING_PROFILES.standard.model,
+        provider: THRESHER_AI_RUNTIME.providerApi,
+        model: THRESHER_AI_RUNTIME.model,
         reasoningEffort: "routed_medium_or_high",
         routing: hcnAssistantRoutingHealth(),
         providerCredential: "dedicated_server_side_only",
         providerTokensExposedToBrowser: false,
         responsesApiStore: false,
+        providerState: "disabled_hcn_bounded_replay_only",
         providerRetention:
-          "openai_project_data_controls_apply",
+          "groq_project_data_controls_apply",
+        builtInProviderTools: false,
+        remoteTools: false,
         conversationState:
           "bounded_session_scoped_memory_only",
         fileScope:
@@ -1297,17 +1304,21 @@ function health() {
       executeAdmission: HCN_ACTION_EXECUTE_ADMISSION.stats()
     },
     hcnAssistant: {
-      enabled: HCN_ASSISTANT_ENABLED,
-      configured: Boolean(HCN_ASSISTANT_OPENAI_API_KEY),
+      identity: THRESHER_AI_RUNTIME.identity,
+      enabled: HCN_THRESHER_AI_ENABLED,
+      configured: Boolean(HCN_THRESHER_AI_GROQ_API_KEY),
       ready: hcnAssistantConfigured(),
       deterministicReady: hcnAssistantFoundationConfigured(),
-      provider: "openai_responses_api",
-      model: HCN_ASSISTANT_REASONING_PROFILES.standard.model,
+      provider: THRESHER_AI_RUNTIME.providerApi,
+      model: THRESHER_AI_RUNTIME.model,
       reasoningEffort: "routed_medium_or_high",
       routing: hcnAssistantRoutingHealth(),
       responsesApiStore: false,
+      providerState: "disabled_hcn_bounded_replay_only",
       providerRetention:
-        "openai_project_data_controls_apply",
+        "groq_project_data_controls_apply",
+      builtInProviderTools: false,
+      remoteTools: false,
       sessionHistory:
         "bounded_in_memory_no_durable_client_transcript",
       assignedFileScopeOnly: true,
@@ -1425,11 +1436,15 @@ function health() {
           ? "encrypted_minimized_operational_state"
           : "not_yet_persistent",
       deterministicRulesRunOnFreshEvidence: true,
-      optionalModelAdvisory: false,
-      operationalProviderConfigured: false,
-      providerNeutralAdapter: true,
+      modelRuntimeIdentity: THRESHER_AI_RUNTIME.identity,
+      optionalModelAdvisory: hcnAssistantConfigured(),
+      operationalProviderConfigured: hcnAssistantConfigured(),
+      operationalProvider: THRESHER_AI_RUNTIME.provider,
+      operationalModel: THRESHER_AI_RUNTIME.model,
+      providerNeutralAdapter: false,
       exactClientDataMinimized: true,
-      modelHasTools: false,
+      modelHasTools: hcnAssistantConfigured(),
+      modelToolAuthority: "read_and_prepare_only",
       modelCanExecute: false,
       liveSourcesWin: true,
       doesNotAuthorizeActions: true,
@@ -4273,14 +4288,14 @@ function validateHcnAssistantTurnInput(input) {
 function hcnAssistantConfigured() {
   return Boolean(
     hcnAssistantFoundationConfigured()
-    && HCN_ASSISTANT_OPENAI_API_KEY
-    && Object.keys(HCN_ASSISTANT_RESPONSE_CLIENTS).length === 2
+    && HCN_THRESHER_AI_GROQ_API_KEY
+    && Object.keys(HCN_THRESHER_AI_RESPONSE_CLIENTS).length === 2
   );
 }
 
 function hcnAssistantFoundationConfigured() {
   return Boolean(
-    HCN_ASSISTANT_ENABLED
+    HCN_THRESHER_AI_ENABLED
     && HCN_CONSOLE_ENABLED
     && hcnConsoleFreshReadConfigured()
   );
@@ -4354,7 +4369,7 @@ async function runHcnModelAssistantTurn({
   profile
 }) {
   const createResponse =
-    HCN_ASSISTANT_RESPONSE_CLIENTS[profile.profileId];
+    HCN_THRESHER_AI_RESPONSE_CLIENTS[profile.profileId];
   if (!hcnAssistantConfigured() || typeof createResponse !== "function") {
     const error = new Error(
       "Ask Thresher reasoning is not configured for this HCN environment."
@@ -4434,7 +4449,7 @@ function hcnAssistantInstructions(principal) {
     .replace(/[^a-z_]/g, "")
     .slice(0, 32) || "employee";
   return [
-    DEFAULT_HCN_ASSISTANT_INSTRUCTIONS,
+    DEFAULT_THRESHER_AI_INSTRUCTIONS,
     "",
     HCN_ASSISTANT_OPERATIONS_PLAYBOOK,
     "",
@@ -4450,14 +4465,13 @@ function hcnAssistantInstructions(principal) {
   ].join("\n");
 }
 
-function createHcnAssistantResponseClients(apiKey) {
+function createThresherAiResponseClients(apiKey) {
   if (!apiKey) return Object.freeze({});
   const clients = {};
   for (const route of ["standard", "deep"]) {
     const profile = HCN_ASSISTANT_REASONING_PROFILES[route];
-    clients[profile.profileId] = createHcnOpenAIResponsesClient({
+    clients[profile.profileId] = createThresherGroqResponsesClient({
       apiKey,
-      model: profile.model,
       reasoningEffort: profile.reasoningEffort,
       maxOutputTokens: profile.maxOutputTokens
     });
@@ -15164,7 +15178,7 @@ function redactSensitiveText(value) {
     process.env.HCN_THRESHER_REFERENCE_KEY,
     process.env.HCN_THRESHER_SIGNING_KEY,
     OPENAI_API_KEY,
-    HCN_ASSISTANT_OPENAI_API_KEY,
+    HCN_THRESHER_AI_GROQ_API_KEY,
     TWILIO_AUTH_TOKEN,
     RETELL_API_KEY,
     QUO_API_KEY
@@ -15173,7 +15187,7 @@ function redactSensitiveText(value) {
   }
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [REDACTED]")
-    .replace(/\b(?:sk|key|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]");
+    .replace(/\b(?:gsk|sk|key|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]");
 }
 
 function authorized(req) {
@@ -17036,7 +17050,7 @@ const OPENAPI = {
               },
               provider: {
                 type: "string",
-                enum: ["openai_responses_api", "unknown"]
+                enum: ["groq_responses_api", "unknown"]
               },
               model: { type: "string" },
               responsesApiStore: {
@@ -18540,8 +18554,8 @@ const OPENAPI = {
                           type: "string",
                           enum: [
                             "hcn.deterministic.v1",
-                            "hcn.openai.gpt-5.6-sol.medium.v1",
-                            "hcn.openai.gpt-5.6-sol.high.v1",
+                            "hcn.thresher.groq.gpt-oss-20b.medium.v1",
+                            "hcn.thresher.groq.gpt-oss-20b.high.v1",
                             "hcn.codex-operator-escalation.v1"
                           ]
                         },

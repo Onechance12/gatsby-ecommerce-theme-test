@@ -76,11 +76,11 @@ function evaluateAssistantRouting(functionSource, value) {
         modelUsed: false
       },
       standard: {
-        profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
+        profileId: "hcn.thresher.groq.gpt-oss-20b.medium.v1",
         modelUsed: true
       },
       deep: {
-        profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+        profileId: "hcn.thresher.groq.gpt-oss-20b.high.v1",
         modelUsed: true
       },
       codex_escalation: {
@@ -463,7 +463,7 @@ test("Ask Thresher accepts only the exact bounded reasoning-routing contract", a
   );
   const valid = {
     route: "deep",
-    profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+    profileId: "hcn.thresher.groq.gpt-oss-20b.high.v1",
     reasonCodes: ["explicit_deep_review"],
     modelUsed: true
   };

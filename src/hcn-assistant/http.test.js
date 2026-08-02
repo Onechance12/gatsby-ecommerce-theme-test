@@ -178,15 +178,15 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         PUBLIC_BASE_URL: bridgeOrigin,
         HCN_CONSOLE_ENABLED: "true",
         HCN_CONSOLE_ORIGIN: bridgeOrigin,
-        HCN_ASSISTANT_ENABLED: "true",
-        HCN_ASSISTANT_OPENAI_API_KEY:
-          "sk-hcn-route-fixture-key-1234567890",
+        HCN_THRESHER_AI_ENABLED: "true",
+        HCN_THRESHER_AI_GROQ_API_KEY:
+          "gsk_hcn_route_fixture_key_1234567890",
         // These legacy values must not override the fixed reasoning router.
         HCN_ASSISTANT_MODEL: "gpt-5.6-terra",
         HCN_ASSISTANT_REASONING_EFFORT: "low",
         HCN_ASSISTANT_MAX_OUTPUT_TOKENS: "1200",
-        HCN_TEST_OPENAI_RECORD_PATH: providerRecordPath,
-        HCN_TEST_OPENAI_RESPONSE_TEXT: ASSISTANT_RESPONSE,
+        HCN_TEST_THRESHER_RECORD_PATH: providerRecordPath,
+        HCN_TEST_THRESHER_RESPONSE_TEXT: ASSISTANT_RESPONSE,
         HCN_TENANT_ID: "tenant_0123456789abcdef",
         HCN_REFERENCE_KEY,
         HCN_GOOGLE_GRANT_KEY:
@@ -247,7 +247,9 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(health.hcnAssistant.configured, true);
   assert.equal(health.hcnAssistant.ready, true);
   assert.equal(health.hcnAssistant.deterministicReady, true);
-  assert.equal(health.hcnAssistant.model, "gpt-5.6-sol");
+  assert.equal(health.hcnAssistant.identity, "hcn.thresher-ai.v1");
+  assert.equal(health.hcnAssistant.provider, "groq_responses_api");
+  assert.equal(health.hcnAssistant.model, "openai/gpt-oss-20b");
   assert.equal(
     health.hcnAssistant.reasoningEffort,
     "routed_medium_or_high"
@@ -388,7 +390,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(assistant.routing.route, "standard");
   assert.equal(
     assistant.routing.profileId,
-    "hcn.openai.gpt-5.6-sol.medium.v1"
+    "hcn.thresher.groq.gpt-oss-20b.medium.v1"
   );
   assert.deepEqual(assistant.routing.reasonCodes, [
     "general_assistance"
@@ -417,7 +419,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(deep.routing.route, "deep");
   assert.equal(
     deep.routing.profileId,
-    "hcn.openai.gpt-5.6-sol.high.v1"
+    "hcn.thresher.groq.gpt-oss-20b.high.v1"
   );
   assert.equal(deep.routing.modelUsed, true);
 
@@ -450,14 +452,14 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerRequest = JSON.parse(providerLines[0]);
   assert.equal(
     providerRequest.url,
-    "https://api.openai.com/v1/responses"
+    "https://api.groq.com/openai/v1/responses"
   );
   assert.equal(providerRequest.method, "POST");
-  assert.equal(providerRequest.body.model, "gpt-5.6-sol");
+  assert.equal(providerRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(providerRequest.body.reasoning.effort, "medium");
   assert.equal(providerRequest.body.max_output_tokens, 1800);
-  assert.equal(providerRequest.body.store, false);
-  assert.equal(providerRequest.body.stream, false);
+  assert.equal(Object.hasOwn(providerRequest.body, "store"), false);
+  assert.equal(Object.hasOwn(providerRequest.body, "stream"), false);
   assert.equal(providerRequest.body.parallel_tool_calls, false);
   assert.equal(
     Object.hasOwn(providerRequest.body, "previous_response_id"),
@@ -479,7 +481,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     false
   );
   const deepProviderRequest = JSON.parse(providerLines[1]);
-  assert.equal(deepProviderRequest.body.model, "gpt-5.6-sol");
+  assert.equal(deepProviderRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(deepProviderRequest.body.reasoning.effort, "high");
   assert.equal(deepProviderRequest.body.max_output_tokens, 2400);
   const serializedProviderRequest = JSON.stringify([
@@ -488,7 +490,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   ]);
   assert.doesNotMatch(
     serializedProviderRequest,
-    /assigned-employee-google-subject|assigned-employee-jobnimbus-owner|assigned\.employee@wavepa\.com|hcn-route-fixture-key/
+    /assigned-employee-google-subject|assigned-employee-jobnimbus-owner|assigned\.employee@wavepa\.com|gsk_hcn_route_fixture_key/
   );
 
   assert.deepEqual(externalMutations, []);

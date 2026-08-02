@@ -7,6 +7,11 @@
  * never be passed through as server signals.
  */
 
+import {
+  THRESHER_AI_MODEL,
+  THRESHER_AI_PROVIDER
+} from "./thresher-ai-runtime.js";
+
 const MAX_USER_REQUEST_CHARACTERS = 6_000;
 const MAX_USER_REQUEST_BYTES = 16 * 1024;
 const MAX_EVIDENCE_SOURCES = 8;
@@ -92,19 +97,19 @@ export const HCN_ASSISTANT_REASONING_PROFILES = deepFreeze({
     callEmbeddedLlm: false
   },
   standard: {
-    profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
-    kind: "responses_api",
-    provider: "openai",
-    model: "gpt-5.6-sol",
+    profileId: "hcn.thresher.groq.gpt-oss-20b.medium.v1",
+    kind: "thresher_groq_responses_api",
+    provider: THRESHER_AI_PROVIDER,
+    model: THRESHER_AI_MODEL,
     reasoningEffort: "medium",
     maxOutputTokens: 1_800,
     callEmbeddedLlm: true
   },
   deep: {
-    profileId: "hcn.openai.gpt-5.6-sol.high.v1",
-    kind: "responses_api",
-    provider: "openai",
-    model: "gpt-5.6-sol",
+    profileId: "hcn.thresher.groq.gpt-oss-20b.high.v1",
+    kind: "thresher_groq_responses_api",
+    provider: THRESHER_AI_PROVIDER,
+    model: THRESHER_AI_MODEL,
     reasoningEffort: "high",
     maxOutputTokens: 2_400,
     callEmbeddedLlm: true

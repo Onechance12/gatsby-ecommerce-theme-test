@@ -520,11 +520,24 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.hcnOperationsBrain.contractsAvailable, true);
   assert.equal(health.hcnOperationsBrain.thresherRulesAvailable, true);
   assert.equal(health.hcnOperationsBrain.clientMemory, "not_yet_persistent");
+  assert.equal(
+    health.hcnOperationsBrain.modelRuntimeIdentity,
+    "hcn.thresher-ai.v1"
+  );
   assert.equal(health.hcnOperationsBrain.optionalModelAdvisory, false);
   assert.equal(health.hcnOperationsBrain.operationalProviderConfigured, false);
-  assert.equal(health.hcnOperationsBrain.providerNeutralAdapter, true);
+  assert.equal(health.hcnOperationsBrain.operationalProvider, "groq");
+  assert.equal(
+    health.hcnOperationsBrain.operationalModel,
+    "openai/gpt-oss-20b"
+  );
+  assert.equal(health.hcnOperationsBrain.providerNeutralAdapter, false);
   assert.equal(health.hcnOperationsBrain.exactClientDataMinimized, true);
   assert.equal(health.hcnOperationsBrain.modelHasTools, false);
+  assert.equal(
+    health.hcnOperationsBrain.modelToolAuthority,
+    "read_and_prepare_only"
+  );
   assert.equal(health.hcnOperationsBrain.modelCanExecute, false);
   assert.equal(health.hcnOperationsBrain.doesNotAuthorizeActions, true);
   assert.equal(health.hcnOperationsBrain.autonomousLearning, false);
@@ -2900,8 +2913,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       PUBLIC_BASE_URL: origin,
       HCN_CONSOLE_ENABLED: "true",
       HCN_CONSOLE_ORIGIN: origin,
-      HCN_ASSISTANT_ENABLED: "false",
-      HCN_ASSISTANT_OPENAI_API_KEY: "",
+      HCN_THRESHER_AI_ENABLED: "false",
+      HCN_THRESHER_AI_GROQ_API_KEY: "",
       HCN_TENANT_ID: "tenant_0123456789abcdef",
       HCN_REFERENCE_KEY: hcnReferenceKey,
       HCN_GOOGLE_GRANT_KEY: hcnGoogleGrantKey,
@@ -3020,12 +3033,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   assert.equal(managementHealth.gmailConfigured, true);
   assert.deepEqual(managementHealth.hcnAssistant, {
+    identity: "hcn.thresher-ai.v1",
     enabled: false,
     configured: false,
     ready: false,
     deterministicReady: false,
-    provider: "openai_responses_api",
-    model: "gpt-5.6-sol",
+    provider: "groq_responses_api",
+    model: "openai/gpt-oss-20b",
     reasoningEffort: "routed_medium_or_high",
     routing: {
       deterministic: {
@@ -3033,13 +3047,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         providerCall: false
       },
       standard: {
-        profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
-        model: "gpt-5.6-sol",
+        profileId: "hcn.thresher.groq.gpt-oss-20b.medium.v1",
+        model: "openai/gpt-oss-20b",
         reasoningEffort: "medium"
       },
       deep: {
-        profileId: "hcn.openai.gpt-5.6-sol.high.v1",
-        model: "gpt-5.6-sol",
+        profileId: "hcn.thresher.groq.gpt-oss-20b.high.v1",
+        model: "openai/gpt-oss-20b",
         reasoningEffort: "high"
       },
       codexEscalation: {
@@ -3048,7 +3062,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       }
     },
     responsesApiStore: false,
-    providerRetention: "openai_project_data_controls_apply",
+    providerState: "disabled_hcn_bounded_replay_only",
+    providerRetention: "groq_project_data_controls_apply",
+    builtInProviderTools: false,
+    remoteTools: false,
     sessionHistory:
       "bounded_in_memory_no_durable_client_transcript",
     assignedFileScopeOnly: true,

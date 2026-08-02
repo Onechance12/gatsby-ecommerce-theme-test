@@ -41,11 +41,11 @@
       modelUsed: false
     }),
     standard: Object.freeze({
-      profileId: "hcn.openai.gpt-5.6-sol.medium.v1",
+      profileId: "hcn.thresher.groq.gpt-oss-20b.medium.v1",
       modelUsed: true
     }),
     deep: Object.freeze({
-      profileId: "hcn.openai.gpt-5.6-sol.high.v1",
+      profileId: "hcn.thresher.groq.gpt-oss-20b.high.v1",
       modelUsed: true
     }),
     codex_escalation: Object.freeze({
