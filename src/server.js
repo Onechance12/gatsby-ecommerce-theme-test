@@ -179,6 +179,10 @@ import {
   buildManagementSweep
 } from "./hcn-ops/management-sweep/core.js";
 import {
+  buildClosedFileBenchmark,
+  isClosedBenchmarkContact
+} from "./hcn-ops/closed-file-benchmark/core.js";
+import {
   DEFAULT_HCN_ASSISTANT_INSTRUCTIONS,
   runHcnAssistant
 } from "./hcn-assistant/core.js";
@@ -398,6 +402,9 @@ const HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET = Math.min(
   positiveIntegerEnv("HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET", 750),
   2500
 );
+const HCN_CLOSED_BENCHMARK_MAX_FILES = 500;
+const HCN_CLOSED_BENCHMARK_PROVIDER_REQUEST_BUDGET = 1250;
+const HCN_CLOSED_BENCHMARK_READ_CONCURRENCY = 6;
 const HCN_MANAGEMENT_VERIFIED_ACTIVITY_CLASSES = new Set([
   "successful_communication",
   "contact_attempt",
@@ -772,6 +779,7 @@ const routes = new Map([
   ["POST /hcn/api/v1/connectors/quo-line", hcnQuoLineLink],
   ["POST /hcn/api/v1/work-center", hcnReadWorkCenter],
   ["POST /hcn/api/v1/management-sweep", hcnReadManagementSweep],
+  ["POST /hcn/api/v1/closed-file-benchmark", hcnReadClosedFileBenchmark],
   ["POST /hcn/api/v1/file-review", hcnReadFile],
   ["POST /hcn/api/v1/assistant/turns", hcnAssistantTurn],
   ["POST /hcn/api/v1/action-plans/prepare", hcnPrepareActionPlan],
@@ -1226,6 +1234,15 @@ function health() {
           && hcnConsoleFreshReadConfigured()
         ),
         macOperatorAuthorized: false,
+        readOnly: true
+      },
+      fixedClosedFileBenchmarkRead: {
+        hpOperatorConfigured: Boolean(CODEX_OPERATOR_TOKEN),
+        hpOperatorReady: Boolean(
+          CODEX_OPERATOR_TOKEN
+          && hcnConsoleFreshReadConfigured()
+        ),
+        fourYearScope: true,
         readOnly: true
       },
       gmailReadsRequireExactAssignedFile: true,
@@ -2525,6 +2542,8 @@ async function authWhoAmI() {
           companyWideIndexOrSweep: false,
           fixedManagementSweepRead:
             isCodexHpManagementSweepIdentity(identity),
+          fixedClosedFileBenchmarkRead:
+            isCodexHpManagementSweepIdentity(identity),
           actionPath: "approval_batch_only"
         }
       : null,
@@ -3451,6 +3470,181 @@ async function hcnReadManagementSweep(input = {}) {
   return withHcnReadAdmission(
     () => readHcnManagementSweep(input)
   );
+}
+
+async function hcnReadClosedFileBenchmark(input = {}) {
+  assertHcnManagementSession();
+  return withHcnReadAdmission(
+    () => readHcnClosedFileBenchmark(input)
+  );
+}
+
+async function readHcnClosedFileBenchmark(input = {}) {
+  const request = validateHcnClosedFileBenchmarkInput(input);
+  if (!API_KEY) {
+    const error = new Error("Fresh JobNimbus evidence is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const generatedAt = new Date().toISOString();
+  const rangeStartDate = new Date(generatedAt);
+  rangeStartDate.setUTCFullYear(rangeStartDate.getUTCFullYear() - 4);
+  const rangeStart = rangeStartDate.toISOString();
+  const providerReadBudget = {
+    maximum: HCN_CLOSED_BENCHMARK_PROVIDER_REQUEST_BUDGET,
+    used: 0
+  };
+  let index;
+  try {
+    index = await hcnCachedContactIndex({
+      maxRecords: 5000,
+      requestBudget: providerReadBudget
+    });
+  } catch {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus closed-file index is unavailable."
+    );
+  }
+  if (!index.complete) {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus closed-file index is incomplete."
+    );
+  }
+
+  let eligibleContacts;
+  try {
+    eligibleContacts = index.rows.filter((contact) =>
+      isClosedBenchmarkContact(contact, { generatedAt, rangeStart })
+    );
+  } catch {
+    throw hcnManagementSourceUnavailable(
+      "The JobNimbus closed-file index contains invalid chronology."
+    );
+  }
+  if (eligibleContacts.length > HCN_CLOSED_BENCHMARK_MAX_FILES) {
+    const error = new Error(
+      "The four-year closed-file benchmark bound was exceeded."
+    );
+    error.code = "hcn_closed_file_benchmark_scope_changed";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const eligibleIds = new Set(
+    eligibleContacts.map((contact) =>
+      hcnProviderFileId(String(contact?.jnid || contact?.id || ""))
+    )
+  );
+  const activityBundles = await mapWithBoundedConcurrency(
+    eligibleContacts,
+    HCN_CLOSED_BENCHMARK_READ_CONCURRENCY,
+    async (contact) => {
+      const providerFileId = hcnProviderFileId(
+        String(contact?.jnid || contact?.id || "")
+      );
+      let page;
+      try {
+        page = await listHcnExactFileActivitiesComplete(providerFileId, {
+          maxRecords: HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS,
+          requestBudget: providerReadBudget
+        });
+      } catch (error) {
+        if (error?.code === "hcn_management_source_unavailable") throw error;
+        throw hcnManagementSourceUnavailable(
+          "One or more closed-file JobNimbus activity histories are unavailable."
+        );
+      }
+      if (!page.complete) {
+        throw hcnManagementSourceUnavailable(
+          "One or more closed-file JobNimbus activity histories are incomplete."
+        );
+      }
+      const activities = page.rows.filter((activity) => {
+        const references = hcnManagementIndexedFileReferences(
+          activity,
+          eligibleIds
+        );
+        return references.length === 1 && references[0] === providerFileId;
+      });
+      return {
+        providerFileId,
+        complete: true,
+        activities
+      };
+    }
+  );
+
+  let benchmark;
+  try {
+    benchmark = buildClosedFileBenchmark({
+      generatedAt,
+      rangeStart,
+      contacts: index.rows,
+      activityBundles,
+      limit: request.limit
+    });
+  } catch {
+    throw hcnManagementSourceUnavailable(
+      "The normalized JobNimbus closed-file benchmark is unavailable."
+    );
+  }
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const publicFileRef = (providerFileId) =>
+    references.subjectId("jobnimbus", providerFileId);
+  const completedAt = new Date().toISOString();
+  return {
+    ...benchmark,
+    generatedAt: completedAt,
+    asOf: generatedAt,
+    checkedAt: completedAt,
+    validUntil: new Date(Date.parse(completedAt) + 5 * 60 * 1000).toISOString(),
+    ephemeral: true,
+    cachePolicy: "no_store",
+    authority: {
+      source: "fresh_jobnimbus_read_only",
+      writesPossible: false,
+      chanceBrainUsed: false,
+      jobroloUsed: false
+    },
+    candidates: benchmark.candidates.map(({ providerFileId, ...candidate }) => ({
+      fileRef: publicFileRef(providerFileId),
+      ...candidate
+    })),
+    repeatabilityLeaders: benchmark.repeatabilityLeaders.map(({
+      providerFileId,
+      ...candidate
+    }) => ({
+      fileRef: publicFileRef(providerFileId),
+      ...candidate
+    })),
+    diagnostics: {
+      providerReadBudgetUsed: providerReadBudget.used,
+      providerReadBudgetMaximum: providerReadBudget.maximum,
+      completePerFileActivityReads: activityBundles.length
+    },
+    limitations: [
+      "The report uses JobNimbus contacts and activity notes only; Gmail, Quo, calendar, bank, and accounting systems were not evaluated.",
+      "A dollar amount is labeled verified outcome only when the same source record uses paid, payment, settlement, award, approved, or collected language.",
+      "JobNimbus last-update time is used as an explicitly labeled close-date proxy when no close/status-change timestamp exists."
+    ]
+  };
+}
+
+function validateHcnClosedFileBenchmarkInput(input) {
+  if (
+    !input
+    || typeof input !== "object"
+    || Array.isArray(input)
+    || Object.keys(input).some((key) => key !== "limit")
+  ) {
+    badRequest("Closed-file benchmark input may contain only limit.");
+  }
+  const limit = input.limit === undefined ? 20 : input.limit;
+  if (!Number.isSafeInteger(limit) || limit < 5 || limit > 30) {
+    badRequest("limit must be an integer from 5 to 30.");
+  }
+  return { limit };
 }
 
 async function readHcnManagementSweep(input = {}) {
@@ -18160,6 +18354,43 @@ const OPENAPI = {
           "409": { description: "The eligible file scope exceeded the configured safe bound." },
           "413": { description: "Request exceeds the 4 KiB console limit." },
           "503": { description: "The three-adjuster configuration, opaque-reference configuration, or fresh complete JobNimbus evidence is unavailable." }
+        }
+      }
+    },
+    "/hcn/api/v1/closed-file-benchmark": {
+      post: {
+        operationId: "readHcnClosedFileBenchmark",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Management-authorized, read-only four-year benchmark of closed JobNimbus insurance files. It reads complete per-file JobNimbus activity histories, separates paid/settled evidence from estimate-only amounts, and returns outcome and repeatability rankings without using Gmail, Quo, Chance Brain, or Jobrolo.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  limit: {
+                    type: "integer",
+                    minimum: 5,
+                    maximum: 30,
+                    default: 20
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Fresh ephemeral closed-file outcome and repeatability benchmark."
+          },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN management authentication required." },
+          "403": { description: "Management authorization failed." },
+          "409": { description: "The eligible closed-file scope exceeded the fixed safe bound." },
+          "413": { description: "Request exceeds the 4 KiB console limit." },
+          "503": { description: "Opaque-reference configuration or fresh complete JobNimbus evidence is unavailable." }
         }
       }
     },

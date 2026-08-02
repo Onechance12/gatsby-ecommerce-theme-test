@@ -99,6 +99,12 @@ export const CODEX_HP_MANAGEMENT_SWEEP_SCOPE =
   "management_sweep:read";
 const HCN_MANAGEMENT_SWEEP_ROUTE =
   "POST /hcn/api/v1/management-sweep";
+const HCN_CLOSED_FILE_BENCHMARK_ROUTE =
+  "POST /hcn/api/v1/closed-file-benchmark";
+const HCN_FIXED_MANAGEMENT_READ_ROUTES = new Set([
+  HCN_MANAGEMENT_SWEEP_ROUTE,
+  HCN_CLOSED_FILE_BENCHMARK_ROUTE
+]);
 
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /api/v1/session",
@@ -110,6 +116,7 @@ export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "POST /hcn/api/v1/connectors/quo-line",
   "POST /hcn/api/v1/work-center",
   "POST /hcn/api/v1/management-sweep",
+  "POST /hcn/api/v1/closed-file-benchmark",
   "POST /hcn/api/v1/file-review",
   "POST /hcn/api/v1/assistant/turns",
   "POST /hcn/api/v1/action-plans/prepare",
@@ -152,6 +159,7 @@ export const HCN_BROWSER_ROUTE_ROLES = new Map([
   ["POST /hcn/api/v1/work-center", HCN_ASSIGNED_WORK_ROLES],
   ["POST /hcn/api/v1/file-review", HCN_ASSIGNED_WORK_ROLES],
   ["POST /hcn/api/v1/management-sweep", HCN_MANAGEMENT_ROLES],
+  ["POST /hcn/api/v1/closed-file-benchmark", HCN_MANAGEMENT_ROLES],
   ["POST /hcn/api/v1/assistant/turns", HCN_ASSIGNED_WORK_ROLES],
   ["POST /hcn/api/v1/action-plans/prepare", HCN_ASSIGNED_ACTION_ROLES],
   ["POST /hcn/api/v1/action-plans/list", HCN_ASSIGNED_ACTION_ROLES],
@@ -365,7 +373,7 @@ export function routeAllowed(identity, method, pathname) {
       identity.type === "hcn_browser_session"
       && hcnRoles.has(identity.role)
     ) || (
-      route === HCN_MANAGEMENT_SWEEP_ROUTE
+      HCN_FIXED_MANAGEMENT_READ_ROUTES.has(route)
       && isCodexHpManagementSweepIdentity(identity)
     );
   }

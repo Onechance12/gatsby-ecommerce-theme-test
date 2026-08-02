@@ -48,7 +48,7 @@ test("Codex operator descriptor names exactly the existing least-privilege route
   assert.equal(descriptor.authorizedCapabilities.includes("voice.call.place"), false);
 });
 
-test("only the exact scoped HP operator advertises the fixed management sweep capability", () => {
+test("only the exact scoped HP operator advertises the fixed management read capabilities", () => {
   const hpCapabilities = capabilitiesForIdentity({
     type: "codex_operator_token",
     subject: "codex-hp-operator",
@@ -61,6 +61,10 @@ test("only the exact scoped HP operator advertises the fixed management sweep ca
   });
   assert.equal(
     hpCapabilities.includes("hcn.management_sweep.read"),
+    true
+  );
+  assert.equal(
+    hpCapabilities.includes("hcn.closed_file_benchmark.read"),
     true
   );
 
@@ -90,6 +94,12 @@ test("only the exact scoped HP operator advertises the fixed management sweep ca
     assert.equal(
       capabilitiesForIdentity(identity).includes(
         "hcn.management_sweep.read"
+      ),
+      false
+    );
+    assert.equal(
+      capabilitiesForIdentity(identity).includes(
+        "hcn.closed_file_benchmark.read"
       ),
       false
     );
@@ -151,6 +161,7 @@ test("HCN browser capability metadata is intersected with the console surface", 
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
     "hcn.assistant.turn",
+    "hcn.closed_file_benchmark.read",
     "hcn.connectors.google.disconnect",
     "hcn.connectors.google.link",
     "hcn.connectors.quo_line.link",
@@ -179,6 +190,7 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
       "hcn.assistant.turn",
+      "hcn.closed_file_benchmark.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",
@@ -232,6 +244,7 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
       "hcn.assistant.turn",
+      "hcn.closed_file_benchmark.read",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
       "hcn.connectors.quo_line.link",

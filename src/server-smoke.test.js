@@ -3213,6 +3213,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
     "hcn.assistant.turn",
+    "hcn.closed_file_benchmark.read",
     "hcn.connectors.google.disconnect",
     "hcn.connectors.google.link",
     "hcn.connectors.quo_line.link",

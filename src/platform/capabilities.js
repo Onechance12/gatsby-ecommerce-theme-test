@@ -27,6 +27,7 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("hcn.connectors.quo_line.link", "POST /hcn/api/v1/connectors/quo-line"),
   capability("hcn.work_center.read", "POST /hcn/api/v1/work-center"),
   capability("hcn.management_sweep.read", "POST /hcn/api/v1/management-sweep"),
+  capability("hcn.closed_file_benchmark.read", "POST /hcn/api/v1/closed-file-benchmark"),
   capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
   capability("hcn.assistant.turn", "POST /hcn/api/v1/assistant/turns"),
   capability("hcn.action_plans.prepare", "POST /hcn/api/v1/action-plans/prepare"),

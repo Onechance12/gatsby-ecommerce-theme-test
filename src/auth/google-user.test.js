@@ -467,7 +467,10 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
 });
 
 test("fixed management sweep admits only the exact scoped HP operator or an existing management browser role", () => {
-  const route = "/hcn/api/v1/management-sweep";
+  const routes = [
+    "/hcn/api/v1/management-sweep",
+    "/hcn/api/v1/closed-file-benchmark"
+  ];
   const hpOperator = {
     type: "codex_operator_token",
     subject: CODEX_HP_OPERATOR_SUBJECT,
@@ -478,12 +481,14 @@ test("fixed management sweep admits only the exact scoped HP operator or an exis
     ]
   };
 
-  assert.equal(routeAllowed(hpOperator, "POST", route), true);
-  assert.equal(
-    CODEX_OPERATOR_ALLOWED_ROUTES.has(`POST ${route}`),
-    false,
-    "the fixed report must not broaden the generic Codex operator route set"
-  );
+  for (const route of routes) {
+    assert.equal(routeAllowed(hpOperator, "POST", route), true);
+    assert.equal(
+      CODEX_OPERATOR_ALLOWED_ROUTES.has(`POST ${route}`),
+      false,
+      "a fixed report must not broaden the generic Codex operator route set"
+    );
+  }
 
   for (const identity of [
     { ...hpOperator, subject: "codex-mac-operator" },
@@ -498,19 +503,23 @@ test("fixed management sweep admits only the exact scoped HP operator or an exis
     { type: "google_oauth", role: "chance" },
     { type: "hcn_browser_session", role: "employee" }
   ]) {
-    assert.equal(routeAllowed(identity, "POST", route), false);
+    for (const route of routes) {
+      assert.equal(routeAllowed(identity, "POST", route), false);
+    }
   }
 
   for (const role of ["chance", "administrator", "manager"]) {
-    assert.equal(
-      routeAllowed(
-        { type: "hcn_browser_session", role },
-        "POST",
-        route
-      ),
-      true,
-      role
-    );
+    for (const route of routes) {
+      assert.equal(
+        routeAllowed(
+          { type: "hcn_browser_session", role },
+          "POST",
+          route
+        ),
+        true,
+        `${role} ${route}`
+      );
+    }
   }
 
   for (const effectRoute of [
@@ -561,6 +570,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/connectors/quo-line",
     "POST /hcn/api/v1/work-center",
     "POST /hcn/api/v1/management-sweep",
+    "POST /hcn/api/v1/closed-file-benchmark",
     "POST /hcn/api/v1/file-review",
     "POST /hcn/api/v1/assistant/turns",
     "POST /hcn/api/v1/action-plans/prepare",
@@ -605,7 +615,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-receipts/detail",
     "POST /hcn/api/v1/action-receipts/list"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 22);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 23);
 
   for (const role of [
     "administrator",
