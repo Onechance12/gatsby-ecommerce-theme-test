@@ -254,7 +254,7 @@ function financialContactEvidence(contact) {
   for (const [key, value] of Object.entries(contact)) {
     if (!MONEY_KEYWORDS.test(String(key))) continue;
     if (!["string", "number"].includes(typeof value)) continue;
-    const sourceText = `${String(key).replace(/[_-]+/g, " ")}: ${String(value)}`;
+    const sourceText = `${String(key).replace(/[_-]+/g, " ")}: ${typeof value === "number" ? `$${value}` : String(value)}`;
     results.push(...financialEvidenceForText(sourceText, {
       source: "jobnimbus_contact_field",
       at: providerTimestamp(field(contact, ["date_updated", "updated_at", "updatedAt"])) || ""
@@ -303,39 +303,58 @@ function classifyFinancialMention(context) {
   const before = context.before.toLowerCase();
   const after = context.after.toLowerCase();
   const nearby = `${before} ${after}`;
-  const immediateBefore = before.slice(-90);
+  const immediateBefore = before.slice(-110);
   const immediateAfter = after.slice(0, 90);
   const immediate = `${immediateBefore} ${immediateAfter}`;
 
   if (
     /\b(?:no payment due|no additional (?:payment|funds?)|not payable|not approved|cannot be (?:approved|granted)|can't be (?:approved|granted)|denied|rejected)\b/.test(nearby)
     || /\b(?:cannot|can't|could not|couldn't)\s+(?:add|approve|pay|grant)\b/.test(immediate)
+    || /^\s*(?:still|remains?|remaining|outstanding)\s+(?:due|owed)\b/.test(immediateAfter)
+    || (!context.mention.hadDollar && /^.{0,35}\bfor (?:your )?reference\b/.test(immediateAfter))
   ) {
     return { category: "unclassified_amount", strength: "context_only" };
   }
 
-  const directContext = /\b(?:deductible|premium|coverage limit|policy limit|mortgage balance)\b/.test(immediate)
-    || /\b(?:estimated damages|vendor estimate|carrier estimate|proposed estimate|final invoice|quote|out[- ]of[- ]pocket)\b/.test(immediateBefore)
-    || /\b(?:remaining|outstanding)\s+(?:payment|settlement)?\s*(?:due|owed)?\s*[:=-]?\s*$/.test(immediateBefore);
+  const nearestLabel = nearestFinancialLabel(immediateBefore);
+  const directEstimate = /\b(?:estimated damages|vendor estimate|carrier estimate|proposed estimate|final invoice|quote|out[- ]of[- ]pocket)\s*(?:rcv|acv|amount|total)?\s*[:=-]?\s*$/.test(immediateBefore);
+  const dueBefore = /\b(?:remaining|outstanding)\s+(?:payment|settlement)?\s*(?:due|owed)?\s*[:=-]?\s*$/.test(immediateBefore);
   const prospective = /\b(?:want(?:s|ed)?|would like|looking to|hop(?:e|es|ing)|target(?:ing)?|seek(?:s|ing)?|need(?:s|ed)?|request(?:s|ed|ing)?|proposed|pending)\b.{0,70}$/.test(immediateBefore);
-  const completedPayment = /\b(?:total )?payment(?:s)? (?:made|received|issued|sent|mailed|added|completed)|\b(?:paid|collected|payout)\b|\bcheck(?:s)? (?:received|issued|mailed|picked up)|\brevenue\s*:?\s*$/.test(immediate)
-    || /^.{0,35}\bpayment added\b/.test(immediateAfter);
+  const completedPayment = /\b(?:total )?payment(?:s)? (?:made|received|issued|sent|mailed|added|completed)|\bpayment(?:s)? (?:has been |have been |was |were )?(?:received|issued|sent|mailed|added|completed)|\b(?:paid|collected|payout)\b|\bcheck(?:s)? (?:received|issued|mailed|picked up)|\brevenue\s*:?\s*$/.test(immediate)
+    || /^.{0,45}\b(?:payment added|paid|collected|check (?:received|issued|mailed|picked up))\b/.test(immediateAfter);
   const completedAward = /\b(?:notice of award|appraisal award|award (?:was |has been )?(?:signed|received|issued|completed)|(?:signed|received|issued|completed)(?: the)? (?:appraisal )?award|signed award|award total|total award)\b/.test(nearby)
     || /\b(?:award|settlement)\s*(?:is|was|of|for|:|-)?\s*$/.test(immediateBefore);
   const approvedOutcome = /\b(?:carrier(?:'s)? approved|approved (?:amount|estimate|scope|total)|settled|settlement received)\b/.test(nearby);
 
-  if (directContext && !completedAward && !approvedOutcome) {
-    return {
-      category: NEGATIVE_AMOUNT_CONTEXT.test(immediate)
-        ? "deductible_or_limit"
-        : /\b(?:fee|invoice|revenue)\b/.test(immediate)
-          ? "company_fee_or_invoice"
-          : "estimate_or_scope",
-      strength: NEGATIVE_AMOUNT_CONTEXT.test(immediate) ? "context_only" : "supporting"
-    };
-  }
+  if (dueBefore) return { category: "unclassified_amount", strength: "context_only" };
   if (prospective && !completedPayment && !completedAward && !approvedOutcome) {
     return { category: "unclassified_amount", strength: "context_only" };
+  }
+  if (nearestLabel?.kind === "context") {
+    return { category: "deductible_or_limit", strength: "context_only" };
+  }
+  if (directEstimate || nearestLabel?.kind === "estimate_specific") {
+    return { category: "estimate_or_scope", strength: "supporting" };
+  }
+  if (nearestLabel?.kind === "payment") {
+    return prospective && !completedPayment
+      ? { category: "unclassified_amount", strength: "context_only" }
+      : { category: "payment", strength: "strong" };
+  }
+  if (nearestLabel?.kind === "award") {
+    return {
+      category: /\bappraisal\b/.test(nearby) ? "appraisal_outcome" : "settlement_or_award",
+      strength: prospective && !completedAward && !approvedOutcome ? "supporting" : "strong"
+    };
+  }
+  if (nearestLabel?.kind === "estimate") {
+    if (completedAward || approvedOutcome) {
+      return {
+        category: /\bappraisal\b/.test(nearby) ? "appraisal_outcome" : "settlement_or_award",
+        strength: "strong"
+      };
+    }
+    return { category: "estimate_or_scope", strength: "supporting" };
   }
   if (completedPayment) return { category: "payment", strength: "strong" };
   if (completedAward || approvedOutcome) {
@@ -357,6 +376,25 @@ function classifyFinancialMention(context) {
     return { category: "deductible_or_limit", strength: "context_only" };
   }
   return { category: "unclassified_amount", strength: "context_only" };
+}
+
+function nearestFinancialLabel(value) {
+  const source = String(value || "");
+  const definitions = [
+    ["context", /\b(?:deductible|premium|coverage limit|policy limit|mortgage balance|non[- ]recoverable depreciation|recoverable depreciation|depreciation)\b/g],
+    ["estimate_specific", /\b(?:estimated damages|vendor estimate|carrier estimate|proposed estimate|final invoice|quote|out[- ]of[- ]pocket)\b/g],
+    ["payment", /\b(?:supplemental actual cash value payment|net payment|prior payments?|payments?|paid|checks?|collected|payout|revenue)\b/g],
+    ["award", /\b(?:appraisal award|award|settlement)\b/g],
+    ["estimate", /\b(?:replacement cost value|actual cash value|estimate|rcv|acv|supplement|contract|invoice|fee|benefits?)\b/g]
+  ];
+  let nearest = null;
+  for (const [kind, pattern] of definitions) {
+    for (const match of source.matchAll(pattern)) {
+      const end = match.index + match[0].length;
+      if (!nearest || end > nearest.end) nearest = { kind, end };
+    }
+  }
+  return nearest;
 }
 
 function normalizeActivity(activity) {
@@ -487,26 +525,32 @@ function moneyMentions(value) {
   const source = String(value || "");
   const mentions = [];
   const seen = new Set();
-  const add = (raw, start, end) => {
-    const amount = Number(String(raw).replace(/,/g, ""));
+  const add = (raw, start, end, { hadDollar = false, multiplier = 1 } = {}) => {
+    const amount = Number(String(raw).replace(/,/g, "")) * multiplier;
     if (!Number.isFinite(amount) || amount < 1 || amount > 100_000_000) return;
     const key = `${start}:${end}:${amount}`;
     if (seen.has(key)) return;
     seen.add(key);
-    mentions.push({ amount, start, end });
+    mentions.push({ amount, start, end, hadDollar });
   };
 
-  for (const match of source.matchAll(/\$\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,9})(?:\.\d{1,2})?)(?![\d,])/g)) {
+  for (const match of source.matchAll(/\$\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,9})(?:\.\d{1,2})?)\s*([kK])?(?![\d,])/g)) {
     const raw = match[1];
     const start = match.index + match[0].lastIndexOf(raw);
-    add(raw, start, start + raw.length);
+    add(raw, start, start + raw.length, {
+      hadDollar: true,
+      multiplier: match[2] ? 1000 : 1
+    });
   }
 
-  const labelPattern = /\b(?:acv|amount|approved|award|benefits?|check|collected|contract|deductible|depreciation|estimate|fee|invoice|paid|payment|payout|rcv|revenue|settlement|supplement|total)\b[^\d$]{0,24}\$?\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,9})(?:\.\d{1,2})?)(?![\d,])/gi;
+  const labelPattern = /\b(?:acv|amount|approved|award|benefits?|check|collected|contract|deductible|depreciation|estimate|fee|invoice|paid|payment|payout|rcv|revenue|settlement|supplement|total)\b[^\d$]{0,24}\$?\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,9})(?:\.\d{1,2})?|[0-9]{1,7}\.\d{1,2})\s*([kK])?(?![\d,])/gi;
   for (const match of source.matchAll(labelPattern)) {
     const raw = match[1];
     const start = match.index + match[0].lastIndexOf(raw);
-    add(raw, start, start + raw.length);
+    add(raw, start, start + raw.length, {
+      hadDollar: match[0].includes("$"),
+      multiplier: match[2] ? 1000 : 1
+    });
   }
 
   return mentions.sort((left, right) => left.start - right.start).slice(0, 30);
@@ -518,6 +562,7 @@ function moneyMentionContext(source, mention) {
   return {
     before,
     after,
+    mention,
     excerpt: `${before}${source.slice(mention.start, mention.end)}${after}`
   };
 }
@@ -526,7 +571,7 @@ function redactExcerpt(value) {
   return String(value || "")
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email redacted]")
     .replace(/\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g, "[phone redacted]")
-    .replace(/\b(?:claim|policy)\s*(?:#|number|no\.?)?\s*[:=-]?\s*[A-Z0-9-]{5,}\b/gi, "$1 [identifier redacted]")
+    .replace(/\b(claim|policy)\s*(?:#|number|no\.?)?\s*[:=-]?\s*[A-Z0-9-]{5,}\b/gi, "$1 [identifier redacted]")
     .replace(/\b\d{1,6}\s+[A-Za-z0-9.' -]{2,50}\s+(?:st|street|rd|road|dr|drive|ave|avenue|ln|lane|ct|court|cir|circle|way|blvd|boulevard|trl|trail|pkwy|parkway)\b/gi, "[address redacted]")
     .replace(/\s+/g, " ")
     .trim()

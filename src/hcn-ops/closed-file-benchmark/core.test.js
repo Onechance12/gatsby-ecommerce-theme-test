@@ -203,3 +203,47 @@ test("keeps a signed RCV award as a verified award, separate from paid money", (
   assert.equal(financial.verifiedPaidAmount, 0);
   assert.equal(financial.verifiedOutcomeAmount, 33961.97);
 });
+
+test("does not treat a paid claim reference number as a dollar amount", () => {
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: [contact("reference")],
+    activityBundles: [bundle("reference", [
+      activity("ref1", "2024-08-01T12:00:00.000Z", "A claim has already been filed. Claim was closed and paid. 84635 for your reference.")
+    ])],
+    limit: 10
+  });
+  assert.equal(result.candidates[0].financial.verifiedOutcomeAmount, 0);
+});
+
+test("keeps vendor value separate from the appraisal award in the same note", () => {
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: [contact("mixed-award")],
+    activityBundles: [bundle("mixed-award", [
+      activity("ma1", "2024-08-01T12:00:00.000Z", "Vendor Estimate $31,240.75 Carrier appraisal Award Estimate RCV 28,151.67")
+    ])],
+    limit: 10
+  });
+  const financial = result.candidates[0].financial;
+  assert.equal(financial.verifiedAwardAmount, 28151.67);
+  assert.equal(financial.verifiedOutcomeAmount, 28151.67);
+  assert.equal(financial.mentionedAmount, 31240.75);
+});
+
+test("parses k-suffixed payments and does not count an unpaid balance", () => {
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: [contact("suffix")],
+    activityBundles: [bundle("suffix", [
+      activity("s1", "2024-08-01T12:00:00.000Z", "Client paid deposit of $10k. Another $7k is still due.")
+    ])],
+    limit: 10
+  });
+  const financial = result.candidates[0].financial;
+  assert.equal(financial.verifiedPaidAmount, 10000);
+  assert.equal(financial.mentionedAmount, 10000);
+});
