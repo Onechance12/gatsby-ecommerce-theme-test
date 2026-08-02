@@ -135,3 +135,71 @@ test("redacts contact details from financial evidence excerpts", () => {
   assert.doesNotMatch(excerpt, /214-555|client@example|ABCD-12345/);
   assert.match(excerpt, /\$42,500/);
 });
+
+test("parses uncommaed dollar amounts without truncating them", () => {
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: [contact("file-40")],
+    activityBundles: [bundle("file-40", [
+      activity("a40", "2024-08-01T12:00:00.000Z", "Payment received $6850.")
+    ])],
+    limit: 10
+  });
+  assert.equal(result.candidates[0].financial.verifiedPaidAmount, 6850);
+  assert.equal(result.candidates[0].financial.verifiedOutcomeAmount, 6850);
+});
+
+test("classifies each amount in a mixed payment and estimate note independently", () => {
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: [contact("file-50")],
+    activityBundles: [bundle("file-50", [
+      activity(
+        "a50",
+        "2024-08-01T12:00:00.000Z",
+        "Total Payment Made: $35,973.26 - Estimated Damages: $53,979.48 - Remaining Settlement Due: $18,006.22"
+      )
+    ])],
+    limit: 10
+  });
+  const financial = result.candidates[0].financial;
+  assert.equal(financial.verifiedPaidAmount, 35973.26);
+  assert.equal(financial.verifiedOutcomeAmount, 35973.26);
+  assert.equal(financial.mentionedAmount, 53979.48);
+});
+
+test("does not promote vendor estimates, desired outcomes, or under-deductible awards", () => {
+  const rows = [contact("estimate"), contact("desired"), contact("under-ded")];
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: rows,
+    activityBundles: [
+      bundle("estimate", [activity("e1", "2024-08-01T12:00:00.000Z", "Vendor Estimate RCV $41,633.67. Appraisal minimum threshold.")]),
+      bundle("desired", [activity("e2", "2024-08-01T12:00:00.000Z", "Client is looking to get approved and receive $12,000 from us.")]),
+      bundle("under-ded", [activity("e3", "2024-08-01T12:00:00.000Z", "The appraisal award is under the $12,000 deductible. There is no payment due.")])
+    ],
+    limit: 10
+  });
+  for (const candidate of result.candidates) {
+    assert.equal(candidate.financial.verifiedOutcomeAmount, 0);
+  }
+});
+
+test("keeps a signed RCV award as a verified award, separate from paid money", () => {
+  const result = buildClosedFileBenchmark({
+    generatedAt: NOW,
+    rangeStart: START,
+    contacts: [contact("award")],
+    activityBundles: [bundle("award", [
+      activity("a60", "2024-08-01T12:00:00.000Z", "Appraisal award was signed today. Total RCV: $33,961.97")
+    ])],
+    limit: 10
+  });
+  const financial = result.candidates[0].financial;
+  assert.equal(financial.verifiedAwardAmount, 33961.97);
+  assert.equal(financial.verifiedPaidAmount, 0);
+  assert.equal(financial.verifiedOutcomeAmount, 33961.97);
+});
