@@ -2921,6 +2921,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       HCN_CONSOLE_ORIGIN: origin,
       HCN_THRESHER_AI_ENABLED: "false",
       HCN_THRESHER_AI_GROQ_API_KEY: "",
+      HCN_ASSISTANT_HISTORY_KEY:
+        Buffer.alloc(32, 0x55).toString("base64url"),
       HCN_TENANT_ID: "tenant_0123456789abcdef",
       HCN_REFERENCE_KEY: hcnReferenceKey,
       HCN_GOOGLE_GRANT_KEY: hcnGoogleGrantKey,
@@ -3068,13 +3070,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         providerCall: false
       }
     },
+    historyConfigured: true,
+    historyReady: true,
     responsesApiStore: false,
     providerState: "disabled_hcn_bounded_replay_only",
     providerRetention: "groq_project_data_controls_apply",
     builtInProviderTools: false,
     remoteTools: false,
     sessionHistory:
-      "bounded_in_memory_no_durable_client_transcript",
+      "encrypted_principal_scoped_durable_transcript",
     assignedFileScopeOnly: true,
     modelHasReadTools: false,
     modelTools: [
@@ -3084,6 +3088,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       "read_file_document",
       "read_file_photo_catalog",
       "research_file_hail_dates",
+      "read_calendar_day",
       "run_management_sweep",
       "read_closed_file_benchmark"
     ],
@@ -3188,7 +3193,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(authenticatedRootResponse.status, 302);
   assert.equal(
     authenticatedRootResponse.headers.get("location"),
-    "/hcn/?shell=v12"
+    "/hcn/?shell=v13"
   );
 
   const authenticatedConsoleRedirectResponse = await fetch(`${origin}/hcn`, {
@@ -3198,11 +3203,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(authenticatedConsoleRedirectResponse.status, 302);
   assert.equal(
     authenticatedConsoleRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v12"
+    "/hcn/?shell=v13"
   );
 
   const authenticatedConsoleResponse = await fetch(
-    `${origin}/hcn/?shell=v12`,
+    `${origin}/hcn/?shell=v13`,
     { headers: { cookie: sessionCookie } }
   );
   assert.equal(authenticatedConsoleResponse.status, 200);
@@ -3263,6 +3268,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "hcn.action_plans.prepare",
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
+    "hcn.assistant.conversations.manage",
+    "hcn.assistant.conversations.read",
     "hcn.assistant.turn",
     "hcn.closed_file_benchmark.read",
     "hcn.connectors.google.disconnect",
@@ -3507,6 +3514,12 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "askHcnThresher"
   );
   assert.equal(
+    fullOpenApi.paths[
+      "/hcn/api/v1/assistant/conversations/list"
+    ].post.operationId,
+    "listHcnAssistantConversations"
+  );
+  assert.equal(
     fullOpenApi.paths["/hcn/connect/google/start"].get.operationId,
     "startHcnGoogleConnector"
   );
@@ -3569,6 +3582,16 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/file-review"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/management-sweep"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/assistant/turns"], undefined);
+  for (const conversationPath of [
+    "/hcn/api/v1/assistant/conversations/list",
+    "/hcn/api/v1/assistant/conversations/create",
+    "/hcn/api/v1/assistant/conversations/detail",
+    "/hcn/api/v1/assistant/conversations/rename",
+    "/hcn/api/v1/assistant/conversations/archive",
+    "/hcn/api/v1/assistant/conversations/restore"
+  ]) {
+    assert.equal(chatGptOpenApi.paths[conversationPath], undefined);
+  }
   for (const connectorPath of hcnConnectorOpenApiPaths) {
     assert.equal(chatGptOpenApi.paths[connectorPath], undefined);
   }
@@ -3607,6 +3630,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         "content-type": "application/json"
       },
       body: JSON.stringify({
+        conversationRef: `conversation_${"a".repeat(32)}`,
+        expectedRevision: 0,
         prompt: "Work my files.",
         mode: "auto"
       })
@@ -3684,6 +3709,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       method: "POST",
       headers: hcnReadHeaders,
       body: JSON.stringify({
+        conversationRef: `conversation_${"a".repeat(32)}`,
+        expectedRevision: 0,
         prompt: "Work my files.",
         mode: "auto"
       })
@@ -4608,6 +4635,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       "hcn.action_plans.prepare",
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
+      "hcn.assistant.conversations.manage",
+      "hcn.assistant.conversations.read",
       "hcn.assistant.turn",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",

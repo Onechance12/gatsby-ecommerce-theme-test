@@ -5,10 +5,10 @@ Google Calendar, Quo, calls, and document evidence. `/hcn/` is the primary
 day-to-day interface for HCN employees, but it is not a replacement data store:
 JobNimbus and each connected provider remain the systems of record. The console
 organizes assigned work and includes Ask Thresher, a server-side AI assistant
-that reads fresh, employee-scoped evidence and prepares controlled action
-plans. It has no execution tool; a signed-in person must still review and
-explicitly approve the exact plan. A later system-of-record migration remains
-a separate, measured product phase.
+that reads fresh, employee-scoped evidence and can propose next steps or
+wording. It cannot prepare, approve, or execute an action plan; consequential
+work remains in the separate exact-plan approval flow. A later system-of-record
+migration remains a separate, measured product phase.
 
 The bridge also supports a ChatGPT Custom GPT Action, verified PDF attachments,
 durable private action receipts, an assigned-file-only employee
@@ -38,11 +38,14 @@ transport is unavailable.
   no model tools, autonomous learning, action authority, or external-effect
   callback.
 - Ask Thresher is a separate reasoning layer over those HCN boundaries. It
-  uses a dedicated server-side OpenAI Responses API credential, serial
-  allowlisted tools, `store:false`, bounded in-memory session history, and the
-  signed-in employee's scope. It can read Work Center/file evidence, run the
-  management sweep only for an authorized role, and prepare an exact action
-  plan. It cannot execute or approve one.
+  uses a dedicated server-side Groq Responses API credential, serial
+  allowlisted tools, no provider-side conversation state, bounded model replay,
+  and the signed-in employee's scope. Employee-visible prompts and responses
+  persist only in a dedicated encrypted, principal-scoped HCN conversation
+  store. It can read Work Center/file evidence and run the management sweep
+  only from an authorized sweep chat. It cannot prepare, execute, or approve an
+  action plan. A file chat is locked to one freshly assigned JobNimbus file and
+  cannot invoke broad or cross-file tools.
 - HCN employee authority is identity-bound and least privilege. A verified
   Google email must exactly match one unique active JobNimbus employee, and
   new employees receive only their assigned JobNimbus scope by default.
@@ -160,6 +163,7 @@ JOBNIMBUS_BRIDGE_TOKEN=
 CODEX_OPERATOR_TOKEN=
 CODEX_MAC_OPERATOR_TOKEN=
 HCN_THRESHER_AI_GROQ_API_KEY=
+HCN_ASSISTANT_HISTORY_KEY=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REFRESH_TOKEN=
@@ -176,6 +180,7 @@ HCN_THRESHER_STORE_KEY=
 HCN_THRESHER_REFERENCE_KEY=
 HCN_THRESHER_SIGNING_KEY=
 HCN_THRESHER_AI_ENABLED=false
+HCN_ASSISTANT_HISTORY_STORE_PATH=/var/data/hcn-operations/platform/assistant-conversations.enc.json
 ALLOW_GMAIL_SEND=false
 QUO_DEFAULT_FROM_NUMBER=
 ALLOW_QUO_SEND=false
@@ -215,6 +220,19 @@ Responses API does not accept a `store` request field, so the adapter omits it
 and keeps bounded conversation replay inside the HCN process. Groq project data
 controls and retention terms still apply.
 
+`HCN_ASSISTANT_HISTORY_KEY` must be a separate canonical, unpadded base64url
+encoding of 32-128 random bytes. It cannot reuse a provider, OAuth, Thresher,
+connector, operator, Chance Brain, or Jobrolo secret.
+`HCN_ASSISTANT_HISTORY_STORE_PATH` must be an absolute descendant of
+`HCN_OPERATIONS_ROOT`, normally
+`/var/data/hcn-operations/platform/assistant-conversations.enc.json`. The
+atomic AES-256-GCM store contains only employee-visible prompts/responses and
+bounded coded routing/source metadata. It does not store provider credentials,
+tool payloads, documents, hidden prompts, provider response identifiers,
+action plans, approvals, or HCN Operations Brain state. Full transcripts are
+available to the owning employee in the UI; each model call replays only a
+bounded recent window.
+
 The reasoning router is fixed in server code, not selected by the browser or
 environment variables. In Auto mode, narrow Work Center, exact-file status,
 and authorized activity-gap reports use deterministic fresh reads with no
@@ -246,6 +264,15 @@ working files, finding a file, reviewing communications, checking neglected
 files, and preparing follow-up work. Every enabled employee can work only the
 JobNimbus files assigned to that employee by default. Connections links that
 employee's Gmail/read-only Calendar grant and Quo line separately.
+Ask Thresher supports multiple durable chats: general work chats, exact-file
+client chats, and role-authorized management sweep chats. Employees can list,
+open, rename, archive, restore, and start chats without exposing provider
+identifiers. Starting a client chat is idempotent: it reopens that employee's
+existing active chat for the exact file instead of creating a duplicate. After
+that chat is archived, a new active chat may be created; an older archived chat
+cannot be restored while another active chat exists for the same file. Every
+list, read, and turn rechecks current role and file
+assignment; a reassigned or inactive file chat is hidden and cannot be opened.
 The application document at `/`, `/hcn`, or `/hcn/` is never served without a
 current HCN employee cookie; unauthenticated navigation is redirected directly
 to Google sign-in. The retirement service worker deletes every older HCN shell
@@ -542,7 +569,9 @@ Before cutover, confirm the full test and readiness suites pass, record the
 exact candidate SHA, and obtain action-time approval for every external
 change. Store a dedicated, funded HCN Groq project key directly in Render as
 `HCN_THRESHER_AI_GROQ_API_KEY`; never reuse another product key or another HCN
-secret. Confirm the checked-in model, reasoning, and token settings, add the
+secret. Add an independently generated `HCN_ASSISTANT_HISTORY_KEY` and confirm
+the reviewed persistent history path before enabling the assistant. Confirm
+the checked-in model, reasoning, and token settings, add the
 exact Google Web OAuth redirect
 `https://hcn-operations-platform.onrender.com/oauth/google/callback`, push the
 candidate to `codex/hcn-platform-foundation`, and manually deploy that exact
@@ -552,9 +581,13 @@ After deployment, do not treat an overall `/health` `ok: true` as assistant
 readiness: the service may remain healthy while `hcnAssistant.ready` is
 `false`. Verify `/api/v1/meta` reports the candidate SHA as
 `provider_attested`, then require `hcnAssistant.enabled`,
-`hcnAssistant.configured`, and `hcnAssistant.ready` all to be `true`. Confirm
-the full OpenAPI and capability manifest expose `hcn.assistant.turn`, the
-Custom GPT schema does not, and assistant responses are `no-store`. Complete
+`hcnAssistant.configured`, `hcnAssistant.historyReady`, and
+`hcnAssistant.ready` all to be `true`. Confirm the full OpenAPI and capability
+manifest expose `hcn.assistant.turn`, `hcn.assistant.conversations.read`, and
+`hcn.assistant.conversations.manage`; the Custom GPT schema must not expose the
+browser conversation routes, and assistant HTTP responses remain `no-store`.
+Create, reopen, rename, archive, and restore a disposable chat and verify its
+transcript survives a new browser session. Complete
 one controlled employee sign-in, assigned-work read, authorized management
 sweep, and exact action-plan preparation. Do not execute the smoke-test plan;
 verify JobNimbus, Gmail, Quo, and Calendar remain unchanged.

@@ -45,6 +45,8 @@ test("HCN assistant playbook attaches HCN workflows to a read-only model", () =>
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /instead of guessing/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /JobNimbus is the client system of record/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Claim-filing readiness requires/i);
+  assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Calendar reads are one local day only/i);
+  assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /absence of a match does not prove no appointment exists/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /read authority only/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Never create or store an action plan/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Chance Brain and Jobrolo are separate systems/i);

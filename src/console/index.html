@@ -13,15 +13,15 @@
       content="Home Claim Network employee Work Center."
     >
     <title>HCN Work Center</title>
-    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v12">
-    <link rel="stylesheet" href="/hcn/app.css?shell=v12">
-    <script src="/hcn/app.js?shell=v12" defer></script>
+    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v13">
+    <link rel="stylesheet" href="/hcn/app.css?shell=v13">
+    <script src="/hcn/app.js?shell=v13" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to employee Work Center</a>
 
     <header class="topbar">
-      <a class="brand" href="/hcn/?shell=v12" aria-label="HCN Work Center home">
+      <a class="brand" href="/hcn/?shell=v13" aria-label="HCN Work Center home">
         <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
         <span class="brand-copy">
           <strong>HCN Work Center</strong>
@@ -113,180 +113,356 @@
           class="assistant-view console-view is-current-view"
           aria-labelledby="company-today-title"
         >
-          <header class="assistant-heading">
-            <div>
-              <p class="eyebrow">Your HCN work assistant</p>
-              <h1 id="company-today-title">Ask Thresher</h1>
-              <p>
-                Tell Thresher what you need. It understands the HCN operating
-                model and can read the live work your account is allowed to use.
-              </p>
-            </div>
-            <a
-              id="sign-in-action"
-              class="button button-primary assistant-sign-in"
-              href="/hcn/auth/login?returnTo=%2Fhcn"
-              hidden
-            >Sign in to HCN</a>
-          </header>
-
-          <div
-            id="home-auth-alert"
-            class="operations-alert home-auth-alert"
-            data-tone="neutral"
-            role="status"
-            aria-live="polite"
-            hidden
-          ></div>
-
-          <aside class="assistant-access" aria-labelledby="home-next-label">
-            <span id="home-next-label" class="home-next-label">Your access</span>
-            <div role="status" aria-live="polite" aria-atomic="true">
-              <strong id="home-next-action">Checking your access</strong>
-              <span id="home-next-detail">This should only take a moment.</span>
-            </div>
-          </aside>
-
-          <div
-            id="assistant-alert"
-            class="operations-alert assistant-alert"
-            data-tone="neutral"
-            role="status"
-            aria-live="polite"
-          >
-            Sign in to ask Thresher for help.
-          </div>
-
-          <div
-            id="assistant-transcript"
-            class="assistant-transcript"
-            role="log"
-            aria-label="Conversation with Thresher"
-            aria-live="polite"
-            aria-relevant="additions"
-            aria-busy="false"
-            tabindex="0"
-          >
-            <article class="assistant-message" data-speaker="assistant">
-              <span class="assistant-speaker">Thresher</span>
-              <p>What do you need help with?</p>
-            </article>
-          </div>
-
-          <div class="assistant-starters" aria-labelledby="assistant-starters-title">
-            <p id="assistant-starters-title">Start with one of these</p>
-            <div class="assistant-starter-grid">
-              <button
-                class="assistant-starter"
-                type="button"
-                data-assistant-starter="Show my assigned Work Center."
-                data-assistant-direct="true"
-              >Work my files</button>
-              <button
-                class="assistant-starter"
-                type="button"
-                data-assistant-starter="Help me find a specific client file."
-              >Find a file</button>
-              <button
-                class="assistant-starter"
-                type="button"
-                data-assistant-starter="Show me my neglected files with the longest verified activity gaps."
-              >Show neglected files</button>
-              <button
-                class="assistant-starter"
-                type="button"
-                data-assistant-starter="Review my recent file-related communications and tell me what needs attention."
-              >Review communications</button>
-              <button
-                class="assistant-starter"
-                type="button"
-                data-assistant-starter="Help me draft a follow-up for a client file."
-              >Draft a follow-up</button>
-              <button
-                class="assistant-starter"
-                type="button"
-                data-assistant-starter="Help me review a file and prepare the next steps needed to file its claim."
-              >File a claim</button>
-            </div>
-          </div>
-
-          <form id="assistant-form" class="assistant-composer" novalidate>
-            <div class="assistant-composer-heading">
-              <label for="assistant-prompt">What do you need?</label>
-              <fieldset
-                id="assistant-mode"
-                class="assistant-mode"
-                aria-describedby="assistant-mode-help"
+          <div class="assistant-workspace">
+            <aside
+              id="assistant-chat-sidebar"
+              class="assistant-chat-sidebar"
+              aria-label="Thresher chats"
+            >
+              <div class="assistant-chat-sidebar-heading">
+                <div>
+                  <p class="eyebrow">Saved work</p>
+                  <h2>Chats</h2>
+                </div>
+                <button
+                  id="assistant-new-chat"
+                  class="button button-primary button-compact"
+                  type="button"
+                >+ New chat</button>
+              </div>
+              <div
+                id="assistant-chat-filters"
+                class="assistant-chat-filters"
+                role="group"
+                aria-label="Filter chats"
               >
-                <legend>Thinking mode</legend>
-                <label>
-                  <input
-                    id="assistant-mode-auto"
-                    name="assistant-mode"
-                    type="radio"
-                    value="auto"
-                    checked
-                  >
-                  <span>Auto</span>
-                </label>
-                <label>
-                  <input
-                    id="assistant-mode-deep"
-                    name="assistant-mode"
-                    type="radio"
-                    value="deep"
-                  >
-                  <span>Deep Review</span>
-                </label>
-              </fieldset>
-            </div>
-            <div class="assistant-compose-row">
-              <textarea
-                id="assistant-prompt"
-                name="message"
-                rows="2"
-                maxlength="2000"
-                placeholder="Ask about a file, email, follow-up, claim, or next step..."
-                aria-describedby="assistant-composer-help"
-                required
-              ></textarea>
-              <button id="assistant-send" class="button button-primary" type="submit">
-                Send
-              </button>
-            </div>
-            <p id="assistant-composer-help">
-              Thresher reads, explains, and recommends. It cannot change, send,
-              upload, call, or create an approval from this chat.
-            </p>
-            <p id="assistant-mode-help" class="visually-hidden">
-              Auto chooses the right level of review. Deep Review uses more
-              careful reasoning for complicated files.
-            </p>
-          </form>
+                <button type="button" data-chat-filter="active" aria-pressed="true">All</button>
+                <button type="button" data-chat-filter="file" aria-pressed="false">Clients</button>
+                <button type="button" data-chat-filter="sweep" aria-pressed="false">Sweeps</button>
+                <button type="button" data-chat-filter="general" aria-pressed="false">General</button>
+                <button type="button" data-chat-filter="archived" aria-pressed="false">Archived</button>
+              </div>
+              <div
+                id="assistant-conversation-list"
+                class="assistant-conversation-list"
+                aria-label="Saved Thresher chats"
+                aria-live="off"
+                aria-busy="false"
+              ></div>
+              <p id="assistant-conversation-empty" class="assistant-conversation-empty">
+                Start a chat and it will stay here.
+              </p>
+              <button
+                id="assistant-conversation-load-more"
+                class="button button-surface button-compact assistant-conversation-load-more"
+                type="button"
+                hidden
+                disabled
+              >Load more chats</button>
+            </aside>
 
-          <aside
-            id="assistant-pilot"
-            class="assistant-pilot"
-            aria-label="Pilot check for this session"
-          >
-            <span class="assistant-pilot-label">Pilot check</span>
-            <span>
-              Last route
-              <strong id="assistant-pilot-route">Not run yet</strong>
-            </span>
-            <span>
-              Fresh sources
-              <strong id="assistant-pilot-sources">0</strong>
-            </span>
-            <span>
-              Model authority
-              <strong id="assistant-pilot-authority">Read only</strong>
-            </span>
-            <span class="assistant-pilot-gate">
-              <span class="status-dot" aria-hidden="true"></span>
-              Nothing executes in chat
-            </span>
-          </aside>
+            <button
+              id="assistant-chat-backdrop"
+              class="assistant-chat-backdrop"
+              type="button"
+              tabindex="-1"
+              aria-label="Close chat list"
+              hidden
+            ></button>
+
+            <div id="assistant-chat-main" class="assistant-chat-main">
+              <header class="assistant-heading">
+                <div>
+                  <p class="eyebrow">Your HCN work assistant</p>
+                  <h1 id="company-today-title">Ask Thresher</h1>
+                  <p>
+                    Tell Thresher what you need. It understands the HCN operating
+                    model and can read the live work your account is allowed to use.
+                  </p>
+                </div>
+                <a
+                  id="sign-in-action"
+                  class="button button-primary assistant-sign-in"
+                  href="/hcn/auth/login?returnTo=%2Fhcn"
+                  hidden
+                >Sign in to HCN</a>
+              </header>
+
+              <div
+                id="home-auth-alert"
+                class="operations-alert home-auth-alert"
+                data-tone="neutral"
+                role="status"
+                aria-live="polite"
+                hidden
+              ></div>
+
+              <aside class="assistant-access" aria-labelledby="home-next-label">
+                <span id="home-next-label" class="home-next-label">Your access</span>
+                <div role="status" aria-live="polite" aria-atomic="true">
+                  <strong id="home-next-action">Checking your access</strong>
+                  <span id="home-next-detail">This should only take a moment.</span>
+                </div>
+              </aside>
+
+              <div class="assistant-current-chat">
+                <button
+                  id="assistant-chat-drawer-open"
+                  class="button button-surface button-compact assistant-chat-drawer-open"
+                  type="button"
+                  aria-controls="assistant-chat-sidebar"
+                  aria-expanded="false"
+                >Chats</button>
+                <div>
+                  <span class="assistant-current-label">Current chat</span>
+                  <strong id="assistant-current-title">Choose or start a chat</strong>
+                  <span id="assistant-current-kind" class="assistant-kind-pill">General</span>
+                </div>
+                <div class="assistant-current-actions">
+                  <button
+                    id="assistant-rename-chat"
+                    class="button button-surface button-compact"
+                    type="button"
+                    disabled
+                  >Rename</button>
+                  <button
+                    id="assistant-archive-chat"
+                    class="button button-surface button-compact"
+                    type="button"
+                    disabled
+                  >Archive</button>
+                  <button
+                    id="assistant-restore-chat"
+                    class="button button-surface button-compact"
+                    type="button"
+                    hidden
+                    disabled
+                  >Restore</button>
+                </div>
+              </div>
+
+              <a class="assistant-connection-strip" href="#connections">
+                <span>Live connections</span>
+                <strong id="assistant-connection-jobnimbus">JobNimbus checking</strong>
+                <strong id="assistant-connection-gmail">Gmail checking</strong>
+                <strong id="assistant-connection-calendar">Calendar checking</strong>
+                <strong id="assistant-connection-quo">Quo checking</strong>
+                <strong id="assistant-connection-thresher">Thresher checking</strong>
+              </a>
+
+              <div
+                id="assistant-alert"
+                class="operations-alert assistant-alert"
+                data-tone="neutral"
+                role="status"
+                aria-live="polite"
+              >
+                Sign in to ask Thresher for help.
+              </div>
+
+              <button
+                id="assistant-load-older"
+                class="button button-surface button-compact assistant-load-older"
+                type="button"
+                hidden
+                disabled
+              >Load older messages</button>
+
+              <div
+                id="assistant-transcript"
+                class="assistant-transcript"
+                role="log"
+                aria-label="Conversation with Thresher"
+                aria-live="polite"
+                aria-relevant="additions"
+                aria-busy="false"
+                tabindex="0"
+              >
+                <article class="assistant-message" data-speaker="assistant">
+                  <span class="assistant-speaker">Thresher</span>
+                  <p>Start a new chat or open one from your history.</p>
+                </article>
+              </div>
+
+              <div id="assistant-starters" class="assistant-starters" aria-labelledby="assistant-starters-title">
+                <p id="assistant-starters-title">Start with one of these</p>
+                <div class="assistant-starter-grid">
+                  <button
+                    class="assistant-starter"
+                    type="button"
+                    data-assistant-starter="Show my assigned Work Center."
+                    data-assistant-direct="true"
+                  >Work my files</button>
+                  <button
+                    class="assistant-starter"
+                    type="button"
+                    data-assistant-starter="Help me find a specific client file."
+                  >Find a file</button>
+                  <button
+                    class="assistant-starter"
+                    type="button"
+                    data-assistant-starter="Show me my neglected files with the longest verified activity gaps."
+                  >Show neglected files</button>
+                  <button
+                    class="assistant-starter"
+                    type="button"
+                    data-assistant-starter="Review my recent file-related communications and tell me what needs attention."
+                  >Review communications</button>
+                  <button
+                    class="assistant-starter"
+                    type="button"
+                    data-assistant-starter="Help me draft a follow-up for a client file."
+                  >Draft a follow-up</button>
+                  <button
+                    class="assistant-starter"
+                    type="button"
+                    data-assistant-starter="Help me review a file and prepare the next steps needed to file its claim."
+                  >File a claim</button>
+                </div>
+              </div>
+
+              <form id="assistant-form" class="assistant-composer" novalidate>
+                <div class="assistant-composer-heading">
+                  <label for="assistant-prompt">What do you need?</label>
+                  <fieldset
+                    id="assistant-mode"
+                    class="assistant-mode"
+                    aria-describedby="assistant-mode-help"
+                  >
+                    <legend>Thinking mode</legend>
+                    <label>
+                      <input
+                        id="assistant-mode-auto"
+                        name="assistant-mode"
+                        type="radio"
+                        value="auto"
+                        checked
+                      >
+                      <span>Auto</span>
+                    </label>
+                    <label>
+                      <input
+                        id="assistant-mode-deep"
+                        name="assistant-mode"
+                        type="radio"
+                        value="deep"
+                      >
+                      <span>Deep Review</span>
+                    </label>
+                  </fieldset>
+                </div>
+                <div class="assistant-compose-row">
+                  <textarea
+                    id="assistant-prompt"
+                    name="message"
+                    rows="2"
+                    maxlength="4000"
+                    placeholder="Ask about a file, email, follow-up, claim, or next step..."
+                    aria-describedby="assistant-composer-help"
+                    required
+                  ></textarea>
+                  <button id="assistant-send" class="button button-primary" type="submit">
+                    Send
+                  </button>
+                </div>
+                <p id="assistant-composer-help">
+                  Chats are saved securely inside HCN. Thresher reads, explains,
+                  and recommends, but cannot change, send, upload, or call from chat.
+                </p>
+                <p id="assistant-mode-help" class="visually-hidden">
+                  Auto chooses the right level of review. Deep Review uses more
+                  careful reasoning for complicated files.
+                </p>
+              </form>
+
+              <aside
+                id="assistant-pilot"
+                class="assistant-pilot"
+                aria-label="Pilot check for this session"
+              >
+                <span class="assistant-pilot-label">Pilot check</span>
+                <span>
+                  Last route
+                  <strong id="assistant-pilot-route">Not run yet</strong>
+                </span>
+                <span>
+                  Fresh sources
+                  <strong id="assistant-pilot-sources">0</strong>
+                </span>
+                <span>
+                  Model authority
+                  <strong id="assistant-pilot-authority">Read only</strong>
+                </span>
+                <span class="assistant-pilot-gate">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  Nothing executes in chat
+                </span>
+              </aside>
+            </div>
+          </div>
+
+          <dialog id="assistant-new-dialog" class="assistant-dialog" aria-labelledby="assistant-new-title">
+            <form id="assistant-new-form" method="dialog">
+              <div class="assistant-dialog-heading">
+                <div>
+                  <p class="eyebrow">Keep work separated</p>
+                  <h2 id="assistant-new-title">Start a new chat</h2>
+                </div>
+                <button id="assistant-new-cancel" class="dialog-close" type="button" aria-label="Close">×</button>
+              </div>
+              <fieldset class="assistant-chat-type-choices">
+                <legend>What is this chat for?</legend>
+                <label>
+                  <input type="radio" name="assistant-new-kind" value="general" checked>
+                  <span><strong>General</strong><small>Questions, planning, or follow-up work</small></span>
+                </label>
+                <label>
+                  <input id="assistant-new-sweep" type="radio" name="assistant-new-kind" value="sweep">
+                  <span><strong>Company sweep</strong><small>Reports and company-wide reviews</small></span>
+                </label>
+                <button
+                  id="assistant-new-client"
+                  class="assistant-chat-type-action"
+                  type="button"
+                >
+                  <span><strong>Client file</strong><small>Choose an assigned file and keep its chat locked to that client</small></span>
+                  <span aria-hidden="true">Choose file →</span>
+                </button>
+              </fieldset>
+              <label class="assistant-dialog-title" for="assistant-new-name">
+                Chat name <span>optional</span>
+              </label>
+              <input
+                id="assistant-new-name"
+                name="assistant-new-name"
+                type="text"
+                maxlength="120"
+                placeholder="New chat"
+              >
+              <div class="assistant-dialog-actions">
+                <button class="button button-surface" type="button" data-assistant-dialog-cancel>Cancel</button>
+                <button id="assistant-new-submit" class="button button-primary" type="submit">Create chat</button>
+              </div>
+            </form>
+          </dialog>
+
+          <dialog id="assistant-rename-dialog" class="assistant-dialog" aria-labelledby="assistant-rename-title">
+            <form id="assistant-rename-form" method="dialog">
+              <div class="assistant-dialog-heading">
+                <div>
+                  <p class="eyebrow">Make it easy to find</p>
+                  <h2 id="assistant-rename-title">Rename chat</h2>
+                </div>
+                <button class="dialog-close" type="button" data-assistant-dialog-cancel aria-label="Close">×</button>
+              </div>
+              <label class="assistant-dialog-title" for="assistant-rename-name">Chat name</label>
+              <input id="assistant-rename-name" type="text" maxlength="120" required>
+              <div class="assistant-dialog-actions">
+                <button class="button button-surface" type="button" data-assistant-dialog-cancel>Cancel</button>
+                <button id="assistant-rename-submit" class="button button-primary" type="submit">Save name</button>
+              </div>
+            </form>
+          </dialog>
 
           <div class="assistant-home-status" aria-hidden="true" hidden>
             <span id="home-work-status">Checking</span>
@@ -569,6 +745,12 @@
                     </div>
                     <div class="file-heading-actions">
                       <span id="file-evidence-status" class="card-status">Checking</span>
+                      <button
+                        id="file-start-chat"
+                        class="button button-primary button-compact"
+                        type="button"
+                        disabled
+                      >Start client chat</button>
                       <button
                         id="file-refresh"
                         class="button button-surface button-compact"

@@ -85,6 +85,7 @@ test("assistant exposes only fixed read tools", () => {
     "read_file_document",
     "read_file_photo_catalog",
     "research_file_hail_dates",
+    "read_calendar_day",
     "run_management_sweep",
     "read_closed_file_benchmark"
   ]);
@@ -152,6 +153,20 @@ test("read-tool contracts accept only opaque scoped references and bounds", () =
     { fileRef: FILE_REF }
   );
   assert.deepEqual(
+    normalizeHcnAssistantToolCall("read_calendar_day", {
+      date: "2026-08-03",
+      file_ref: ""
+    }),
+    { date: "2026-08-03", fileRef: "" }
+  );
+  assert.deepEqual(
+    normalizeHcnAssistantToolCall("read_calendar_day", {
+      date: "2026-08-03",
+      file_ref: FILE_REF
+    }),
+    { date: "2026-08-03", fileRef: FILE_REF }
+  );
+  assert.deepEqual(
     normalizeHcnAssistantToolCall("read_closed_file_benchmark", {
       limit: 10
     }),
@@ -165,6 +180,18 @@ test("read-tool contracts accept only opaque scoped references and bounds", () =
     ["review_file", {
       file_ref: FILE_REF,
       owner_id: "attacker-owner"
+    }],
+    ["read_calendar_day", {
+      date: "tomorrow",
+      file_ref: ""
+    }],
+    ["read_calendar_day", {
+      date: "2026-02-30",
+      file_ref: ""
+    }],
+    ["read_calendar_day", {
+      date: "2026-08-03",
+      file_ref: "provider-file-id"
     }],
     ["read_closed_file_benchmark", { limit: 31 }],
     ["prepare_action_plan", {}]

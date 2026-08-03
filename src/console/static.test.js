@@ -295,11 +295,11 @@ test("console serves only its fixed application-shell allowlist", async () => {
   const manifest = JSON.parse(
     manifestAsset.body.toString("utf8")
   );
-  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v12/);
-  assert.match(html, /\/hcn\/app\.css\?shell=v12/);
-  assert.match(html, /\/hcn\/app\.js\?shell=v12/);
-  assert.match(html, /href="\/hcn\/\?shell=v12"/);
-  assert.equal(manifest.start_url, "/hcn/?shell=v12");
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v13/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v13/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v13/);
+  assert.match(html, /href="\/hcn\/\?shell=v13"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v13");
 
   for (const pathname of [
     "/hcn",
@@ -344,6 +344,19 @@ test("console shell contains no client records, bearer-token field, or browser s
   assert.match(source, /\/hcn\/api\/v1\/work-center/);
   assert.match(source, /\/hcn\/api\/v1\/file-review/);
   assert.match(source, /\/hcn\/api\/v1\/assistant\/turns/);
+  for (const operation of [
+    "list",
+    "create",
+    "detail",
+    "rename",
+    "archive",
+    "restore"
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`/hcn/api/v1/assistant/conversations/${operation}`)
+    );
+  }
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
 
@@ -377,10 +390,38 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /id="assistant-transcript"[\s\S]*role="log"/);
   assert.match(html, /aria-live="polite"/);
   assert.match(html, /id="assistant-form"/);
-  assert.match(html, /id="assistant-prompt"[\s\S]*maxlength="2000"/);
+  assert.match(html, /id="assistant-prompt"[\s\S]*maxlength="4000"/);
   assert.match(html, /id="assistant-send"/);
   assert.match(html, /id="assistant-alert"[\s\S]*role="status"/);
   assert.doesNotMatch(html, /id="assistant-review-action"/);
+  assert.match(
+    html,
+    /id="assistant-chat-sidebar"[\s\S]*aria-label="Thresher chats"/
+  );
+  assert.match(html, /id="assistant-new-chat"[\s\S]*>\+ New chat<\/button>/);
+  assert.match(
+    html,
+    /id="assistant-chat-filters"[\s\S]*data-chat-filter="active"[\s\S]*data-chat-filter="file"[\s\S]*data-chat-filter="sweep"[\s\S]*data-chat-filter="general"[\s\S]*data-chat-filter="archived"/
+  );
+  assert.match(
+    html,
+    /id="assistant-conversation-list"[\s\S]*aria-label="Saved Thresher chats"[\s\S]*aria-busy="false"/
+  );
+  assert.match(script, /list\.setAttribute\("role", "list"\)/);
+  assert.match(script, /row\.setAttribute\("role", "listitem"\)/);
+  assert.match(
+    html,
+    /id="assistant-chat-drawer-open"[\s\S]*aria-controls="assistant-chat-sidebar"[\s\S]*aria-expanded="false"/
+  );
+  assert.match(html, /id="assistant-current-title"/);
+  assert.match(html, /id="assistant-current-kind"/);
+  assert.match(html, /id="assistant-rename-chat"/);
+  assert.match(html, /id="assistant-archive-chat"/);
+  assert.match(html, /id="assistant-restore-chat"/);
+  assert.match(html, /<dialog id="assistant-new-dialog"/);
+  assert.match(html, /<dialog id="assistant-rename-dialog"/);
+  assert.match(html, /Chats are saved securely inside HCN\./);
+  assert.match(html, /id="file-start-chat"/);
   assert.match(html, /id="assistant-mode"[\s\S]*<legend>Thinking mode<\/legend>/);
   assert.match(
     html,
@@ -408,11 +449,11 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(script, /const ASSISTANT_TURN_CAPABILITY = "hcn\.assistant\.turn"/);
   assert.match(
     script,
-    /ENDPOINTS\.assistantTurns,[\s\S]*\{ prompt: prompt, mode: mode \}/
+    /ENDPOINTS\.assistantTurns,[\s\S]*conversationRef: conversation\.conversationRef,[\s\S]*expectedRevision: conversation\.revision,[\s\S]*prompt: prompt,[\s\S]*mode: mode/
   );
   assert.match(script, /ASSISTANT_TURN_CAPABILITY/);
   assert.match(script, /postOperationalJson\(/);
-  assert.match(script, /"hcn\.console\.assistant-turn\.v3"/);
+  assert.match(script, /"hcn\.console\.assistant-turn\.v4"/);
   assert.match(script, /function normalizeAssistantTurnResponse\(value\)/);
   assert.match(script, /function normalizeAssistantRouting\(value\)/);
   assert.match(script, /const ASSISTANT_MODES = new Set\(\["auto", "deep"\]\)/);
@@ -428,8 +469,12 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(script, /function renderAssistantPilot\(turn\)/);
   assert.doesNotMatch(script, /assistantPreparedPlanCount/);
   assert.match(script, /keys\.length !== allowed\.size/);
-  assert.match(script, /value\.ephemeral !== true/);
+  assert.match(script, /value\.persisted !== true/);
   assert.match(script, /value\.cachePolicy !== "no_store"/);
+  assert.match(script, /!ASSISTANT_CONVERSATION_REF\.test\(value\.conversationRef\)/);
+  assert.match(script, /!Number\.isSafeInteger\(value\.revision\)/);
+  assert.match(script, /value\.revision < 1/);
+  assert.match(script, /!ASSISTANT_MESSAGE_REF\.test\(value\.messageRef\)/);
   assert.match(script, /authority\.canPrepareActionPlans !== false/);
   assert.match(script, /authority\.canExecuteActions !== false/);
   assert.match(script, /authority\.exactHumanApprovalRequired !== true/);
@@ -451,6 +496,135 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /assistant\/turns/);
+});
+
+test("Ask Thresher multi-chat history is durable through scoped server APIs only", async () => {
+  const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+  const combined = `${html}\n${script}\n${worker}`;
+
+  const endpointBindings = {
+    assistantConversationList: "list",
+    assistantConversationCreate: "create",
+    assistantConversationDetail: "detail",
+    assistantConversationRename: "rename",
+    assistantConversationArchive: "archive",
+    assistantConversationRestore: "restore"
+  };
+  for (const [binding, operation] of Object.entries(endpointBindings)) {
+    assert.match(
+      script,
+      new RegExp(
+        `${binding}: "/hcn/api/v1/assistant/conversations/${operation}"`
+      )
+    );
+    assert.match(script, new RegExp(`ENDPOINTS\\.${binding}`));
+  }
+
+  assert.match(
+    script,
+    /const ASSISTANT_CONVERSATION_READ_CAPABILITY =\s*"hcn\.assistant\.conversations\.read"/
+  );
+  assert.match(
+    script,
+    /const ASSISTANT_CONVERSATION_MANAGE_CAPABILITY =\s*"hcn\.assistant\.conversations\.manage"/
+  );
+  assert.match(script, /function loadAssistantConversations\(options\)/);
+  assert.match(script, /function loadAssistantConversation\(conversationRef\)/);
+  assert.match(script, /function loadOlderAssistantMessages\(\)/);
+  assert.match(script, /function createAssistantConversation\(input\)/);
+  assert.match(script, /function submitAssistantRename\(event\)/);
+  assert.match(script, /function archiveAssistantConversation\(\)/);
+  assert.match(script, /function restoreAssistantConversation\(\)/);
+  assert.match(script, /function mutateAssistantConversation\(endpoint, additional, success\)/);
+  assert.match(
+    script,
+    /ENDPOINTS\.assistantConversationList,[\s\S]*\{ state: requestedState, offset: offset, limit: 100 \}/
+  );
+  assert.match(
+    script,
+    /ENDPOINTS\.assistantConversationDetail,[\s\S]*conversationRef: conversationRef,[\s\S]*offset: messageOffset,[\s\S]*limit: 100/
+  );
+  assert.match(script, /detail\.conversation\.messageCount - 100/);
+  assert.match(script, /page\.offset - 100/);
+  assert.match(
+    script,
+    /state\.assistantConversationOlderController\.abort\(\);[\s\S]*state\.assistantConversationOlderLoading = false;/
+  );
+  assert.match(
+    script,
+    /state\.assistantConversationRef !== conversationRef[\s\S]*return;/
+  );
+  assert.match(
+    script,
+    /previousScrollTop[\s\S]*elements\["assistant-transcript"\]\.scrollHeight[\s\S]*previousScrollHeight/
+  );
+  assert.match(
+    script,
+    /ENDPOINTS\.assistantConversationCreate,[\s\S]*kind: input\.kind,[\s\S]*title: input\.title,[\s\S]*fileRef: input\.fileRef/
+  );
+  assert.match(
+    script,
+    /Object\.assign\(\{[\s\S]*conversationRef: conversation\.conversationRef,[\s\S]*expectedRevision: conversation\.revision[\s\S]*\}, additional\)/
+  );
+
+  assert.match(script, /"hcn\.console\.assistant-conversation-list\.v1"/);
+  assert.match(script, /"hcn\.console\.assistant-conversation-detail\.v1"/);
+  assert.match(script, /"hcn\.console\.assistant-conversation\.v1"/);
+  assert.match(script, /"hcn\.console\.assistant-turn\.v4"/);
+  assert.match(script, /value\.persisted !== true/);
+  assert.match(script, /value\.cachePolicy !== "no_store"/);
+  assert.match(script, /expectedRevision: conversation\.revision/);
+  assert.match(script, /statusOf\(error\) === 409/);
+  assert.match(script, /"Chat saved\."/);
+  assert.match(script, /"Chat archived\."/);
+  assert.match(script, /"Chat restored\."/);
+
+  for (const id of [
+    "assistant-chat-sidebar",
+    "assistant-new-chat",
+    "assistant-new-client",
+    "assistant-chat-filters",
+    "assistant-conversation-list",
+    "assistant-conversation-load-more",
+    "assistant-chat-drawer-open",
+    "assistant-current-title",
+    "assistant-current-kind",
+    "assistant-rename-chat",
+    "assistant-archive-chat",
+    "assistant-restore-chat",
+    "assistant-load-older",
+    "assistant-new-dialog",
+    "assistant-rename-dialog"
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /data-chat-filter="active"[\s\S]*>All<\/button>/);
+  assert.match(html, /data-chat-filter="file"[\s\S]*>Clients<\/button>/);
+  assert.match(html, /data-chat-filter="sweep"[\s\S]*>Sweeps<\/button>/);
+  assert.match(html, /data-chat-filter="general"[\s\S]*>General<\/button>/);
+  assert.match(html, /data-chat-filter="archived"[\s\S]*>Archived<\/button>/);
+  assert.match(html, /Chats are saved securely inside HCN\./);
+  assert.match(
+    script,
+    /function openAssistantNewDialog\(\) \{[\s\S]*toggleAssistantDrawer\(false\);[\s\S]*\.showModal\(\)/
+  );
+  assert.match(
+    script,
+    /elements\["assistant-chat-main"\]\.toggleAttribute\("inert", open\)/
+  );
+  assert.match(script, /function trapAssistantDrawerFocus\(event\)/);
+
+  assert.doesNotMatch(combined, /localStorage|sessionStorage|indexedDB/i);
+  assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.doesNotMatch(worker, /assistant\/conversations|assistant\/turns/);
+  assert.doesNotMatch(worker, /addEventListener\("fetch"/);
 });
 
 test("Ask Thresher accepts only the exact bounded reasoning-routing contract", async () => {
@@ -544,7 +718,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.match(worker, /self\.registration\.unregister\(\)/);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /caches\.open|caches\.match|cache\.addAll/);
-  assert.match(script, /\/hcn\/sw\.js\?shell=v12/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v13/);
   assert.match(script, /serviceWorker\.getRegistration\("\/hcn\/"\)/);
   assert.match(script, /window\.location\.replace\(ENDPOINTS\.login\)/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);

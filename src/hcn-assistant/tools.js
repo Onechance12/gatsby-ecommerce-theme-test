@@ -16,6 +16,7 @@ export const HCN_ASSISTANT_TOOL_NAMES = Object.freeze([
   "read_file_document",
   "read_file_photo_catalog",
   "research_file_hail_dates",
+  "read_calendar_day",
   "run_management_sweep",
   "read_closed_file_benchmark"
 ]);
@@ -143,6 +144,28 @@ export const HCN_ASSISTANT_TOOLS = deepFreeze([
   },
   {
     type: "function",
+    name: "read_calendar_day",
+    description:
+      "Read the signed-in employee's Google Calendar for one exact YYYY-MM-DD day. Use file_ref as an empty string for privacy-minimized free/busy only. In a client-file chat, use that chat's exact opaque file_ref to find only strongly correlated appointment times; raw event titles, descriptions, locations, attendees, contacts, links, and provider ids are never returned.",
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        date: {
+          type: "string",
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        file_ref: {
+          type: "string",
+          pattern: "^(?:|subject_[a-f0-9]{32})$"
+        }
+      },
+      required: ["date", "file_ref"]
+    }
+  },
+  {
+    type: "function",
     name: "run_management_sweep",
     description:
       "Run the role-authorized company activity-gap sweep. The server rejects this tool unless the signed-in HCN role has management access.",
@@ -242,6 +265,31 @@ export function normalizeHcnAssistantToolCall(name, input) {
         fileRef: input.file_ref,
         documentRef: input.document_ref
       });
+    case "read_calendar_day":
+      exactRecord(
+        input,
+        ["date", "file_ref"],
+        "read_calendar_day input"
+      );
+      if (
+        typeof input.date !== "string"
+        || !/^\d{4}-\d{2}-\d{2}$/.test(input.date)
+        || !validCalendarDate(input.date)
+      ) {
+        malformed("read_calendar_day requires date as YYYY-MM-DD");
+      }
+      if (
+        input.file_ref !== ""
+        && !FILE_REF_PATTERN.test(input.file_ref)
+      ) {
+        malformed(
+          "read_calendar_day file_ref must be empty or one opaque file_ref"
+        );
+      }
+      return Object.freeze({
+        date: input.date,
+        fileRef: input.file_ref
+      });
     case "run_management_sweep":
       exactRecord(
         input,
@@ -290,6 +338,16 @@ function requireFileRef(value, toolName) {
   if (typeof value !== "string" || !FILE_REF_PATTERN.test(value)) {
     malformed(`${toolName} requires one opaque file_ref`);
   }
+}
+
+function validCalendarDate(value) {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year
+    && date.getUTCMonth() + 1 === month
+    && date.getUTCDate() === day
+  );
 }
 
 function exactRecord(value, keys, label) {

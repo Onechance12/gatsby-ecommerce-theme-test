@@ -77,6 +77,27 @@ validates this isolated path/key foundation and fails closed on partial,
 malformed, escaped, or reused configuration. It does not activate Thresher
 state reads or writes and therefore does not claim active persistence.
 
+### Ask Thresher conversation history
+
+Employee-visible chat history is not HCN Operations Brain state. It uses a
+separate encrypted, principal-scoped store beneath the HCN platform subtree,
+with independent `HCN_ASSISTANT_HISTORY_KEY` material. Only the exact visible
+user prompt, visible assistant response, conversation metadata, and bounded
+coded routing/source metadata may persist there. Hidden prompts, provider
+credentials or identifiers, tool payloads, documents, action plans, approvals,
+and operational-state contracts are forbidden.
+
+General, exact-file, and management-sweep conversations are separate scopes.
+Every list, read, mutation, and turn binds to the immutable Google principal;
+file conversations recheck the current active JobNimbus assignment and expose
+only exact-file tools, while sweep conversations recheck the management role.
+Each principal may have at most one active conversation for an exact file.
+Starting that file again reopens the existing active conversation; archived
+history remains separate, and it cannot be restored while a replacement active
+conversation exists for the same file.
+Full history may be displayed to the owner, but the model receives only a
+bounded recent replay and no provider-side conversation identifier.
+
 ### Jobrolo
 
 Jobrolo is a separate commercial CRM product. It is not an HCN bridge module,

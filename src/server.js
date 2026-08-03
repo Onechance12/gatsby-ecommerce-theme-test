@@ -187,6 +187,13 @@ import {
   runHcnAssistant
 } from "./hcn-assistant/core.js";
 import {
+  createHcnAssistantConversationStore
+} from "./hcn-assistant/conversation-store.js";
+import {
+  readGoogleCalendarDayAvailability,
+  readGoogleCalendarFileAppointments
+} from "./hcn-assistant/calendar-read.js";
+import {
   createThresherGroqResponsesClient
 } from "./hcn-assistant/thresher-groq-responses.js";
 import {
@@ -342,6 +349,16 @@ const HCN_THRESHER_STORE_PATH =
       ? path.join(HCN_OPERATIONS_ROOT, "thresher", "state.enc.json")
       : ""
   );
+const HCN_ASSISTANT_HISTORY_STORE_PATH =
+  process.env.HCN_ASSISTANT_HISTORY_STORE_PATH
+  || (
+    HCN_OPERATIONS_DATA_DIR
+      ? path.join(
+          HCN_OPERATIONS_DATA_DIR,
+          "assistant-conversations.enc.json"
+        )
+      : ""
+  );
 const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(BRIDGE_DATA_DIR, "handoffs.json");
 const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(BRIDGE_DATA_DIR, "handoff-uploads");
 const ARTIFACT_STORE_PATH = process.env.ARTIFACT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "artifacts.json");
@@ -354,6 +371,8 @@ const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 
 const HCN_CONSOLE_API_BODY_BYTES = 4 * 1024;
 const HCN_ACTION_PREPARE_BODY_BYTES = 64 * 1024;
 const HCN_ASSISTANT_BODY_BYTES = 16 * 1024;
+const HCN_ASSISTANT_HISTORY_KEY =
+  process.env.HCN_ASSISTANT_HISTORY_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const HCN_THRESHER_AI_ENABLED =
   process.env.HCN_THRESHER_AI_ENABLED === "true";
@@ -558,11 +577,10 @@ const HCN_ASSISTANT_GLOBAL_ADMISSION = createHcnReadAdmissionController({
 const HCN_ASSISTANT_GLOBAL_BINDING = createHash("sha256")
   .update("hcn-assistant:global-admission:v1", "utf8")
   .digest("hex");
-const HCN_ASSISTANT_CONVERSATIONS = new Map();
-const HCN_ASSISTANT_MAX_CONVERSATIONS = 512;
 const HCN_ASSISTANT_MAX_HISTORY_MESSAGES = 8;
 const HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES = 8 * 1024;
-const HCN_ASSISTANT_CONVERSATION_TTL_MS = 30 * 60_000;
+const HCN_ASSISTANT_TURN_OPERATIONS =
+  createKeyedOperationQueue({ maxKeys: 512 });
 const HCN_PENDING_ACTION_PLANS = createHcnPendingActionPlanStore();
 const HCN_INVITATION_APPROVALS =
   createHcnInvitationApprovalStore();
@@ -575,6 +593,7 @@ let hcnConsoleFreshReadServiceInstance = null;
 let hcnGoogleGrantStoreInstance = null;
 let hcnIdentityPinStoreInstance = null;
 let hcnInvitationStoreInstance = null;
+let hcnAssistantConversationStoreInstance = null;
 let hcnQuoLineStoreInstance = null;
 let hcnActionReceiptIndexInstance = null;
 let hcnActionExecutionInFlight = false;
@@ -634,6 +653,7 @@ for (const [label, otherSecret] of [
   ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
   ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
   ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+  ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
   ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
   ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
   ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
@@ -653,6 +673,38 @@ for (const [label, otherSecret] of [
   ) {
     throw new Error(
       `HCN_THRESHER_AI_GROQ_API_KEY must be different from ${label}.`
+    );
+  }
+}
+for (const [label, otherSecret] of [
+  ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
+  ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
+  ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
+  ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+  ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
+  ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
+  ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
+  ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+  ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
+  ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
+  ["JOBNIMBUS_API_KEY", API_KEY],
+  ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+  ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+  ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+  ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
+  ["QUO_API_KEY", QUO_API_KEY],
+  ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
+  ["RETELL_API_KEY", RETELL_API_KEY],
+  ["OPENAI_API_KEY", OPENAI_API_KEY],
+  ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY]
+]) {
+  if (
+    HCN_ASSISTANT_HISTORY_KEY
+    && otherSecret
+    && secureEqual(HCN_ASSISTANT_HISTORY_KEY, otherSecret)
+  ) {
+    throw new Error(
+      `HCN_ASSISTANT_HISTORY_KEY must be different from ${label}.`
     );
   }
 }
@@ -753,6 +805,7 @@ const HCN_THRESHER_CONFIGURATION = loadThresherRuntimeConfiguration(
       ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
       ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
       ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
       ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
       ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
       ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
@@ -776,6 +829,15 @@ if (process.env.RENDER && !hcnOperationsStorageConfigured()) {
     "Render startup requires an isolated, absolute HCN_OPERATIONS_ROOT and every persistent HCN path beneath it."
   );
 }
+if (
+  process.env.RENDER
+  && HCN_THRESHER_AI_ENABLED
+  && !hcnAssistantConversationStoreConfigured()
+) {
+  throw new Error(
+    "Render startup requires a dedicated encrypted HCN assistant conversation store."
+  );
+}
 
 const routes = new Map([
   ["GET /health", health],
@@ -791,6 +853,12 @@ const routes = new Map([
   ["POST /hcn/api/v1/management-sweep", hcnReadManagementSweep],
   ["POST /hcn/api/v1/closed-file-benchmark", hcnReadClosedFileBenchmark],
   ["POST /hcn/api/v1/file-review", hcnReadFile],
+  ["POST /hcn/api/v1/assistant/conversations/list", hcnListAssistantConversations],
+  ["POST /hcn/api/v1/assistant/conversations/create", hcnCreateAssistantConversation],
+  ["POST /hcn/api/v1/assistant/conversations/detail", hcnReadAssistantConversation],
+  ["POST /hcn/api/v1/assistant/conversations/rename", hcnRenameAssistantConversation],
+  ["POST /hcn/api/v1/assistant/conversations/archive", hcnArchiveAssistantConversation],
+  ["POST /hcn/api/v1/assistant/conversations/restore", hcnRestoreAssistantConversation],
   ["POST /hcn/api/v1/assistant/turns", hcnAssistantTurn],
   ["POST /hcn/api/v1/action-plans/prepare", hcnPrepareActionPlan],
   ["POST /hcn/api/v1/action-plans/list", hcnListActionPlans],
@@ -927,7 +995,7 @@ const server = createServer(async (req, res) => {
       }
       res.writeHead(302, {
         ...HCN_CONSOLE_SECURITY_HEADERS,
-        location: "/hcn/?shell=v12"
+        location: "/hcn/?shell=v13"
       });
       return res.end();
     }
@@ -1193,6 +1261,8 @@ function health() {
         routing: hcnAssistantRoutingHealth(),
         providerCredential: "dedicated_server_side_only",
         providerTokensExposedToBrowser: false,
+        historyConfigured: Boolean(HCN_ASSISTANT_HISTORY_KEY),
+        historyReady: hcnAssistantConversationStoreConfigured(),
         responsesApiStore: false,
         providerState: "disabled_hcn_bounded_replay_only",
         providerRetention:
@@ -1200,7 +1270,7 @@ function health() {
         builtInProviderTools: false,
         remoteTools: false,
         conversationState:
-          "bounded_session_scoped_memory_only",
+          "encrypted_principal_scoped_durable",
         fileScope:
           "signed_in_employee_jobnimbus_assignments_only",
         tools: [...HCN_ASSISTANT_TOOL_NAMES],
@@ -1322,6 +1392,8 @@ function health() {
       model: THRESHER_AI_RUNTIME.model,
       reasoningEffort: "routed_medium_or_high",
       routing: hcnAssistantRoutingHealth(),
+      historyConfigured: Boolean(HCN_ASSISTANT_HISTORY_KEY),
+      historyReady: hcnAssistantConversationStoreConfigured(),
       responsesApiStore: false,
       providerState: "disabled_hcn_bounded_replay_only",
       providerRetention:
@@ -1329,7 +1401,7 @@ function health() {
       builtInProviderTools: false,
       remoteTools: false,
       sessionHistory:
-        "bounded_in_memory_no_durable_client_transcript",
+        "encrypted_principal_scoped_durable_transcript",
       assignedFileScopeOnly: true,
       modelHasReadTools: hcnAssistantConfigured(),
       modelTools: [...HCN_ASSISTANT_TOOL_NAMES],
@@ -1577,12 +1649,52 @@ function hcnOperationsStorageConfigured() {
     HCN_ACTION_RECEIPT_STORE_PATH,
     HCN_QUO_LINE_STORE_PATH,
     HCN_IDENTITY_PIN_STORE_PATH,
-    HCN_INVITATION_STORE_PATH
+    HCN_INVITATION_STORE_PATH,
+    HCN_ASSISTANT_HISTORY_STORE_PATH
   ].every((candidate) => {
     if (!candidate) return false;
     const resolved = path.resolve(candidate);
     return resolved.startsWith(`${hcnRoot}${path.sep}`);
   });
+}
+
+function hcnAssistantConversationStoreConfigured() {
+  if (
+    !hcnOperationsStorageConfigured()
+    || !HCN_ASSISTANT_HISTORY_KEY
+    || !HCN_ASSISTANT_HISTORY_STORE_PATH
+    || HCN_REFERENCE_CONFIGURATION.ready !== true
+  ) {
+    return false;
+  }
+  try {
+    hcnAssistantConversationStore();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hcnAssistantConversationStore() {
+  if (!hcnAssistantConversationStoreInstance) {
+    hcnAssistantConversationStoreInstance =
+      createHcnAssistantConversationStore({
+        filePath: HCN_ASSISTANT_HISTORY_STORE_PATH,
+        encryptionKey: HCN_ASSISTANT_HISTORY_KEY
+      });
+  }
+  return hcnAssistantConversationStoreInstance;
+}
+
+function requireHcnAssistantConversationStore() {
+  if (!hcnAssistantConversationStoreConfigured()) {
+    const error = new Error(
+      "Encrypted HCN assistant conversation storage is unavailable."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  return hcnAssistantConversationStore();
 }
 
 function hcnIdentityPinStoreConfigured() {
@@ -3476,9 +3588,6 @@ function hcnBrowserLogout() {
   HCN_PENDING_ACTION_PLANS.invalidateSession({
     sessionBinding: hcnActionSessionBinding()
   });
-  HCN_ASSISTANT_CONVERSATIONS.delete(
-    hcnSessionDerivedHash("assistant-conversation:v1")
-  );
   HCN_CONSOLE_SESSION_STORE.revokeSession(context.hcnSessionId);
   return httpResponse(200, {
     signedOut: true
@@ -4463,6 +4572,120 @@ async function hcnResearchFileHailDates(input = {}) {
   });
 }
 
+async function hcnReadCalendarDay(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  return withHcnReadAdmission(async () => {
+    if (!input.fileRef) {
+      const accessToken = await hcnAssistantCalendarAccessToken();
+      return readGoogleCalendarDayAvailability({
+        fetchImpl: fetch,
+        accessToken,
+        date: input.date,
+        timeZone: OPERATIONS_TIME_ZONE,
+        calendarId: GOOGLE_CALENDAR_ID
+      });
+    }
+    const scope = await resolveHcnAssistantAssignedFile({
+      fileRef: input.fileRef,
+      principal
+    });
+    const matchTerms = hcnCalendarFileMatchTerms(scope.contact);
+    if (!matchTerms.length) {
+      const error = new Error(
+        "The exact JobNimbus file has no safe identifiers for Calendar correlation."
+      );
+      error.statusCode = 422;
+      throw error;
+    }
+    // Reauthorization and safe-term derivation complete before any Google
+    // credential is read or Calendar provider request is made.
+    const accessToken = await hcnAssistantCalendarAccessToken();
+    return readGoogleCalendarFileAppointments({
+      fetchImpl: fetch,
+      accessToken,
+      date: input.date,
+      timeZone: OPERATIONS_TIME_ZONE,
+      calendarId: GOOGLE_CALENDAR_ID,
+      fileRef: scope.fileRef,
+      matchTerms
+    });
+  });
+}
+
+async function hcnAssistantCalendarAccessToken() {
+  if (
+    currentRequestAuthentication()?.authenticationMethod
+      !== "hcn_cookie"
+  ) {
+    const error = new Error(
+      "The employee Google Calendar connector is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (!hcnGoogleGrantStoreConfigured()) {
+    throw hcnAssistantReadSourceUnavailable(
+      "The employee Google Calendar connector is unavailable."
+    );
+  }
+  const principalRef = currentHcnGooglePrincipalRef();
+  return HCN_GOOGLE_GRANT_OPERATIONS.run(
+    principalRef,
+    async () => {
+      const grant = await hcnGoogleGrantStore().get({ principalRef });
+      const scopes = new Set(grant?.scopes || []);
+      if (
+        !grant?.refreshToken
+        || !scopes.has(
+          "https://www.googleapis.com/auth/calendar.readonly"
+        )
+      ) {
+        const error = new Error(
+          "Link the signed-in employee Google Calendar before reading it."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      return getHcnGoogleAccessTokenLocked(principalRef);
+    }
+  );
+}
+
+function hcnCalendarFileMatchTerms(contact) {
+  const file = compactContact(contact);
+  const candidates = [
+    ["property_address", file.address],
+    ["claim_number", file.claimNumber],
+    ["email", file.email],
+    ["phone", file.phone],
+    ["client_name", file.name],
+    ["job_number", file.number]
+  ];
+  return candidates.flatMap(([kind, rawValue]) => {
+    const value = String(rawValue || "").trim();
+    if (!value || value.length > 256) return [];
+    if (kind === "phone") {
+      const digits = value.replace(/\D/g, "");
+      return digits.length >= 10 && digits.length <= 15
+        ? [{ kind, value }]
+        : [];
+    }
+    if (
+      kind === "email"
+      && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+    ) {
+      return [];
+    }
+    if (
+      kind === "job_number"
+      && !/^\d{3,12}$/.test(value)
+    ) {
+      return [];
+    }
+    return value.length >= 5 ? [{ kind, value }] : [];
+  });
+}
+
 async function resolveHcnAssistantAssignedFile({ fileRef, principal }) {
   const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
   const assignedOwnerId = String(
@@ -4635,9 +4858,338 @@ function hcnDeriveFreshFileIntelligence(review, principal) {
   }
 }
 
+async function hcnListAssistantConversations(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertExactHcnKeys(
+    input,
+    ["state", "offset", "limit"],
+    "Assistant conversation list"
+  );
+  const state = hcnAssistantConversationState(input.state);
+  const offset = hcnAssistantBoundedInteger(input.offset, 0, 10_000, "offset");
+  const limit = hcnAssistantBoundedInteger(input.limit, 1, 100, "limit");
+  const principalRef = hcnGooglePrincipalRef(principal.googleSubject);
+  const owned = [];
+  let storeOffset = 0;
+  do {
+    const page = await requireHcnAssistantConversationStore().list({
+      principalRef,
+      state,
+      offset: storeOffset,
+      limit: 100
+    });
+    owned.push(...page.items);
+    storeOffset += page.items.length;
+    if (!page.page.hasMore) break;
+  } while (storeOffset < 1_000);
+  const managementAuthorized = hcnAssistantManagementRole(principal.role);
+  const assignedFileRefs = owned.some(
+    (conversation) => conversation.kind === "file"
+  )
+    ? await withHcnReadAdmission(
+        () => hcnFreshAssistantAssignedFileRefs(principal)
+      )
+    : new Set();
+  const authorized = owned.filter(
+    (conversation) => {
+      if (
+        conversation.scope === "management"
+        && !managementAuthorized
+      ) {
+        return false;
+      }
+      return conversation.kind !== "file"
+        || assignedFileRefs.has(conversation.fileRef);
+    }
+  );
+  const items = authorized.slice(offset, offset + limit);
+  return {
+    schema: "hcn.console.assistant-conversation-list.v1",
+    generatedAt: new Date().toISOString(),
+    items,
+    page: {
+      offset,
+      limit,
+      total: authorized.length,
+      hasMore: offset + items.length < authorized.length
+    }
+  };
+}
+
+async function hcnFreshAssistantAssignedFileRefs(principal) {
+  let index;
+  try {
+    index = await hcnCachedContactIndex({ maxRecords: 5000 });
+  } catch {
+    throw hcnAssistantReadSourceUnavailable(
+      "The assigned JobNimbus file index is unavailable."
+    );
+  }
+  if (!index?.complete || !Array.isArray(index.rows)) {
+    throw hcnAssistantReadSourceUnavailable(
+      "The assigned JobNimbus file index is incomplete."
+    );
+  }
+  const ownerId = String(principal?.jobNimbusOwnerId || "").trim();
+  if (!ownerId) {
+    throw hcnAssistantReadSourceUnavailable(
+      "The signed-in JobNimbus assignment is unavailable."
+    );
+  }
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  return new Set(index.rows.flatMap((contact) => {
+    const providerFileId = String(contact?.jnid || contact?.id || "");
+    if (
+      !providerFileId
+      || !isInsuranceFile(contact)
+      || !assignedTo(contact, ownerId)
+      || !hcnContactIsExplicitlyActive(contact)
+    ) {
+      return [];
+    }
+    return [references.subjectId("jobnimbus", providerFileId)];
+  }));
+}
+
+async function hcnCreateAssistantConversation(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertExactHcnKeys(
+    input,
+    ["kind", "title", "fileRef"],
+    "Assistant conversation create"
+  );
+  const kind = hcnAssistantConversationKind(input.kind);
+  const title = hcnAssistantConversationTitle(input.title);
+  const fileRef = hcnAssistantConversationFileRef(input.fileRef, kind);
+  const scope = kind === "sweep" ? "management" : "assigned";
+  if (scope === "management") assertHcnManagementSession();
+  if (kind === "file") {
+    await withHcnReadAdmission(
+      () => resolveHcnAssistantAssignedFile({ fileRef, principal })
+    );
+  }
+  const conversation = await requireHcnAssistantConversationStore().create({
+    principalRef: hcnGooglePrincipalRef(principal.googleSubject),
+    scope,
+    kind,
+    fileRef,
+    title
+  });
+  return hcnAssistantConversationEnvelope(conversation);
+}
+
+async function hcnReadAssistantConversation(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "offset", "limit"],
+    "Assistant conversation detail"
+  );
+  const conversationRef = hcnAssistantConversationRef(
+    input.conversationRef
+  );
+  const offset = hcnAssistantBoundedInteger(input.offset, 0, 10_000, "offset");
+  const limit = hcnAssistantBoundedInteger(input.limit, 1, 100, "limit");
+  const conversation = await hcnRequireAssistantConversation({
+    principal,
+    conversationRef
+  });
+  const messages = conversation.messages.slice(offset, offset + limit);
+  return {
+    schema: "hcn.console.assistant-conversation-detail.v1",
+    generatedAt: new Date().toISOString(),
+    conversation: hcnAssistantConversationProjection(conversation),
+    messages,
+    page: {
+      offset,
+      limit,
+      total: conversation.messages.length,
+      hasMore: offset + messages.length < conversation.messages.length
+    }
+  };
+}
+
+async function hcnRenameAssistantConversation(input = {}) {
+  return hcnMutateAssistantConversation(input, "rename");
+}
+
+async function hcnArchiveAssistantConversation(input = {}) {
+  return hcnMutateAssistantConversation(input, "archive");
+}
+
+async function hcnRestoreAssistantConversation(input = {}) {
+  return hcnMutateAssistantConversation(input, "restore");
+}
+
+async function hcnMutateAssistantConversation(input, operation) {
+  const principal = assertHcnAssignedReadSession();
+  const expectedKeys = operation === "rename"
+    ? ["conversationRef", "title", "expectedRevision"]
+    : ["conversationRef", "expectedRevision"];
+  assertExactHcnKeys(
+    input,
+    expectedKeys,
+    `Assistant conversation ${operation}`
+  );
+  const conversationRef = hcnAssistantConversationRef(
+    input.conversationRef
+  );
+  const expectedRevision = hcnAssistantBoundedInteger(
+    input.expectedRevision,
+    0,
+    1_000_000,
+    "expectedRevision"
+  );
+  await hcnRequireAssistantConversation({ principal, conversationRef });
+  const request = {
+    principalRef: hcnGooglePrincipalRef(principal.googleSubject),
+    conversationRef,
+    expectedRevision
+  };
+  const conversation = operation === "rename"
+    ? await requireHcnAssistantConversationStore().rename({
+        ...request,
+        title: hcnAssistantConversationTitle(input.title)
+      })
+    : await requireHcnAssistantConversationStore()[operation](request);
+  return hcnAssistantConversationEnvelope(conversation);
+}
+
+async function hcnRequireAssistantConversation({
+  principal,
+  conversationRef
+}) {
+  const conversation = await requireHcnAssistantConversationStore().get({
+    principalRef: hcnGooglePrincipalRef(principal.googleSubject),
+    conversationRef
+  });
+  if (!conversation) {
+    const error = new Error(
+      "The HCN assistant conversation was not found."
+    );
+    error.statusCode = 404;
+    throw error;
+  }
+  await hcnAssertAssistantConversationAccess(conversation, principal);
+  return conversation;
+}
+
+async function hcnAssertAssistantConversationAccess(
+  conversation,
+  principal
+) {
+  if (conversation.scope === "management") {
+    assertHcnManagementSession();
+    return;
+  }
+  if (conversation.kind === "file") {
+    await withHcnReadAdmission(
+      () => resolveHcnAssistantAssignedFile({
+        fileRef: conversation.fileRef,
+        principal
+      })
+    );
+  }
+}
+
+function hcnAssistantConversationEnvelope(conversation) {
+  return {
+    schema: "hcn.console.assistant-conversation.v1",
+    generatedAt: new Date().toISOString(),
+    conversation
+  };
+}
+
+function hcnAssistantConversationProjection(conversation) {
+  return {
+    conversationRef: conversation.conversationRef,
+    scope: conversation.scope,
+    kind: conversation.kind,
+    fileRef: conversation.fileRef,
+    title: conversation.title,
+    state: conversation.state,
+    revision: conversation.revision,
+    messageCount: conversation.messages.length,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    archivedAt: conversation.archivedAt
+  };
+}
+
+function hcnAssistantConversationState(value) {
+  if (!["active", "archived"].includes(value)) {
+    badRequest("state must be active or archived.");
+  }
+  return value;
+}
+
+function hcnAssistantConversationKind(value) {
+  if (!["general", "file", "sweep"].includes(value)) {
+    badRequest("kind must be general, file, or sweep.");
+  }
+  return value;
+}
+
+function hcnAssistantConversationTitle(value) {
+  const title = String(value || "").trim();
+  if (
+    !title
+    || title.length > 120
+    || Buffer.byteLength(title, "utf8") > 512
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(title)
+  ) {
+    badRequest("title must be 1-120 characters without control characters.");
+  }
+  return title;
+}
+
+function hcnAssistantConversationRef(value) {
+  const conversationRef = String(value || "").trim();
+  if (!/^conversation_[a-f0-9]{32}$/.test(conversationRef)) {
+    badRequest("conversationRef is invalid.");
+  }
+  return conversationRef;
+}
+
+function hcnAssistantConversationFileRef(value, kind) {
+  const fileRef = String(value || "").trim();
+  if (kind === "file") {
+    if (!/^subject_[a-f0-9]{32}$/.test(fileRef)) {
+      badRequest("A valid assigned fileRef is required for a file chat.");
+    }
+    return fileRef;
+  }
+  if (fileRef) {
+    badRequest("fileRef must be empty for general and sweep chats.");
+  }
+  return "";
+}
+
+function hcnAssistantBoundedInteger(value, minimum, maximum, label) {
+  if (
+    !Number.isSafeInteger(value)
+    || value < minimum
+    || value > maximum
+  ) {
+    badRequest(`${label} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  return value;
+}
+
+function hcnAssistantManagementRole(role) {
+  return ["chance", "administrator", "manager"].includes(
+    String(role || "").toLowerCase()
+  );
+}
+
 async function hcnAssistantTurn(input = {}) {
   const principal = assertHcnAssignedReadSession();
-  const { prompt, mode } = validateHcnAssistantTurnInput(input);
+  const {
+    conversationRef,
+    expectedRevision,
+    prompt,
+    mode
+  } = validateHcnAssistantTurnInput(input);
   if (!hcnAssistantFoundationConfigured()) {
     const error = new Error(
       "Ask Thresher is not configured for this HCN environment."
@@ -4645,85 +5197,123 @@ async function hcnAssistantTurn(input = {}) {
     error.statusCode = 503;
     throw error;
   }
-  const serverSignals = classifyHcnAssistantRequest({
-    userRequest: prompt,
-    requestedMode: mode
-  });
-  const routing = routeHcnAssistantReasoning({
-    userRequest: prompt,
-    serverSignals
-  });
-
-  const sessionBinding =
-    hcnSessionDerivedHash("assistant-conversation:v1");
-  const principalBinding =
-    hcnAssistantPrincipalBinding(principal);
-  return withHcnAssistantAdmission(sessionBinding, async () => {
-    const history = hcnAssistantConversationHistory({
-      sessionBinding,
-      principalBinding
-    });
-    const sources = new Map();
-    const result = routing.route === "deterministic"
-      ? await runHcnDeterministicAssistantTurn({
-          operation: serverSignals.operation,
-          prompt,
-          sources
-        })
-      : routing.route === "codex_escalation"
-        ? {
-            message: formatCodexEscalation(routing.reasonCodes),
-            preparedPlan: null
-          }
-        : await runHcnModelAssistantTurn({
+  return HCN_ASSISTANT_TURN_OPERATIONS.run(
+    conversationRef,
+    () => withHcnAssistantAdmission(
+      hcnAssistantAdmissionBinding(conversationRef),
+      async () => {
+      const conversation = await hcnRequireAssistantConversation({
+        principal,
+        conversationRef
+      });
+      if (conversation.revision !== expectedRevision) {
+        const error = new Error(
+          "The HCN assistant conversation changed. Reload it before continuing."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      if (conversation.state !== "active") {
+        const error = new Error(
+          "An archived HCN assistant conversation cannot receive a turn."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      const serverSignals = classifyHcnAssistantRequest({
+        userRequest: prompt,
+        requestedMode: mode
+      });
+      const routing = routeHcnAssistantReasoning({
+        userRequest: prompt,
+        serverSignals
+      });
+      const principalBinding = hcnAssistantPrincipalBinding(principal);
+      const history = boundedHcnAssistantHistory(
+        conversation.messages
+      );
+      const sources = new Map();
+      const result = routing.route === "deterministic"
+        ? await runHcnDeterministicAssistantTurn({
+            operation: serverSignals.operation,
             prompt,
-            history,
-            principal,
-            principalBinding,
             sources,
-            profile: routing.providerProfile
-          });
-    const message = validateHcnAssistantMessage(result?.message);
-    hcnAssistantRememberConversation({
-      sessionBinding,
-      principalBinding,
-      prompt,
-      message
-    });
-    return {
-      schema: "hcn.console.assistant-turn.v3",
-      generatedAt: new Date().toISOString(),
-      ephemeral: true,
-      cachePolicy: "no_store",
-      authority: {
-        fileScope: "signed_in_employee_assignments_only",
-        liveSourcesWin: true,
-        canRead: true,
-        canPrepareActionPlans: false,
-        canExecuteActions: false,
-        exactHumanApprovalRequired: true
-      },
-      routing: hcnAssistantRoutingProjection(routing),
-      message,
-      plan: null,
-      sources: [...sources.values()]
-    };
-  });
+            conversation
+          })
+        : routing.route === "codex_escalation"
+          ? {
+              message: formatCodexEscalation(routing.reasonCodes),
+              preparedPlan: null
+            }
+          : await runHcnModelAssistantTurn({
+              prompt,
+              history,
+              principal,
+              principalBinding,
+              sources,
+              profile: routing.providerProfile,
+              conversation
+            });
+      const message = validateHcnAssistantMessage(result?.message);
+      const routingProjection = hcnAssistantRoutingProjection(routing);
+      const sourceList = [...sources.values()];
+      const saved = await requireHcnAssistantConversationStore().appendTurn({
+        principalRef: hcnGooglePrincipalRef(principal.googleSubject),
+        conversationRef,
+        expectedRevision,
+        prompt,
+        message,
+        mode,
+        routing: routingProjection,
+        sources: sourceList
+      });
+      return {
+        schema: "hcn.console.assistant-turn.v4",
+        generatedAt: new Date().toISOString(),
+        persisted: true,
+        cachePolicy: "no_store",
+        conversationRef,
+        revision: saved.conversation.revision,
+        messageRef: saved.assistantMessage.messageRef,
+        authority: {
+          fileScope: "signed_in_employee_assignments_only",
+          liveSourcesWin: true,
+          canRead: true,
+          canPrepareActionPlans: false,
+          canExecuteActions: false,
+          exactHumanApprovalRequired: true
+        },
+        routing: routingProjection,
+        message,
+        plan: null,
+        sources: sourceList
+      };
+      }
+    )
+  );
 }
 
 function validateHcnAssistantTurnInput(input) {
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "expectedRevision", "prompt", "mode"],
+    "Ask Thresher turn"
+  );
+  const conversationRef = hcnAssistantConversationRef(
+    input.conversationRef
+  );
+  const expectedRevision = hcnAssistantBoundedInteger(
+    input.expectedRevision,
+    0,
+    1_000_000,
+    "expectedRevision"
+  );
   if (
-    !input
-    || typeof input !== "object"
-    || Array.isArray(input)
-    || Object.keys(input).length !== 2
-    || !Object.hasOwn(input, "prompt")
-    || !Object.hasOwn(input, "mode")
-    || typeof input.prompt !== "string"
+    typeof input.prompt !== "string"
     || !["auto", "deep"].includes(input.mode)
   ) {
     badRequest(
-      "Ask Thresher requires exactly prompt and mode (auto or deep)."
+      "Ask Thresher requires a prompt and mode (auto or deep)."
     );
   }
   const prompt = input.prompt.trim();
@@ -4737,7 +5327,12 @@ function validateHcnAssistantTurnInput(input) {
       "prompt must be 1-4000 characters without unsupported control characters."
     );
   }
-  return { prompt, mode: input.mode };
+  return {
+    conversationRef,
+    expectedRevision,
+    prompt,
+    mode: input.mode
+  };
 }
 
 function hcnAssistantConfigured() {
@@ -4753,15 +5348,22 @@ function hcnAssistantFoundationConfigured() {
     HCN_THRESHER_AI_ENABLED
     && HCN_CONSOLE_ENABLED
     && hcnConsoleFreshReadConfigured()
+    && hcnAssistantConversationStoreConfigured()
   );
 }
 
 async function runHcnDeterministicAssistantTurn({
   operation,
   prompt,
-  sources
+  sources,
+  conversation
 }) {
   if (operation === "work_center") {
+    hcnAssertAssistantToolConversationScope(
+      "read_work_center",
+      {},
+      conversation
+    );
     const workCenter = await hcnReadWorkCenter({
       offset: 0,
       limit: 25
@@ -4777,6 +5379,7 @@ async function runHcnDeterministicAssistantTurn({
     };
   }
   if (operation === "management_sweep") {
+    hcnAssertAssistantManagementConversation(conversation);
     assertHcnManagementSession();
     const sweep = await hcnReadManagementSweep({
       limitPerAdjuster: 10
@@ -4802,6 +5405,16 @@ async function runHcnDeterministicAssistantTurn({
       jobNumber,
       recentLimit: 20
     });
+    if (
+      conversation?.kind === "file"
+      && review?.file?.fileRef !== conversation.fileRef
+    ) {
+      const error = new Error(
+        "This file chat is bound to a different assigned JobNimbus file."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
     collectHcnAssistantSources(sources, "review_file", review);
     return {
       message: formatDeterministicFileStatus(review),
@@ -4821,7 +5434,8 @@ async function runHcnModelAssistantTurn({
   principal,
   principalBinding,
   sources,
-  profile
+  profile,
+  conversation
 }) {
   const createResponse =
     HCN_THRESHER_AI_RESPONSE_CLIENTS[profile.profileId];
@@ -4837,7 +5451,7 @@ async function runHcnModelAssistantTurn({
     history,
     assignedIdentity: principal,
     model: profile.model,
-    instructions: hcnAssistantInstructions(principal),
+    instructions: hcnAssistantInstructions(principal, conversation),
     maxToolRounds: 6,
     maxToolCalls: 8,
     maxOutputTokens: profile.maxOutputTokens,
@@ -4857,6 +5471,11 @@ async function runHcnModelAssistantTurn({
         error.statusCode = 403;
         throw error;
       }
+      hcnAssertAssistantToolConversationScope(
+        name,
+        toolInput,
+        conversation
+      );
       let toolResult;
       switch (name) {
         case "read_work_center":
@@ -4879,6 +5498,9 @@ async function runHcnModelAssistantTurn({
           break;
         case "research_file_hail_dates":
           toolResult = await hcnResearchFileHailDates(toolInput);
+          break;
+        case "read_calendar_day":
+          toolResult = await hcnReadCalendarDay(toolInput);
           break;
         case "run_management_sweep":
           assertHcnManagementSession();
@@ -4911,7 +5533,7 @@ function hcnAssistantRoutingProjection(routing) {
   };
 }
 
-function hcnAssistantInstructions(principal) {
+function hcnAssistantInstructions(principal, conversation) {
   const role = String(principal?.role || "employee")
     .toLowerCase()
     .replace(/[^a-z_]/g, "")
@@ -4925,6 +5547,10 @@ function hcnAssistantInstructions(principal) {
     "",
     "Server-enforced context for this turn:",
     `- Signed-in HCN role: ${role}.`,
+    `- Conversation kind: ${String(conversation?.kind || "general")}.`,
+    conversation?.kind === "file"
+      ? `- This chat is locked to opaque file reference ${conversation.fileRef}; never request or discuss a different file in this chat.`
+      : "- This conversation is not locked to one file.",
     "- Every file lookup is restricted server-side to the signed-in employee's authorized JobNimbus scope.",
     "- Management sweep and benchmark access are decided by the server; do not claim access unless the relevant tool succeeds.",
     "- Exact-file review may include a deterministic intelligence object. Treat it as the authoritative coded workflow analysis of the fresh evidence; explain it plainly and do not override its missing-evidence or approval-gate conclusions.",
@@ -4933,6 +5559,68 @@ function hcnAssistantInstructions(principal) {
     "- Your complete model tool registry is read-only. Do not claim to have prepared or stored an action; proposed wording exists only in your answer.",
     `- Current server time: ${new Date().toISOString()}.`
   ].join("\n");
+}
+
+function hcnAssertAssistantManagementConversation(conversation) {
+  if (conversation?.kind !== "sweep") {
+    const error = new Error(
+      "Management reports must be run from a management sweep chat."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
+function hcnAssertAssistantToolConversationScope(
+  name,
+  input,
+  conversation
+) {
+  const fileTools = [
+    "review_file",
+    "read_file_document_catalog",
+    "read_file_document",
+    "read_file_photo_catalog",
+    "research_file_hail_dates",
+    "read_calendar_day"
+  ];
+  if (
+    name === "read_calendar_day"
+    && conversation?.kind !== "file"
+    && input?.fileRef
+  ) {
+    const error = new Error(
+      "Exact-file Calendar correlation must be run from that assigned file chat."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (
+    conversation?.kind === "file"
+    && !fileTools.includes(name)
+  ) {
+    const error = new Error(
+      "This file chat may use only exact-file read tools for its bound JobNimbus file."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (
+    ["run_management_sweep", "read_closed_file_benchmark"].includes(name)
+  ) {
+    hcnAssertAssistantManagementConversation(conversation);
+  }
+  if (
+    conversation?.kind === "file"
+    && fileTools.includes(name)
+    && input?.fileRef !== conversation.fileRef
+  ) {
+    const error = new Error(
+      "This file chat may read only its bound assigned JobNimbus file."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
 }
 
 function createThresherAiResponseClients(apiKey) {
@@ -5005,112 +5693,56 @@ function hcnAssistantPrincipalBinding(principal) {
     .digest("hex");
 }
 
-function hcnAssistantConversationHistory({
-  sessionBinding,
-  principalBinding
-}) {
-  cleanupHcnAssistantConversations();
-  const conversation =
-    HCN_ASSISTANT_CONVERSATIONS.get(sessionBinding);
-  if (!conversation) return [];
-  if (
-    conversation.principalBinding !== principalBinding
-    || Date.now() - conversation.updatedAt
-      >= HCN_ASSISTANT_CONVERSATION_TTL_MS
-  ) {
-    HCN_ASSISTANT_CONVERSATIONS.delete(sessionBinding);
-    return [];
-  }
-  return conversation.messages.map((message) => ({ ...message }));
-}
-
-function hcnAssistantRememberConversation({
-  sessionBinding,
-  principalBinding,
-  prompt,
-  message
-}) {
-  cleanupHcnAssistantConversations();
-  let conversation = HCN_ASSISTANT_CONVERSATIONS.get(sessionBinding);
-  if (
-    !conversation
-    || conversation.principalBinding !== principalBinding
-  ) {
-    if (
-      !conversation
-      && HCN_ASSISTANT_CONVERSATIONS.size
-        >= HCN_ASSISTANT_MAX_CONVERSATIONS
-    ) {
-      const oldest = [...HCN_ASSISTANT_CONVERSATIONS.entries()]
-        .sort((left, right) =>
-          left[1].updatedAt - right[1].updatedAt
-        )[0];
-      if (oldest) HCN_ASSISTANT_CONVERSATIONS.delete(oldest[0]);
-    }
-    conversation = {
-      principalBinding,
-      updatedAt: Date.now(),
-      messages: []
-    };
-  }
-  conversation.messages.push(
-    { role: "user", content: prompt },
-    { role: "assistant", content: message }
-  );
-  conversation.messages =
-    boundedHcnAssistantHistory(conversation.messages);
-  conversation.updatedAt = Date.now();
-  HCN_ASSISTANT_CONVERSATIONS.set(sessionBinding, conversation);
+function hcnAssistantAdmissionBinding(conversationRef) {
+  return createHash("sha256")
+    .update("hcn-assistant:conversation-admission:v1", "utf8")
+    .update("\0", "utf8")
+    .update(hcnAssistantConversationRef(conversationRef), "utf8")
+    .digest("hex");
 }
 
 function boundedHcnAssistantHistory(messages) {
   const bounded = [];
   let totalBytes = 0;
   for (
-    let index = messages.length - 1;
+    let index = messages.length - 2;
     index >= 0
-      && bounded.length < HCN_ASSISTANT_MAX_HISTORY_MESSAGES;
-    index -= 1
+      && bounded.length <= HCN_ASSISTANT_MAX_HISTORY_MESSAGES - 2;
+    index -= 2
   ) {
-    const candidate = messages[index];
+    const userMessage = messages[index];
+    const assistantMessage = messages[index + 1];
     if (
-      !candidate
-      || !["user", "assistant"].includes(candidate.role)
-      || typeof candidate.content !== "string"
+      !userMessage
+      || userMessage.role !== "user"
+      || typeof userMessage.content !== "string"
+      || !assistantMessage
+      || assistantMessage.role !== "assistant"
+      || typeof assistantMessage.content !== "string"
     ) {
       continue;
     }
-    const bytes = Buffer.byteLength(candidate.content, "utf8");
+    const userBytes = Buffer.byteLength(userMessage.content, "utf8");
+    const assistantBytes = Buffer.byteLength(
+      assistantMessage.content,
+      "utf8"
+    );
+    const pairBytes = userBytes + assistantBytes;
     if (
-      bytes < 1
-      || bytes > HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES
-      || totalBytes + bytes > HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES
+      userBytes < 1
+      || assistantBytes < 1
+      || pairBytes > HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES
+      || totalBytes + pairBytes > HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES
     ) {
       continue;
     }
-    bounded.unshift({
-      role: candidate.role,
-      content: candidate.content
-    });
-    totalBytes += bytes;
-  }
-  while (bounded.length && bounded[0].role !== "user") {
-    bounded.shift();
+    bounded.unshift(
+      { role: "user", content: userMessage.content },
+      { role: "assistant", content: assistantMessage.content }
+    );
+    totalBytes += pairBytes;
   }
   return bounded;
-}
-
-function cleanupHcnAssistantConversations() {
-  const cutoff = Date.now() - HCN_ASSISTANT_CONVERSATION_TTL_MS;
-  for (const [key, conversation] of HCN_ASSISTANT_CONVERSATIONS) {
-    if (
-      !conversation
-      || !Number.isFinite(conversation.updatedAt)
-      || conversation.updatedAt <= cutoff
-    ) {
-      HCN_ASSISTANT_CONVERSATIONS.delete(key);
-    }
-  }
 }
 
 function validateHcnAssistantMessage(value) {
@@ -5187,6 +5819,16 @@ function collectHcnAssistantSources(sources, toolName, result) {
     sources.set("weather", hcnAssistantSourceProjection(
       "weather",
       "Hail report research",
+      result.source
+    ));
+    return;
+  }
+  if (toolName === "read_calendar_day" && result?.source) {
+    sources.set("google_calendar", hcnAssistantSourceProjection(
+      "google_calendar",
+      result.schema === "hcn.assistant.calendar-file-appointments.v1"
+        ? "Google Calendar file appointments"
+        : "Google Calendar availability",
       result.source
     ));
     return;
@@ -15681,6 +16323,7 @@ function redactSensitiveText(value) {
     OAUTH_SESSION_SECRET,
     HCN_GOOGLE_GRANT_KEY,
     HCN_QUO_LINK_KEY,
+    HCN_ASSISTANT_HISTORY_KEY,
     process.env.HCN_REFERENCE_KEY,
     process.env.HCN_THRESHER_STORE_KEY,
     process.env.HCN_THRESHER_REFERENCE_KEY,
@@ -18957,6 +19600,128 @@ const OPENAPI = {
         }
       }
     },
+    "/hcn/api/v1/assistant/conversations/list": {
+      post: {
+        operationId: "listHcnAssistantConversations",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Lists active or archived encrypted assistant conversations owned by the signed-in HCN employee. Management chats remain role gated.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  state: { type: "string", enum: ["active", "archived"] },
+                  offset: { type: "integer", minimum: 0, maximum: 10000 },
+                  limit: { type: "integer", minimum: 1, maximum: 100 }
+                },
+                required: ["state", "offset", "limit"]
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Principal-scoped conversation summaries." },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN browser session required." },
+          "403": { description: "Assigned-employee session, Origin, or CSRF check failed." },
+          "503": { description: "Encrypted conversation storage is unavailable." }
+        }
+      }
+    },
+    "/hcn/api/v1/assistant/conversations/create": {
+      post: {
+        operationId: "createHcnAssistantConversation",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Creates one encrypted principal-scoped general, exact-file, or management-sweep conversation. Exact-file assignment and management role are freshly enforced.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  kind: { type: "string", enum: ["general", "file", "sweep"] },
+                  title: { type: "string", minLength: 1, maxLength: 120 },
+                  fileRef: { type: "string", pattern: "^(?:|subject_[a-f0-9]{32})$" }
+                },
+                required: ["kind", "title", "fileRef"]
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Created conversation summary at revision zero." },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN browser session required." },
+          "403": { description: "File assignment or management authorization failed." },
+          "409": { description: "Conversation capacity was reached." },
+          "503": { description: "Encrypted conversation storage is unavailable." }
+        }
+      }
+    },
+    "/hcn/api/v1/assistant/conversations/detail": {
+      post: {
+        operationId: "readHcnAssistantConversation",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Reads one page of the full employee-visible transcript for an owned conversation. Model replay remains separately bounded on each turn.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  conversationRef: { type: "string", pattern: "^conversation_[a-f0-9]{32}$" },
+                  offset: { type: "integer", minimum: 0, maximum: 10000 },
+                  limit: { type: "integer", minimum: 1, maximum: 100 }
+                },
+                required: ["conversationRef", "offset", "limit"]
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Conversation summary and one chronological transcript page." },
+          "400": { description: "Strict request validation failed." },
+          "401": { description: "HCN browser session required." },
+          "403": { description: "Current file or management authorization failed." },
+          "404": { description: "Owned conversation was not found." },
+          "503": { description: "Encrypted conversation storage is unavailable." }
+        }
+      }
+    },
+    "/hcn/api/v1/assistant/conversations/rename": {
+      post: {
+        operationId: "renameHcnAssistantConversation",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Renames one owned conversation with an exact optimistic revision check.",
+        requestBody: hcnAssistantConversationMutationRequestBody(true),
+        responses: hcnAssistantConversationMutationResponses()
+      }
+    },
+    "/hcn/api/v1/assistant/conversations/archive": {
+      post: {
+        operationId: "archiveHcnAssistantConversation",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Archives one owned conversation with an exact optimistic revision check; its durable transcript remains encrypted.",
+        requestBody: hcnAssistantConversationMutationRequestBody(false),
+        responses: hcnAssistantConversationMutationResponses()
+      }
+    },
+    "/hcn/api/v1/assistant/conversations/restore": {
+      post: {
+        operationId: "restoreHcnAssistantConversation",
+        security: [{ hcnBrowserSession: [] }],
+        description: "Restores one owned archived conversation with an exact optimistic revision check.",
+        requestBody: hcnAssistantConversationMutationRequestBody(false),
+        responses: hcnAssistantConversationMutationResponses()
+      }
+    },
     "/hcn/api/v1/assistant/turns": {
       post: {
         operationId: "askHcnThresher",
@@ -18970,6 +19735,15 @@ const OPENAPI = {
                 type: "object",
                 additionalProperties: false,
                 properties: {
+                  conversationRef: {
+                    type: "string",
+                    pattern: "^conversation_[a-f0-9]{32}$"
+                  },
+                  expectedRevision: {
+                    type: "integer",
+                    minimum: 0,
+                    maximum: 1000000
+                  },
                   prompt: {
                     type: "string",
                     minLength: 1,
@@ -18981,7 +19755,12 @@ const OPENAPI = {
                     description: "Auto uses the server reasoning router. Deep requests the fixed high-reasoning profile; it cannot select a model or execution capability."
                   }
                 },
-                required: ["prompt", "mode"]
+                required: [
+                  "conversationRef",
+                  "expectedRevision",
+                  "prompt",
+                  "mode"
+                ]
               }
             }
           }
@@ -18997,16 +19776,28 @@ const OPENAPI = {
                   properties: {
                     schema: {
                       type: "string",
-                      const: "hcn.console.assistant-turn.v3"
+                      const: "hcn.console.assistant-turn.v4"
                     },
                     generatedAt: {
                       type: "string",
                       format: "date-time"
                     },
-                    ephemeral: { type: "boolean", const: true },
+                    persisted: { type: "boolean", const: true },
                     cachePolicy: {
                       type: "string",
                       const: "no_store"
+                    },
+                    conversationRef: {
+                      type: "string",
+                      pattern: "^conversation_[a-f0-9]{32}$"
+                    },
+                    revision: {
+                      type: "integer",
+                      minimum: 1
+                    },
+                    messageRef: {
+                      type: "string",
+                      pattern: "^message_[a-f0-9]{32}$"
                     },
                     authority: {
                       type: "object",
@@ -19151,8 +19942,11 @@ const OPENAPI = {
                   required: [
                     "schema",
                     "generatedAt",
-                    "ephemeral",
+                    "persisted",
                     "cachePolicy",
+                    "conversationRef",
+                    "revision",
+                    "messageRef",
                     "authority",
                     "routing",
                     "message",
@@ -19745,6 +20539,54 @@ function jsonBody(schemaName) {
         schema: { $ref: `#/components/schemas/${schemaName}` }
       }
     }
+  };
+}
+
+function hcnAssistantConversationMutationRequestBody(includeTitle) {
+  const properties = {
+    conversationRef: {
+      type: "string",
+      pattern: "^conversation_[a-f0-9]{32}$"
+    },
+    expectedRevision: {
+      type: "integer",
+      minimum: 0,
+      maximum: 1000000
+    }
+  };
+  const required = ["conversationRef", "expectedRevision"];
+  if (includeTitle) {
+    properties.title = {
+      type: "string",
+      minLength: 1,
+      maxLength: 120
+    };
+    required.splice(1, 0, "title");
+  }
+  return {
+    required: true,
+    content: {
+      "application/json": {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties,
+          required
+        }
+      }
+    }
+  };
+}
+
+function hcnAssistantConversationMutationResponses() {
+  return {
+    "200": { description: "Updated conversation summary." },
+    "400": { description: "Strict request validation failed." },
+    "401": { description: "HCN browser session required." },
+    "403": { description: "Current file or management authorization failed." },
+    "404": { description: "Owned conversation was not found." },
+    "409": { description: "The conversation revision or state changed." },
+    "503": { description: "Encrypted conversation storage is unavailable." }
   };
 }
 

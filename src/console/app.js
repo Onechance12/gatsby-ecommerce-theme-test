@@ -10,6 +10,12 @@
     googleConnectStart: "/hcn/connect/google/start",
     quoLine: "/hcn/api/v1/connectors/quo-line",
     assistantTurns: "/hcn/api/v1/assistant/turns",
+    assistantConversationList: "/hcn/api/v1/assistant/conversations/list",
+    assistantConversationCreate: "/hcn/api/v1/assistant/conversations/create",
+    assistantConversationDetail: "/hcn/api/v1/assistant/conversations/detail",
+    assistantConversationRename: "/hcn/api/v1/assistant/conversations/rename",
+    assistantConversationArchive: "/hcn/api/v1/assistant/conversations/archive",
+    assistantConversationRestore: "/hcn/api/v1/assistant/conversations/restore",
     managementSweep: "/hcn/api/v1/management-sweep",
     teamInvitationList: "/hcn/api/v1/team/invitations/list",
     teamInvitationPrepare: "/hcn/api/v1/team/invitations/prepare",
@@ -28,6 +34,18 @@
 
   const WORK_CENTER_CAPABILITY = "hcn.work_center.read";
   const ASSISTANT_TURN_CAPABILITY = "hcn.assistant.turn";
+  const ASSISTANT_CONVERSATION_READ_CAPABILITY =
+    "hcn.assistant.conversations.read";
+  const ASSISTANT_CONVERSATION_MANAGE_CAPABILITY =
+    "hcn.assistant.conversations.manage";
+  const ASSISTANT_CONVERSATION_REF = /^conversation_[a-f0-9]{32}$/;
+  const ASSISTANT_MESSAGE_REF = /^message_[a-f0-9]{32}$/;
+  const ASSISTANT_CONVERSATION_KINDS = new Set([
+    "general",
+    "file",
+    "sweep"
+  ]);
+  const ASSISTANT_CONVERSATION_STATES = new Set(["active", "archived"]);
   const ASSISTANT_MODES = new Set(["auto", "deep"]);
   const ASSISTANT_ROUTES = new Set([
     "deterministic",
@@ -323,7 +341,21 @@
     receipt: null,
     receiptLoading: false,
     assistantController: null,
+    assistantConversationListController: null,
+    assistantConversationDetailController: null,
+    assistantConversationMutationController: null,
+    assistantConversationOlderController: null,
     assistantLoading: false,
+    assistantConversationsLoading: false,
+    assistantConversationMutationLoading: false,
+    assistantConversationOlderLoading: false,
+    assistantConversations: null,
+    assistantConversationPage: null,
+    assistantConversation: null,
+    assistantConversationRef: "",
+    assistantConversationFilter: "active",
+    assistantDrawerOpen: false,
+    assistantDrawerReturnFocus: null,
     leavingForLogin: false,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
@@ -373,6 +405,37 @@
       "home-sweep-status",
       "home-connections-status",
       "assistant-alert",
+      "assistant-chat-sidebar",
+      "assistant-chat-backdrop",
+      "assistant-chat-drawer-open",
+      "assistant-new-chat",
+      "assistant-chat-filters",
+      "assistant-conversation-list",
+      "assistant-conversation-empty",
+      "assistant-conversation-load-more",
+      "assistant-current-title",
+      "assistant-current-kind",
+      "assistant-rename-chat",
+      "assistant-archive-chat",
+      "assistant-restore-chat",
+      "assistant-connection-jobnimbus",
+      "assistant-connection-gmail",
+      "assistant-connection-calendar",
+      "assistant-connection-quo",
+      "assistant-connection-thresher",
+      "assistant-load-older",
+      "assistant-starters",
+      "assistant-new-dialog",
+      "assistant-new-form",
+      "assistant-new-cancel",
+      "assistant-new-sweep",
+      "assistant-new-client",
+      "assistant-new-name",
+      "assistant-new-submit",
+      "assistant-rename-dialog",
+      "assistant-rename-form",
+      "assistant-rename-name",
+      "assistant-rename-submit",
       "assistant-transcript",
       "assistant-form",
       "assistant-prompt",
@@ -420,6 +483,7 @@
       "file-name",
       "file-stage",
       "file-evidence-status",
+      "file-start-chat",
       "file-refresh",
       "file-alert",
       "file-freshness",
@@ -558,7 +622,71 @@
 
     elements["retry-action"].addEventListener("click", loadPlatformState);
     elements["sign-out-action"].addEventListener("click", signOut);
+    elements["assistant-new-chat"].addEventListener(
+      "click",
+      openAssistantNewDialog
+    );
+    elements["assistant-chat-drawer-open"].addEventListener(
+      "click",
+      function () { toggleAssistantDrawer(true); }
+    );
+    elements["assistant-chat-backdrop"].addEventListener(
+      "click",
+      function () { toggleAssistantDrawer(false); }
+    );
+    elements["assistant-chat-filters"].addEventListener(
+      "click",
+      selectAssistantConversationFilter
+    );
+    elements["assistant-conversation-load-more"].addEventListener(
+      "click",
+      function () { loadAssistantConversations({ append: true }); }
+    );
+    elements["assistant-new-form"].addEventListener(
+      "submit",
+      submitAssistantNewConversation
+    );
+    elements["assistant-new-client"].addEventListener(
+      "click",
+      openAssistantClientChatPicker
+    );
+    elements["assistant-rename-form"].addEventListener(
+      "submit",
+      submitAssistantRename
+    );
+    elements["assistant-rename-chat"].addEventListener(
+      "click",
+      openAssistantRenameDialog
+    );
+    elements["assistant-archive-chat"].addEventListener(
+      "click",
+      archiveAssistantConversation
+    );
+    elements["assistant-restore-chat"].addEventListener(
+      "click",
+      restoreAssistantConversation
+    );
+    document.querySelectorAll("[data-assistant-dialog-cancel]").forEach(
+      function (button) {
+        button.addEventListener("click", closeAssistantDialogs);
+      }
+    );
+    elements["assistant-new-cancel"].addEventListener(
+      "click",
+      closeAssistantDialogs
+    );
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && state.assistantDrawerOpen) {
+        toggleAssistantDrawer(false);
+      } else if (event.key === "Tab" && state.assistantDrawerOpen) {
+        trapAssistantDrawerFocus(event);
+      }
+    });
     elements["assistant-form"].addEventListener("submit", submitAssistantTurn);
+    elements["assistant-load-older"].addEventListener(
+      "click",
+      loadOlderAssistantMessages
+    );
     elements["assistant-prompt"].addEventListener("keydown", function (event) {
       if (
         event.key === "Enter"
@@ -573,7 +701,7 @@
       button.addEventListener("click", function () {
         const prompt = boundedString(
           button.getAttribute("data-assistant-starter"),
-          2000
+          4000
         ).trim();
         if (!prompt || state.assistantLoading) return;
         elements["assistant-prompt"].value = prompt;
@@ -607,6 +735,10 @@
     elements["file-refresh"].addEventListener("click", function () {
       if (state.selectedFileRef) loadFileReview(state.selectedFileRef);
     });
+    elements["file-start-chat"].addEventListener(
+      "click",
+      startSelectedFileConversation
+    );
     elements["file-back"].addEventListener("click", closeFileReview);
     elements["action-type"].addEventListener("change", renderActionFields);
     elements["action-form"].addEventListener("submit", addDraftAction);
@@ -665,6 +797,15 @@
     window.addEventListener("online", handleNetworkChange);
     window.addEventListener("offline", handleNetworkChange);
     window.addEventListener("hashchange", syncActiveNavigation);
+    const assistantDrawerMedia = window.matchMedia("(max-width: 620px)");
+    if (typeof assistantDrawerMedia.addEventListener === "function") {
+      assistantDrawerMedia.addEventListener(
+        "change",
+        syncAssistantDrawerViewport
+      );
+    } else if (typeof assistantDrawerMedia.addListener === "function") {
+      assistantDrawerMedia.addListener(syncAssistantDrawerViewport);
+    }
     document.addEventListener("visibilitychange", handleVisibilityChange);
     document.querySelectorAll(".primary-nav .nav-item").forEach(function (link) {
       link.addEventListener("click", function () {
@@ -673,6 +814,7 @@
     });
 
     syncActiveNavigation();
+    syncAssistantDrawerViewport();
     document.body.classList.add("console-ready");
     loadPlatformState();
     registerServiceWorker();
@@ -992,10 +1134,1231 @@
     );
   }
 
+  function currentAssistantConversation() {
+    return record(record(state.assistantConversation).conversation);
+  }
+
+  function normalizeAssistantConversationPage(value) {
+    if (
+      !objectHasExactKeys(value, ["offset", "limit", "total", "hasMore"])
+      || !Number.isSafeInteger(value.offset)
+      || value.offset < 0
+      || !Number.isSafeInteger(value.limit)
+      || value.limit < 1
+      || value.limit > 100
+      || !Number.isSafeInteger(value.total)
+      || value.total < 0
+      || typeof value.hasMore !== "boolean"
+    ) {
+      throw new Error("Invalid assistant conversation page");
+    }
+    return {
+      offset: value.offset,
+      limit: value.limit,
+      total: value.total,
+      hasMore: value.hasMore
+    };
+  }
+
+  function normalizeAssistantConversationSummary(value) {
+    const expected = [
+      "conversationRef",
+      "scope",
+      "kind",
+      "fileRef",
+      "title",
+      "state",
+      "revision",
+      "messageCount",
+      "createdAt",
+      "updatedAt",
+      "archivedAt"
+    ];
+    if (!objectHasExactKeys(value, expected)) {
+      throw new Error("Invalid assistant conversation");
+    }
+    const conversationRef = boundedString(value.conversationRef, 80);
+    const scope = boundedString(value.scope, 24);
+    const kind = boundedString(value.kind, 24);
+    const fileRef = boundedString(value.fileRef, 80);
+    const title = boundedString(value.title, 120).trim();
+    const conversationState = boundedString(value.state, 24);
+    const archivedAt = boundedString(value.archivedAt, 40);
+    if (
+      !ASSISTANT_CONVERSATION_REF.test(conversationRef)
+      || !["assigned", "management"].includes(scope)
+      || !ASSISTANT_CONVERSATION_KINDS.has(kind)
+      || !ASSISTANT_CONVERSATION_STATES.has(conversationState)
+      || !title
+      || title !== String(value.title).trim()
+      || !Number.isSafeInteger(value.revision)
+      || value.revision < 0
+      || !Number.isSafeInteger(value.messageCount)
+      || value.messageCount < 0
+      || value.messageCount > 4000
+      || !validIsoInstant(value.createdAt)
+      || !validIsoInstant(value.updatedAt)
+      || (
+        conversationState === "active"
+        && archivedAt !== ""
+      )
+      || (
+        conversationState === "archived"
+        && !validIsoInstant(archivedAt)
+      )
+      || (
+        kind === "file"
+          ? !FILE_REF.test(fileRef) || scope !== "assigned"
+          : fileRef !== ""
+      )
+      || (kind === "general" && scope !== "assigned")
+      || (kind === "sweep" && scope !== "management")
+    ) {
+      throw new Error("Invalid assistant conversation");
+    }
+    return {
+      conversationRef: conversationRef,
+      scope: scope,
+      kind: kind,
+      fileRef: fileRef,
+      title: title,
+      state: conversationState,
+      revision: value.revision,
+      messageCount: value.messageCount,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+      archivedAt: archivedAt
+    };
+  }
+
+  function normalizeAssistantConversationMessage(value) {
+    if (!objectHasExactKeys(value, [
+      "messageRef",
+      "role",
+      "content",
+      "createdAt",
+      "mode",
+      "routing",
+      "sources"
+    ])) {
+      throw new Error("Invalid assistant conversation message");
+    }
+    const messageRef = boundedString(value.messageRef, 80);
+    const role = boundedString(value.role, 16);
+    const content = boundedString(value.content, 16000).trim();
+    const mode = boundedString(value.mode, 16);
+    if (
+      !ASSISTANT_MESSAGE_REF.test(messageRef)
+      || !["user", "assistant"].includes(role)
+      || !content
+      || content !== String(value.content).trim()
+      || !validIsoInstant(value.createdAt)
+      || !ASSISTANT_MODES.has(mode)
+      || (
+        role === "user"
+          ? value.routing !== null
+            || !Array.isArray(value.sources)
+            || value.sources.length !== 0
+          : false
+      )
+    ) {
+      throw new Error("Invalid assistant conversation message");
+    }
+    return {
+      messageRef: messageRef,
+      role: role,
+      content: content,
+      createdAt: value.createdAt,
+      mode: mode,
+      routing: role === "assistant"
+        ? normalizeAssistantRouting(value.routing)
+        : null,
+      sources: role === "assistant"
+        ? normalizeAssistantSources(value.sources)
+        : []
+    };
+  }
+
+  function normalizeAssistantConversationListResponse(value) {
+    if (
+      !objectHasExactKeys(value, ["schema", "generatedAt", "items", "page"])
+      || value.schema !== "hcn.console.assistant-conversation-list.v1"
+      || !validIsoInstant(value.generatedAt)
+      || !Array.isArray(value.items)
+      || value.items.length > 100
+    ) {
+      throw new Error("Invalid assistant conversation list");
+    }
+    const items = value.items.map(normalizeAssistantConversationSummary);
+    if (new Set(items.map(function (item) {
+      return item.conversationRef;
+    })).size !== items.length) {
+      throw new Error("Invalid assistant conversation list");
+    }
+    return {
+      generatedAt: value.generatedAt,
+      items: items,
+      page: normalizeAssistantConversationPage(value.page)
+    };
+  }
+
+  function normalizeAssistantConversationEnvelope(value) {
+    if (
+      !objectHasExactKeys(value, ["schema", "generatedAt", "conversation"])
+      || value.schema !== "hcn.console.assistant-conversation.v1"
+      || !validIsoInstant(value.generatedAt)
+    ) {
+      throw new Error("Invalid assistant conversation response");
+    }
+    return normalizeAssistantConversationSummary(value.conversation);
+  }
+
+  function normalizeAssistantConversationDetailResponse(value) {
+    if (
+      !objectHasExactKeys(value, [
+        "schema",
+        "generatedAt",
+        "conversation",
+        "messages",
+        "page"
+      ])
+      || value.schema !== "hcn.console.assistant-conversation-detail.v1"
+      || !validIsoInstant(value.generatedAt)
+      || !Array.isArray(value.messages)
+      || value.messages.length > 100
+    ) {
+      throw new Error("Invalid assistant conversation detail");
+    }
+    const conversation = normalizeAssistantConversationSummary(
+      value.conversation
+    );
+    const messages = value.messages.map(
+      normalizeAssistantConversationMessage
+    );
+    if (new Set(messages.map(function (message) {
+      return message.messageRef;
+    })).size !== messages.length) {
+      throw new Error("Invalid assistant conversation detail");
+    }
+    return {
+      generatedAt: value.generatedAt,
+      conversation: conversation,
+      messages: messages,
+      page: normalizeAssistantConversationPage(value.page)
+    };
+  }
+
+  async function loadAssistantConversations(options) {
+    if (
+      !navigator.onLine
+      || !hasAssistantConversationReadAuthority()
+    ) {
+      return;
+    }
+    if (state.assistantConversationListController) {
+      state.assistantConversationListController.abort();
+    }
+    const controller = new AbortController();
+    state.assistantConversationListController = controller;
+    state.assistantConversationsLoading = true;
+    elements["assistant-conversation-list"].setAttribute("aria-busy", "true");
+    const requestedState = state.assistantConversationFilter === "archived"
+      ? "archived"
+      : "active";
+    const append = options?.append === true;
+    const currentPage = record(state.assistantConversationPage);
+    const offset = append && Number.isSafeInteger(currentPage.offset)
+      && Number.isSafeInteger(currentPage.limit)
+      ? currentPage.offset + currentPage.limit
+      : 0;
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.assistantConversationList,
+        { state: requestedState, offset: offset, limit: 100 },
+        controller.signal,
+        ASSISTANT_CONVERSATION_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const currentRequestedState = (
+        state.assistantConversationFilter === "archived"
+          ? "archived"
+          : "active"
+      );
+      if (requestedState !== currentRequestedState) return;
+      const list = normalizeAssistantConversationListResponse(response);
+      if (append) {
+        const existing = Array.isArray(state.assistantConversations)
+          ? state.assistantConversations
+          : [];
+        const merged = new Map(existing.map(function (conversation) {
+          return [conversation.conversationRef, conversation];
+        }));
+        list.items.forEach(function (conversation) {
+          merged.set(conversation.conversationRef, conversation);
+        });
+        state.assistantConversations = [...merged.values()].sort(
+          function (left, right) {
+            return right.updatedAt.localeCompare(left.updatedAt)
+              || left.conversationRef.localeCompare(right.conversationRef);
+          }
+        );
+      } else {
+        state.assistantConversations = list.items;
+      }
+      state.assistantConversationPage = list.page;
+      renderAssistantConversationList();
+      if (append) return;
+      const preferredRef = boundedString(
+        options && options.preferredRef,
+        80
+      );
+      const currentRef = state.assistantConversationRef;
+      const selected = list.items.find(function (item) {
+        return item.conversationRef === preferredRef;
+      }) || list.items.find(function (item) {
+        return item.conversationRef === currentRef;
+      }) || list.items[0];
+      if (selected) {
+        await loadAssistantConversation(selected.conversationRef);
+      } else {
+        clearSelectedAssistantConversation();
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (!append) {
+        state.assistantConversations = null;
+        state.assistantConversationPage = null;
+        clearSelectedAssistantConversation();
+      }
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["assistant-alert"],
+        append
+          ? "More saved chats could not be loaded. Your current list was left unchanged."
+          : "Saved chats could not be loaded. No stale chat is shown.",
+        "bad"
+      );
+    } finally {
+      if (state.assistantConversationListController === controller) {
+        state.assistantConversationListController = null;
+        state.assistantConversationsLoading = false;
+        elements["assistant-conversation-list"].setAttribute(
+          "aria-busy",
+          "false"
+        );
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  async function loadAssistantConversation(conversationRef) {
+    if (
+      !ASSISTANT_CONVERSATION_REF.test(String(conversationRef || ""))
+      || !hasAssistantConversationReadAuthority()
+    ) {
+      return;
+    }
+    const listed = (Array.isArray(state.assistantConversations)
+      ? state.assistantConversations
+      : []).find(function (conversation) {
+      return conversation.conversationRef === conversationRef;
+    });
+    const knownMessageCount = Number.isSafeInteger(listed?.messageCount)
+      ? listed.messageCount
+      : 0;
+    const messageOffset = Math.max(0, knownMessageCount - 100);
+    if (state.assistantConversationOlderController) {
+      state.assistantConversationOlderController.abort();
+      state.assistantConversationOlderController = null;
+      state.assistantConversationOlderLoading = false;
+    }
+    if (state.assistantConversationDetailController) {
+      state.assistantConversationDetailController.abort();
+    }
+    const controller = new AbortController();
+    state.assistantConversationDetailController = controller;
+    elements["assistant-transcript"].setAttribute("aria-busy", "true");
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.assistantConversationDetail,
+        {
+          conversationRef: conversationRef,
+          offset: messageOffset,
+          limit: 100
+        },
+        controller.signal,
+        ASSISTANT_CONVERSATION_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      let detail = normalizeAssistantConversationDetailResponse(response);
+      if (detail.conversation.conversationRef !== conversationRef) {
+        throw new Error("Invalid assistant conversation selection");
+      }
+      const latestOffset = Math.max(
+        0,
+        detail.conversation.messageCount - 100
+      );
+      if (latestOffset !== messageOffset) {
+        const latestResponse = await postOperationalJson(
+          ENDPOINTS.assistantConversationDetail,
+          {
+            conversationRef: conversationRef,
+            offset: latestOffset,
+            limit: 100
+          },
+          controller.signal,
+          ASSISTANT_CONVERSATION_READ_CAPABILITY
+        );
+        if (controller.signal.aborted) return;
+        detail = normalizeAssistantConversationDetailResponse(latestResponse);
+        if (detail.conversation.conversationRef !== conversationRef) {
+          throw new Error("Invalid assistant conversation selection");
+        }
+      }
+      state.assistantConversationRef = conversationRef;
+      state.assistantConversation = detail;
+      upsertAssistantConversation(detail.conversation);
+      renderAssistantConversation();
+      renderAssistantConversationList();
+      toggleAssistantDrawer(false);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      if (statusOf(error) === 404) {
+        state.assistantConversationRef = "";
+        state.assistantConversation = null;
+        renderAssistantConversation();
+        notice(
+          elements["assistant-alert"],
+          "That chat is no longer available to this HCN account.",
+          "warn"
+        );
+        return;
+      }
+      notice(
+        elements["assistant-alert"],
+        "The selected chat could not be opened. No stale transcript is shown.",
+        "bad"
+      );
+    } finally {
+      if (state.assistantConversationDetailController === controller) {
+        state.assistantConversationDetailController = null;
+        elements["assistant-transcript"].setAttribute("aria-busy", "false");
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  async function loadOlderAssistantMessages() {
+    const detail = record(state.assistantConversation);
+    const conversation = record(detail.conversation);
+    const page = record(detail.page);
+    const currentMessages = Array.isArray(detail.messages)
+      ? detail.messages
+      : [];
+    if (
+      state.assistantConversationOlderLoading
+      || !hasAssistantConversationReadAuthority()
+      || !navigator.onLine
+      || !ASSISTANT_CONVERSATION_REF.test(conversation.conversationRef || "")
+      || !Number.isSafeInteger(page.offset)
+      || page.offset <= 0
+    ) {
+      return;
+    }
+    const nextOffset = Math.max(0, page.offset - 100);
+    const nextLimit = page.offset - nextOffset;
+    const conversationRef = conversation.conversationRef;
+    const previousScrollHeight = elements["assistant-transcript"].scrollHeight;
+    const previousScrollTop = elements["assistant-transcript"].scrollTop;
+    if (state.assistantConversationOlderController) {
+      state.assistantConversationOlderController.abort();
+    }
+    const controller = new AbortController();
+    state.assistantConversationOlderController = controller;
+    state.assistantConversationOlderLoading = true;
+    syncAssistantConversationControls();
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.assistantConversationDetail,
+        {
+          conversationRef: conversationRef,
+          offset: nextOffset,
+          limit: nextLimit
+        },
+        controller.signal,
+        ASSISTANT_CONVERSATION_READ_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const older = normalizeAssistantConversationDetailResponse(response);
+      if (
+        state.assistantConversationRef !== conversationRef
+        || record(record(state.assistantConversation).conversation).conversationRef
+          !== conversationRef
+        || older.conversation.conversationRef !== conversationRef
+        || older.conversation.revision !== conversation.revision
+      ) {
+        if (state.assistantConversationRef !== conversationRef) return;
+        await loadAssistantConversations({
+          preferredRef: conversationRef
+        });
+        return;
+      }
+      const knownRefs = new Set(currentMessages.map(function (message) {
+        return message.messageRef;
+      }));
+      const combined = older.messages.filter(function (message) {
+        return !knownRefs.has(message.messageRef);
+      }).concat(currentMessages);
+      state.assistantConversation = {
+        generatedAt: older.generatedAt,
+        conversation: older.conversation,
+        messages: combined,
+        page: {
+          offset: older.page.offset,
+          limit: combined.length,
+          total: older.page.total,
+          hasMore: false
+        }
+      };
+      renderAssistantConversation();
+      elements["assistant-transcript"].scrollTop = Math.max(
+        0,
+        previousScrollTop
+          + elements["assistant-transcript"].scrollHeight
+          - previousScrollHeight
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      if (statusOf(error) === 404) {
+        clearSelectedAssistantConversation();
+        notice(
+          elements["assistant-alert"],
+          "That chat is no longer available to this HCN account.",
+          "warn"
+        );
+        return;
+      }
+      notice(
+        elements["assistant-alert"],
+        "Older messages could not be loaded. The current chat was left unchanged.",
+        "bad"
+      );
+    } finally {
+      if (state.assistantConversationOlderController === controller) {
+        state.assistantConversationOlderController = null;
+        state.assistantConversationOlderLoading = false;
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  function upsertAssistantConversation(conversation) {
+    if (!Array.isArray(state.assistantConversations)) return;
+    const next = state.assistantConversations.filter(function (item) {
+      return item.conversationRef !== conversation.conversationRef;
+    });
+    if (
+      (state.assistantConversationFilter === "archived")
+        === (conversation.state === "archived")
+    ) {
+      next.push(conversation);
+    }
+    state.assistantConversations = next.sort(function (left, right) {
+      return right.updatedAt.localeCompare(left.updatedAt)
+        || left.conversationRef.localeCompare(right.conversationRef);
+    });
+  }
+
+  function filteredAssistantConversations() {
+    const items = Array.isArray(state.assistantConversations)
+      ? state.assistantConversations
+      : [];
+    const filter = state.assistantConversationFilter;
+    if (["file", "sweep", "general"].includes(filter)) {
+      return items.filter(function (item) { return item.kind === filter; });
+    }
+    return items;
+  }
+
+  function renderAssistantConversationList() {
+    const items = filteredAssistantConversations();
+    const groups = new Map([
+      ["Today", []],
+      ["Previous 7 days", []],
+      ["Older", []]
+    ]);
+    items.forEach(function (conversation) {
+      groups.get(assistantConversationDateGroup(conversation.updatedAt))
+        .push(conversation);
+    });
+    const fragment = document.createDocumentFragment();
+    groups.forEach(function (rows, label) {
+      if (!rows.length) return;
+      const group = document.createElement("section");
+      const heading = document.createElement("h3");
+      const list = document.createElement("div");
+      group.className = "assistant-conversation-group";
+      heading.className = "assistant-conversation-group-title";
+      heading.id = "assistant-chat-group-" + label
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-");
+      setText(heading, label);
+      list.className = "assistant-conversation-group-list";
+      list.setAttribute("role", "list");
+      list.setAttribute("aria-labelledby", heading.id);
+      rows.forEach(function (conversation) {
+        list.append(buildAssistantConversationRow(conversation));
+      });
+      group.append(heading, list);
+      fragment.append(group);
+    });
+    elements["assistant-conversation-list"].replaceChildren(fragment);
+    elements["assistant-conversation-empty"].hidden = items.length > 0;
+    const page = record(state.assistantConversationPage);
+    const hasMore = page.hasMore === true;
+    elements["assistant-conversation-load-more"].hidden = !hasMore;
+    elements["assistant-conversation-load-more"].disabled = (
+      !hasMore || state.assistantConversationsLoading
+    );
+    syncAssistantConversationControls();
+  }
+
+  function buildAssistantConversationRow(conversation) {
+    const row = document.createElement("div");
+    const select = document.createElement("button");
+    const title = document.createElement("strong");
+    const meta = document.createElement("span");
+    const kind = document.createElement("span");
+    const time = document.createElement("time");
+    const more = document.createElement("button");
+    row.className = "assistant-conversation-row";
+    row.setAttribute("role", "listitem");
+    select.type = "button";
+    select.className = "assistant-conversation-select";
+    select.setAttribute(
+      "aria-current",
+      conversation.conversationRef === state.assistantConversationRef
+        ? "true"
+        : "false"
+    );
+    select.addEventListener("click", function () {
+      loadAssistantConversation(conversation.conversationRef);
+    });
+    setText(title, conversation.title);
+    meta.className = "assistant-conversation-meta";
+    setText(kind, assistantConversationKindLabel(conversation.kind));
+    time.dateTime = conversation.updatedAt;
+    setText(time, assistantConversationTimeLabel(conversation.updatedAt));
+    meta.append(kind, time);
+    select.append(title, meta);
+    more.type = "button";
+    more.className = "assistant-conversation-more";
+    more.setAttribute("aria-label", "Open actions for " + conversation.title);
+    more.setAttribute("title", "Open chat actions");
+    setText(more, "•••");
+    more.addEventListener("click", async function () {
+      await loadAssistantConversation(conversation.conversationRef);
+      elements["assistant-rename-chat"].focus();
+    });
+    row.append(select, more);
+    return row;
+  }
+
+  function assistantConversationDateGroup(value) {
+    const current = new Date();
+    const updated = new Date(value);
+    const todayStart = new Date(
+      current.getFullYear(),
+      current.getMonth(),
+      current.getDate()
+    ).getTime();
+    const age = todayStart - new Date(
+      updated.getFullYear(),
+      updated.getMonth(),
+      updated.getDate()
+    ).getTime();
+    if (age <= 0) return "Today";
+    if (age <= 7 * 24 * 60 * 60 * 1000) return "Previous 7 days";
+    return "Older";
+  }
+
+  function assistantConversationTimeLabel(value) {
+    const date = new Date(value);
+    const now = new Date();
+    if (assistantConversationDateGroup(value) === "Today") {
+      return new Intl.DateTimeFormat(undefined, {
+        hour: "numeric",
+        minute: "2-digit"
+      }).format(date);
+    }
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: date.getFullYear() === now.getFullYear()
+        ? undefined
+        : "numeric"
+    }).format(date);
+  }
+
+  function assistantConversationKindLabel(kind) {
+    if (kind === "file") return "Client";
+    if (kind === "sweep") return "Sweep";
+    return "General";
+  }
+
+  function renderAssistantConversation() {
+    const detail = record(state.assistantConversation);
+    const conversation = record(detail.conversation);
+    const messages = Array.isArray(detail.messages) ? detail.messages : [];
+    elements["assistant-transcript"].replaceChildren();
+    if (!ASSISTANT_CONVERSATION_REF.test(conversation.conversationRef || "")) {
+      appendAssistantMessage(
+        "assistant",
+        "Start a new chat or open one from your history."
+      );
+      setText(elements["assistant-current-title"], "Choose or start a chat");
+      setText(elements["assistant-current-kind"], "General");
+      elements["assistant-starters"].hidden = false;
+      syncAssistantConversationControls();
+      return;
+    }
+    setText(elements["assistant-current-title"], conversation.title);
+    setText(
+      elements["assistant-current-kind"],
+      assistantConversationKindLabel(conversation.kind)
+    );
+    if (!messages.length) {
+      appendAssistantMessage(
+        "assistant",
+        conversation.kind === "file"
+          ? "This client chat is ready. Ask what needs attention on this exact file."
+          : conversation.kind === "sweep"
+            ? "This sweep chat is ready. Ask for the company review you need."
+            : "What do you need help with?"
+      );
+    } else {
+      messages.forEach(function (message) {
+        appendAssistantMessage(message.role, message.content, {
+          createdAt: message.createdAt,
+          messageRef: message.messageRef
+        });
+      });
+    }
+    elements["assistant-starters"].hidden = messages.length > 0;
+    const page = record(detail.page);
+    const hasOlder = Number.isSafeInteger(page.offset) && page.offset > 0;
+    elements["assistant-load-older"].hidden = !hasOlder;
+    elements["assistant-load-older"].disabled = (
+      !hasOlder || state.assistantConversationOlderLoading
+    );
+    elements["assistant-transcript"].scrollTop =
+      elements["assistant-transcript"].scrollHeight;
+    syncAssistantConversationControls();
+  }
+
+  function clearSelectedAssistantConversation() {
+    if (state.assistantConversationDetailController) {
+      state.assistantConversationDetailController.abort();
+      state.assistantConversationDetailController = null;
+    }
+    if (state.assistantConversationOlderController) {
+      state.assistantConversationOlderController.abort();
+      state.assistantConversationOlderController = null;
+      state.assistantConversationOlderLoading = false;
+    }
+    state.assistantConversationRef = "";
+    state.assistantConversation = null;
+    renderAssistantConversation();
+    renderAssistantConversationList();
+  }
+
+  function syncAssistantConversationControls() {
+    const conversation = currentAssistantConversation();
+    const hasConversation = ASSISTANT_CONVERSATION_REF.test(
+      conversation.conversationRef || ""
+    );
+    const canManage = hasAssistantConversationManageAuthority()
+      && !state.assistantConversationMutationLoading;
+    elements["assistant-new-chat"].disabled = !canManage;
+    elements["assistant-new-client"].disabled = !(
+      canManage && hasWorkCenterAuthority()
+    );
+    elements["assistant-rename-chat"].disabled = !canManage || !hasConversation;
+    elements["assistant-archive-chat"].disabled = (
+      !canManage
+      || !hasConversation
+      || conversation.state !== "active"
+    );
+    elements["assistant-archive-chat"].hidden = (
+      hasConversation && conversation.state === "archived"
+    );
+    elements["assistant-restore-chat"].disabled = (
+      !canManage
+      || !hasConversation
+      || conversation.state !== "archived"
+    );
+    elements["assistant-restore-chat"].hidden = (
+      !hasConversation || conversation.state !== "archived"
+    );
+    elements["file-start-chat"].disabled = !(
+      canManage
+      && state.fileReview
+      && FILE_REF.test(String(state.selectedFileRef || ""))
+    );
+    const page = record(record(state.assistantConversation).page);
+    const hasOlder = Number.isSafeInteger(page.offset) && page.offset > 0;
+    elements["assistant-load-older"].hidden = !hasOlder;
+    elements["assistant-load-older"].disabled = (
+      !hasOlder || state.assistantConversationOlderLoading
+    );
+    const listPage = record(state.assistantConversationPage);
+    const hasMoreChats = listPage.hasMore === true;
+    elements["assistant-conversation-load-more"].hidden = !hasMoreChats;
+    elements["assistant-conversation-load-more"].disabled = (
+      !hasMoreChats || state.assistantConversationsLoading
+    );
+  }
+
+  function openAssistantNewDialog() {
+    if (!hasAssistantConversationManageAuthority()) return;
+    toggleAssistantDrawer(false);
+    elements["assistant-new-form"].reset();
+    elements["assistant-new-name"].value = "";
+    elements["assistant-new-sweep"].disabled = !hasManagementSweepAuthority();
+    elements["assistant-new-client"].disabled = !hasWorkCenterAuthority();
+    elements["assistant-new-dialog"].showModal();
+    elements["assistant-new-name"].focus();
+  }
+
+  function openAssistantClientChatPicker() {
+    if (!hasWorkCenterAuthority()) return;
+    closeAssistantDialogs();
+    window.location.hash = "#work-center";
+    notice(
+      elements["work-center-alert"],
+      "Open the exact client file, then choose Start client chat.",
+      "good"
+    );
+    if (!state.workCenter && !state.workCenterLoading) {
+      loadWorkCenter({ resetFile: true, offset: 0 });
+    }
+  }
+
+  function closeAssistantDialogs() {
+    ["assistant-new-dialog", "assistant-rename-dialog"].forEach(function (id) {
+      if (elements[id].open) elements[id].close();
+    });
+  }
+
+  async function submitAssistantNewConversation(event) {
+    event.preventDefault();
+    const selected = elements["assistant-new-form"].querySelector(
+      'input[name="assistant-new-kind"]:checked'
+    );
+    const kind = selected ? boundedString(selected.value, 16) : "general";
+    if (!["general", "sweep"].includes(kind)) return;
+    const title = boundedString(elements["assistant-new-name"].value, 120)
+      .trim() || (kind === "sweep" ? "New company sweep" : "New chat");
+    await createAssistantConversation({ kind: kind, title: title, fileRef: "" });
+  }
+
+  async function startSelectedFileConversation() {
+    if (
+      !state.fileReview
+      || !FILE_REF.test(String(state.selectedFileRef || ""))
+    ) {
+      return;
+    }
+    const file = record(state.fileReview.file);
+    const title = boundedString(
+      [file.displayName, file.jobNumber].filter(Boolean).join(" · "),
+      120
+    ).trim() || "Client file chat";
+    await createAssistantConversation({
+      kind: "file",
+      title: title,
+      fileRef: state.selectedFileRef
+    });
+  }
+
+  async function createAssistantConversation(input) {
+    if (
+      state.assistantConversationMutationLoading
+      || !hasAssistantConversationManageAuthority()
+    ) {
+      return null;
+    }
+    const controller = new AbortController();
+    if (state.assistantConversationMutationController) {
+      state.assistantConversationMutationController.abort();
+    }
+    if (state.assistantConversationOlderController) {
+      state.assistantConversationOlderController.abort();
+    }
+    state.assistantConversationMutationController = controller;
+    state.assistantConversationMutationLoading = true;
+    syncAssistantConversationControls();
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.assistantConversationCreate,
+        {
+          kind: input.kind,
+          title: input.title,
+          fileRef: input.fileRef
+        },
+        controller.signal,
+        ASSISTANT_CONVERSATION_MANAGE_CAPABILITY
+      );
+      if (controller.signal.aborted) return null;
+      const conversation = normalizeAssistantConversationEnvelope(response);
+      if (conversation.state !== "active") {
+        throw new Error("Invalid new assistant conversation");
+      }
+      closeAssistantDialogs();
+      state.assistantConversationFilter = conversation.kind;
+      syncAssistantFilterButtons();
+      state.assistantConversations = Array.isArray(state.assistantConversations)
+        ? state.assistantConversations
+        : [];
+      upsertAssistantConversation(conversation);
+      await loadAssistantConversation(conversation.conversationRef);
+      renderAssistantConversationList();
+      window.location.hash = "#overview";
+      elements["assistant-prompt"].focus();
+      notice(elements["assistant-alert"], "Chat saved.", "good");
+      return conversation;
+    } catch (error) {
+      if (controller.signal.aborted) return null;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return null;
+      }
+      notice(
+        elements["assistant-alert"],
+        "The chat could not be created. Nothing was saved.",
+        "bad"
+      );
+      return null;
+    } finally {
+      if (state.assistantConversationMutationController === controller) {
+        state.assistantConversationMutationController = null;
+        state.assistantConversationMutationLoading = false;
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  function openAssistantRenameDialog() {
+    const conversation = currentAssistantConversation();
+    if (!conversation.conversationRef) return;
+    elements["assistant-rename-name"].value = conversation.title;
+    elements["assistant-rename-dialog"].showModal();
+    elements["assistant-rename-name"].select();
+  }
+
+  async function submitAssistantRename(event) {
+    event.preventDefault();
+    const title = boundedString(elements["assistant-rename-name"].value, 120)
+      .trim();
+    if (!title) return;
+    await mutateAssistantConversation(
+      ENDPOINTS.assistantConversationRename,
+      { title: title },
+      "Chat renamed."
+    );
+  }
+
+  async function archiveAssistantConversation() {
+    const conversation = currentAssistantConversation();
+    if (!conversation.conversationRef || conversation.state !== "active") return;
+    if (!window.confirm("Archive this chat? You can restore it later.")) return;
+    await mutateAssistantConversation(
+      ENDPOINTS.assistantConversationArchive,
+      {},
+      "Chat archived."
+    );
+  }
+
+  async function restoreAssistantConversation() {
+    const conversation = currentAssistantConversation();
+    if (!conversation.conversationRef || conversation.state !== "archived") return;
+    await mutateAssistantConversation(
+      ENDPOINTS.assistantConversationRestore,
+      {},
+      "Chat restored."
+    );
+  }
+
+  async function mutateAssistantConversation(endpoint, additional, success) {
+    const conversation = currentAssistantConversation();
+    if (
+      state.assistantConversationMutationLoading
+      || !hasAssistantConversationManageAuthority()
+      || !ASSISTANT_CONVERSATION_REF.test(conversation.conversationRef || "")
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    if (state.assistantConversationMutationController) {
+      state.assistantConversationMutationController.abort();
+    }
+    state.assistantConversationMutationController = controller;
+    state.assistantConversationMutationLoading = true;
+    syncAssistantConversationControls();
+    try {
+      const response = await postOperationalJson(
+        endpoint,
+        Object.assign({
+          conversationRef: conversation.conversationRef,
+          expectedRevision: conversation.revision
+        }, additional),
+        controller.signal,
+        ASSISTANT_CONVERSATION_MANAGE_CAPABILITY
+      );
+      if (controller.signal.aborted) return;
+      const updated = normalizeAssistantConversationEnvelope(response);
+      closeAssistantDialogs();
+      if (updated.state === "archived") {
+        state.assistantConversationFilter = "active";
+      } else if (conversation.state === "archived") {
+        state.assistantConversationFilter = "active";
+      }
+      syncAssistantFilterButtons();
+      state.assistantConversation = {
+        generatedAt: response.generatedAt,
+        conversation: updated,
+        messages: record(state.assistantConversation).messages || [],
+        page: record(state.assistantConversation).page || {
+          offset: 0,
+          limit: 100,
+          total: updated.messageCount,
+          hasMore: false
+        }
+      };
+      upsertAssistantConversation(updated);
+      notice(elements["assistant-alert"], success, "good");
+      await loadAssistantConversations();
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (isAuthorizationStatus(error)) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["assistant-alert"],
+        statusOf(error) === 409
+          ? "That chat changed in another tab. It was refreshed; try again."
+          : "The chat change could not be saved.",
+        "bad"
+      );
+      if (statusOf(error) === 409) await loadAssistantConversations();
+    } finally {
+      if (state.assistantConversationMutationController === controller) {
+        state.assistantConversationMutationController = null;
+        state.assistantConversationMutationLoading = false;
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  function selectAssistantConversationFilter(event) {
+    const button = event.target.closest("[data-chat-filter]");
+    if (!button) return;
+    const filter = boundedString(button.dataset.chatFilter, 16);
+    if (!["active", "file", "sweep", "general", "archived"].includes(filter)) {
+      return;
+    }
+    const previousState = state.assistantConversationFilter === "archived"
+      ? "archived"
+      : "active";
+    state.assistantConversationFilter = filter;
+    syncAssistantFilterButtons();
+    const nextState = filter === "archived" ? "archived" : "active";
+    if (previousState !== nextState) {
+      state.assistantConversations = null;
+      state.assistantConversationPage = null;
+      clearSelectedAssistantConversation();
+      loadAssistantConversations();
+    } else {
+      renderAssistantConversationList();
+    }
+  }
+
+  function syncAssistantFilterButtons() {
+    elements["assistant-chat-filters"].querySelectorAll(
+      "[data-chat-filter]"
+    ).forEach(function (button) {
+      button.setAttribute(
+        "aria-pressed",
+        button.dataset.chatFilter === state.assistantConversationFilter
+          ? "true"
+          : "false"
+      );
+    });
+  }
+
+  function toggleAssistantDrawer(open) {
+    const mobile = window.matchMedia("(max-width: 620px)").matches;
+    const next = open === true && mobile;
+    const wasOpen = state.assistantDrawerOpen;
+    if (next && !wasOpen) {
+      state.assistantDrawerReturnFocus = document.activeElement instanceof Element
+        ? document.activeElement
+        : elements["assistant-chat-drawer-open"];
+    }
+    state.assistantDrawerOpen = next;
+    syncAssistantDrawerViewport();
+    if (next) {
+      elements["assistant-new-chat"].focus();
+    } else if (wasOpen) {
+      const returnFocus = state.assistantDrawerReturnFocus;
+      state.assistantDrawerReturnFocus = null;
+      const target = returnFocus instanceof HTMLElement
+        && returnFocus.isConnected
+        ? returnFocus
+        : elements["assistant-chat-drawer-open"];
+      target.focus();
+    }
+  }
+
+  function syncAssistantDrawerViewport() {
+    const mobile = window.matchMedia("(max-width: 620px)").matches;
+    const open = mobile && state.assistantDrawerOpen;
+    if (!mobile) state.assistantDrawerOpen = false;
+    document.body.toggleAttribute("data-assistant-drawer", open);
+    if (open) document.body.dataset.assistantDrawer = "open";
+    elements["assistant-chat-drawer-open"].setAttribute(
+      "aria-expanded",
+      open ? "true" : "false"
+    );
+    elements["assistant-chat-backdrop"].hidden = !open;
+    elements["assistant-chat-sidebar"].setAttribute(
+      "aria-hidden",
+      mobile && !open ? "true" : "false"
+    );
+    elements["assistant-chat-sidebar"].toggleAttribute(
+      "inert",
+      mobile && !open
+    );
+    elements["assistant-chat-main"].toggleAttribute("inert", open);
+    document.querySelector(".topbar")?.toggleAttribute("inert", open);
+    document.querySelector(".app-layout > .sidebar")?.toggleAttribute(
+      "inert",
+      open
+    );
+    if (open) {
+      elements["assistant-chat-sidebar"].setAttribute("role", "dialog");
+      elements["assistant-chat-sidebar"].setAttribute("aria-modal", "true");
+    } else {
+      elements["assistant-chat-sidebar"].removeAttribute("role");
+      elements["assistant-chat-sidebar"].removeAttribute("aria-modal");
+      if (
+        mobile
+        && elements["assistant-chat-sidebar"].contains(document.activeElement)
+      ) {
+        elements["assistant-chat-drawer-open"].focus();
+      }
+    }
+  }
+
+  function trapAssistantDrawerFocus(event) {
+    const focusable = Array.from(
+      elements["assistant-chat-sidebar"].querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter(function (element) {
+      return !element.hasAttribute("hidden") && !element.closest("[hidden]");
+    });
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    } else if (!elements["assistant-chat-sidebar"].contains(document.activeElement)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function syncAssistantConnectionStrip() {
+    const connections = record(state.connections);
+    const fallback = state.connectionsLoading ? "" : "unavailable";
+    const jobNimbus = boundedString(
+      record(connections.jobNimbus).status,
+      32
+    ) || fallback;
+    const google = record(connections.google);
+    const gmail = boundedString(google.gmail, 32) || fallback;
+    const calendar = boundedString(google.calendar, 32) || fallback;
+    const quo = boundedString(record(connections.quo).status, 32) || fallback;
+    setAssistantConnectionChip(
+      elements["assistant-connection-jobnimbus"],
+      "JobNimbus",
+      jobNimbus
+    );
+    setAssistantConnectionChip(
+      elements["assistant-connection-gmail"],
+      "Gmail",
+      gmail
+    );
+    setAssistantConnectionChip(
+      elements["assistant-connection-calendar"],
+      "Calendar",
+      calendar
+    );
+    elements["assistant-connection-calendar"].title =
+      calendar === "connected"
+        ? "Google Calendar is linked for Thresher's read-only day and assigned-file scheduling checks."
+        : "Open Connections to link Google Calendar.";
+    setAssistantConnectionChip(
+      elements["assistant-connection-quo"],
+      "Quo",
+      quo
+    );
+    const thresher = assistantRuntimeStatus() === "configured"
+      ? "connected"
+      : "unavailable";
+    setAssistantConnectionChip(
+      elements["assistant-connection-thresher"],
+      "Thresher",
+      thresher
+    );
+  }
+
+  function setAssistantConnectionChip(element, label, status) {
+    const connected = status === "connected";
+    const checking = !status;
+    setText(
+      element,
+      label + (connected ? " ready" : checking ? " checking" : " needs setup")
+    );
+    element.dataset.status = connected ? "connected" : "attention";
+  }
+
   function syncAssistantAccess() {
     const signedIn = hasBrowserAuthority();
     const authorized = hasAssistantAuthority();
     syncAssistantControls();
+    syncAssistantConversationControls();
+    syncAssistantConnectionStrip();
     if (state.assistantLoading) {
       notice(
         elements["assistant-alert"],
@@ -1028,6 +2391,13 @@
       );
       return;
     }
+    if (
+      hasAssistantConversationReadAuthority()
+      && state.assistantConversations === null
+      && !state.assistantConversationsLoading
+    ) {
+      loadAssistantConversations();
+    }
     const runtimeStatus = assistantRuntimeStatus();
     if (!["configured", "direct_only"].includes(runtimeStatus)) {
       notice(
@@ -1059,6 +2429,7 @@
     const available = (
       navigator.onLine
       && hasAssistantAuthority()
+      && hasAssistantConversationManageAuthority()
       && ["configured", "direct_only"].includes(runtimeStatus)
       && !state.assistantLoading
     );
@@ -1097,6 +2468,7 @@
     if (
       !navigator.onLine
       || !hasAssistantAuthority()
+      || !hasAssistantConversationManageAuthority()
       || !["configured", "direct_only"].includes(
         assistantRuntimeStatus()
       )
@@ -1107,7 +2479,7 @@
 
     const prompt = boundedString(
       elements["assistant-prompt"].value,
-      2000
+      4000
     ).trim();
     const mode = selectedAssistantMode();
     if (!prompt) {
@@ -1117,6 +2489,31 @@
         "warn"
       );
       elements["assistant-prompt"].focus();
+      return;
+    }
+
+    let conversation = currentAssistantConversation();
+    if (!ASSISTANT_CONVERSATION_REF.test(conversation.conversationRef || "")) {
+      const created = await createAssistantConversation({
+        kind: "general",
+        title: assistantConversationTitleFromPrompt(prompt),
+        fileRef: ""
+      });
+      if (!created) {
+        elements["assistant-prompt"].value = prompt;
+        return;
+      }
+      conversation = currentAssistantConversation();
+    }
+    if (
+      conversation.state !== "active"
+      || !Number.isSafeInteger(conversation.revision)
+    ) {
+      notice(
+        elements["assistant-alert"],
+        "Restore this chat or start a new one before sending.",
+        "warn"
+      );
       return;
     }
 
@@ -1136,20 +2533,44 @@
     try {
       const response = await postOperationalJson(
         ENDPOINTS.assistantTurns,
-        { prompt: prompt, mode: mode },
+        {
+          conversationRef: conversation.conversationRef,
+          expectedRevision: conversation.revision,
+          prompt: prompt,
+          mode: mode
+        },
         controller.signal,
         ASSISTANT_TURN_CAPABILITY
       );
       if (controller.signal.aborted) return;
       const turn = normalizeAssistantTurnResponse(response);
       pending.remove();
-      appendAssistantMessage("assistant", turn.message);
+      appendAssistantMessage("assistant", turn.message, {
+        createdAt: turn.generatedAt,
+        messageRef: turn.messageRef
+      });
+      const current = currentAssistantConversation();
+      if (current.conversationRef === turn.conversationRef) {
+        const updated = {
+          ...current,
+          revision: turn.revision,
+          messageCount: current.messageCount + 2,
+          updatedAt: turn.generatedAt
+        };
+        state.assistantConversation = {
+          ...record(state.assistantConversation),
+          conversation: updated
+        };
+        upsertAssistantConversation(updated);
+        renderAssistantConversationList();
+      }
       renderAssistantPilot(turn);
       notice(
         elements["assistant-alert"],
         "Thresher finished the read-only review.",
         "good"
       );
+      await loadAssistantConversation(turn.conversationRef);
     } catch (error) {
       if (controller.signal.aborted) return;
       pending.remove();
@@ -1157,10 +2578,16 @@
         handleOperationalAuthLoss();
         return;
       }
-      appendAssistantMessage(
-        "assistant",
-        "I couldn’t complete that review. " + assistantErrorMessage(error)
-      );
+      if (statusOf(error) === 409) {
+        await loadAssistantConversations({
+          preferredRef: conversation.conversationRef
+        });
+      } else {
+        appendAssistantMessage(
+          "assistant",
+          "I couldn’t complete that review. " + assistantErrorMessage(error)
+        );
+      }
       notice(
         elements["assistant-alert"],
         assistantErrorMessage(error),
@@ -1176,13 +2603,24 @@
     elements["assistant-prompt"].focus();
   }
 
+  function assistantConversationTitleFromPrompt(prompt) {
+    const compact = boundedString(prompt, 80)
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/[?.!,;:]+$/g, "");
+    return compact || "New chat";
+  }
+
   function normalizeAssistantTurnResponse(value) {
     if (!isRecord(value)) throw new Error("Invalid assistant response");
     const allowed = new Set([
       "schema",
       "generatedAt",
-      "ephemeral",
+      "persisted",
       "cachePolicy",
+      "conversationRef",
+      "revision",
+      "messageRef",
       "authority",
       "message",
       "plan",
@@ -1211,10 +2649,14 @@
       || authorityKeys.some(function (key) {
         return !allowedAuthority.has(key);
       })
-      || value.schema !== "hcn.console.assistant-turn.v3"
+      || value.schema !== "hcn.console.assistant-turn.v4"
       || !validIsoInstant(value.generatedAt)
-      || value.ephemeral !== true
+      || value.persisted !== true
       || value.cachePolicy !== "no_store"
+      || !ASSISTANT_CONVERSATION_REF.test(value.conversationRef)
+      || !Number.isSafeInteger(value.revision)
+      || value.revision < 1
+      || !ASSISTANT_MESSAGE_REF.test(value.messageRef)
       || authority.fileScope !== "signed_in_employee_assignments_only"
       || authority.liveSourcesWin !== true
       || authority.canRead !== true
@@ -1234,6 +2676,10 @@
     }
 
     return {
+      generatedAt: value.generatedAt,
+      conversationRef: value.conversationRef,
+      revision: value.revision,
+      messageRef: value.messageRef,
       message: message,
       planId: "",
       sourceCount: sources.length,
@@ -1354,24 +2800,58 @@
     const article = document.createElement("article");
     const label = document.createElement("span");
     const paragraph = document.createElement("p");
+    const timestamp = document.createElement("time");
     const normalizedSpeaker = speaker === "user" ? "user" : "assistant";
     article.className = "assistant-message";
     article.dataset.speaker = normalizedSpeaker;
     if (options?.busy === true) article.dataset.busy = "true";
+    if (ASSISTANT_MESSAGE_REF.test(String(options?.messageRef || ""))) {
+      article.dataset.messageRef = options.messageRef;
+    }
     label.className = "assistant-speaker";
     setText(label, normalizedSpeaker === "user" ? "You" : "Thresher");
     setText(paragraph, boundedString(message, 16000));
     article.append(label, paragraph);
+    if (validIsoInstant(options?.createdAt)) {
+      timestamp.className = "assistant-message-time";
+      timestamp.dateTime = options.createdAt;
+      setText(timestamp, readableDateTime(options.createdAt));
+      article.append(timestamp);
+    }
     elements["assistant-transcript"].append(article);
     elements["assistant-transcript"].scrollTop =
       elements["assistant-transcript"].scrollHeight;
     return article;
   }
 
-  function clearAssistantData() {
+  function clearAssistantData(message) {
     if (state.assistantController) state.assistantController.abort();
+    if (state.assistantConversationListController) {
+      state.assistantConversationListController.abort();
+    }
+    if (state.assistantConversationDetailController) {
+      state.assistantConversationDetailController.abort();
+    }
+    if (state.assistantConversationMutationController) {
+      state.assistantConversationMutationController.abort();
+    }
+    if (state.assistantConversationOlderController) {
+      state.assistantConversationOlderController.abort();
+    }
     state.assistantController = null;
+    state.assistantConversationListController = null;
+    state.assistantConversationDetailController = null;
+    state.assistantConversationMutationController = null;
+    state.assistantConversationOlderController = null;
     state.assistantLoading = false;
+    state.assistantConversationsLoading = false;
+    state.assistantConversationMutationLoading = false;
+    state.assistantConversationOlderLoading = false;
+    state.assistantConversations = null;
+    state.assistantConversationPage = null;
+    state.assistantConversation = null;
+    state.assistantConversationRef = "";
+    state.assistantConversationFilter = "active";
     elements["assistant-prompt"].value = "";
     elements["assistant-mode-auto"].checked = true;
     elements["assistant-mode-deep"].checked = false;
@@ -1381,8 +2861,22 @@
     elements["assistant-transcript"].replaceChildren();
     appendAssistantMessage(
       "assistant",
-      "What do you need help with?"
+      message || "Sign in to load your saved HCN chats."
     );
+    elements["assistant-conversation-list"].replaceChildren();
+    elements["assistant-conversation-load-more"].hidden = true;
+    elements["assistant-conversation-load-more"].disabled = true;
+    elements["assistant-load-older"].hidden = true;
+    elements["assistant-load-older"].disabled = true;
+    elements["assistant-conversation-empty"].hidden = false;
+    elements["assistant-conversation-list"].setAttribute("aria-busy", "false");
+    setText(elements["assistant-current-title"], "Choose or start a chat");
+    setText(elements["assistant-current-kind"], "General");
+    elements["assistant-starters"].hidden = false;
+    closeAssistantDialogs();
+    toggleAssistantDrawer(false);
+    syncAssistantFilterButtons();
+    syncAssistantConversationControls();
     syncAssistantControls();
   }
 
@@ -1959,6 +3453,24 @@
     );
   }
 
+  function hasAssistantConversationReadAuthority() {
+    return (
+      hasBrowserAuthority()
+      && sessionCapabilities().includes(
+        ASSISTANT_CONVERSATION_READ_CAPABILITY
+      )
+    );
+  }
+
+  function hasAssistantConversationManageAuthority() {
+    return (
+      hasAssistantConversationReadAuthority()
+      && sessionCapabilities().includes(
+        ASSISTANT_CONVERSATION_MANAGE_CAPABILITY
+      )
+    );
+  }
+
   function assistantRuntimeStatus() {
     const runtime = record(record(state.session).runtime);
     const assistant = record(runtime.assistant);
@@ -2311,6 +3823,7 @@
     state.quoMutationLoading = false;
     state.quoChallengePending = false;
     state.connections = null;
+    syncAssistantConnectionStrip();
 
     elements["connections-refresh"].disabled = false;
     elements["google-connect-action"].disabled = false;
@@ -2444,6 +3957,7 @@
         state.connectionsController = null;
         state.connectionsLoading = false;
         elements["connections-refresh"].disabled = false;
+        syncAssistantConnectionStrip();
         syncConnectionControls();
         syncHomeGuidance();
       }
@@ -2531,6 +4045,7 @@
     elements["google-connect-action"].hidden = true;
     elements["quo-phone-form"].hidden = true;
     elements["quo-verify-form"].hidden = true;
+    syncAssistantConnectionStrip();
   }
 
   function normalizeConnectionsResponse(value) {
@@ -2702,6 +4217,7 @@
         : "Connection status is current for this session.",
       "good"
     );
+    syncAssistantConnectionStrip();
     syncConnectionControls();
   }
 
@@ -5459,6 +6975,7 @@
       if (controller.signal.aborted) return;
       state.fileReview = normalizeFileResponse(response, fileRef);
       renderFileReview(state.fileReview);
+      syncAssistantConversationControls();
     } catch (error) {
       if (controller.signal.aborted) return;
       if (isAuthorizationStatus(error)) {
@@ -5466,6 +6983,7 @@
         return;
       }
       state.fileReview = null;
+      syncAssistantConversationControls();
       badge(elements["file-evidence-status"], "Unavailable", "bad");
       notice(
         elements["file-alert"],
@@ -5492,6 +7010,7 @@
     elements["file-placeholder"].hidden = true;
     elements["file-review"].hidden = false;
     elements["file-refresh"].disabled = true;
+    elements["file-start-chat"].disabled = true;
     setText(elements["file-job-number"], selected.jobNumber || "Exact file");
     setText(elements["file-name"], selected.displayName || "Assigned file");
     setText(
@@ -5518,6 +7037,7 @@
     state.fileLoading = false;
     state.selectedFileRef = null;
     state.fileReview = null;
+    elements["file-start-chat"].disabled = true;
     elements["work-center-workspace"].removeAttribute("data-file-open");
     elements["file-placeholder"].hidden = false;
     elements["file-review"].hidden = true;
@@ -5528,6 +7048,7 @@
   }
 
   function purgeFileReviewDom() {
+    elements["file-start-chat"].disabled = true;
     setText(elements["file-job-number"], "No file selected");
     setText(elements["file-name"], "Choose a file from the fresh queue");
     setText(elements["file-stage"], "No client data is retained");
@@ -8780,7 +10301,7 @@
       navigator.serviceWorker.getRegistration("/hcn/").then(function (registration) {
         if (!registration) return null;
         return navigator.serviceWorker.register(
-          "/hcn/sw.js?shell=v12",
+          "/hcn/sw.js?shell=v13",
           { scope: "/hcn/" }
         );
       }).catch(function () {

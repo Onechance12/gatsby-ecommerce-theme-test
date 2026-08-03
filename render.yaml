@@ -67,6 +67,12 @@ services:
         value: "true"
       - key: HCN_THRESHER_AI_GROQ_API_KEY
         sync: false
+      # Durable employee chat transcripts use their own HCN-only encrypted
+      # store and key. Never reuse a Thresher state or provider credential.
+      - key: HCN_ASSISTANT_HISTORY_KEY
+        sync: false
+      - key: HCN_ASSISTANT_HISTORY_STORE_PATH
+        value: /var/data/hcn-operations/platform/assistant-conversations.enc.json
       # Dedicated least-privilege credential used only by the HP HCN operator.
       # Never reuse the shared bridge token or a Chance Brain credential.
       - key: CODEX_OPERATOR_TOKEN

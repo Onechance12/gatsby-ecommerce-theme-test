@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-30.2";
+export const CAPABILITY_VERSION = "2026-08-03.1";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -29,6 +29,12 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("hcn.management_sweep.read", "POST /hcn/api/v1/management-sweep"),
   capability("hcn.closed_file_benchmark.read", "POST /hcn/api/v1/closed-file-benchmark"),
   capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
+  capability("hcn.assistant.conversations.read", "POST /hcn/api/v1/assistant/conversations/list"),
+  capability("hcn.assistant.conversations.read", "POST /hcn/api/v1/assistant/conversations/detail"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/create"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/rename"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/archive"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/restore"),
   capability("hcn.assistant.turn", "POST /hcn/api/v1/assistant/turns"),
   capability("hcn.action_plans.prepare", "POST /hcn/api/v1/action-plans/prepare"),
   capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/list"),
@@ -171,6 +177,9 @@ export function buildRuntimeStatus(runtime = {}) {
           : hcnAssistant.responsesApiStore === true
             ? "enabled"
             : "unknown",
+      durableHistory: configurationStatus(
+        hcnAssistant.historyReady
+      ),
       assignedFileScope: configurationStatus(
         hcnAssistant.assignedFileScopeOnly
       ),

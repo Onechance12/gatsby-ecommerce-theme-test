@@ -160,6 +160,8 @@ test("HCN browser capability metadata is intersected with the console surface", 
     "hcn.action_plans.prepare",
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
+    "hcn.assistant.conversations.manage",
+    "hcn.assistant.conversations.read",
     "hcn.assistant.turn",
     "hcn.closed_file_benchmark.read",
     "hcn.connectors.google.disconnect",
@@ -189,6 +191,8 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "hcn.action_plans.prepare",
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
+      "hcn.assistant.conversations.manage",
+      "hcn.assistant.conversations.read",
       "hcn.assistant.turn",
       "hcn.closed_file_benchmark.read",
       "hcn.connectors.google.disconnect",
@@ -206,6 +210,8 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "hcn.action_plans.prepare",
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
+      "hcn.assistant.conversations.manage",
+      "hcn.assistant.conversations.read",
       "hcn.assistant.turn",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
@@ -228,6 +234,8 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "hcn.action_plans.prepare",
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
+      "hcn.assistant.conversations.manage",
+      "hcn.assistant.conversations.read",
       "hcn.assistant.turn",
       "hcn.connectors.google.disconnect",
       "hcn.connectors.google.link",
@@ -243,6 +251,8 @@ test("non-Chance HCN browser sessions receive only their reviewed employee capab
       "hcn.action_plans.prepare",
       "hcn.action_plans.read",
       "hcn.action_receipts.read",
+      "hcn.assistant.conversations.manage",
+      "hcn.assistant.conversations.read",
       "hcn.assistant.turn",
       "hcn.closed_file_benchmark.read",
       "hcn.connectors.google.disconnect",
@@ -339,6 +349,7 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
     },
     hcnAssistant: {
       deterministicReady: true,
+      historyReady: true,
       ready: false
     },
     hcnOperationsBrain: {
@@ -358,6 +369,7 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.connectors.quo, "unknown");
   assert.equal(status.assistant.availability, "unconfigured");
   assert.equal(status.assistant.directReads, "configured");
+  assert.equal(status.assistant.durableHistory, "configured");
   assert.equal(status.gates.externalWrites, "enabled");
   assert.equal(status.gates.gmailSend, "disabled");
   assert.equal(status.gates.hcnActionExecution, "disabled");

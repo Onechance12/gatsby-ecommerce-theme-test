@@ -572,6 +572,12 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/management-sweep",
     "POST /hcn/api/v1/closed-file-benchmark",
     "POST /hcn/api/v1/file-review",
+    "POST /hcn/api/v1/assistant/conversations/list",
+    "POST /hcn/api/v1/assistant/conversations/create",
+    "POST /hcn/api/v1/assistant/conversations/detail",
+    "POST /hcn/api/v1/assistant/conversations/rename",
+    "POST /hcn/api/v1/assistant/conversations/archive",
+    "POST /hcn/api/v1/assistant/conversations/restore",
     "POST /hcn/api/v1/assistant/turns",
     "POST /hcn/api/v1/action-plans/prepare",
     "POST /hcn/api/v1/action-plans/list",
@@ -615,7 +621,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-receipts/detail",
     "POST /hcn/api/v1/action-receipts/list"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 23);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 29);
 
   for (const role of [
     "administrator",
@@ -645,6 +651,15 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     );
     assert.equal(
       routeAllowed(otherBrowser, "POST", "/hcn/api/v1/assistant/turns"),
+      role !== "onboarding",
+      role
+    );
+    assert.equal(
+      routeAllowed(
+        otherBrowser,
+        "POST",
+        "/hcn/api/v1/assistant/conversations/list"
+      ),
       role !== "onboarding",
       role
     );
@@ -682,6 +697,14 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
   ]) {
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/work-center"), false);
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/file-review"), false);
+    assert.equal(
+      routeAllowed(
+        otherIdentity,
+        "POST",
+        "/hcn/api/v1/assistant/conversations/list"
+      ),
+      false
+    );
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/assistant/turns"), false);
   }
 });
