@@ -14,6 +14,7 @@ import {
   buildPostClaimWorkflow,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
+  CLAIM_BRIDGE_SOURCE,
   digest,
   retellCallBody,
   callbackCandidateFromCall,
@@ -163,6 +164,23 @@ import {
 import {
   createHcnActionReceiptIndex
 } from "./hcn-actions/receipt-index.js";
+import {
+  assertHcnClaimFilingPilot,
+  assertHcnClaimCallRef,
+  buildHcnVerifiedClaimWriteback,
+  buildHcnClaimReviewPresentation,
+  createHcnServerClaimEvidence,
+  hcnClaimApprovalDigest,
+  hcnClaimCallRef,
+  hcnClaimFilingPilotEligible,
+  hcnClaimPreparationMissingFacts,
+  hcnClaimSpokenAnswers,
+  hcnClaimScopeBinding,
+  normalizeHcnClaimConfirmations,
+  parseHcnClaimFilingPilotSubjects,
+  parseHcnClaimWritebackMapping,
+  projectHcnClaimResult
+} from "./hcn-claim-filing/contracts.js";
 import {
   mapJobNimbusFileEnvelope,
   mapJobNimbusIndexEnvelope,
@@ -397,12 +415,24 @@ const TWILIO_VERIFIED_TEST_NUMBER = process.env.TWILIO_VERIFIED_TEST_NUMBER || "
 const ALLOW_VOICE_CALLS = RELEASE_GATES.ALLOW_VOICE_CALLS;
 const RETELL_API_BASE_URL = stripTrailingSlash(process.env.RETELL_API_BASE_URL || "https://api.retellai.com");
 const RETELL_API_KEY = process.env.RETELL_API_KEY || "";
+const RETELL_API_TIMEOUT_MS = Math.max(
+  100,
+  Math.min(positiveIntegerEnv("RETELL_API_TIMEOUT_MS", 15_000), 60_000)
+);
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
 const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
 const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR_AGENT_ID || RETELL_HOMEOWNER_AGENT_ID;
 const RETELL_CARRIER_FOLLOWUP_AGENT_ID = process.env.RETELL_CARRIER_FOLLOWUP_AGENT_ID || "agent_66fb8a49fc6ab5a777eb9f0474";
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = RELEASE_GATES.ALLOW_RETELL_CALLS;
+const HCN_CLAIM_FILING_PILOT_SUBJECTS =
+  parseHcnClaimFilingPilotSubjects(
+    process.env.HCN_CLAIM_FILING_PILOT_SUBJECTS_JSON
+  );
+const HCN_CLAIM_WRITEBACK_FIELD_MAPPING =
+  parseHcnClaimWritebackMapping(
+    process.env.HCN_JOBNIMBUS_CLAIM_FIELD_MAPPING_JSON
+  );
 const ALLOW_CLIENT_COORDINATOR_CALLS = RELEASE_GATES.ALLOW_CLIENT_COORDINATOR_CALLS;
 const ALLOW_CARRIER_FOLLOWUP_CALLS = RELEASE_GATES.ALLOW_CARRIER_FOLLOWUP_CALLS;
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
@@ -582,6 +612,10 @@ const HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES = 8 * 1024;
 const HCN_ASSISTANT_TURN_OPERATIONS =
   createKeyedOperationQueue({ maxKeys: 512 });
 const HCN_PENDING_ACTION_PLANS = createHcnPendingActionPlanStore();
+const HCN_PENDING_CLAIM_CALL_PLANS =
+  createHcnPendingActionPlanStore();
+const HCN_PENDING_CLAIM_WRITEBACK_PLANS =
+  createHcnPendingActionPlanStore();
 const HCN_INVITATION_APPROVALS =
   createHcnInvitationApprovalStore();
 const HCN_CONSOLE_STATE_CODEC = OAUTH_SESSION_SECRET
@@ -594,6 +628,7 @@ let hcnGoogleGrantStoreInstance = null;
 let hcnIdentityPinStoreInstance = null;
 let hcnInvitationStoreInstance = null;
 let hcnAssistantConversationStoreInstance = null;
+let hcnAssistantConversationStoreReady = false;
 let hcnQuoLineStoreInstance = null;
 let hcnActionReceiptIndexInstance = null;
 let hcnActionExecutionInFlight = false;
@@ -824,6 +859,9 @@ const HCN_THRESHER_CONFIGURATION = loadThresherRuntimeConfiguration(
   }
 );
 
+hcnAssistantConversationStoreReady =
+  await verifyHcnAssistantConversationStoreReadiness();
+
 if (process.env.RENDER && !hcnOperationsStorageConfigured()) {
   throw new Error(
     "Render startup requires an isolated, absolute HCN_OPERATIONS_ROOT and every persistent HCN path beneath it."
@@ -860,6 +898,12 @@ const routes = new Map([
   ["POST /hcn/api/v1/assistant/conversations/archive", hcnArchiveAssistantConversation],
   ["POST /hcn/api/v1/assistant/conversations/restore", hcnRestoreAssistantConversation],
   ["POST /hcn/api/v1/assistant/turns", hcnAssistantTurn],
+  ["POST /hcn/api/v1/claim-filings/status", hcnClaimFilingStatus],
+  ["POST /hcn/api/v1/claim-filings/prepare", hcnPrepareClaimFiling],
+  ["POST /hcn/api/v1/claim-filings/execute", hcnExecuteClaimFiling],
+  ["POST /hcn/api/v1/claim-filings/result", hcnReadClaimFilingResult],
+  ["POST /hcn/api/v1/claim-filings/writeback/prepare", hcnPrepareClaimWriteback],
+  ["POST /hcn/api/v1/claim-filings/writeback/execute", hcnExecuteClaimWriteback],
   ["POST /hcn/api/v1/action-plans/prepare", hcnPrepareActionPlan],
   ["POST /hcn/api/v1/action-plans/list", hcnListActionPlans],
   ["POST /hcn/api/v1/action-plans/detail", hcnReadActionPlan],
@@ -1659,6 +1703,10 @@ function hcnOperationsStorageConfigured() {
 }
 
 function hcnAssistantConversationStoreConfigured() {
+  return hcnAssistantConversationStoreReady;
+}
+
+function hcnAssistantConversationStoreConfigurationValid() {
   if (
     !hcnOperationsStorageConfigured()
     || !HCN_ASSISTANT_HISTORY_KEY
@@ -1669,6 +1717,16 @@ function hcnAssistantConversationStoreConfigured() {
   }
   try {
     hcnAssistantConversationStore();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyHcnAssistantConversationStoreReadiness() {
+  if (!hcnAssistantConversationStoreConfigurationValid()) return false;
+  try {
+    await hcnAssistantConversationStore().verify();
     return true;
   } catch {
     return false;
@@ -4749,7 +4807,11 @@ async function resolveHcnAssistantAssignedFile({ fileRef, principal }) {
     contact,
     fileRef,
     providerFileId,
-    references
+    references,
+    knownStatusNames: [...new Set(index.rows
+      .filter((candidate) => isInsuranceFile(candidate))
+      .map((candidate) => String(candidate?.status_name || "").trim())
+      .filter(Boolean))]
   };
 }
 
@@ -5395,6 +5457,13 @@ async function runHcnDeterministicAssistantTurn({
     };
   }
   if (operation === "file_status") {
+    if (conversation?.kind !== "file") {
+      const error = new Error(
+        "Exact-file status must be reviewed from that assigned file chat."
+      );
+      error.statusCode = 403;
+      throw error;
+    }
     const jobNumber = extractDeterministicJobNumber(prompt);
     if (!jobNumber) {
       badRequest(
@@ -5550,7 +5619,9 @@ function hcnAssistantInstructions(principal, conversation) {
     `- Conversation kind: ${String(conversation?.kind || "general")}.`,
     conversation?.kind === "file"
       ? `- This chat is locked to opaque file reference ${conversation.fileRef}; never request or discuss a different file in this chat.`
-      : "- This conversation is not locked to one file.",
+      : conversation?.kind === "general"
+        ? "- General chat cannot retrieve assigned-file listings or exact-file evidence. Direct the employee to Work Center and an exact client chat for file details."
+        : "- This conversation is not locked to one file.",
     "- Every file lookup is restricted server-side to the signed-in employee's authorized JobNimbus scope.",
     "- Management sweep and benchmark access are decided by the server; do not claim access unless the relevant tool succeeds.",
     "- Exact-file review may include a deterministic intelligence object. Treat it as the authoritative coded workflow analysis of the fresh evidence; explain it plainly and do not override its missing-evidence or approval-gate conclusions.",
@@ -5576,14 +5647,30 @@ function hcnAssertAssistantToolConversationScope(
   input,
   conversation
 ) {
-  const fileTools = [
+  const exactFileTools = [
     "review_file",
     "read_file_document_catalog",
     "read_file_document",
     "read_file_photo_catalog",
-    "research_file_hail_dates",
-    "read_calendar_day"
+    "research_file_hail_dates"
   ];
+  const fileTools = [...exactFileTools, "read_calendar_day"];
+  const requestsExactFile = exactFileTools.includes(name)
+    || (name === "read_calendar_day" && Boolean(input?.fileRef));
+  if (conversation?.kind === "general" && name === "read_work_center") {
+    const error = new Error(
+      "Assigned file listings are available in the Work Center, not a durable general chat."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (conversation?.kind !== "file" && requestsExactFile) {
+    const error = new Error(
+      "Exact-file evidence may be read only from that assigned file chat."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
   if (
     name === "read_calendar_day"
     && conversation?.kind !== "file"
@@ -5872,6 +5959,1337 @@ function hcnAssistantSourceProjection(key, label, source) {
       || source?.asOf
       || ""
     ).slice(0, 40)
+  };
+}
+
+async function hcnClaimFilingStatus(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "fileRef"],
+    "HCN claim filing status"
+  );
+  const context = await hcnClaimFilingContext({
+    principal,
+    conversationRef: input.conversationRef,
+    fileRef: input.fileRef
+  });
+  const eligible = hcnClaimFilingPilotEligible(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+  const recovery = eligible
+    ? await hcnRecoverableClaimCall({ context, principal })
+    : Object.freeze({ state: "none" });
+  return hcnClaimFilingEnvelope({
+    eligible,
+    fileRef: context.fileRef,
+    callsEnabled: eligible && ALLOW_RETELL_CALLS,
+    writebackConfigured:
+      eligible && HCN_CLAIM_WRITEBACK_FIELD_MAPPING.configured === true,
+    recovery
+  });
+}
+
+async function hcnPrepareClaimFiling(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertHcnClaimFilingPilot(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "fileRef", "confirmations"],
+    "HCN claim filing prepare"
+  );
+  return withHcnActionAdmission(
+    HCN_ACTION_PREPARE_ADMISSION,
+    async () => {
+      const context = await hcnClaimFilingContext({
+        principal,
+        conversationRef: input.conversationRef,
+        fileRef: input.fileRef
+      });
+      const confirmations = normalizeHcnClaimConfirmations(
+        input.confirmations || {}
+      );
+      const baseMissing = hcnClaimPreparationMissingFacts({
+        file: context.file,
+        property: context.property,
+        confirmations
+      });
+      if (baseMissing.length > 0) {
+        return hcnClaimFilingEnvelope({
+          eligible: true,
+          callsEnabled: ALLOW_RETELL_CALLS,
+          review: buildHcnClaimReviewPresentation({
+            fileRef: context.fileRef,
+            file: context.file,
+            confirmations,
+            missingFacts: baseMissing
+          }),
+          plan: null
+        });
+      }
+
+      const corePlan = hcnBuildClaimCorePlan(context, confirmations);
+      const missingFacts = hcnClaimPreparationMissingFacts({
+        file: context.file,
+        property: context.property,
+        confirmations,
+        corePlan
+      });
+      const unboundReview = buildHcnClaimReviewPresentation({
+        fileRef: context.fileRef,
+        file: context.file,
+        plan: corePlan,
+        confirmations,
+        missingFacts
+      });
+      if (missingFacts.length > 0 || !unboundReview.ready) {
+        return hcnClaimFilingEnvelope({
+          eligible: true,
+          callsEnabled: ALLOW_RETELL_CALLS,
+          review: unboundReview,
+          plan: null
+        });
+      }
+
+      const principalRef = hcnActionReceiptPrincipalRef();
+      const conversationRef = context.conversation.conversationRef;
+      const approvalDigest = hcnClaimApprovalDigest({
+        principalRef,
+        conversationRef,
+        fileRef: context.fileRef,
+        corePlanDigest: corePlan.planDigest
+      });
+      const review = Object.freeze({
+        ...unboundReview,
+        planDigest: approvalDigest
+      });
+      const fileScopeBinding = hcnClaimScopeBinding({
+        principalRef,
+        conversationRef,
+        fileRef: context.fileRef,
+        providerFileId: context.scope.providerFileId,
+        ownerId: principal.jobNimbusOwnerId,
+        relevantFileState: hcnClaimRelevantFileState(context),
+        approvalDigest
+      });
+      let approval;
+      try {
+        approval = await issueActionApprovalChallenge(approvalDigest, 1);
+        const plan = HCN_PENDING_CLAIM_CALL_PLANS.create({
+          sessionBinding: hcnClaimFilingSessionBinding(),
+          fileRef: context.fileRef,
+          fileDisplayLabel: hcnClaimFileDisplayLabel(context.file),
+          fileScopeBinding,
+          operations: [{
+            type: "retell.claim_filing_call",
+            conversationRef,
+            fileRef: context.fileRef,
+            confirmations,
+            corePlanDigest: corePlan.planDigest
+          }],
+          dryRun: {
+            approvalDigest,
+            approvalChallenge: approval.challenge,
+            approvalExpiresAt: approval.expiresAt,
+            operationCount: 1,
+            operations: [{
+              type: "retell.claim_filing_call",
+              material: review
+            }]
+          }
+        });
+        return hcnClaimFilingEnvelope({
+          eligible: true,
+          callsEnabled: ALLOW_RETELL_CALLS,
+          review,
+          plan
+        });
+      } catch (error) {
+        if (approval?.id) {
+          await revokeActionApprovalChallenge(approval.id).catch(() => {});
+        }
+        throw error;
+      }
+    }
+  );
+}
+
+async function hcnExecuteClaimFiling(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertHcnClaimFilingPilot(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "fileRef", "planId", "approvalDigest"],
+    "HCN claim filing execute"
+  );
+  return withHcnActionAdmission(
+    HCN_ACTION_EXECUTE_ADMISSION,
+    async () => {
+      const context = await hcnClaimFilingContext({
+        principal,
+        conversationRef: input.conversationRef,
+        fileRef: input.fileRef
+      });
+      const sessionBinding = hcnClaimFilingSessionBinding();
+      const planId = String(input.planId || "");
+      const approvalDigest = String(input.approvalDigest || "");
+      const pending = HCN_PENDING_CLAIM_CALL_PLANS.get({
+        sessionBinding,
+        planId
+      });
+      if (
+        pending.fileRef !== context.fileRef
+        || pending.approvalDigest !== approvalDigest
+      ) {
+        const error = new Error(
+          "The execution request does not match the exact reviewed claim plan."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      if (
+        !ALLOW_RETELL_CALLS
+        || !RETELL_API_KEY
+        || !RETELL_AGENT_ID
+        || !RETELL_FROM_NUMBER
+      ) {
+        const error = new Error(
+          "Claim calls are disabled or the approved Retell calling configuration is incomplete."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+      const principalRef = hcnActionReceiptPrincipalRef();
+      const fileScopeBinding = hcnClaimScopeBinding({
+        principalRef,
+        conversationRef: context.conversation.conversationRef,
+        fileRef: context.fileRef,
+        providerFileId: context.scope.providerFileId,
+        ownerId: principal.jobNimbusOwnerId,
+        relevantFileState: hcnClaimRelevantFileState(context),
+        approvalDigest
+      });
+      const execution = HCN_PENDING_CLAIM_CALL_PLANS.beginExecution({
+        sessionBinding,
+        planId,
+        fileScopeBinding,
+        approvalDigest
+      });
+      const operation = execution.operations[0];
+      let corePlan;
+      try {
+        if (
+          execution.operationCount !== 1
+          || operation?.type !== "retell.claim_filing_call"
+          || operation.conversationRef
+            !== context.conversation.conversationRef
+          || operation.fileRef !== context.fileRef
+        ) {
+          throw new Error("Stored claim operation does not match the exact file.");
+        }
+        const confirmations = normalizeHcnClaimConfirmations(
+          operation.confirmations
+        );
+        corePlan = hcnBuildClaimCorePlan(context, confirmations);
+        if (
+          corePlan.planDigest !== operation.corePlanDigest
+          || !corePlan.readiness.ready
+          || hcnClaimPreparationMissingFacts({
+            file: context.file,
+            property: context.property,
+            confirmations,
+            corePlan
+          }).length > 0
+        ) {
+          throw new Error(
+            "Fresh claim facts no longer match the reviewed callable packet."
+          );
+        }
+        await consumeActionApprovalChallenge(
+          execution.approvalChallenge,
+          execution.approvalDigest
+        );
+      } catch {
+        HCN_PENDING_CLAIM_CALL_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "The exact claim plan changed or its approval could not be consumed. Nothing was called."
+        });
+        const error = new Error(
+          "The exact claim plan changed or its approval expired. Prepare and review a fresh plan."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const receiptIndex = hcnActionReceiptIndex();
+      let executingReceipt;
+      try {
+        executingReceipt = receiptIndex.appendExecuting({
+          sessionPrincipalRef: principalRef,
+          fileRef: context.fileRef,
+          planId,
+          digest: approvalDigest,
+          operationCount: 1
+        });
+      } catch {
+        HCN_PENDING_CLAIM_CALL_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "The durable executing receipt could not be written. Nothing was called."
+        });
+        const error = new Error(
+          "The durable HCN receipt boundary is unavailable. Nothing was called."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+
+      const callRef = hcnClaimCallRef({
+        principalRef,
+        fileRef: context.fileRef,
+        approvalDigest
+      });
+      const callRequest = retellCallBody(corePlan);
+      callRequest.metadata = {
+        ...callRequest.metadata,
+        hcnCallRef: callRef,
+        hcnFileRef: context.fileRef,
+        hcnApprovalDigest: approvalDigest
+      };
+      let providerCall;
+      try {
+        providerCall = await retellApi(
+          "POST",
+          "/v2/create-phone-call",
+          callRequest
+        );
+        if (!String(providerCall?.call_id || "").trim()) {
+          throw new Error("Retell did not return a call identifier.");
+        }
+      } catch {
+        return hcnFinalizeUncertainClaimCall({
+          receiptIndex,
+          executingReceipt,
+          execution,
+          sessionBinding,
+          reason:
+            "The provider call outcome is unknown. Do not retry automatically; reconcile Retell before preparing another call."
+        });
+      }
+
+      let receipt;
+      try {
+        receipt = receiptIndex.transition({
+          sessionPrincipalRef: principalRef,
+          fileRef: context.fileRef,
+          planId,
+          digest: approvalDigest,
+          batchRef: executingReceipt.batchRef,
+          status: "completed_pending_verification",
+          succeededCount: 1,
+          failedCount: 0,
+          blockedCount: 0,
+          unknownCount: 0
+        });
+      } catch {
+        HCN_PENDING_CLAIM_CALL_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "The call was requested, but its terminal receipt could not be persisted. Reconcile Retell before any retry."
+        });
+        const error = new Error(
+          "The claim call requires reconciliation; no automatic retry is allowed."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+      const plan = HCN_PENDING_CLAIM_CALL_PLANS.finishExecution({
+        sessionBinding,
+        planId,
+        result: {
+          mode: "completed_pending_verification",
+          reason:
+            "The provider accepted the call. Review the terminal result before any JobNimbus writeback.",
+          batch: {
+            status: "completed_pending_verification",
+            operationCount: 1,
+            completed: [{
+              index: 0,
+              type: "retell.claim_filing_call",
+              status: "executed",
+              receipt: { callRef }
+            }]
+          }
+        }
+      });
+      return hcnClaimFilingEnvelope({
+        eligible: true,
+        callsEnabled: true,
+        callRef,
+        plan,
+        receipt,
+        automaticRetry: false
+      });
+    },
+    { exclusiveSession: true, globalExecution: true }
+  );
+}
+
+function hcnFinalizeUncertainClaimCall({
+  receiptIndex,
+  executingReceipt,
+  execution,
+  sessionBinding,
+  reason
+}) {
+  let receipt;
+  try {
+    receipt = receiptIndex.transition({
+      sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+      fileRef: execution.fileRef,
+      planId: execution.planId,
+      digest: execution.approvalDigest,
+      batchRef: executingReceipt.batchRef,
+      status: "reconciliation_required",
+      succeededCount: 0,
+      failedCount: 0,
+      blockedCount: 0,
+      unknownCount: 1
+    });
+  } catch {
+    HCN_PENDING_CLAIM_CALL_PLANS.recoverExecution({
+      sessionBinding,
+      planId: execution.planId,
+      reason
+    });
+    const error = new Error(
+      "The claim call outcome and durable receipt both require reconciliation."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const plan = HCN_PENDING_CLAIM_CALL_PLANS.finishExecution({
+    sessionBinding,
+    planId: execution.planId,
+    result: { mode: "reconciliation_required", reason }
+  });
+  return hcnClaimFilingEnvelope({
+    eligible: true,
+    callsEnabled: true,
+    plan,
+    receipt,
+    automaticRetry: false
+  });
+}
+
+async function hcnReadClaimFilingResult(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertHcnClaimFilingPilot(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "fileRef", "planId", "callRef"],
+    "HCN claim filing result"
+  );
+  return withHcnReadAdmission(async () => {
+    const context = await hcnClaimFilingContext({
+      principal,
+      conversationRef: input.conversationRef,
+      fileRef: input.fileRef
+    });
+    const callRef = assertHcnClaimCallRef(input.callRef);
+    const receipt = hcnActionReceiptIndex().get({
+      sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+      planId: String(input.planId || "")
+    });
+    if (
+      receipt.fileRef !== context.fileRef
+      || receipt.status !== "completed_pending_verification"
+    ) {
+      const error = new Error(
+        "A completed pending-verification receipt for this exact file is required."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+    const rawCall = await hcnFindClaimCall({
+      callRef,
+      fileRef: context.fileRef,
+      approvalDigest: receipt.digest,
+      providerFileId: context.scope.providerFileId,
+      ownerId: principal.jobNimbusOwnerId
+    });
+    const callStatus = String(rawCall.call_status || "").toLowerCase();
+    if (!["ended", "completed"].includes(callStatus)) {
+      return hcnClaimFilingEnvelope({
+        eligible: true,
+        callRef,
+        result: {
+          schema: "hcn.claim-filing.result-review.v2",
+          callRef,
+          fileRef: context.fileRef,
+          callStatus,
+          terminal: false,
+          humanConfirmationRequired: false,
+          writebackEligible: false,
+          automaticRetry: false
+        }
+      });
+    }
+    const evidence = createHcnServerClaimEvidence({
+      callRef,
+      fileRef: context.fileRef,
+      planDigest: receipt.digest,
+      terminalReceipt: receipt,
+      rawCall,
+      file: context.file,
+      ownerId: principal.jobNimbusOwnerId
+    });
+    return hcnClaimFilingEnvelope({
+      eligible: true,
+      callRef,
+      result: projectHcnClaimResult(evidence)
+    });
+  });
+}
+
+async function hcnPrepareClaimWriteback(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertHcnClaimFilingPilot(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+  assertExactHcnKeys(
+    input,
+    [
+      "conversationRef",
+      "fileRef",
+      "callPlanId",
+      "callRef",
+      "humanConfirmation"
+    ],
+    "HCN claim writeback prepare"
+  );
+  return withHcnActionAdmission(
+    HCN_ACTION_PREPARE_ADMISSION,
+    async () => {
+      const context = await hcnClaimFilingContext({
+        principal,
+        conversationRef: input.conversationRef,
+        fileRef: input.fileRef
+      });
+      const callEvidence = await hcnLoadClaimCallEvidence({
+        context,
+        principal,
+        callPlanId: String(input.callPlanId || ""),
+        callRef: input.callRef
+      });
+      const writeback = hcnResolveClaimWritebackStatus(buildHcnVerifiedClaimWriteback({
+        evidence: callEvidence.evidence,
+        humanConfirmation: input.humanConfirmation || {},
+        currentStatus: context.file.status,
+        fieldMapping: HCN_CLAIM_WRITEBACK_FIELD_MAPPING
+      }), context.knownStatusNames);
+      const review = hcnClaimWritebackReview({
+        context,
+        callRef: callEvidence.callRef,
+        evidence: callEvidence.evidence,
+        writeback
+      });
+      if (!writeback.ready) {
+        return hcnClaimFilingEnvelope({
+          eligible: true,
+          writesEnabled:
+            ALLOW_WRITES && HCN_ACTION_EXECUTION_ENABLED,
+          mappingConfigured:
+            HCN_CLAIM_WRITEBACK_FIELD_MAPPING.configured,
+          review,
+          plan: null
+        });
+      }
+      const principalRef = hcnActionReceiptPrincipalRef();
+      const approvalDigest = digest({
+        schema: "hcn.claim-filing.writeback-approval.v1",
+        principalRef,
+        conversationRef: context.conversation.conversationRef,
+        fileRef: context.fileRef,
+        callRef: callEvidence.callRef,
+        callPlanId: String(input.callPlanId),
+        evidenceDigest: callEvidence.evidence.evidenceDigest,
+        mappingVersion: HCN_CLAIM_WRITEBACK_FIELD_MAPPING.version,
+        fields: writeback.fields,
+        status: writeback.status,
+        note: writeback.note
+      });
+      const boundReview = Object.freeze({
+        ...review,
+        approvalDigest
+      });
+      const fileScopeBinding = hcnClaimScopeBinding({
+        principalRef,
+        conversationRef: context.conversation.conversationRef,
+        fileRef: context.fileRef,
+        providerFileId: context.scope.providerFileId,
+        ownerId: principal.jobNimbusOwnerId,
+        relevantFileState: hcnClaimRelevantFileState(context),
+        approvalDigest
+      });
+      let approval;
+      try {
+        approval = await issueActionApprovalChallenge(approvalDigest, 1);
+        const plan = HCN_PENDING_CLAIM_WRITEBACK_PLANS.create({
+          sessionBinding: hcnClaimWritebackSessionBinding(),
+          fileRef: context.fileRef,
+          fileDisplayLabel: hcnClaimFileDisplayLabel(context.file),
+          fileScopeBinding,
+          operations: [{
+            type: "jobnimbus.claim_filing_writeback",
+            conversationRef: context.conversation.conversationRef,
+            fileRef: context.fileRef,
+            callPlanId: String(input.callPlanId),
+            callRef: callEvidence.callRef,
+            evidenceDigest: callEvidence.evidence.evidenceDigest,
+            humanConfirmation: input.humanConfirmation,
+            writebackDigest: digest(writeback)
+          }],
+          dryRun: {
+            approvalDigest,
+            approvalChallenge: approval.challenge,
+            approvalExpiresAt: approval.expiresAt,
+            operationCount: 1,
+            operations: [{
+              type: "jobnimbus.claim_filing_writeback",
+              material: boundReview
+            }]
+          }
+        });
+        return hcnClaimFilingEnvelope({
+          eligible: true,
+          writesEnabled:
+            ALLOW_WRITES && HCN_ACTION_EXECUTION_ENABLED,
+          mappingConfigured: true,
+          review: boundReview,
+          plan
+        });
+      } catch (error) {
+        if (approval?.id) {
+          await revokeActionApprovalChallenge(approval.id).catch(() => {});
+        }
+        throw error;
+      }
+    }
+  );
+}
+
+async function hcnExecuteClaimWriteback(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  assertHcnClaimFilingPilot(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+  assertExactHcnKeys(
+    input,
+    ["conversationRef", "fileRef", "planId", "approvalDigest"],
+    "HCN claim writeback execute"
+  );
+  return withHcnActionAdmission(
+    HCN_ACTION_EXECUTE_ADMISSION,
+    async () => {
+      const context = await hcnClaimFilingContext({
+        principal,
+        conversationRef: input.conversationRef,
+        fileRef: input.fileRef
+      });
+      const sessionBinding = hcnClaimWritebackSessionBinding();
+      const planId = String(input.planId || "");
+      const approvalDigest = String(input.approvalDigest || "");
+      const pending = HCN_PENDING_CLAIM_WRITEBACK_PLANS.get({
+        sessionBinding,
+        planId
+      });
+      if (
+        pending.fileRef !== context.fileRef
+        || pending.approvalDigest !== approvalDigest
+      ) {
+        const error = new Error(
+          "The writeback request does not match the exact reviewed plan."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      if (
+        !ALLOW_WRITES
+        || !HCN_ACTION_EXECUTION_ENABLED
+        || !HCN_CLAIM_WRITEBACK_FIELD_MAPPING.configured
+      ) {
+        const error = new Error(
+          "Claim writeback is disabled or its exact JobNimbus field mapping is unavailable."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+      const principalRef = hcnActionReceiptPrincipalRef();
+      const fileScopeBinding = hcnClaimScopeBinding({
+        principalRef,
+        conversationRef: context.conversation.conversationRef,
+        fileRef: context.fileRef,
+        providerFileId: context.scope.providerFileId,
+        ownerId: principal.jobNimbusOwnerId,
+        relevantFileState: hcnClaimRelevantFileState(context),
+        approvalDigest
+      });
+      const execution = HCN_PENDING_CLAIM_WRITEBACK_PLANS.beginExecution({
+        sessionBinding,
+        planId,
+        fileScopeBinding,
+        approvalDigest
+      });
+      const operation = execution.operations[0];
+      let writeback;
+      try {
+        if (
+          execution.operationCount !== 1
+          || operation?.type !== "jobnimbus.claim_filing_writeback"
+          || operation.conversationRef
+            !== context.conversation.conversationRef
+          || operation.fileRef !== context.fileRef
+        ) {
+          throw new Error("Stored writeback operation is out of scope.");
+        }
+        const callEvidence = await hcnLoadClaimCallEvidence({
+          context,
+          principal,
+          callPlanId: operation.callPlanId,
+          callRef: operation.callRef
+        });
+        if (
+          callEvidence.evidence.evidenceDigest
+            !== operation.evidenceDigest
+        ) {
+          throw new Error("The reviewed call evidence changed.");
+        }
+        writeback = hcnResolveClaimWritebackStatus(buildHcnVerifiedClaimWriteback({
+          evidence: callEvidence.evidence,
+          humanConfirmation: operation.humanConfirmation,
+          currentStatus: context.file.status,
+          fieldMapping: HCN_CLAIM_WRITEBACK_FIELD_MAPPING
+        }), context.knownStatusNames);
+        if (!writeback.ready || digest(writeback) !== operation.writebackDigest) {
+          throw new Error("The exact writeback changed after review.");
+        }
+        await consumeActionApprovalChallenge(
+          execution.approvalChallenge,
+          execution.approvalDigest
+        );
+      } catch {
+        HCN_PENDING_CLAIM_WRITEBACK_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "Fresh file or call evidence no longer matches the reviewed writeback. Nothing was written."
+        });
+        const error = new Error(
+          "The exact writeback changed or its approval expired. Prepare and review it again."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const receiptIndex = hcnActionReceiptIndex();
+      let executingReceipt;
+      try {
+        executingReceipt = receiptIndex.appendExecuting({
+          sessionPrincipalRef: principalRef,
+          fileRef: context.fileRef,
+          planId,
+          digest: approvalDigest,
+          operationCount: 1
+        });
+      } catch {
+        HCN_PENDING_CLAIM_WRITEBACK_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "The durable executing receipt could not be written. Nothing was written to JobNimbus."
+        });
+        const error = new Error(
+          "The durable HCN receipt boundary is unavailable. Nothing was written."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+
+      let verification;
+      try {
+        verification = await hcnExecuteVerifiedClaimWriteback({
+          context,
+          writeback
+        });
+      } catch {
+        return hcnFinalizeUncertainClaimWriteback({
+          receiptIndex,
+          executingReceipt,
+          execution,
+          sessionBinding,
+          reason:
+            "The JobNimbus write or exact readback is uncertain. Reconcile the mapped fields and note before any retry."
+        });
+      }
+      let receipt;
+      try {
+        receipt = receiptIndex.transition({
+          sessionPrincipalRef: principalRef,
+          fileRef: context.fileRef,
+          planId,
+          digest: approvalDigest,
+          batchRef: executingReceipt.batchRef,
+          status: "executed",
+          succeededCount: 1,
+          failedCount: 0,
+          blockedCount: 0,
+          unknownCount: 0
+        });
+      } catch {
+        HCN_PENDING_CLAIM_WRITEBACK_PLANS.recoverExecution({
+          sessionBinding,
+          planId,
+          reason:
+            "JobNimbus readback succeeded, but the terminal receipt could not be persisted. Reconcile before any retry."
+        });
+        const error = new Error(
+          "The claim writeback requires reconciliation; no automatic retry is allowed."
+        );
+        error.statusCode = 503;
+        throw error;
+      }
+      const plan = HCN_PENDING_CLAIM_WRITEBACK_PLANS.finishExecution({
+        sessionBinding,
+        planId,
+        result: {
+          mode: "executed",
+          reason:
+            "The exact configured JobNimbus fields and note were verified by fresh readback.",
+          batch: {
+            status: "completed",
+            operationCount: 1,
+            completed: [{
+              index: 0,
+              type: "jobnimbus.claim_filing_writeback",
+              status: "executed",
+              receipt: verification
+            }]
+          }
+        }
+      });
+      return hcnClaimFilingEnvelope({
+        eligible: true,
+        plan,
+        receipt,
+        verifiedByReadback: true,
+        automaticRetry: false
+      });
+    },
+    { exclusiveSession: true, globalExecution: true }
+  );
+}
+
+async function hcnExecuteVerifiedClaimWriteback({ context, writeback }) {
+  const contactBody = {
+    ...writeback.fields,
+    ...(writeback.status ? { status_name: writeback.status } : {})
+  };
+  await jobNimbus(
+    `/contacts/${encodeURIComponent(context.scope.providerFileId)}`,
+    { method: "PUT", body: contactBody }
+  );
+  let activities = await listRelated(
+    "/activities",
+    context.scope.providerFileId,
+    100
+  );
+  const noteAlreadyPresent = activities.some((activity) =>
+    hcnActivityMatchesClaimNote(
+      activity,
+      writeback.note,
+      context.scope.providerFileId
+    )
+  );
+  if (!noteAlreadyPresent) {
+    const noteBody = {
+      note: writeback.note,
+      date_created: Math.floor(Date.now() / 1000),
+      record_type_name: "Note",
+      primary: { id: context.scope.providerFileId }
+    };
+    await jobNimbus("/activities", { method: "POST", body: noteBody });
+  }
+
+  const refreshed = await jobNimbus(
+    `/contacts/${encodeURIComponent(context.scope.providerFileId)}`
+  );
+  if (
+    String(refreshed?.jnid || refreshed?.id || "")
+      !== context.scope.providerFileId
+    || !isInsuranceFile(refreshed)
+    || !assignedTo(refreshed, context.principal.jobNimbusOwnerId)
+    || !hcnContactIsExplicitlyActive(refreshed)
+    || !recordMatchesFields(refreshed, contactBody)
+  ) {
+    throw new Error("Exact mapped JobNimbus field readback failed.");
+  }
+  activities = await listRelated(
+    "/activities",
+    context.scope.providerFileId,
+    100
+  );
+  const noteVerified = activities.some((activity) =>
+    hcnActivityMatchesClaimNote(
+      activity,
+      writeback.note,
+      context.scope.providerFileId
+    )
+  );
+  if (!noteVerified) {
+    throw new Error("Exact JobNimbus note readback failed.");
+  }
+  return {
+    verifiedByReadback: true,
+    mappedFields: Object.keys(writeback.fields).sort(),
+    statusVerified: Boolean(writeback.status),
+    noteVerified: true,
+    noteCreated: !noteAlreadyPresent,
+    noteAlreadyPresent
+  };
+}
+
+function hcnActivityMatchesClaimNote(activity, note, providerFileId) {
+  const exactText = String(
+    activity?.note || activity?.description || ""
+  ).trim() === note;
+  if (!exactText) return false;
+  const relatedId = String(
+    activity?.primary?.id
+    || activity?.primary_id
+    || activity?.contact_id
+    || ""
+  ).trim();
+  return !relatedId || relatedId === String(providerFileId);
+}
+
+function hcnFinalizeUncertainClaimWriteback({
+  receiptIndex,
+  executingReceipt,
+  execution,
+  sessionBinding,
+  reason
+}) {
+  let receipt;
+  try {
+    receipt = receiptIndex.transition({
+      sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+      fileRef: execution.fileRef,
+      planId: execution.planId,
+      digest: execution.approvalDigest,
+      batchRef: executingReceipt.batchRef,
+      status: "reconciliation_required",
+      succeededCount: 0,
+      failedCount: 0,
+      blockedCount: 0,
+      unknownCount: 1
+    });
+  } catch {
+    HCN_PENDING_CLAIM_WRITEBACK_PLANS.recoverExecution({
+      sessionBinding,
+      planId: execution.planId,
+      reason
+    });
+    const error = new Error(
+      "The JobNimbus writeback and durable receipt both require reconciliation."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const plan = HCN_PENDING_CLAIM_WRITEBACK_PLANS.finishExecution({
+    sessionBinding,
+    planId: execution.planId,
+    result: { mode: "reconciliation_required", reason }
+  });
+  return hcnClaimFilingEnvelope({
+    eligible: true,
+    plan,
+    receipt,
+    verifiedByReadback: false,
+    automaticRetry: false
+  });
+}
+
+async function hcnLoadClaimCallEvidence({
+  context,
+  principal,
+  callPlanId,
+  callRef
+}) {
+  const normalizedCallRef = assertHcnClaimCallRef(callRef);
+  const receipt = hcnActionReceiptIndex().get({
+    sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+    planId: String(callPlanId || "")
+  });
+  if (
+    receipt.fileRef !== context.fileRef
+    || receipt.status !== "completed_pending_verification"
+  ) {
+    const error = new Error(
+      "A completed pending-verification receipt for this exact claim call is required."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  const rawCall = await hcnFindClaimCall({
+    callRef: normalizedCallRef,
+    fileRef: context.fileRef,
+    approvalDigest: receipt.digest,
+    providerFileId: context.scope.providerFileId,
+    ownerId: principal.jobNimbusOwnerId
+  });
+  const evidence = createHcnServerClaimEvidence({
+    callRef: normalizedCallRef,
+    fileRef: context.fileRef,
+    planDigest: receipt.digest,
+    terminalReceipt: receipt,
+    rawCall,
+    file: context.file,
+    ownerId: principal.jobNimbusOwnerId
+  });
+  return { callRef: normalizedCallRef, receipt, rawCall, evidence };
+}
+
+function hcnClaimWritebackReview({ context, callRef, evidence, writeback }) {
+  return Object.freeze({
+    schema: "hcn.claim-filing.writeback-review.v1",
+    ready: writeback.ready,
+    fileRef: context.fileRef,
+    file: {
+      jobNumber: String(context.file.number || ""),
+      displayName: String(context.file.name || ""),
+      currentStatus: String(context.file.status || "")
+    },
+    callRef,
+    evidenceDigest: evidence.evidenceDigest,
+    mappedFields: writeback.fields,
+    status: writeback.status,
+    note: writeback.note,
+    fieldSources: writeback.fieldSources,
+    blockers: writeback.blockers,
+    readbackRequired: true,
+    approvalDigest: ""
+  });
+}
+
+async function hcnFindClaimCall({
+  callRef,
+  fileRef,
+  approvalDigest,
+  providerFileId,
+  ownerId
+}) {
+  if (!RETELL_API_KEY) {
+    const error = new Error("The Retell result provider is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  const response = await retellApi("POST", "/v3/list-calls", {
+    filter_criteria: {
+      metadata: hcnClaimCallMetadataFilters({
+        callRef,
+        fileRef,
+        approvalDigest,
+        providerFileId,
+        ownerId
+      })
+    },
+    sort_order: "descending",
+    limit: 2
+  });
+  const matches = (response.items || []).filter((call) => {
+    return hcnClaimCallMatches(call, {
+      callRef,
+      fileRef,
+      approvalDigest,
+      providerFileId,
+      ownerId
+    });
+  });
+  if (matches.length !== 1 || response.has_more === true) {
+    const error = new Error(
+      "The exact claim call could not be uniquely resolved from Retell."
+    );
+    error.statusCode = matches.length ? 409 : 404;
+    throw error;
+  }
+  return retellApi(
+    "GET",
+    `/v2/get-call/${encodeURIComponent(matches[0].call_id)}`
+  );
+}
+
+function hcnClaimCallMetadataFilters({
+  callRef,
+  fileRef,
+  approvalDigest,
+  providerFileId,
+  ownerId
+}) {
+  return [
+    ["source", CLAIM_BRIDGE_SOURCE],
+    ["hcnCallRef", callRef],
+    ["hcnFileRef", fileRef],
+    ["hcnApprovalDigest", approvalDigest],
+    ["contactId", providerFileId],
+    ["ownerId", ownerId]
+  ].map(([key, value]) => ({ key, type: "string", value: String(value) }));
+}
+
+function hcnClaimCallMatches(call, {
+  callRef,
+  fileRef,
+  approvalDigest,
+  providerFileId,
+  ownerId
+}) {
+  const metadata = call?.metadata || {};
+  return metadata.source === CLAIM_BRIDGE_SOURCE
+    && metadata.hcnCallRef === callRef
+    && metadata.hcnFileRef === fileRef
+    && metadata.hcnApprovalDigest === approvalDigest
+    && String(metadata.contactId || "") === String(providerFileId)
+    && String(metadata.ownerId || "") === String(ownerId)
+    && Boolean(String(call?.call_id || "").trim());
+}
+
+async function hcnRecoverableClaimCall({ context, principal }) {
+  if (context.file.claimNumber || !RETELL_API_KEY) {
+    return Object.freeze({ state: "none" });
+  }
+  const receipts = hcnActionReceiptIndex().list({
+    sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+    fileRef: context.fileRef,
+    status: "completed_pending_verification",
+    limit: 100
+  });
+  if (!receipts.length) return Object.freeze({ state: "none" });
+  try {
+    const candidates = [];
+    for (const receipt of receipts) {
+      const callRef = hcnClaimCallRef({
+        principalRef: hcnActionReceiptPrincipalRef(),
+        fileRef: context.fileRef,
+        approvalDigest: receipt.digest
+      });
+      const response = await retellApi("POST", "/v3/list-calls", {
+        filter_criteria: {
+          metadata: hcnClaimCallMetadataFilters({
+            callRef,
+            fileRef: context.fileRef,
+            approvalDigest: receipt.digest,
+            providerFileId: context.scope.providerFileId,
+            ownerId: principal.jobNimbusOwnerId
+          })
+        },
+        sort_order: "descending",
+        limit: 2
+      });
+      const matches = (response.items || []).filter((call) =>
+        hcnClaimCallMatches(call, {
+          callRef,
+          fileRef: context.fileRef,
+          approvalDigest: receipt.digest,
+          providerFileId: context.scope.providerFileId,
+          ownerId: principal.jobNimbusOwnerId
+        })
+      );
+      if (matches.length > 1 || response.has_more === true) {
+        return Object.freeze({ state: "reconciliation_required" });
+      }
+      if (matches.length === 1) {
+        candidates.push({
+          planId: receipt.planId,
+          callRef,
+          acceptedAt: receipt.terminalAt || receipt.updatedAt || ""
+        });
+      }
+    }
+    if (!candidates.length) return Object.freeze({ state: "none" });
+    candidates.sort((left, right) =>
+      String(right.acceptedAt).localeCompare(String(left.acceptedAt))
+    );
+    return Object.freeze({ state: "available", ...candidates[0] });
+  } catch {
+    return Object.freeze({ state: "temporarily_unavailable" });
+  }
+}
+
+function hcnBuildClaimCorePlan(context, confirmations) {
+  return buildClaimFilingPlan(
+    hcnCanonicalClaimFile(context),
+    {
+      ownerId: context.principal.jobNimbusOwnerId,
+      fileNumber: context.file.number,
+      agentId: RETELL_AGENT_ID,
+      from: RETELL_FROM_NUMBER,
+      goal: "file_new_claim",
+      carrierPhone: confirmations.carrierPhone,
+      damageOpening: confirmations.damageOpening,
+      damageDetails: confirmations.damageDetails,
+      ...hcnClaimSpokenAnswers(confirmations)
+    }
+  );
+}
+
+async function hcnClaimFilingContext({
+  principal,
+  conversationRef,
+  fileRef
+}) {
+  const normalizedConversationRef = hcnAssistantConversationRef(
+    conversationRef
+  );
+  const normalizedFileRef = hcnAssistantConversationFileRef(
+    fileRef,
+    "file"
+  );
+  const conversation = await hcnRequireAssistantConversation({
+    principal,
+    conversationRef: normalizedConversationRef
+  });
+  if (
+    conversation.state !== "active"
+    || conversation.kind !== "file"
+    || conversation.fileRef !== normalizedFileRef
+  ) {
+    throw hcnAssistantReadTargetChanged();
+  }
+  const scope = await withHcnReadAdmission(
+    () => resolveHcnAssistantAssignedFile({
+      fileRef: normalizedFileRef,
+      principal
+    })
+  );
+  const file = compactContact(
+    scope.contact,
+    HCN_CLAIM_WRITEBACK_FIELD_MAPPING
+  );
+  return {
+    principal,
+    conversation,
+    scope,
+    knownStatusNames: scope.knownStatusNames,
+    fileRef: normalizedFileRef,
+    file,
+    property: {
+      addressLine1: String(scope.contact.address_line1 || "").trim(),
+      city: String(scope.contact.city || "").trim(),
+      state: String(scope.contact.state_text || "").trim(),
+      zip: String(scope.contact.zip || "").trim()
+    }
+  };
+}
+
+function hcnCanonicalClaimFile(context) {
+  const { file, scope } = context;
+  return {
+    file: {
+      id: file.id,
+      customer: file.name,
+      address: file.address,
+      carrier: file.carrier,
+      policyNumber: file.policyNumber,
+      claimNumber: file.claimNumber,
+      dateOfLoss: file.dateOfLoss,
+      typeOfLoss: file.typeOfLoss,
+      status: file.status,
+      contact: scope.contact,
+      adjuster: {
+        name: file.adjusterName,
+        phone: file.adjusterPhone,
+        email: file.adjusterEmail
+      }
+    },
+    evidence: {
+      categories: [],
+      documents: [],
+      notes: [],
+      tasks: []
+    },
+    captured: {},
+    overrides: {}
+  };
+}
+
+function hcnClaimRelevantFileState(context) {
+  const file = context.file;
+  return {
+    name: file.name,
+    status: file.status,
+    address: file.address,
+    phone: file.phone,
+    email: file.email,
+    carrier: file.carrier,
+    policyNumber: file.policyNumber,
+    claimNumber: file.claimNumber,
+    dateOfLoss: file.dateOfLoss,
+    typeOfLoss: file.typeOfLoss,
+    adjusterName: file.adjusterName,
+    adjusterPhone: file.adjusterPhone,
+    adjusterEmail: file.adjusterEmail,
+    assignedOwnerId: context.principal.jobNimbusOwnerId
+  };
+}
+
+function hcnClaimFileDisplayLabel(file) {
+  const label = `${file.number || ""} ${file.name || ""}`
+    .replace(/[\x00-\x1f\x7f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return [...(label || "Selected HCN file")].slice(0, 256).join("");
+}
+
+function hcnClaimFilingSessionBinding() {
+  return hcnSessionDerivedHash("claim-filing-plan:v1");
+}
+
+function hcnClaimWritebackSessionBinding() {
+  return hcnSessionDerivedHash("claim-filing-writeback-plan:v1");
+}
+
+function hcnClaimFilingEnvelope(value) {
+  return {
+    schema: "hcn.console.claim-filing.v1",
+    generatedAt: new Date().toISOString(),
+    ephemeral: true,
+    cachePolicy: "no_store",
+    authority: {
+      mode: "pilot_employee_exact_file_human_approval",
+      fileScope: "active_assigned_file_conversation_only",
+      modelCanPrepare: false,
+      modelCanExecute: false,
+      automaticExecution: false,
+      automaticRetry: false,
+      legacyClaimRoutesExposed: false
+    },
+    ...value
   };
 }
 
@@ -7453,8 +8871,9 @@ function privacy() {
     "This private platform helps authorized HCN employees work assigned JobNimbus files using connected JobNimbus, Google, Quo, and Groq services.",
     "HCN does not sell client or employee data.",
     "Requests are authenticated and scoped to the signed-in employee before client evidence is accessed.",
-    "Ask Thresher sends the prompt and only the allowlisted read-only evidence needed for that turn to HCN's dedicated Groq project using its OpenAI-compatible Responses API. HCN does not request provider-side response storage and keeps its own chat history only in bounded, session-scoped process memory.",
-    "Groq project data controls and retention terms still apply; disabling response storage alone is not a zero-retention guarantee.",
+    "Ask Thresher sends the prompt and the necessary allowlisted read-only evidence for that turn to HCN's dedicated Groq project using its OpenAI-compatible Responses API. Each model request explicitly requests store:false.",
+    "HCN stores employee-visible transcripts in a durable, encrypted, principal-scoped HCN store and sends only bounded recent transcript replay on later model turns.",
+    "Groq project Data Controls and retention terms still apply. Sending store:false does not establish zero data retention; ZDR must be separately enabled and attested for the dedicated HCN Groq project.",
     "Provider credentials are stored server-side in Render environment variables or encrypted HCN stores and are never returned to the browser.",
     "Thresher's model tools are strictly read-only and cannot even create an HCN action plan. Client changes, drafts, sends, texts, and scheduling updates remain separate platform workflows requiring review and explicit human approval."
   ].join("\n");
@@ -9926,23 +11345,23 @@ async function latestCallbackContinuation(originalCallId) {
 
 async function retellApi(method, endpoint, body) {
   if (!RETELL_API_KEY) badRequest("RETELL_API_KEY is not configured.");
-  const response = await fetch(`${RETELL_API_BASE_URL}${endpoint}`, {
-    method,
-    headers: {
-      authorization: `Bearer ${RETELL_API_KEY}`,
-      "content-type": "application/json"
+  return fetchBoundedJson(
+    fetch,
+    `${RETELL_API_BASE_URL}${endpoint}`,
+    {
+      method,
+      headers: {
+        authorization: `Bearer ${RETELL_API_KEY}`,
+        "content-type": "application/json"
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
     },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  });
-  const text = await response.text();
-  let payload;
-  try { payload = text ? JSON.parse(text) : {}; } catch { payload = { raw: text.slice(0, 500) }; }
-  if (!response.ok) {
-    const error = new Error(`Retell API ${response.status}: ${JSON.stringify(payload).slice(0, 500)}`);
-    error.statusCode = response.status;
-    throw error;
-  }
-  return payload;
+    {
+      timeoutMs: RETELL_API_TIMEOUT_MS,
+      maxBytes: 16 * 1024 * 1024,
+      errorCode: "RETELL_REQUEST_FAILED"
+    }
+  );
 }
 
 async function buildContactUpdatePlan(contact, update) {
@@ -15403,7 +16822,10 @@ function fieldValue(record, names) {
   return "";
 }
 
-function compactContact(contact) {
+function compactContact(contact, fieldMapping = null) {
+  const mapped = fieldMapping?.configured === true
+    ? fieldMapping.fields
+    : {};
   return {
     id: contact.jnid || contact.id,
     number: contact.number || String(contact.recid || ""),
@@ -15413,13 +16835,13 @@ function compactContact(contact) {
     phone: contact.mobile_phone || contact.home_phone || contact.work_phone || "",
     email: contact.email || "",
     carrier: fieldValue(contact, ["Insurance Company", "Carrier", "insurance_company", "cf_string_1"]),
-    claimNumber: fieldValue(contact, ["Claim #", "Claim Number", "claim_number", "cf_string_10", "cf_string_2"]),
+    claimNumber: fieldValue(contact, [mapped.claimNumber, "Claim #", "Claim Number", "claim_number", "cf_string_10", "cf_string_2"].filter(Boolean)),
     policyNumber: fieldValue(contact, ["Policy #", "Policy Number", "policy_number", "cf_string_4", "cf_string_3"]),
     typeOfLoss: fieldValue(contact, ["Type Of Loss", "Type of Loss", "Cause of Loss", "cf_string_5"]),
     dateOfLoss: fieldValue(contact, ["Date of Loss", "DOL", "cf_date_1"]),
-    adjusterName: fieldValue(contact, ["Carrier DA", "Carrier Adjuster", "Adjuster", "cf_string_7"]),
-    adjusterPhone: fieldValue(contact, ["Carrier DA Contact #", "Adjuster Phone", "cf_string_8"]),
-    adjusterEmail: fieldValue(contact, ["Carrier DA Email", "Adjuster Email", "cf_string_9"])
+    adjusterName: fieldValue(contact, [mapped.adjusterName, "Carrier DA", "Carrier Adjuster", "Adjuster", "cf_string_7"].filter(Boolean)),
+    adjusterPhone: fieldValue(contact, [mapped.adjusterPhone, "Carrier DA Contact #", "Adjuster Phone", "cf_string_8"].filter(Boolean)),
+    adjusterEmail: fieldValue(contact, [mapped.adjusterEmail, "Carrier DA Email", "Adjuster Email", "cf_string_9"].filter(Boolean))
   };
 }
 
@@ -16339,6 +17761,17 @@ function redactSensitiveText(value) {
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [REDACTED]")
     .replace(/\b(?:gsk|sk|key|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]");
+}
+
+function hcnResolveClaimWritebackStatus(writeback, knownStatusNames) {
+  if (!writeback?.ready || !writeback.status) return writeback;
+  return Object.freeze({
+    ...writeback,
+    status: resolveWorkflowStatusName(
+      writeback.status,
+      knownStatusNames
+    )
+  });
 }
 
 function authorized(req) {

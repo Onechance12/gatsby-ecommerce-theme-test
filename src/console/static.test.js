@@ -420,7 +420,9 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /id="assistant-restore-chat"/);
   assert.match(html, /<dialog id="assistant-new-dialog"/);
   assert.match(html, /<dialog id="assistant-rename-dialog"/);
-  assert.match(html, /Chats are saved securely inside HCN\./);
+  assert.match(html, /Chats are encrypted and saved inside HCN\./);
+  assert.match(html, /necessary retrieved excerpts are sent[\s\S]*Groq model provider/);
+  assert.match(html, /HCN makes no retention promise/);
   assert.match(html, /id="file-start-chat"/);
   assert.match(html, /id="assistant-mode"[\s\S]*<legend>Thinking mode<\/legend>/);
   assert.match(
@@ -610,7 +612,19 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
   assert.match(html, /data-chat-filter="sweep"[\s\S]*>Sweeps<\/button>/);
   assert.match(html, /data-chat-filter="general"[\s\S]*>General<\/button>/);
   assert.match(html, /data-chat-filter="archived"[\s\S]*>Archived<\/button>/);
-  assert.match(html, /Chats are saved securely inside HCN\./);
+  assert.match(html, /Chats are encrypted and saved inside HCN\./);
+  assert.match(
+    script,
+    /const conversationContextLocked =[\s\S]*state\.assistantLoading \|\| state\.assistantClaimLoading;[\s\S]*\.assistant-conversation-select, \.assistant-conversation-more/
+  );
+  assert.match(
+    script,
+    /const responseMatchesSelectedConversation = \([\s\S]*current\.conversationRef === turn\.conversationRef[\s\S]*state\.assistantConversationRef === turn\.conversationRef[\s\S]*\);/
+  );
+  assert.match(
+    script,
+    /if \(responseMatchesSelectedConversation\) \{[\s\S]*appendAssistantMessage\("assistant", turn\.message[\s\S]*The reply was saved to its original chat/
+  );
   assert.match(
     script,
     /function openAssistantNewDialog\(\) \{[\s\S]*toggleAssistantDrawer\(false\);[\s\S]*\.showModal\(\)/
@@ -625,6 +639,91 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
   assert.doesNotMatch(worker, /assistant\/conversations|assistant\/turns/);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
+});
+
+test("exact-file claim filing is pilot-hidden, approval-gated, and provider-opaque", async () => {
+  const [htmlAsset, scriptAsset, workerAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/sw.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const worker = workerAsset.body.toString("utf8");
+
+  assert.match(
+    html,
+    /id="assistant-claim-workflow"[\s\S]*aria-labelledby="assistant-claim-title"[\s\S]*hidden/
+  );
+  for (const id of [
+    "assistant-claim-prepare-form",
+    "assistant-claim-injuries",
+    "assistant-claim-call-review",
+    "assistant-claim-call-approve",
+    "assistant-claim-call-execute",
+    "assistant-claim-result",
+    "assistant-claim-result-confirm",
+    "assistant-claim-writeback-form",
+    "assistant-claim-writeback-approve",
+    "assistant-claim-writeback-execute"
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /value="injuries_reported">Injuries reported[^<]*stop/);
+  assert.match(html, /approve one carrier call/);
+  assert.match(html, /actual call transcript shown above/);
+  assert.doesNotMatch(html, /Carrier phone override/);
+  assert.match(html, /approve this exact JobNimbus update/);
+
+  const endpoints = [
+    ["claimFilingStatus", "status"],
+    ["claimFilingPrepare", "prepare"],
+    ["claimFilingExecute", "execute"],
+    ["claimFilingResult", "result"],
+    ["claimWritebackPrepare", "writeback/prepare"],
+    ["claimWritebackExecute", "writeback/execute"]
+  ];
+  for (const [binding, suffix] of endpoints) {
+    assert.match(
+      script,
+      new RegExp(
+        `${binding}: "/hcn/api/v1/claim-filings/${suffix.replace("/", "\\/")}"`
+      )
+    );
+    assert.match(script, new RegExp(`ENDPOINTS\\.${binding}`));
+  }
+
+  assert.match(
+    script,
+    /function assistantClaimScope\(\)[\s\S]*conversation\.kind !== "file"[\s\S]*conversation\.state !== "active"[\s\S]*CLAIM_FILE_REF\.test\(fileRef\)/
+  );
+  assert.match(
+    script,
+    /ENDPOINTS\.claimFilingStatus,[\s\S]*conversationRef: scope\.conversationRef,[\s\S]*fileRef: scope\.fileRef/
+  );
+  assert.match(
+    script,
+    /state\.assistantClaimStatus\.eligible[\s\S]*assistant-claim-workflow"\]\.hidden/
+  );
+  assert.match(
+    script,
+    /assistant-claim-call-approve"\]\.checked[\s\S]*ENDPOINTS\.claimFilingExecute/
+  );
+  assert.match(
+    script,
+    /assistant-claim-result-confirm"\]\.checked[\s\S]*ENDPOINTS\.claimWritebackPrepare/
+  );
+  assert.match(
+    script,
+    /assistant-claim-writeback-approve"\]\.checked[\s\S]*ENDPOINTS\.claimWritebackExecute/
+  );
+  assert.match(script, /Do not retry automatically/);
+  assert.match(script, /model analyzed; human confirmation required/);
+  assert.match(script, /Fresh exact-field readback required: Yes/);
+  assert.match(script, /state\.assistantClaimController\.abort\(\)/);
+  assert.doesNotMatch(script, /["']\/claim-filing\//);
+  assert.doesNotMatch(script, /call_id|providerCallId|retellCallId/);
+  assert.doesNotMatch(worker, /claim-filings/);
 });
 
 test("Ask Thresher accepts only the exact bounded reasoning-routing contract", async () => {
@@ -1332,11 +1431,19 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.match(html, /<strong>HCN Work Center<\/strong>/);
   assert.match(html, /Ask Thresher/);
   assert.match(html, /aria-live="polite"[\s\S]*id="home-next-action"/);
-  assert.equal((html.match(/data-assistant-starter=/g) || []).length, 6);
-  assert.match(html, /data-assistant-starter="Show my assigned Work Center\."/);
-  assert.match(html, /data-assistant-direct="true"/);
+  assert.equal((html.match(/data-assistant-starter=/g) || []).length, 4);
+  assert.equal(
+    (html.match(/class="assistant-starter"\s+href="#work-center"/g) || []).length,
+    2
+  );
+  assert.match(html, /href="#work-center"[\s\S]*>Work my files<\/a>/);
+  assert.match(html, /data-assistant-kinds="general"/);
+  assert.match(html, /data-assistant-kinds="file"/);
+  assert.match(html, /data-assistant-kinds="sweep"/);
   assert.match(html, /data-assistant-starter="Show me my neglected files/);
   assert.match(html, /data-assistant-starter="Review my recent file-related communications/);
+  assert.match(script, /function syncAssistantStarters\(kind, hasMessages\)/);
+  assert.match(script, /allowedKinds\.includes\(normalizedKind\)/);
   assert.match(script, /setConnection\("good", "System ready"\)/);
   assert.match(html, /Richard’s 10 × 3 report/);
   assert.match(

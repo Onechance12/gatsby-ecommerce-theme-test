@@ -16,6 +16,12 @@
     assistantConversationRename: "/hcn/api/v1/assistant/conversations/rename",
     assistantConversationArchive: "/hcn/api/v1/assistant/conversations/archive",
     assistantConversationRestore: "/hcn/api/v1/assistant/conversations/restore",
+    claimFilingStatus: "/hcn/api/v1/claim-filings/status",
+    claimFilingPrepare: "/hcn/api/v1/claim-filings/prepare",
+    claimFilingExecute: "/hcn/api/v1/claim-filings/execute",
+    claimFilingResult: "/hcn/api/v1/claim-filings/result",
+    claimWritebackPrepare: "/hcn/api/v1/claim-filings/writeback/prepare",
+    claimWritebackExecute: "/hcn/api/v1/claim-filings/writeback/execute",
     managementSweep: "/hcn/api/v1/management-sweep",
     teamInvitationList: "/hcn/api/v1/team/invitations/list",
     teamInvitationPrepare: "/hcn/api/v1/team/invitations/prepare",
@@ -39,6 +45,10 @@
   const ASSISTANT_CONVERSATION_MANAGE_CAPABILITY =
     "hcn.assistant.conversations.manage";
   const ASSISTANT_CONVERSATION_REF = /^conversation_[a-f0-9]{32}$/;
+  const CLAIM_FILE_REF = /^subject_[a-f0-9]{32}$/;
+  const CLAIM_PLAN_ID = /^plan_[a-f0-9]{32}$/;
+  const CLAIM_CALL_REF = /^claim_call_[a-f0-9]{32}$/;
+  const CLAIM_DIGEST = /^[a-f0-9]{64}$/;
   const ASSISTANT_MESSAGE_REF = /^message_[a-f0-9]{32}$/;
   const ASSISTANT_CONVERSATION_KINDS = new Set([
     "general",
@@ -356,6 +366,15 @@
     assistantConversationFilter: "active",
     assistantDrawerOpen: false,
     assistantDrawerReturnFocus: null,
+    assistantClaimController: null,
+    assistantClaimLoading: false,
+    assistantClaimStatus: null,
+    assistantClaimPlan: null,
+    assistantClaimCallPlanId: "",
+    assistantClaimCallRef: "",
+    assistantClaimResult: null,
+    assistantClaimWritebackPlan: null,
+    assistantClaimScopeKey: "",
     leavingForLogin: false,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
@@ -445,6 +464,35 @@
       "assistant-pilot-route",
       "assistant-pilot-sources",
       "assistant-pilot-authority",
+      "assistant-claim-workflow",
+      "assistant-claim-state",
+      "assistant-claim-prepare-form",
+      "assistant-claim-damage-opening",
+      "assistant-claim-damage-details",
+      "assistant-claim-injuries",
+      "assistant-claim-livable",
+      "assistant-claim-repairs",
+      "assistant-claim-contractor",
+      "assistant-claim-prepare",
+      "assistant-claim-call-review",
+      "assistant-claim-call-review-body",
+      "assistant-claim-call-approve",
+      "assistant-claim-call-execute",
+      "assistant-claim-result",
+      "assistant-claim-result-refresh",
+      "assistant-claim-result-body",
+      "assistant-claim-writeback-form",
+      "assistant-claim-outcome",
+      "assistant-claim-number",
+      "assistant-claim-adjuster-name",
+      "assistant-claim-adjuster-phone",
+      "assistant-claim-adjuster-email",
+      "assistant-claim-result-confirm",
+      "assistant-claim-writeback-prepare",
+      "assistant-claim-writeback-review",
+      "assistant-claim-writeback-review-body",
+      "assistant-claim-writeback-approve",
+      "assistant-claim-writeback-execute",
       "management-sweep-refresh",
       "management-sweep-hero-message",
       "management-sweep-status",
@@ -683,6 +731,38 @@
       }
     });
     elements["assistant-form"].addEventListener("submit", submitAssistantTurn);
+    elements["assistant-claim-prepare-form"].addEventListener(
+      "submit",
+      prepareAssistantClaimFiling
+    );
+    elements["assistant-claim-call-approve"].addEventListener(
+      "change",
+      syncAssistantClaimControls
+    );
+    elements["assistant-claim-call-execute"].addEventListener(
+      "click",
+      executeAssistantClaimCall
+    );
+    elements["assistant-claim-result-refresh"].addEventListener(
+      "click",
+      loadAssistantClaimResult
+    );
+    elements["assistant-claim-result-confirm"].addEventListener(
+      "change",
+      syncAssistantClaimControls
+    );
+    elements["assistant-claim-writeback-form"].addEventListener(
+      "submit",
+      prepareAssistantClaimWriteback
+    );
+    elements["assistant-claim-writeback-approve"].addEventListener(
+      "change",
+      syncAssistantClaimControls
+    );
+    elements["assistant-claim-writeback-execute"].addEventListener(
+      "click",
+      executeAssistantClaimWriteback
+    );
     elements["assistant-load-older"].addEventListener(
       "click",
       loadOlderAssistantMessages
@@ -1461,6 +1541,7 @@
     ) {
       return;
     }
+    resetAssistantClaimWorkflow();
     const listed = (Array.isArray(state.assistantConversations)
       ? state.assistantConversations
       : []).find(function (conversation) {
@@ -1524,6 +1605,7 @@
       renderAssistantConversation();
       renderAssistantConversationList();
       toggleAssistantDrawer(false);
+      loadAssistantClaimStatus();
     } catch (error) {
       if (controller.signal.aborted) return;
       if (isAuthorizationStatus(error)) {
@@ -1746,6 +1828,7 @@
     row.setAttribute("role", "listitem");
     select.type = "button";
     select.className = "assistant-conversation-select";
+    select.disabled = state.assistantLoading;
     select.setAttribute(
       "aria-current",
       conversation.conversationRef === state.assistantConversationRef
@@ -1753,6 +1836,7 @@
         : "false"
     );
     select.addEventListener("click", function () {
+      if (state.assistantLoading) return;
       loadAssistantConversation(conversation.conversationRef);
     });
     setText(title, conversation.title);
@@ -1764,10 +1848,12 @@
     select.append(title, meta);
     more.type = "button";
     more.className = "assistant-conversation-more";
+    more.disabled = state.assistantLoading;
     more.setAttribute("aria-label", "Open actions for " + conversation.title);
     more.setAttribute("title", "Open chat actions");
     setText(more, "•••");
     more.addEventListener("click", async function () {
+      if (state.assistantLoading) return;
       await loadAssistantConversation(conversation.conversationRef);
       elements["assistant-rename-chat"].focus();
     });
@@ -1817,6 +1903,22 @@
     return "General";
   }
 
+  function syncAssistantStarters(kind, hasMessages) {
+    const normalizedKind = ["file", "sweep"].includes(kind)
+      ? kind
+      : "general";
+    let visibleCount = 0;
+    document.querySelectorAll("[data-assistant-kinds]").forEach(function (starter) {
+      const allowedKinds = String(starter.dataset.assistantKinds || "")
+        .split(/\s+/)
+        .filter(Boolean);
+      const visible = !hasMessages && allowedKinds.includes(normalizedKind);
+      starter.hidden = !visible;
+      if (visible) visibleCount += 1;
+    });
+    elements["assistant-starters"].hidden = hasMessages || visibleCount === 0;
+  }
+
   function renderAssistantConversation() {
     const detail = record(state.assistantConversation);
     const conversation = record(detail.conversation);
@@ -1829,7 +1931,7 @@
       );
       setText(elements["assistant-current-title"], "Choose or start a chat");
       setText(elements["assistant-current-kind"], "General");
-      elements["assistant-starters"].hidden = false;
+      syncAssistantStarters("general", false);
       syncAssistantConversationControls();
       return;
     }
@@ -1855,7 +1957,7 @@
         });
       });
     }
-    elements["assistant-starters"].hidden = messages.length > 0;
+    syncAssistantStarters(conversation.kind, messages.length > 0);
     const page = record(detail.page);
     const hasOlder = Number.isSafeInteger(page.offset) && page.offset > 0;
     elements["assistant-load-older"].hidden = !hasOlder;
@@ -1868,6 +1970,7 @@
   }
 
   function clearSelectedAssistantConversation() {
+    resetAssistantClaimWorkflow();
     if (state.assistantConversationDetailController) {
       state.assistantConversationDetailController.abort();
       state.assistantConversationDetailController = null;
@@ -1888,8 +1991,21 @@
     const hasConversation = ASSISTANT_CONVERSATION_REF.test(
       conversation.conversationRef || ""
     );
+    const conversationContextLocked =
+      state.assistantLoading || state.assistantClaimLoading;
     const canManage = hasAssistantConversationManageAuthority()
-      && !state.assistantConversationMutationLoading;
+      && !state.assistantConversationMutationLoading
+      && !conversationContextLocked;
+    elements["assistant-chat-filters"].querySelectorAll(
+      "[data-chat-filter]"
+    ).forEach(function (button) {
+      button.disabled = conversationContextLocked;
+    });
+    elements["assistant-conversation-list"].querySelectorAll(
+      ".assistant-conversation-select, .assistant-conversation-more"
+    ).forEach(function (button) {
+      button.disabled = conversationContextLocked;
+    });
     elements["assistant-new-chat"].disabled = !canManage;
     elements["assistant-new-client"].disabled = !(
       canManage && hasWorkCenterAuthority()
@@ -1930,8 +2046,646 @@
     );
   }
 
+  function assistantClaimScope() {
+    const conversation = currentAssistantConversation();
+    const conversationRef = String(conversation.conversationRef || "");
+    const fileRef = String(conversation.fileRef || "");
+    if (
+      conversation.kind !== "file"
+      || conversation.state !== "active"
+      || !ASSISTANT_CONVERSATION_REF.test(conversationRef)
+      || !CLAIM_FILE_REF.test(fileRef)
+    ) {
+      return null;
+    }
+    return {
+      conversationRef: conversationRef,
+      fileRef: fileRef,
+      key: conversationRef + ":" + fileRef
+    };
+  }
+
+  function resetAssistantClaimWorkflow() {
+    if (state.assistantClaimController) {
+      state.assistantClaimController.abort();
+      state.assistantClaimController = null;
+    }
+    state.assistantClaimLoading = false;
+    state.assistantClaimStatus = null;
+    state.assistantClaimPlan = null;
+    state.assistantClaimCallPlanId = "";
+    state.assistantClaimCallRef = "";
+    state.assistantClaimResult = null;
+    state.assistantClaimWritebackPlan = null;
+    state.assistantClaimScopeKey = "";
+    elements["assistant-claim-prepare-form"].reset();
+    elements["assistant-claim-writeback-form"].reset();
+    elements["assistant-claim-workflow"].hidden = true;
+    elements["assistant-claim-call-review"].hidden = true;
+    elements["assistant-claim-result"].hidden = true;
+    elements["assistant-claim-writeback-form"].hidden = true;
+    elements["assistant-claim-writeback-review"].hidden = true;
+    setText(elements["assistant-claim-call-review-body"], "");
+    setText(elements["assistant-claim-result-body"], "");
+    setText(elements["assistant-claim-writeback-review-body"], "");
+    syncAssistantClaimControls();
+  }
+
+  async function loadAssistantClaimStatus() {
+    const scope = assistantClaimScope();
+    if (!scope || !hasBrowserAuthority()) {
+      resetAssistantClaimWorkflow();
+      return;
+    }
+    if (state.assistantClaimController) state.assistantClaimController.abort();
+    const controller = new AbortController();
+    state.assistantClaimController = controller;
+    state.assistantClaimLoading = true;
+    state.assistantClaimScopeKey = scope.key;
+    syncAssistantClaimControls();
+    try {
+      const response = await postOperationalJson(
+        ENDPOINTS.claimFilingStatus,
+        {
+          conversationRef: scope.conversationRef,
+          fileRef: scope.fileRef
+        },
+        controller.signal
+      );
+      if (
+        controller.signal.aborted
+        || assistantClaimScope()?.key !== scope.key
+        || response.fileRef !== scope.fileRef
+      ) {
+        return;
+      }
+      state.assistantClaimStatus = {
+        eligible: response.eligible === true,
+        callsEnabled: response.callsEnabled === true,
+        writebackConfigured: response.writebackConfigured === true
+      };
+      const recovery = record(response.recovery);
+      if (
+        recovery.state === "available"
+        && CLAIM_PLAN_ID.test(String(recovery.planId || ""))
+        && CLAIM_CALL_REF.test(String(recovery.callRef || ""))
+      ) {
+        state.assistantClaimPlan = null;
+        state.assistantClaimCallPlanId = recovery.planId;
+        state.assistantClaimCallRef = recovery.callRef;
+        elements["assistant-claim-result"].hidden = false;
+        setText(
+          elements["assistant-claim-result-body"],
+          "A previously accepted carrier call was restored. Check its result to continue review."
+        );
+      }
+      elements["assistant-claim-workflow"].hidden =
+        state.assistantClaimStatus.eligible !== true;
+      setText(
+        elements["assistant-claim-state"],
+        state.assistantClaimStatus.callsEnabled
+          ? "Pilot ready"
+          : "Call gate off"
+      );
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      state.assistantClaimStatus = null;
+      elements["assistant-claim-workflow"].hidden = true;
+      if (statusOf(error) === 401) handleOperationalAuthLoss();
+    } finally {
+      if (state.assistantClaimController === controller) {
+        state.assistantClaimController = null;
+        state.assistantClaimLoading = false;
+        syncAssistantClaimControls();
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  function assistantClaimConfirmations() {
+    return {
+      damageOpening: boundedString(
+        elements["assistant-claim-damage-opening"].value,
+        600
+      ).trim(),
+      damageDetails: boundedString(
+        elements["assistant-claim-damage-details"].value,
+        1200
+      ).split(/[;\n]+/).map(function (item) {
+        return item.trim();
+      }).filter(Boolean),
+      injuries: String(elements["assistant-claim-injuries"].value || ""),
+      homeLivable: String(elements["assistant-claim-livable"].value || ""),
+      temporaryRepairs: String(elements["assistant-claim-repairs"].value || ""),
+      contractorHired: String(elements["assistant-claim-contractor"].value || ""),
+      carrierPhone: ""
+    };
+  }
+
+  async function prepareAssistantClaimFiling(event) {
+    event.preventDefault();
+    const scope = assistantClaimScope();
+    if (
+      state.assistantClaimLoading
+      || !scope
+      || state.assistantClaimStatus?.eligible !== true
+    ) {
+      return;
+    }
+    const confirmations = assistantClaimConfirmations();
+    if (
+      !confirmations.damageOpening
+      || !confirmations.damageDetails.length
+      || !confirmations.injuries
+      || !confirmations.homeLivable
+      || !confirmations.temporaryRepairs
+      || !confirmations.contractorHired
+    ) {
+      notice(
+        elements["assistant-alert"],
+        "Complete every carrier-call confirmation before reviewing the plan.",
+        "warn"
+      );
+      return;
+    }
+    await runAssistantClaimRequest(
+      scope,
+      async function (controller) {
+        const response = await postOperationalJson(
+          ENDPOINTS.claimFilingPrepare,
+          {
+            conversationRef: scope.conversationRef,
+            fileRef: scope.fileRef,
+            confirmations: confirmations
+          },
+          controller.signal
+        );
+        state.assistantClaimPlan = response.plan || null;
+        state.assistantClaimCallPlanId = "";
+        state.assistantClaimCallRef = "";
+        state.assistantClaimResult = null;
+        state.assistantClaimWritebackPlan = null;
+        renderAssistantClaimCallReview(response);
+        elements["assistant-claim-result"].hidden = true;
+        elements["assistant-claim-writeback-review"].hidden = true;
+        notice(
+          elements["assistant-alert"],
+          response.plan
+            ? "The exact carrier-call plan is ready for your review."
+            : "The claim is not ready. Review the missing or escalation items.",
+          response.plan ? "good" : "warn"
+        );
+      }
+    );
+  }
+
+  function renderAssistantClaimCallReview(response) {
+    const review = record(response.review);
+    const lines = [
+      review.ready === true ? "READY FOR REVIEW" : "NOT READY",
+      "",
+      "File: " + claimFileLabel(review.file),
+      "Objective: " + displayClaimValue(review.objective),
+      "Carrier: " + displayClaimValue(record(review.carrierDestination).carrier),
+      "Destination: " + displayClaimValue(record(review.carrierDestination).phone),
+      "",
+      "Verified JobNimbus facts",
+      ...claimObjectLines(review.verifiedFacts),
+      "",
+      "Employee-confirmed facts",
+      ...claimObjectLines(review.employeeConfirmedFacts)
+    ];
+    const missing = Array.isArray(review.missingFacts) ? review.missingFacts : [];
+    if (missing.length) {
+      lines.push("", "Missing or blocking");
+      missing.forEach(function (item) {
+        lines.push("? " + displayClaimValue(
+          record(item).label || record(item).code || item
+        ));
+      });
+    }
+    const stopRules = Array.isArray(review.stopRules) ? review.stopRules : [];
+    if (stopRules.length) {
+      lines.push("", "Stop rules");
+      stopRules.forEach(function (rule) {
+        lines.push("? " + displayClaimValue(rule));
+      });
+    }
+    const digest = String(review.planDigest || "");
+    if (digest) lines.push("", "Plan digest: " + digest);
+    setText(elements["assistant-claim-call-review-body"], lines.join("\n"));
+    elements["assistant-claim-call-review"].hidden = false;
+    elements["assistant-claim-call-approve"].checked = false;
+    syncAssistantClaimControls();
+  }
+
+  async function executeAssistantClaimCall() {
+    const scope = assistantClaimScope();
+    const plan = record(state.assistantClaimPlan);
+    if (
+      state.assistantClaimLoading
+      || !scope
+      || !elements["assistant-claim-call-approve"].checked
+      || !CLAIM_PLAN_ID.test(String(plan.planId || ""))
+      || !CLAIM_DIGEST.test(String(plan.approvalDigest || ""))
+    ) {
+      return;
+    }
+    const callPlanId = plan.planId;
+    await runAssistantClaimRequest(
+      scope,
+      async function (controller) {
+        const response = await postOperationalJson(
+          ENDPOINTS.claimFilingExecute,
+          {
+            conversationRef: scope.conversationRef,
+            fileRef: scope.fileRef,
+            planId: plan.planId,
+            approvalDigest: plan.approvalDigest
+          },
+          controller.signal
+        );
+        state.assistantClaimPlan = null;
+        state.assistantClaimCallPlanId = callPlanId;
+        state.assistantClaimCallRef = CLAIM_CALL_REF.test(
+          String(response.callRef || "")
+        ) ? response.callRef : "";
+        elements["assistant-claim-call-approve"].checked = false;
+        elements["assistant-claim-result"].hidden = false;
+        setText(
+          elements["assistant-claim-result-body"],
+          state.assistantClaimCallRef
+            ? "The provider accepted the call. Check the result after it ends."
+            : "The call outcome requires reconciliation. Do not retry automatically."
+        );
+        notice(
+          elements["assistant-alert"],
+          state.assistantClaimCallRef
+            ? "Call accepted. Result review is now available."
+            : "Call outcome is uncertain. Reconcile before any retry.",
+          state.assistantClaimCallRef ? "good" : "warn"
+        );
+      }
+    );
+  }
+
+  async function loadAssistantClaimResult() {
+    const scope = assistantClaimScope();
+    if (
+      state.assistantClaimLoading
+      || !scope
+      || !CLAIM_PLAN_ID.test(state.assistantClaimCallPlanId)
+      || !CLAIM_CALL_REF.test(state.assistantClaimCallRef)
+    ) {
+      return;
+    }
+    await runAssistantClaimRequest(
+      scope,
+      async function (controller) {
+        const response = await postOperationalJson(
+          ENDPOINTS.claimFilingResult,
+          {
+            conversationRef: scope.conversationRef,
+            fileRef: scope.fileRef,
+            planId: state.assistantClaimCallPlanId,
+            callRef: state.assistantClaimCallRef
+          },
+          controller.signal
+        );
+        state.assistantClaimResult = response.result || null;
+        renderAssistantClaimResult(response.result);
+        notice(
+          elements["assistant-alert"],
+          response.result?.terminal === false
+            ? "The call is still in progress. Check again later."
+            : "Terminal call result loaded for human review.",
+          response.result?.terminal === false ? "neutral" : "good"
+        );
+      }
+    );
+  }
+
+  function renderAssistantClaimResult(value) {
+    const result = record(value);
+    const suggestions = record(result.modelAnalyzedSuggestions);
+    const lines = [
+      result.terminal === false ? "CALL IN PROGRESS" : "TERMINAL CALL RESULT",
+      "",
+      "Status: " + displayClaimValue(result.callStatus),
+      "Disconnected because: " + displayClaimValue(result.disconnectionReason),
+      "Automatic retry: No",
+      "Writeback authorized: No ? human review required"
+    ];
+    const outcome = record(result.outcomeSuggestion);
+    if (outcome.value) {
+      lines.push(
+        "",
+        "Model-analyzed outcome suggestion",
+        "? " + displayClaimValue(outcome.value) + " (not carrier-confirmed)"
+      );
+    }
+    const suggestionLines = claimSuggestionLines(suggestions);
+    if (suggestionLines.length) {
+      lines.push("", "Model-analyzed field suggestions", ...suggestionLines);
+    }
+    const guesses = Array.isArray(result.transcriptGuesses)
+      ? result.transcriptGuesses
+      : [];
+    if (guesses.length) {
+      lines.push("", "Transcript guesses ? do not write back");
+      guesses.forEach(function (guess) {
+        const item = record(guess);
+        lines.push(
+          "? " + displayClaimValue(item.label || item.field)
+            + ": " + displayClaimValue(item.value)
+        );
+      });
+    }
+    if (result.blocker) lines.push("", "Blocker: " + displayClaimValue(result.blocker));
+    if (result.callbackRequested === true) {
+      lines.push("", "Callback requested ? stop and reconcile; no automatic retry.");
+    }
+    if (result.evidenceDigest) {
+      lines.push("", "Evidence digest: " + displayClaimValue(result.evidenceDigest));
+    }
+    if (result.reviewTranscript) {
+      lines.push("", "ACTUAL CALL TRANSCRIPT — REVIEW BEFORE CONFIRMING", result.reviewTranscript);
+    }
+    setText(elements["assistant-claim-result-body"], lines.join("\n"));
+    elements["assistant-claim-result"].hidden = false;
+    const terminal = CLAIM_DIGEST.test(String(result.evidenceDigest || ""));
+    elements["assistant-claim-writeback-form"].hidden = !terminal;
+    if (terminal) {
+      elements["assistant-claim-outcome"].value = "";
+      elements["assistant-claim-number"].value = "";
+      elements["assistant-claim-adjuster-name"].value = "";
+      elements["assistant-claim-adjuster-phone"].value = "";
+      elements["assistant-claim-adjuster-email"].value = "";
+      elements["assistant-claim-result-confirm"].checked = false;
+    }
+    syncAssistantClaimControls();
+  }
+
+  async function prepareAssistantClaimWriteback(event) {
+    event.preventDefault();
+    const scope = assistantClaimScope();
+    const result = record(state.assistantClaimResult);
+    if (
+      state.assistantClaimLoading
+      || !scope
+      || !elements["assistant-claim-result-confirm"].checked
+      || !CLAIM_DIGEST.test(String(result.evidenceDigest || ""))
+    ) {
+      return;
+    }
+    const humanConfirmation = {
+      evidenceDigest: result.evidenceDigest,
+      reviewBasis: "reviewed_call_transcript",
+      outcome: String(elements["assistant-claim-outcome"].value || ""),
+      claimNumber: boundedString(elements["assistant-claim-number"].value, 120).trim(),
+      adjusterName: boundedString(
+        elements["assistant-claim-adjuster-name"].value,
+        160
+      ).trim(),
+      adjusterPhone: boundedString(
+        elements["assistant-claim-adjuster-phone"].value,
+        40
+      ).trim(),
+      adjusterEmail: boundedString(
+        elements["assistant-claim-adjuster-email"].value,
+        254
+      ).trim()
+    };
+    await runAssistantClaimRequest(
+      scope,
+      async function (controller) {
+        const response = await postOperationalJson(
+          ENDPOINTS.claimWritebackPrepare,
+          {
+            conversationRef: scope.conversationRef,
+            fileRef: scope.fileRef,
+            callPlanId: state.assistantClaimCallPlanId,
+            callRef: state.assistantClaimCallRef,
+            humanConfirmation: humanConfirmation
+          },
+          controller.signal
+        );
+        state.assistantClaimWritebackPlan = response.plan || null;
+        renderAssistantClaimWritebackReview(response);
+        notice(
+          elements["assistant-alert"],
+          response.plan
+            ? "The exact JobNimbus update is ready for separate approval."
+            : "JobNimbus writeback remains blocked. Review the listed blockers.",
+          response.plan ? "good" : "warn"
+        );
+      }
+    );
+  }
+
+  function renderAssistantClaimWritebackReview(response) {
+    const review = record(response.review);
+    const lines = [
+      review.ready === true ? "READY FOR APPROVAL" : "WRITEBACK BLOCKED",
+      "",
+      "File: " + claimFileLabel(review.file),
+      "Mapped fields",
+      ...claimObjectLines(review.mappedFields),
+      "",
+      "Status: " + displayClaimValue(review.status || "No status change"),
+      "Note: " + displayClaimValue(review.note),
+      "Fresh exact-field readback required: Yes"
+    ];
+    const blockers = Array.isArray(review.blockers) ? review.blockers : [];
+    if (blockers.length) {
+      lines.push("", "Blockers");
+      blockers.forEach(function (blocker) {
+        lines.push("? " + displayClaimValue(
+          record(blocker).message || record(blocker).code || blocker
+        ));
+      });
+    }
+    if (review.approvalDigest) {
+      lines.push("", "Approval digest: " + displayClaimValue(review.approvalDigest));
+    }
+    setText(elements["assistant-claim-writeback-review-body"], lines.join("\n"));
+    elements["assistant-claim-writeback-review"].hidden = false;
+    elements["assistant-claim-writeback-approve"].checked = false;
+    syncAssistantClaimControls();
+  }
+
+  async function executeAssistantClaimWriteback() {
+    const scope = assistantClaimScope();
+    const plan = record(state.assistantClaimWritebackPlan);
+    if (
+      state.assistantClaimLoading
+      || !scope
+      || !elements["assistant-claim-writeback-approve"].checked
+      || !CLAIM_PLAN_ID.test(String(plan.planId || ""))
+      || !CLAIM_DIGEST.test(String(plan.approvalDigest || ""))
+    ) {
+      return;
+    }
+    await runAssistantClaimRequest(
+      scope,
+      async function (controller) {
+        const response = await postOperationalJson(
+          ENDPOINTS.claimWritebackExecute,
+          {
+            conversationRef: scope.conversationRef,
+            fileRef: scope.fileRef,
+            planId: plan.planId,
+            approvalDigest: plan.approvalDigest
+          },
+          controller.signal
+        );
+        state.assistantClaimWritebackPlan = null;
+        elements["assistant-claim-writeback-approve"].checked = false;
+        const verified = response.verifiedByReadback === true;
+        notice(
+          elements["assistant-alert"],
+          verified
+            ? "JobNimbus claim fields and note were updated and verified by fresh readback."
+            : "JobNimbus writeback requires reconciliation. Do not retry automatically.",
+          verified ? "good" : "warn"
+        );
+        setText(
+          elements["assistant-claim-writeback-review-body"],
+          verified
+            ? "COMPLETE\n\nThe exact configured fields and note were verified in JobNimbus."
+            : "RECONCILIATION REQUIRED\n\nDo not retry automatically."
+        );
+      }
+    );
+  }
+
+  async function runAssistantClaimRequest(scope, operation) {
+    if (state.assistantClaimController) state.assistantClaimController.abort();
+    const controller = new AbortController();
+    state.assistantClaimController = controller;
+    state.assistantClaimLoading = true;
+    syncAssistantClaimControls();
+    syncAssistantConversationControls();
+    try {
+      await operation(controller);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (statusOf(error) === 401) {
+        handleOperationalAuthLoss();
+        return;
+      }
+      notice(
+        elements["assistant-alert"],
+        assistantClaimErrorMessage(error),
+        "bad"
+      );
+    } finally {
+      if (state.assistantClaimController === controller) {
+        state.assistantClaimController = null;
+        state.assistantClaimLoading = false;
+        syncAssistantClaimControls();
+        syncAssistantConversationControls();
+      }
+    }
+  }
+
+  function syncAssistantClaimControls() {
+    const loading = state.assistantClaimLoading;
+    const status = record(state.assistantClaimStatus);
+    const callPlan = record(state.assistantClaimPlan);
+    const result = record(state.assistantClaimResult);
+    const writebackPlan = record(state.assistantClaimWritebackPlan);
+    elements["assistant-claim-prepare-form"].querySelectorAll(
+      "input, select, textarea, button"
+    ).forEach(function (control) {
+      control.disabled = loading || status.eligible !== true;
+    });
+    elements["assistant-claim-call-approve"].disabled =
+      loading || !CLAIM_PLAN_ID.test(String(callPlan.planId || ""));
+    elements["assistant-claim-call-execute"].disabled = (
+      loading
+      || status.callsEnabled !== true
+      || !elements["assistant-claim-call-approve"].checked
+      || !CLAIM_PLAN_ID.test(String(callPlan.planId || ""))
+      || !CLAIM_DIGEST.test(String(callPlan.approvalDigest || ""))
+    );
+    elements["assistant-claim-result-refresh"].disabled = (
+      loading
+      || !CLAIM_PLAN_ID.test(state.assistantClaimCallPlanId)
+      || !CLAIM_CALL_REF.test(state.assistantClaimCallRef)
+    );
+    elements["assistant-claim-result-confirm"].disabled =
+      loading || !CLAIM_DIGEST.test(String(result.evidenceDigest || ""));
+    elements["assistant-claim-writeback-prepare"].disabled = (
+      loading
+      || !elements["assistant-claim-result-confirm"].checked
+      || !CLAIM_DIGEST.test(String(result.evidenceDigest || ""))
+    );
+    elements["assistant-claim-writeback-approve"].disabled =
+      loading || !CLAIM_PLAN_ID.test(String(writebackPlan.planId || ""));
+    elements["assistant-claim-writeback-execute"].disabled = (
+      loading
+      || !elements["assistant-claim-writeback-approve"].checked
+      || !CLAIM_PLAN_ID.test(String(writebackPlan.planId || ""))
+      || !CLAIM_DIGEST.test(String(writebackPlan.approvalDigest || ""))
+    );
+  }
+
+  function claimObjectLines(value) {
+    const object = record(value);
+    const entries = Object.entries(object);
+    if (!entries.length) return ["? None"];
+    return entries.map(function (entry) {
+      const raw = Array.isArray(entry[1]) ? entry[1].join("; ") : entry[1];
+      return "? " + humanize(entry[0]) + ": " + displayClaimValue(raw);
+    });
+  }
+
+  function claimSuggestionLines(suggestions) {
+    return Object.entries(record(suggestions)).map(function (entry) {
+      const suggestion = record(entry[1]);
+      return "? " + humanize(entry[0]) + ": "
+        + displayClaimValue(suggestion.value)
+        + " (model analyzed; human confirmation required)";
+    });
+  }
+
+  function claimFileLabel(value) {
+    const file = record(value);
+    return [
+      boundedString(file.jobNumber, 60),
+      boundedString(file.displayName, 160)
+    ].filter(Boolean).join(" ? ") || "Selected file";
+  }
+
+  function displayClaimValue(value) {
+    const text = Array.isArray(value)
+      ? value.join("; ")
+      : boundedString(value, 1200).trim();
+    return text || "Not provided";
+  }
+
+  function assistantClaimErrorMessage(error) {
+    const status = statusOf(error);
+    if (status === 403) {
+      return "This employee is not enabled for the internal claim-filing pilot.";
+    }
+    if (status === 404) {
+      return "This exact file is no longer assigned or available. Nothing was called or written.";
+    }
+    if (status === 409) {
+      return "The reviewed plan, assignment, or call evidence changed. Prepare a fresh plan; do not retry the old one.";
+    }
+    if (status === 503) {
+      return "The required provider gate, durable receipt, or verified JobNimbus mapping is unavailable.";
+    }
+    return "The claim workflow stopped safely. Nothing should be retried until the exact file state is rechecked.";
+  }
+
   function openAssistantNewDialog() {
-    if (!hasAssistantConversationManageAuthority()) return;
+    if (state.assistantLoading || !hasAssistantConversationManageAuthority()) {
+      return;
+    }
     toggleAssistantDrawer(false);
     elements["assistant-new-form"].reset();
     elements["assistant-new-name"].value = "";
@@ -2060,6 +2814,7 @@
   }
 
   function openAssistantRenameDialog() {
+    if (state.assistantLoading) return;
     const conversation = currentAssistantConversation();
     if (!conversation.conversationRef) return;
     elements["assistant-rename-name"].value = conversation.title;
@@ -2080,6 +2835,7 @@
   }
 
   async function archiveAssistantConversation() {
+    if (state.assistantLoading) return;
     const conversation = currentAssistantConversation();
     if (!conversation.conversationRef || conversation.state !== "active") return;
     if (!window.confirm("Archive this chat? You can restore it later.")) return;
@@ -2091,6 +2847,7 @@
   }
 
   async function restoreAssistantConversation() {
+    if (state.assistantLoading) return;
     const conversation = currentAssistantConversation();
     if (!conversation.conversationRef || conversation.state !== "archived") return;
     await mutateAssistantConversation(
@@ -2103,7 +2860,8 @@
   async function mutateAssistantConversation(endpoint, additional, success) {
     const conversation = currentAssistantConversation();
     if (
-      state.assistantConversationMutationLoading
+      state.assistantLoading
+      || state.assistantConversationMutationLoading
       || !hasAssistantConversationManageAuthority()
       || !ASSISTANT_CONVERSATION_REF.test(conversation.conversationRef || "")
     ) {
@@ -2173,6 +2931,7 @@
   }
 
   function selectAssistantConversationFilter(event) {
+    if (state.assistantLoading) return;
     const button = event.target.closest("[data-chat-filter]");
     if (!button) return;
     const filter = boundedString(button.dataset.chatFilter, 16);
@@ -2545,12 +3304,16 @@
       if (controller.signal.aborted) return;
       const turn = normalizeAssistantTurnResponse(response);
       pending.remove();
-      appendAssistantMessage("assistant", turn.message, {
-        createdAt: turn.generatedAt,
-        messageRef: turn.messageRef
-      });
       const current = currentAssistantConversation();
-      if (current.conversationRef === turn.conversationRef) {
+      const responseMatchesSelectedConversation = (
+        current.conversationRef === turn.conversationRef
+        && state.assistantConversationRef === turn.conversationRef
+      );
+      if (responseMatchesSelectedConversation) {
+        appendAssistantMessage("assistant", turn.message, {
+          createdAt: turn.generatedAt,
+          messageRef: turn.messageRef
+        });
         const updated = {
           ...current,
           revision: turn.revision,
@@ -2563,14 +3326,34 @@
         };
         upsertAssistantConversation(updated);
         renderAssistantConversationList();
+        renderAssistantPilot(turn);
+        notice(
+          elements["assistant-alert"],
+          "Thresher finished the read-only review.",
+          "good"
+        );
+        await loadAssistantConversation(turn.conversationRef);
+      } else {
+        const original = (Array.isArray(state.assistantConversations)
+          ? state.assistantConversations
+          : []).find(function (item) {
+          return item.conversationRef === turn.conversationRef;
+        });
+        if (original) {
+          upsertAssistantConversation({
+            ...original,
+            revision: turn.revision,
+            messageCount: original.messageCount + 2,
+            updatedAt: turn.generatedAt
+          });
+          renderAssistantConversationList();
+        }
+        notice(
+          elements["assistant-alert"],
+          "The reply was saved to its original chat. Open that chat to read it.",
+          "good"
+        );
       }
-      renderAssistantPilot(turn);
-      notice(
-        elements["assistant-alert"],
-        "Thresher finished the read-only review.",
-        "good"
-      );
-      await loadAssistantConversation(turn.conversationRef);
     } catch (error) {
       if (controller.signal.aborted) return;
       pending.remove();
@@ -2825,6 +3608,7 @@
   }
 
   function clearAssistantData(message) {
+    resetAssistantClaimWorkflow();
     if (state.assistantController) state.assistantController.abort();
     if (state.assistantConversationListController) {
       state.assistantConversationListController.abort();

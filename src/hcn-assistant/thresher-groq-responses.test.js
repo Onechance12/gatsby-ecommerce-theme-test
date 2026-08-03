@@ -45,10 +45,10 @@ test("Thresher AI adapter uses only the fixed Groq endpoint and model", async ()
   const body = JSON.parse(requests[0].options.body);
   assert.equal(body.model, THRESHER_AI_MODEL);
   assert.equal(body.parallel_tool_calls, false);
+  assert.equal(body.store, false);
   assert.equal(body.max_output_tokens, 1600);
   assert.deepEqual(body.reasoning, { effort: "low" });
   for (const forbidden of [
-    "store",
     "stream",
     "previous_response_id",
     "conversation",

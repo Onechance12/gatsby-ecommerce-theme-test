@@ -287,39 +287,181 @@
               <div id="assistant-starters" class="assistant-starters" aria-labelledby="assistant-starters-title">
                 <p id="assistant-starters-title">Start with one of these</p>
                 <div class="assistant-starter-grid">
+                  <a
+                    class="assistant-starter"
+                    href="#work-center"
+                    data-assistant-kinds="general"
+                  >Work my files</a>
+                  <a
+                    class="assistant-starter"
+                    href="#work-center"
+                    data-assistant-kinds="general"
+                  >Find a file</a>
                   <button
                     class="assistant-starter"
                     type="button"
-                    data-assistant-starter="Show my assigned Work Center."
-                    data-assistant-direct="true"
-                  >Work my files</button>
-                  <button
-                    class="assistant-starter"
-                    type="button"
-                    data-assistant-starter="Help me find a specific client file."
-                  >Find a file</button>
-                  <button
-                    class="assistant-starter"
-                    type="button"
+                    data-assistant-kinds="sweep"
                     data-assistant-starter="Show me my neglected files with the longest verified activity gaps."
                   >Show neglected files</button>
                   <button
                     class="assistant-starter"
                     type="button"
+                    data-assistant-kinds="file"
                     data-assistant-starter="Review my recent file-related communications and tell me what needs attention."
                   >Review communications</button>
                   <button
                     class="assistant-starter"
                     type="button"
+                    data-assistant-kinds="file"
                     data-assistant-starter="Help me draft a follow-up for a client file."
                   >Draft a follow-up</button>
                   <button
                     class="assistant-starter"
                     type="button"
+                    data-assistant-kinds="file"
                     data-assistant-starter="Help me review a file and prepare the next steps needed to file its claim."
                   >File a claim</button>
                 </div>
               </div>
+
+              <section
+                id="assistant-claim-workflow"
+                class="assistant-claim-workflow"
+                aria-labelledby="assistant-claim-title"
+                hidden
+              >
+                <div class="assistant-claim-heading">
+                  <div>
+                    <p class="eyebrow">Exact assigned file</p>
+                    <h3 id="assistant-claim-title">File this claim</h3>
+                  </div>
+                  <span id="assistant-claim-state" class="status-badge">Pilot</span>
+                </div>
+                <p class="assistant-claim-help">
+                  Confirm the facts the carrier will hear. Thresher prepares the
+                  call, but cannot approve or place it for you.
+                </p>
+
+                <form id="assistant-claim-prepare-form" class="assistant-claim-form" novalidate>
+                  <label class="assistant-claim-wide">
+                    <span>Damage opening</span>
+                    <textarea id="assistant-claim-damage-opening" rows="2" maxlength="600" required></textarea>
+                  </label>
+                  <label class="assistant-claim-wide">
+                    <span>Damage details</span>
+                    <textarea
+                      id="assistant-claim-damage-details"
+                      rows="2"
+                      maxlength="1200"
+                      placeholder="One verified detail per line"
+                      required
+                    ></textarea>
+                  </label>
+                  <label>
+                    <span>Injuries</span>
+                    <select id="assistant-claim-injuries" required>
+                      <option value="">Choose</option>
+                      <option value="no_injuries_reported">No injuries reported</option>
+                      <option value="injuries_reported">Injuries reported ? stop</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Home livable</span>
+                    <select id="assistant-claim-livable" required>
+                      <option value="">Choose</option>
+                      <option value="livable">Yes</option>
+                      <option value="not_livable">No</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Temporary repairs</span>
+                    <select id="assistant-claim-repairs" required>
+                      <option value="">Choose</option>
+                      <option value="none_made">None made</option>
+                      <option value="repairs_made">Repairs made</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Contractor hired</span>
+                    <select id="assistant-claim-contractor" required>
+                      <option value="">Choose</option>
+                      <option value="none_hired">No</option>
+                      <option value="contractor_hired">Yes</option>
+                    </select>
+                  </label>
+                  <button id="assistant-claim-prepare" class="button button-primary" type="submit">
+                    Review call plan
+                  </button>
+                </form>
+
+                <section id="assistant-claim-call-review" class="assistant-claim-step" hidden>
+                  <h4>Call plan</h4>
+                  <pre id="assistant-claim-call-review-body" class="assistant-claim-review"></pre>
+                  <label class="assistant-claim-approval">
+                    <input id="assistant-claim-call-approve" type="checkbox">
+                    <span>I reviewed this exact plan and approve one carrier call.</span>
+                  </label>
+                  <button id="assistant-claim-call-execute" class="button button-primary" type="button" disabled>
+                    Place approved call
+                  </button>
+                </section>
+
+                <section id="assistant-claim-result" class="assistant-claim-step" hidden>
+                  <div class="assistant-claim-step-heading">
+                    <h4>Call result</h4>
+                    <button id="assistant-claim-result-refresh" class="button button-surface button-compact" type="button">
+                      Check result
+                    </button>
+                  </div>
+                  <pre id="assistant-claim-result-body" class="assistant-claim-review"></pre>
+
+                  <form id="assistant-claim-writeback-form" class="assistant-claim-form" hidden novalidate>
+                    <label>
+                      <span>Confirmed outcome</span>
+                      <select id="assistant-claim-outcome" required>
+                        <option value="">Choose</option>
+                        <option value="claim_filed">New claim filed</option>
+                        <option value="existing_claim_confirmed">Existing claim confirmed</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Claim number</span>
+                      <input id="assistant-claim-number" type="text" maxlength="120" required>
+                    </label>
+                    <label>
+                      <span>Adjuster name</span>
+                      <input id="assistant-claim-adjuster-name" type="text" maxlength="160">
+                    </label>
+                    <label>
+                      <span>Adjuster phone</span>
+                      <input id="assistant-claim-adjuster-phone" type="tel" maxlength="40">
+                    </label>
+                    <label class="assistant-claim-wide">
+                      <span>Adjuster email</span>
+                      <input id="assistant-claim-adjuster-email" type="email" maxlength="254">
+                    </label>
+                    <label class="assistant-claim-approval assistant-claim-wide">
+                      <input id="assistant-claim-result-confirm" type="checkbox">
+                      <span>I reviewed the actual call transcript shown above and independently confirmed or corrected the exact values entered here.</span>
+                    </label>
+                    <button id="assistant-claim-writeback-prepare" class="button button-primary" type="submit" disabled>
+                      Review JobNimbus update
+                    </button>
+                  </form>
+                </section>
+
+                <section id="assistant-claim-writeback-review" class="assistant-claim-step" hidden>
+                  <h4>JobNimbus update</h4>
+                  <pre id="assistant-claim-writeback-review-body" class="assistant-claim-review"></pre>
+                  <label class="assistant-claim-approval">
+                    <input id="assistant-claim-writeback-approve" type="checkbox">
+                    <span>I approve this exact JobNimbus update.</span>
+                  </label>
+                  <button id="assistant-claim-writeback-execute" class="button button-primary" type="button" disabled>
+                    Update and verify JobNimbus
+                  </button>
+                </section>
+              </section>
 
               <form id="assistant-form" class="assistant-composer" novalidate>
                 <div class="assistant-composer-heading">
@@ -366,8 +508,12 @@
                   </button>
                 </div>
                 <p id="assistant-composer-help">
-                  Chats are saved securely inside HCN. Thresher reads, explains,
-                  and recommends, but cannot change, send, upload, or call from chat.
+                  Chats are encrypted and saved inside HCN. When model reasoning
+                  is used, your message and necessary retrieved excerpts are sent
+                  to the configured Groq model provider. Provider handling follows
+                  that Groq project data controls; HCN makes no retention promise
+                  here. Use a client chat for file details. Thresher cannot change,
+                  send, upload, or call from chat.
                 </p>
                 <p id="assistant-mode-help" class="visually-hidden">
                   Auto chooses the right level of review. Deep Review uses more

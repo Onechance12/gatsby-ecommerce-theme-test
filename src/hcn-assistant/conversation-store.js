@@ -187,6 +187,11 @@ export function createHcnAssistantConversationStore({
     return conversation ? immutableCopy(conversation) : null;
   }
 
+  async function verify() {
+    await loadDocument();
+    return true;
+  }
+
   async function create(input = {}) {
     const request = normalizeCreateInput(input);
     return enqueueMutation(async () => {
@@ -406,6 +411,7 @@ export function createHcnAssistantConversationStore({
   }
 
   return Object.freeze({
+    verify,
     list,
     get,
     create,

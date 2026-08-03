@@ -60,9 +60,10 @@ services:
       - key: HCN_REFERENCE_KEY
         sync: false
       # Dedicated Thresher AI reasoning runtime on Groq GPT-OSS 20B. The model
-      # may read the signed-in employee's allowlisted evidence and prepare an
-      # action plan, but it has no execution tool. Create a separate funded
-      # Groq project/key for HCN; never reuse Rolo.ai or another product key.
+      # may read the signed-in employee's allowlisted evidence and recommend
+      # next steps, but it cannot prepare or execute an action plan. Create a
+      # separate funded Groq project/key for HCN; never reuse Rolo.ai or another
+      # product key.
       - key: HCN_THRESHER_AI_ENABLED
         value: "true"
       - key: HCN_THRESHER_AI_GROQ_API_KEY

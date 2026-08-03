@@ -360,6 +360,22 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "encrypted_principal_scoped_durable_transcript"
   );
 
+  const privacyResponse = await fetch(`${bridgeOrigin}/privacy`);
+  assert.equal(privacyResponse.status, 200);
+  const privacyNotice = await privacyResponse.text();
+  assert.match(
+    privacyNotice,
+    /durable, encrypted, principal-scoped HCN store/i
+  );
+  assert.match(privacyNotice, /bounded recent transcript replay/i);
+  assert.match(
+    privacyNotice,
+    /prompt and the necessary allowlisted read-only evidence/i
+  );
+  assert.match(privacyNotice, /explicitly requests store:false/i);
+  assert.match(privacyNotice, /does not establish zero data retention/i);
+  assert.doesNotMatch(privacyNotice, /session-scoped process memory/i);
+
   const loginResponse = await fetch(
     `${bridgeOrigin}/hcn/auth/login?returnTo=${encodeURIComponent("/hcn")}`,
     { redirect: "manual" }
@@ -495,25 +511,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const deterministicBody = await deterministicResponse.text();
   assert.equal(
     deterministicResponse.status,
-    200,
+    403,
     deterministicBody
   );
-  const deterministic = JSON.parse(deterministicBody);
-  assert.equal(
-    deterministic.schema,
-    "hcn.console.assistant-turn.v4"
-  );
-  assert.equal(deterministic.persisted, true);
-  assert.equal(deterministic.conversationRef, conversationRef);
-  expectedRevision = deterministic.revision;
-  assert.equal(deterministic.routing.route, "deterministic");
-  assert.equal(deterministic.routing.profileId, "hcn.deterministic.v1");
-  assert.equal(deterministic.routing.modelUsed, false);
-  assert.match(deterministic.message, /2739/);
-  assert.match(deterministic.message, /Nothing was changed/);
-  assert.deepEqual(
-    deterministic.sources.map(({ key, status }) => ({ key, status })),
-    [{ key: "jobnimbus", status: "fresh" }]
+  assert.match(
+    JSON.parse(deterministicBody).error,
+    /Work Center, not a durable general chat/i
   );
 
   const assistantResponse = await fetch(
@@ -606,6 +609,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const fileConversation = await createFileConversationResponse.json();
   const fileConversationRef =
     fileConversation.conversation.conversationRef;
+  let fileExpectedRevision = 0;
 
   const reopenFileConversationResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/conversations/create`,
@@ -704,6 +708,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const calendarBody = await calendarResponse.text();
   assert.equal(calendarResponse.status, 200, calendarBody);
   const calendar = JSON.parse(calendarBody);
+  fileExpectedRevision = calendar.revision;
   assert.equal(calendar.sources.length, 1);
   assert.deepEqual(
     {
@@ -722,7 +727,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     /^\d{4}-\d{2}-\d{2}T/
   );
 
-  const catalogResponse = await fetch(
+  const blockedGeneralCatalogResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
     {
       method: "POST",
@@ -741,6 +746,37 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       })
     }
   );
+  const blockedGeneralCatalogBody =
+    await blockedGeneralCatalogResponse.text();
+  assert.equal(
+    blockedGeneralCatalogResponse.status,
+    502,
+    blockedGeneralCatalogBody
+  );
+  assert.match(
+    JSON.parse(blockedGeneralCatalogBody).error,
+    /requested HCN read tool failed/i
+  );
+
+  const catalogResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef: fileConversationRef,
+        expectedRevision: fileExpectedRevision,
+        prompt:
+          `fixture-document-catalog: review documents for ${fileRef}`,
+        mode: "auto"
+      })
+    }
+  );
   const catalogBody = await catalogResponse.text();
   assert.equal(
     catalogResponse.status,
@@ -748,7 +784,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     `${catalogBody}\n${JSON.stringify(providerObservations)}`
   );
   const catalog = JSON.parse(catalogBody);
-  expectedRevision = catalog.revision;
+  fileExpectedRevision = catalog.revision;
   assert.equal(catalog.message, ASSISTANT_RESPONSE);
   assert.equal(catalog.plan, null);
   assert.deepEqual(
@@ -763,6 +799,27 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       status: "fresh"
     }]
   );
+
+  assignedFileActive = false;
+  const reassignedDetailResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/conversations/detail`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef: fileConversationRef,
+        offset: 0,
+        limit: 100
+      })
+    }
+  );
+  assert.equal(reassignedDetailResponse.status, 404);
+  assignedFileActive = true;
 
   const deepResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
@@ -840,13 +897,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     detail.schema,
     "hcn.console.assistant-conversation-detail.v1"
   );
-  assert.equal(detail.conversation.messageCount, 10);
-  assert.equal(detail.messages.length, 10);
+  assert.equal(detail.conversation.messageCount, 6);
+  assert.equal(detail.messages.length, 6);
   assert.deepEqual(
     detail.messages.map((message) => message.role),
     [
-      "user", "assistant", "user", "assistant", "user",
-      "assistant", "user", "assistant", "user", "assistant"
+      "user", "assistant", "user", "assistant", "user", "assistant"
     ]
   );
 
@@ -943,7 +999,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerLines = (
     await readFile(providerRecordPath, "utf8")
   ).trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(providerLines.length, 6);
+  assert.equal(providerLines.length, 7);
   const providerRequest = JSON.parse(providerLines[0]);
   assert.equal(
     providerRequest.url,
@@ -953,7 +1009,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(providerRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(providerRequest.body.reasoning.effort, "medium");
   assert.equal(providerRequest.body.max_output_tokens, 1800);
-  assert.equal(Object.hasOwn(providerRequest.body, "store"), false);
+  assert.equal(providerRequest.body.store, false);
   assert.equal(Object.hasOwn(providerRequest.body, "stream"), false);
   assert.equal(providerRequest.body.parallel_tool_calls, false);
   assert.equal(
@@ -994,8 +1050,13 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     JSON.stringify(calendarToolOutputRequest),
     /Assigned File Fixture|assigned-file-provider-id|assigned-employee-connector-access-token/
   );
-  const catalogToolRequest = JSON.parse(providerLines[3]);
-  const catalogToolOutputRequest = JSON.parse(providerLines[4]);
+  const blockedGeneralCatalogRequest = JSON.parse(providerLines[3]);
+  assert.match(
+    JSON.stringify(blockedGeneralCatalogRequest.body.input),
+    /fixture-document-catalog/
+  );
+  const catalogToolRequest = JSON.parse(providerLines[4]);
+  const catalogToolOutputRequest = JSON.parse(providerLines[5]);
   assert.match(
     JSON.stringify(catalogToolRequest.body.input),
     /fixture-document-catalog/
@@ -1008,7 +1069,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     JSON.stringify(catalogToolOutputRequest),
     /assigned-file-provider-id|assigned-document-provider-id/
   );
-  const deepProviderRequest = JSON.parse(providerLines[5]);
+  const deepProviderRequest = JSON.parse(providerLines[6]);
   assert.equal(deepProviderRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(deepProviderRequest.body.reasoning.effort, "high");
   assert.equal(deepProviderRequest.body.max_output_tokens, 2400);

@@ -579,6 +579,12 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/assistant/conversations/archive",
     "POST /hcn/api/v1/assistant/conversations/restore",
     "POST /hcn/api/v1/assistant/turns",
+    "POST /hcn/api/v1/claim-filings/status",
+    "POST /hcn/api/v1/claim-filings/prepare",
+    "POST /hcn/api/v1/claim-filings/execute",
+    "POST /hcn/api/v1/claim-filings/result",
+    "POST /hcn/api/v1/claim-filings/writeback/prepare",
+    "POST /hcn/api/v1/claim-filings/writeback/execute",
     "POST /hcn/api/v1/action-plans/prepare",
     "POST /hcn/api/v1/action-plans/list",
     "POST /hcn/api/v1/action-plans/detail",
@@ -621,7 +627,7 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "POST /hcn/api/v1/action-receipts/detail",
     "POST /hcn/api/v1/action-receipts/list"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 29);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 35);
 
   for (const role of [
     "administrator",
@@ -654,6 +660,28 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
       role !== "onboarding",
       role
     );
+    assert.equal(
+      routeAllowed(
+        otherBrowser,
+        "POST",
+        "/hcn/api/v1/claim-filings/prepare"
+      ),
+      role !== "onboarding",
+      role
+    );
+    for (const pathname of [
+      "/hcn/api/v1/claim-filings/status",
+      "/hcn/api/v1/claim-filings/execute",
+      "/hcn/api/v1/claim-filings/result",
+      "/hcn/api/v1/claim-filings/writeback/prepare",
+      "/hcn/api/v1/claim-filings/writeback/execute"
+    ]) {
+      assert.equal(
+        routeAllowed(otherBrowser, "POST", pathname),
+        role !== "onboarding",
+        `${role} ${pathname}`
+      );
+    }
     assert.equal(
       routeAllowed(
         otherBrowser,
