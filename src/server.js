@@ -236,6 +236,9 @@ import {
   HCN_ASSISTANT_TOOL_NAMES
 } from "./hcn-assistant/tools.js";
 import {
+  hcnAssistantAvailableToolNames
+} from "./hcn-assistant/tool-selection.js";
+import {
   classifyHcnAssistantRequest,
   HCN_ASSISTANT_REASONING_REASON_CODES,
   HCN_ASSISTANT_REASONING_PROFILES,
@@ -5666,7 +5669,7 @@ async function runHcnModelAssistantTurn({
       conversation?.kind === "file" ? "review_file" : "",
     availableToolNames: hcnAssistantAvailableToolNames({
       prompt,
-      conversation
+      conversationKind: conversation?.kind
     }),
     maxToolRounds: 6,
     maxToolCalls: 8,
@@ -5738,46 +5741,6 @@ async function runHcnModelAssistantTurn({
       return toolResult;
     }
   });
-}
-
-const HCN_EXACT_FILE_FOLLOW_UP_TOOL_HINTS = Object.freeze([
-  Object.freeze({
-    tools: Object.freeze([
-      "read_file_document_catalog",
-      "read_file_document"
-    ]),
-    pattern: /\b(?:attachment|attachments|document|documents|policy|declaration|declarations|dec\s*page|estimate|scope|settlement|letter\s+of\s+representation|lor)\b/i
-  }),
-  Object.freeze({
-    tools: Object.freeze(["read_file_photo_catalog"]),
-    pattern: /\b(?:photo|photos|image|images|picture|pictures)\b/i
-  }),
-  Object.freeze({
-    tools: Object.freeze(["research_file_hail_dates"]),
-    pattern: /\b(?:hail|storm|weather|date\s+of\s+loss|dol)\b/i
-  }),
-  Object.freeze({
-    tools: Object.freeze(["read_calendar_day"]),
-    pattern: /\b(?:calendar|schedule|scheduled|scheduling|appointment|availability)\b/i
-  })
-]);
-
-function hcnAssistantAvailableToolNames({
-  prompt,
-  conversation
-}) {
-  if (conversation?.kind !== "file") {
-    return HCN_ASSISTANT_TOOL_NAMES;
-  }
-  const recentContext = String(prompt || "");
-  const selected = [];
-  for (const hint of HCN_EXACT_FILE_FOLLOW_UP_TOOL_HINTS) {
-    if (!hint.pattern.test(recentContext)) continue;
-    for (const name of hint.tools) {
-      if (!selected.includes(name)) selected.push(name);
-    }
-  }
-  return Object.freeze(selected);
 }
 
 function hcnAssistantRoutingProjection(routing) {
