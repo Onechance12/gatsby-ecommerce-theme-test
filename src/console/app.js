@@ -7871,6 +7871,7 @@
         state.fileController = null;
         state.fileLoading = false;
         elements["file-refresh"].disabled = false;
+        renderActionComposerState();
       }
     }
   }

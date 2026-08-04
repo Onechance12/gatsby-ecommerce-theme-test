@@ -1747,6 +1747,11 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
     script,
     /elements\["file-actions"\]\.addEventListener\("click"[\s\S]*elements\["action-composer"\]\.scrollIntoView/
   );
+  const fileLoader = extractConsoleFunction(script, "loadFileReview");
+  assert.match(
+    fileLoader,
+    /finally \{[\s\S]*state\.fileLoading = false;[\s\S]*renderActionComposerState\(\);/
+  );
   assert.match(html, /Central time/);
   assert.match(html, /id="approval-acknowledge" type="checkbox" disabled/);
   assert.match(html, /Prepare immutable review/);
