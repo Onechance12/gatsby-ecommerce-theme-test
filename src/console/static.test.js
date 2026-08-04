@@ -701,7 +701,7 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
   );
   assert.match(
     html,
-    /id="assistant-chat-files-link"[\s\S]*href="#work-center"[\s\S]*>Files<\/a>/
+    /id="assistant-chat-files-link"[\s\S]*href="#work-center"[\s\S]*>Exit<\/a>/
   );
   assert.match(
     script,
