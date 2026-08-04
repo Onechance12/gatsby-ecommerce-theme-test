@@ -425,6 +425,7 @@
       "home-connections-status",
       "assistant-alert",
       "assistant-chat-sidebar",
+      "assistant-chat-main",
       "assistant-chat-backdrop",
       "assistant-chat-drawer-open",
       "assistant-new-chat",

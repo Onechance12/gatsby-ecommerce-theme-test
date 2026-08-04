@@ -637,6 +637,26 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
     script,
     /elements\["assistant-chat-main"\]\.toggleAttribute\("inert", open\)/
   );
+  const initialize = extractConsoleFunction(script, "initialize");
+  const registryStart = initialize.indexOf("[");
+  const registryEnd = initialize.indexOf("].forEach(function (id)", registryStart);
+  assert.notEqual(registryStart, -1, "initialize must declare its element registry");
+  assert.notEqual(registryEnd, -1, "initialize must bind its element registry");
+  const registeredElements = new Set(
+    [...initialize.slice(registryStart, registryEnd).matchAll(/"([^"]+)"/g)]
+      .map((match) => match[1])
+  );
+  const drawerDependencies = new Set(
+    [...extractConsoleFunction(script, "syncAssistantDrawerViewport")
+      .matchAll(/elements\["([^"]+)"\]/g)]
+      .map((match) => match[1])
+  );
+  for (const dependency of drawerDependencies) {
+    assert.ok(
+      registeredElements.has(dependency),
+      `initialize must bind drawer dependency ${dependency}`
+    );
+  }
   assert.match(script, /function trapAssistantDrawerFocus\(event\)/);
 
   assert.doesNotMatch(combined, /localStorage|sessionStorage|indexedDB/i);
