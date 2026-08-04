@@ -126,6 +126,18 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
     );
   }
   if (
+    noToolPromptMarker
+    && latestUserMessage.includes(noToolPromptMarker)
+  ) {
+    return new Response(
+      JSON.stringify({ status: "completed", output: [] }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }
+    );
+  }
+  if (
     calendarToolPromptMarker
     && latestUserMessage.includes(calendarToolPromptMarker)
   ) {

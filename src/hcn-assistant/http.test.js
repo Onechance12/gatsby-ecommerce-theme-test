@@ -888,7 +888,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const noReviewError = JSON.parse(noReviewBody).error;
   assert.match(
     noReviewError,
-    /required fresh file review/i
+    /assistant provider returned/i
   );
   await waitForOutput(
     () => bridgeOutput.slice(failureLogOffset),
@@ -915,7 +915,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   assert.equal(
     failureLogs[0].errorCode,
-    "required_first_tool_call_missing"
+    "malformed_provider_output"
   );
   assert.equal(failureLogs[0].errorName, "HcnAssistantError");
   assert.equal(failureLogs[0].statusCode, 502);
@@ -927,7 +927,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(failureLogs[0].upstreamStatusCode, 0);
   assert.doesNotMatch(
     JSON.stringify(failureLogs[0]),
-    /PRIVATE_PROMPT_MARKER|required fresh file review|subject_|conversation_/
+    /PRIVATE_PROMPT_MARKER|assistant provider returned|subject_|conversation_/
   );
   assert.equal(
     JSON.stringify(failureLogs[0]).includes(noReviewError),
@@ -1264,7 +1264,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerLines = (
     await readFile(providerRecordPath, "utf8")
   ).trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(providerLines.length, 14);
+  assert.equal(providerLines.length, 10);
   const providerRequests = providerLines.map((line) => JSON.parse(line));
   const serializedInput = (request) => JSON.stringify(request.body.input);
   const latestUserMessage = (request) => [
@@ -1306,37 +1306,32 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const requiredReviewRequests = providerRequests.filter(
     (request) => request.body.tool_choice === "required"
   );
-  assert.equal(requiredReviewRequests.length, 5);
-  for (const request of requiredReviewRequests) {
-    assert.deepEqual(
-      request.body.tools.map((tool) => tool.name),
-      ["review_file"]
-    );
-  }
+  assert.equal(requiredReviewRequests.length, 0);
   for (const prompt of ordinaryFilePrompts) {
     const rounds = requestsForPrompt(prompt);
-    assert.equal(rounds.length, 2);
-    assert.equal(rounds[0].body.tool_choice, "required");
-    assert.equal(Object.hasOwn(rounds[1].body, "tool_choice"), false);
-    assert.equal(Object.hasOwn(rounds[1].body, "tools"), false);
-    assert.match(serializedInput(rounds[1]), /hcn\.console\.file\.v1/);
-    const reviewOutput = rounds[1].body.input.find(
-      (item) => item?.type === "function_call_output"
+    assert.equal(rounds.length, 1);
+    assert.equal(Object.hasOwn(rounds[0].body, "tool_choice"), false);
+    assert.equal(Object.hasOwn(rounds[0].body, "tools"), false);
+    assert.match(serializedInput(rounds[0]), /hcn\.console\.file\.v1/);
+    const reviewEvidence = rounds[0].body.input.find(
+      (item) =>
+        item?.role === "user"
+        && item?.content?.startsWith("Server-fetched evidence")
     );
-    assert.ok(reviewOutput);
+    assert.ok(reviewEvidence);
     assert.ok(
-      Buffer.byteLength(reviewOutput.output, "utf8") <= 24 * 1024
+      Buffer.byteLength(reviewEvidence.content, "utf8") <= 24 * 1024
     );
     assert.ok(
-      Buffer.byteLength(JSON.stringify(rounds[1].body), "utf8")
+      Buffer.byteLength(JSON.stringify(rounds[0].body), "utf8")
         <= 20 * 1024,
       `ordinary exact-file provider request is ${Buffer.byteLength(
-        JSON.stringify(rounds[1].body),
+        JSON.stringify(rounds[0].body),
         "utf8"
       )} bytes`
     );
     assert.equal(
-      Object.hasOwn(JSON.parse(reviewOutput.output), "thresher"),
+      reviewEvidence.content.includes('"thresher"'),
       false
     );
   }
@@ -1345,31 +1340,32 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "fixture-skip-required-review"
   );
   assert.equal(noReviewRounds.length, 1);
-  assert.equal(noReviewRounds[0].body.tool_choice, "required");
+  assert.equal(Object.hasOwn(noReviewRounds[0].body, "tool_choice"), false);
 
   const calendarRounds = requestsForPrompt("fixture-calendar-day");
-  assert.equal(calendarRounds.length, 3);
-  assert.equal(calendarRounds[0].body.tool_choice, "required");
-  assert.equal(calendarRounds[1].body.tool_choice, "auto");
-  for (const request of calendarRounds.slice(1)) {
+  assert.equal(calendarRounds.length, 2);
+  for (const request of calendarRounds) {
+    assert.equal(request.body.tool_choice, "auto");
     assert.deepEqual(
       request.body.tools.map((tool) => tool.name),
       ["read_calendar_day"]
     );
   }
-  assert.match(serializedInput(calendarRounds[1]), /hcn\.console\.file\.v1/);
+  assert.match(serializedInput(calendarRounds[0]), /hcn\.console\.file\.v1/);
   assert.match(
-    serializedInput(calendarRounds[2]),
+    serializedInput(calendarRounds[1]),
     /hcn\.assistant\.calendar-file-appointments\.v1/
   );
 
   const catalogRounds = requestsForPrompt("fixture-document-catalog");
-  assert.equal(catalogRounds.length, 4);
-  const requiredCatalogIndex = catalogRounds.findIndex(
-    (request) => request.body.tool_choice === "required"
+  assert.equal(catalogRounds.length, 3);
+  const fileCatalogRounds = catalogRounds.filter(
+    (request) => serializedInput(request).includes(
+      "Server-fetched evidence"
+    )
   );
-  assert.equal(requiredCatalogIndex, 1);
-  for (const request of catalogRounds.slice(requiredCatalogIndex + 1)) {
+  assert.equal(fileCatalogRounds.length, 2);
+  for (const request of fileCatalogRounds) {
     assert.equal(request.body.tool_choice, "auto");
     assert.deepEqual(
       request.body.tools.map((tool) => tool.name),
@@ -1377,11 +1373,11 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     );
   }
   assert.match(
-    serializedInput(catalogRounds[requiredCatalogIndex + 1]),
+    serializedInput(fileCatalogRounds[0]),
     /hcn\.console\.file\.v1/
   );
   assert.match(
-    serializedInput(catalogRounds[requiredCatalogIndex + 2]),
+    serializedInput(fileCatalogRounds[1]),
     /hcn\.assistant\.document-catalog\.v1/
   );
 

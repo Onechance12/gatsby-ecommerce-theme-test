@@ -5659,14 +5659,23 @@ async function runHcnModelAssistantTurn({
     error.statusCode = 503;
     throw error;
   }
+  let prefetchedEvidence = null;
+  if (conversation?.kind === "file") {
+    const fileReview = projectHcnAssistantFileReview(await hcnReadFile({
+      fileRef: conversation.fileRef,
+      recentLimit: 20
+    }));
+    collectHcnAssistantSources(sources, "review_file", fileReview);
+    prefetchedEvidence = fileReview;
+  }
   return runHcnAssistant({
     prompt,
     history,
     assignedIdentity: principal,
     model: profile.model,
     instructions: hcnAssistantInstructions(principal, conversation),
-    requiredFirstToolName:
-      conversation?.kind === "file" ? "review_file" : "",
+    prefetchedEvidence,
+    requiredFirstToolName: "",
     availableToolNames: hcnAssistantAvailableToolNames({
       prompt,
       conversationKind: conversation?.kind
