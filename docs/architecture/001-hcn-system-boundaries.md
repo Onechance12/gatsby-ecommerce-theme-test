@@ -96,11 +96,11 @@ Starting that file again reopens the existing active conversation; archived
 history remains separate, and it cannot be restored while a replacement active
 conversation exists for the same file.
 Full history may be displayed to the owner, but the model receives only a
-bounded recent replay and no provider-side conversation identifier. Every
-outbound Groq Responses request explicitly sends `store:false`, as required by
-the HCN boundary and supported by the endpoint contract. That request flag does
-not establish zero data retention; the dedicated HCN Groq project's Data
-Controls and ZDR status require separate deployment-time attestation.
+bounded recent replay and no provider-side conversation identifier. The Groq
+endpoint used by HCN does not accept a `store` request field, so HCN omits that
+field while continuing to reject provider-managed conversation state. This is
+not a retention promise; the dedicated HCN Groq project's Data Controls and ZDR
+status require separate deployment-time attestation.
 
 ### Jobrolo
 

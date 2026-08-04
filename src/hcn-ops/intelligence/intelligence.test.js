@@ -606,6 +606,41 @@ test("inspection scheduling can request coordination without inventing an appoin
   );
 });
 
+test("later estimate evidence never silently removes an open inspection task", () => {
+  const input = baseInput();
+  input.tasks = [{
+    taskCode: "inspection_coordination",
+    status: "open",
+    priority: "high",
+    ownerRef: OWNER_REF,
+    dueAt: "2026-06-20T12:00:00.000Z",
+    source: "jobnimbus",
+    evidenceRef: ref(16),
+    observedAt: "2026-06-10T12:00:00.000Z"
+  }];
+  input.documents.push(
+    document(ref(17), "estimate", {
+      observedAt: "2026-07-10T12:00:00.000Z"
+    })
+  );
+
+  const result = deriveFileIntelligence(input);
+
+  assert.equal(result.overdueTasks.length, 1);
+  assert.equal(
+    result.nextRequiredActions.some(
+      ({ actionCode, targetCode }) =>
+        actionCode === "review_overdue_task" &&
+        targetCode === "inspection_coordination"
+    ),
+    true
+  );
+  assert.equal(
+    result.workflows.follow_up.metrics.overdueTaskCount,
+    1
+  );
+});
+
 test("open promises without a due date remain undated", () => {
   const input = baseInput();
   input.tasks = [];

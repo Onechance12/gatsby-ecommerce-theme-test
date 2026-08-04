@@ -20,11 +20,13 @@ const REQUEST_FIELDS = Object.freeze([
  *
  * Provider, endpoint, and model are deliberately fixed in source. The caller
  * cannot supply provider state, built-in tools, MCP servers, background mode,
- * files, streaming, or an alternate model. The Groq Responses endpoint accepts
- * only `false` or `null` for `store`, so the HCN boundary requires and
- * explicitly transmits `store:false`. This request flag is not a ZDR claim;
- * Groq project Data Controls remain a separate deployment gate. Conversation
- * replay remains bounded and HCN-controlled.
+ * files, streaming, or an alternate model.
+ * The HCN boundary rejects provider-managed conversation state and keeps
+ * replay bounded and HCN-controlled. `store:false` remains an internal
+ * invariant supplied by the assistant core, but it is deliberately omitted
+ * from the Groq wire payload because this endpoint does not support that
+ * request field. Provider project Data Controls remain a separate deployment
+ * gate; omission of the field is not a retention or ZDR claim.
  */
 export function createThresherGroqResponsesClient({
   apiKey,
@@ -58,7 +60,6 @@ export function createThresherGroqResponsesClient({
           tools: request.tools,
           tool_choice: "auto",
           parallel_tool_calls: false,
-          store: false,
           max_output_tokens: maxOutputTokens,
           reasoning: { effort }
         })

@@ -341,7 +341,12 @@ function normalizeSource(source) {
 
 function normalizeStageCode(value) {
   const code = normalizedCode(value);
-  if (/closed|complete/.test(code)) return "closed";
+  if (
+    ["closed", "complete", "completed"].includes(code)
+    || /(?:^|_)file_closed(?:_|$)/.test(code)
+  ) {
+    return "closed";
+  }
   if (/payment|collection/.test(code)) return "payment_collection";
   if (/settlement/.test(code)) return "settlement_review";
   if (/supplement/.test(code)) return "supplement";

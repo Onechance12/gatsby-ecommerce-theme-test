@@ -243,11 +243,56 @@ test("Work Center includes only active Chance-assigned insurance files", async (
   assert.equal(result.page.total, 3);
   assert.deepEqual(
     result.files.map((file) => file.jobNumber),
-    ["JN-1006", "JN-1005", "JN-1001"]
+    ["JN-1006", "JN-1001", "JN-1005"]
   );
   assert.equal(result.files[0].lane, "priority");
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.files), true);
+});
+
+test("Work Center ranks actionable older workflow files ahead of recent active files", async () => {
+  const files = [
+    eligibleFile({
+      providerFileId: "provider-file-recent",
+      jobNumber: "JN-2001",
+      statusCode: "submitted_for_appraisal",
+      updatedAt: "2026-07-28T17:59:00.000Z"
+    }),
+    eligibleFile({
+      providerFileId: "provider-file-pa-review",
+      jobNumber: "JN-2002",
+      statusCode: "ready_for_pa_review",
+      updatedAt: "2026-06-01T17:00:00.000Z",
+      missingFacts: {
+        claimNumber: true,
+        policyNumber: true,
+        dateOfLoss: false,
+        adjuster: false
+      }
+    }),
+    eligibleFile({
+      providerFileId: "provider-file-confirmation",
+      jobNumber: "JN-2003",
+      statusCode: "submitted_awaiting_confirmation",
+      updatedAt: "2026-07-01T17:00:00.000Z",
+      missingFacts: {
+        claimNumber: false,
+        policyNumber: false,
+        dateOfLoss: false,
+        adjuster: true
+      }
+    })
+  ];
+
+  const result = await createService({ files }).readWorkCenter({
+    offset: 0,
+    limit: 50
+  });
+
+  assert.deepEqual(
+    result.files.map((file) => file.jobNumber),
+    ["JN-2002", "JN-2003", "JN-2001"]
+  );
 });
 
 test("Work Center list minimizes PII and never emits raw provider data", async () => {
@@ -453,6 +498,92 @@ test("exact file response is bounded, ephemeral, and strips provider extras", as
   ]) {
     assert.equal(serialized.includes(forbidden), false);
   }
+});
+
+test("actionable workflow files receive a read-only Today review item", async () => {
+  const file = eligibleFile({
+    statusCode: "ready_for_pa_review",
+    stageCode: "estimating",
+    updatedAt: "2026-07-28T17:50:00.000Z",
+    missingFacts: {
+      claimNumber: true,
+      policyNumber: false,
+      dateOfLoss: false,
+      adjuster: false
+    }
+  });
+  const details = jobNimbusDetail(file);
+  details.data.file.claimNumber = null;
+  const result = await createService({
+    files: [file],
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+
+  assert.deepEqual(
+    result.lanes.today.map((item) => item.reasonCode),
+    ["file_review_today"]
+  );
+});
+
+test("workflow status alone does not invent a Today review item", async () => {
+  const file = eligibleFile({
+    statusCode: "ready_for_pa_review",
+    stageCode: "unknown",
+    missingFacts: {
+      claimNumber: false,
+      policyNumber: false,
+      dateOfLoss: false,
+      adjuster: false
+    }
+  });
+  const details = jobNimbusDetail(file);
+  details.data.tasks = [];
+  details.data.documents = [];
+  const result = await createService({
+    files: [file],
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+
+  assert.deepEqual(result.lanes.today, []);
+});
+
+test("later estimate evidence never silently removes an open inspection task", async () => {
+  const file = eligibleFile({
+    statusCode: "ready_for_pa_review",
+    stageCode: "estimating"
+  });
+  const details = jobNimbusDetail(file);
+  details.data.tasks = [{
+    providerRecordId: "stale-inspection-task",
+    kind: "task",
+    status: "open",
+    priority: "normal",
+    dueAt: "2026-06-15T18:00:00.000Z",
+    assignedRole: "chance",
+    label: "Estimate Inspection"
+  }];
+  details.data.documents = [{
+    providerRecordId: "later-estimate",
+    kind: "estimate",
+    reviewState: "needs_review",
+    createdAt: "2026-07-08T18:00:00.000Z",
+    fileName: "Current estimate.pdf"
+  }];
+  const result = await createService({
+    files: [file],
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+
+  assert.equal(
+    result.lanes.priority.some((item) => item.reasonCode === "overdue_task"),
+    true
+  );
+  assert.equal(
+    result.lanes.priority.some(
+      (item) => item.reasonCode === "document_review_required"
+    ),
+    true
+  );
 });
 
 test("recent projections enforce the requested maximum and mark partial evidence", async () => {

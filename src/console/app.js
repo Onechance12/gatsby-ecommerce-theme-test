@@ -254,6 +254,7 @@
   const LANE_LABELS = Object.freeze({
     awaiting_response: "Waiting for a response",
     document_review_required: "Document needs review",
+    file_review_today: "Review this file today",
     missing_adjuster: "Adjuster information is missing",
     missing_claim_number: "Claim number is missing",
     missing_date_of_loss: "Date of loss is missing",
@@ -264,6 +265,12 @@
     source_stale: "Source evidence is stale",
     source_unavailable: "Source is unavailable",
     task_due_today: "Task is due today"
+  });
+
+  const STATUS_WORKFLOW_LABELS = Object.freeze({
+    need_paperwork_info: "Estimating workflow",
+    photo_file_estimate_needed: "Estimating workflow",
+    ready_for_pa_review: "Estimating workflow"
   });
 
   const CONNECTOR_LABELS = Object.freeze({
@@ -1891,7 +1898,8 @@
         { focusComposer: true }
       );
     });
-    setText(title, conversation.title);
+    setText(title, assistantConversationDisplayTitle(conversation.title));
+    title.title = conversation.title;
     meta.className = "assistant-conversation-meta";
     setText(kind, assistantConversationKindLabel(conversation.kind));
     time.dateTime = conversation.updatedAt;
@@ -1901,7 +1909,10 @@
     more.type = "button";
     more.className = "assistant-conversation-more";
     more.disabled = state.assistantLoading;
-    more.setAttribute("aria-label", "Open actions for " + conversation.title);
+    more.setAttribute(
+      "aria-label",
+      "Open actions for " + assistantConversationDisplayTitle(conversation.title)
+    );
     more.setAttribute("title", "Open chat actions");
     setText(more, "•••");
     more.addEventListener("click", async function () {
@@ -1988,7 +1999,11 @@
       syncAssistantMobileWorkspace();
       return;
     }
-    setText(elements["assistant-current-title"], conversation.title);
+    setText(
+      elements["assistant-current-title"],
+      assistantConversationDisplayTitle(conversation.title, 72)
+    );
+    elements["assistant-current-title"].title = conversation.title;
     setText(
       elements["assistant-current-kind"],
       assistantConversationKindLabel(conversation.kind)
@@ -3501,11 +3516,17 @@
   }
 
   function assistantConversationTitleFromPrompt(prompt) {
-    const compact = boundedString(prompt, 80)
+    const compact = boundedString(prompt, 52)
       .replace(/\s+/g, " ")
       .trim()
       .replace(/[?.!,;:]+$/g, "");
     return compact || "New chat";
+  }
+
+  function assistantConversationDisplayTitle(value, maximum = 48) {
+    const title = boundedString(value, 120).replace(/\s+/g, " ").trim();
+    if (title.length <= maximum) return title || "New chat";
+    return title.slice(0, Math.max(1, maximum - 3)).trimEnd() + "...";
   }
 
   function normalizeAssistantTurnResponse(value) {
@@ -7395,7 +7416,7 @@
 
     appendSweepDetail(
       details,
-      "Last JobNimbus touch",
+      "Last qualifying operational activity",
       sweepNarrativeText(item.lastTouch)
     );
     appendSweepDetail(details, "Current blocker", item.blocker.summary);
@@ -7814,7 +7835,7 @@
     setText(name, file.displayName || "Unnamed assigned file");
     setText(number, file.jobNumber || "No job number");
     setText(status, humanize(file.statusCode || "status unavailable"));
-    setText(stage, humanize(file.stageCode || "stage unavailable"));
+    setText(stage, fileStageLabel(file));
     top.append(name, number);
     meta.append(status, stage);
 
@@ -7928,7 +7949,7 @@
     setText(
       elements["file-stage"],
       humanize(selected.statusCode || "status unavailable") + " · " +
-        humanize(selected.stageCode || "stage unavailable")
+        fileStageLabel(selected)
     );
     badge(elements["file-evidence-status"], "Checking", "neutral");
     notice(
@@ -8224,7 +8245,7 @@
     setText(
       elements["file-stage"],
       humanize(file.statusCode || "status unavailable") + " · " +
-        humanize(file.stageCode || "stage unavailable")
+        fileStageLabel(file)
     );
     const complete = review.evidenceStatus === "complete";
     badge(
@@ -8291,7 +8312,9 @@
         complete
           ? source.acceptedItems + " recent item" +
             (source.acceptedItems === 1 ? "" : "s") + " accepted"
-          : humanize(source.failureCode || source.completeness || "source incomplete")
+          : humanize(
+              source.failureCode || source.completeness || "source incomplete"
+            )
       );
       top.append(title, dot);
       item.append(top, detail);
@@ -8307,7 +8330,7 @@
         rows: [
           ["Job number", file.jobNumber],
           ["Status", humanize(file.statusCode)],
-          ["Stage", humanize(file.stageCode)],
+          ["Stage", fileStageLabel(file)],
           ["Type", humanize(file.fileTypeCode)],
           ["Last updated", readableDateTime(file.updatedAt)]
         ]
@@ -8874,9 +8897,10 @@
 
   function renderActionComposerState() {
     populateDraftOptions();
+    const sessionCanPrepare = hasActionPrepareAuthority();
     const available = Boolean(
       navigator.onLine
-      && hasActionPrepareAuthority()
+      && sessionCanPrepare
       && state.fileReview
       && state.selectedFileRef
       && state.fileReview.file.fileRef === state.selectedFileRef
@@ -8885,6 +8909,12 @@
     const controls = elements["action-form"].querySelectorAll(
       "input, select, textarea, button"
     );
+    elements["file-actions"].hidden = !sessionCanPrepare;
+    elements["action-form"].hidden = !sessionCanPrepare;
+    elements["action-prepare"].hidden = !sessionCanPrepare;
+    elements["action-draft-list"].hidden = !sessionCanPrepare;
+    const draftHeading = elements["action-draft-clear"].closest(".draft-heading");
+    if (draftHeading) draftHeading.hidden = !sessionCanPrepare;
     elements["file-actions"].disabled = !available || state.actionLoading;
     controls.forEach(function (control) {
       control.disabled = !available || state.actionLoading;
@@ -8921,9 +8951,11 @@
     if (!available) {
       notice(
         elements["action-composer-alert"],
-        state.fileReview
-          ? "This session cannot prepare actions for the selected file."
-          : "Open one exact fresh file before preparing actions.",
+        !sessionCanPrepare
+          ? "Actions are read only for this session. No action controls are available."
+          : state.fileReview
+            ? "This session cannot prepare actions for the selected file."
+            : "Open one exact fresh file before preparing actions.",
         "neutral"
       );
     } else if (state.actionDraft.length > 0) {
@@ -11268,6 +11300,24 @@
       .replace(/\b\w/g, function (letter) {
         return letter.toUpperCase();
       });
+  }
+
+  function fileStageLabel(value) {
+    const file = record(value);
+    const explicitStage = boundedString(file.stageCode, 64);
+    if (
+      explicitStage
+      && !["unknown", "unavailable", "stage_unavailable"].includes(
+        explicitStage.toLowerCase()
+      )
+    ) {
+      return humanize(explicitStage);
+    }
+    const statusCode = boundedString(file.statusCode, 64);
+    const workflowLabel = STATUS_WORKFLOW_LABELS[statusCode];
+    return workflowLabel
+      ? workflowLabel + " (from status)"
+      : "Stage unavailable";
   }
 
   function sweepSourceLabel(value) {

@@ -1329,8 +1329,8 @@ function health() {
         providerTokensExposedToBrowser: false,
         historyConfigured: Boolean(HCN_ASSISTANT_HISTORY_KEY),
         historyReady: hcnAssistantConversationStoreConfigured(),
-        responsesApiStore: false,
-        providerState: "disabled_hcn_bounded_replay_only",
+        responsesApiStore: null,
+        providerState: "no_provider_conversation_ids_bounded_hcn_replay_only",
         providerRetention:
           "groq_project_data_controls_apply",
         builtInProviderTools: false,
@@ -1460,8 +1460,8 @@ function health() {
       routing: hcnAssistantRoutingHealth(),
       historyConfigured: Boolean(HCN_ASSISTANT_HISTORY_KEY),
       historyReady: hcnAssistantConversationStoreConfigured(),
-      responsesApiStore: false,
-      providerState: "disabled_hcn_bounded_replay_only",
+      responsesApiStore: null,
+      providerState: "no_provider_conversation_ids_bounded_hcn_replay_only",
       providerRetention:
         "groq_project_data_controls_apply",
       builtInProviderTools: false,
@@ -8944,9 +8944,9 @@ function privacy() {
     "This private platform helps authorized HCN employees work assigned JobNimbus files using connected JobNimbus, Google, Quo, and Groq services.",
     "HCN does not sell client or employee data.",
     "Requests are authenticated and scoped to the signed-in employee before client evidence is accessed.",
-    "Ask Thresher sends the prompt and the necessary allowlisted read-only evidence for that turn to HCN's dedicated Groq project using its OpenAI-compatible Responses API. Each model request explicitly requests store:false.",
+    "Ask Thresher sends the prompt and the necessary allowlisted read-only evidence for that turn to HCN's dedicated Groq project using its OpenAI-compatible Responses API. HCN does not send provider conversation identifiers and manually supplies only bounded HCN-controlled replay.",
     "HCN stores employee-visible transcripts in a durable, encrypted, principal-scoped HCN store and sends only bounded recent transcript replay on later model turns.",
-    "Groq project Data Controls and retention terms still apply. Sending store:false does not establish zero data retention; ZDR must be separately enabled and attested for the dedicated HCN Groq project.",
+    "The Groq endpoint used by HCN does not accept a store request field, so that field is omitted. Groq project Data Controls and retention terms still apply; ZDR must be separately enabled and attested for the dedicated HCN Groq project.",
     "Provider credentials are stored server-side in Render environment variables or encrypted HCN stores and are never returned to the browser.",
     "Thresher's model tools are strictly read-only and cannot even create an HCN action plan. Client changes, drafts, sends, texts, and scheduling updates remain separate platform workflows requiring review and explicit human approval."
   ].join("\n");

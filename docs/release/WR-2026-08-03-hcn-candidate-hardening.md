@@ -1,13 +1,15 @@
 # WR-2026-08-03 HCN candidate hardening
 
-Status: ready for independent re-review
+Status: local operational repair passed; awaiting publish approval and live smoke
 
 ## Source state
 
 - Repository: `Onechance12/gatsby-ecommerce-theme-test`
 - Branch: `codex/hcn-platform-foundation`
-- Hardened baseline HEAD: `cbd91ab1eefc7d16eabebec4d2c2cd7f15d43c2d`
-- Remote and rollback SHA: `2a292269be830e0d40eb4d1445e46f27e67d3aea`
+- Current published baseline and repair rollback SHA:
+  `41bc6a60db1cf30deac38578f7c141ee54ddb820`
+- Historical hardened baseline: `cbd91ab1eefc7d16eabebec4d2c2cd7f15d43c2d`
+- Earlier historical rollback SHA: `2a292269be830e0d40eb4d1445e46f27e67d3aea`
 - Delivery target: release-candidate commit on `codex/hcn-platform-foundation`, tracked by draft PR #6
 - Production, provider, client, and secret access: none
 - Production deploy, merge, provider mutation, and configuration changes: none
@@ -33,14 +35,14 @@ Status: ready for independent re-review
 6. The public privacy notice now discloses the durable, encrypted,
    principal-scoped transcript store and bounded recent model replay. It no
    longer describes chat history as session-scoped process memory.
-7. Every Groq Responses request explicitly transmits `store:false`. Groq's
-   current endpoint-specific API reference accepts only `false` or `null` for
-   that field. This flag is not treated as ZDR; project Data Controls remain a
-   separate external gate.
+7. HCN does not send provider conversation identifiers and manually supplies
+   only bounded HCN-controlled replay. The Groq endpoint used by this adapter
+   does not accept a `store` request field, so the field is omitted. This is not
+   treated as ZDR; project Data Controls remain a separate external gate.
 
 Official contract reviewed on 2026-08-03:
 
-- [Groq Responses API reference](https://console.groq.com/docs/api-reference)
+- [Groq Responses API documentation](https://console.groq.com/docs/responses-api)
 - [Groq data controls and ZDR](https://console.groq.com/docs/your-data)
 
 ## Phase 1 claim-filing vertical slice
@@ -121,9 +123,18 @@ Official contract reviewed on 2026-08-03:
 
 - `node --check src/console/app.js`: passed
 - `node --check src/server.js`: passed
-- Final claim-filing and console focused gate: 39 passed, 0 failed, 0 skipped
-- `npm run check`: exit 0; 634 tests total, 633 passed, 0 failed, and 1 skipped
+- Final operational repair focused gate: 76 passed, 0 failed, 0 skipped
+- `npm run precheck`: exit 0; 103 passed, 0 failed, 0 skipped
+- `npm run check`: exit 0; 653 tests total, 652 passed, 0 failed, and 1 skipped
 - `git diff --check`: passed
+
+The 2026-08-04 operational repair removes an unsupported Groq request field,
+keeps bounded HCN-managed replay with no provider conversation identifier,
+ranks older actionable work ahead of routine recent files, adds a read-only
+Today review item for recognized estimating statuses, labels status-derived
+workflow hints without inventing a JobNimbus stage, preserves every open task
+until JobNimbus proves it closed, bounds chat titles, and hides unavailable
+action controls. No client or provider record was accessed or changed.
 
 The one skipped main-suite test is pre-existing test-suite behavior and is not
 a candidate-critical assistant, history, HTTP, or Calendar test.
@@ -136,7 +147,8 @@ a candidate-critical assistant, history, HTTP, or Calendar test.
    allowlist or feature gate is required before deployment; do not infer that
    the existing assigned-file boundary is a pilot-admission gate.
 2. Provision and attest a dedicated HCN Groq project with ZDR enabled in its
-   Data Controls. `store:false` does not satisfy this gate by itself.
+   Data Controls. Omitting the unsupported `store` field does not satisfy this
+   gate.
 3. Attest distinct, strong HCN-only secrets for assistant history encryption,
    Groq access, references, signatures, tenant isolation, OAuth/session
    protection, and other HCN stores. Record configuration presence only; never
@@ -145,11 +157,9 @@ a candidate-critical assistant, history, HTTP, or Calendar test.
    file-backed conversation store.
 5. Attest the persistent HCN disk and exact assistant-history path, including
    restart persistence and fail-closed wrong-key/tamper readiness.
-6. The hardened baseline SHA is
-   `cbd91ab1eefc7d16eabebec4d2c2cd7f15d43c2d`, and rollback SHA is
-   `2a292269be830e0d40eb4d1445e46f27e67d3aea`. Treat the exact head of draft PR
-   #6 as the release-candidate SHA and attest it again before deployment while
-   retaining the rollback SHA.
+6. The repair rollback SHA is
+   `41bc6a60db1cf30deac38578f7c141ee54ddb820`. Attest the exact repair commit
+   before deployment and retain that rollback SHA.
 7. Run configured synthetic smoke tests for the pending-turn UI race and for
    restart/decrypt/reload behavior before admitting pilot users.
 8. Obtain separate approval for a five-file read-only pilot. The pilot must not

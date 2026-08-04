@@ -179,6 +179,52 @@ test("unsupported source and presentation values cannot become raw output", () =
   );
 });
 
+test("JobNimbus status does not masquerade as an authoritative stage", () => {
+  const candidate = review();
+  candidate.file.stageCode = "unknown";
+  candidate.file.statusCode = "ready_for_pa_review";
+  const input = adaptFreshReviewToFileEvidence({
+    review: candidate,
+    ownerRef: OWNER_REF,
+    ownerEvidenceRef: OWNER_EVIDENCE_REF,
+    ...references
+  });
+  const intelligence = deriveFileIntelligence(input);
+
+  assert.equal(input.stages[0].stageCode, "unknown");
+  assert.equal(intelligence.currentStage.code, "unknown");
+  assert.equal(intelligence.currentStage.source, "jobnimbus");
+});
+
+test("unsupported JobNimbus stage and status remain fail-closed unknown", () => {
+  const candidate = review();
+  candidate.file.stageCode = "unknown";
+  candidate.file.statusCode = "unmapped_custom_board_status";
+  const input = adaptFreshReviewToFileEvidence({
+    review: candidate,
+    ownerRef: OWNER_REF,
+    ownerEvidenceRef: OWNER_EVIDENCE_REF,
+    ...references
+  });
+  const intelligence = deriveFileIntelligence(input);
+
+  assert.equal(input.stages[0].stageCode, "unknown");
+  assert.equal(intelligence.currentStage.code, "unknown");
+});
+
+test("estimate completion status is not misclassified as a closed file", () => {
+  const candidate = review();
+  candidate.file.stageCode = "estimate_completed";
+  const input = adaptFreshReviewToFileEvidence({
+    review: candidate,
+    ownerRef: OWNER_REF,
+    ownerEvidenceRef: OWNER_EVIDENCE_REF,
+    ...references
+  });
+
+  assert.equal(input.stages[0].stageCode, "estimate");
+});
+
 test("draft Gmail is never verified contact or response due", () => {
   const candidate = review();
   candidate.recent.gmail = [{

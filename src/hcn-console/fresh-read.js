@@ -29,6 +29,20 @@ const SAFE_PROVIDER_ID = /^[^\s\x00-\x1f\x7f]{1,512}$/;
 const SAFE_JOB_NUMBER = /^[a-z0-9][a-z0-9._/-]{0,63}$/i;
 const SAFE_CODE = /^[a-z][a-z0-9_.-]{0,63}$/;
 const MAX_PROVIDER_ITEMS = 500;
+const WORK_CENTER_STATUS_WEIGHTS = Object.freeze({
+  ready_for_pa_review: 200,
+  photo_file_estimate_needed: 180,
+  need_paperwork_info: 170,
+  submitted_awaiting_confirmation: 150,
+  hot_final_negotiation: 130,
+  negotiating: 110,
+});
+const REVIEW_TODAY_STATUS_CODES = Object.freeze([
+  "need_paperwork_info",
+  "photo_file_estimate_needed",
+  "ready_for_pa_review",
+  "submitted_awaiting_confirmation"
+]);
 
 const AUTHORITY = Object.freeze({
   mode: "read_only",
@@ -107,7 +121,7 @@ export function createHcnConsoleFreshReadService({
       files.push({ ...normalized, fileRef });
     }
 
-    files.sort(compareIndexFiles);
+    files.sort((left, right) => compareIndexFiles(left, right, generatedAt));
     return {
       envelope: fresh,
       files
@@ -506,14 +520,34 @@ function createEvidenceRef(references, source, providerRecordId) {
   return value;
 }
 
-function compareIndexFiles(left, right) {
-  const byAttention =
-    Number(missingFactCodes(right.missingFacts).length > 0)
-    - Number(missingFactCodes(left.missingFacts).length > 0);
+function compareIndexFiles(left, right, generatedAt) {
+  const byAttention = workCenterAttentionScore(right, generatedAt)
+    - workCenterAttentionScore(left, generatedAt);
   if (byAttention !== 0) return byAttention;
-  const byUpdatedAt = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  const byUpdatedAt = Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
   if (byUpdatedAt !== 0) return byUpdatedAt;
   return left.jobNumber.localeCompare(right.jobNumber);
+}
+
+function workCenterAttentionScore(file, generatedAt) {
+  const statusWeight = WORK_CENTER_STATUS_WEIGHTS[file.statusCode] || 0;
+  const ageDays = Math.max(
+    0,
+    Math.min(
+      120,
+      Math.floor((Date.parse(generatedAt) - Date.parse(file.updatedAt)) / 86_400_000),
+    ),
+  );
+  const missing = file.missingFacts;
+  let score = statusWeight + ageDays;
+  if (missing.claimNumber && file.statusCode === "ready_for_pa_review") score += 45;
+  if (missing.policyNumber) score += 20;
+  if (missing.dateOfLoss) score += 20;
+  if (
+    missing.adjuster
+    && file.statusCode === "submitted_awaiting_confirmation"
+  ) score += 40;
+  return score;
 }
 
 function projectIndexFile(value) {
@@ -719,6 +753,27 @@ function buildOperationalLanes({
         });
       }
     }
+  }
+
+  // "Today" means a fresh, actionable review condition. Neglect and activity
+  // gaps are separate reports and are never inferred from this lane.
+  const hasActionableJobNimbusReview = priority.some((item) =>
+    item.source === "jobnimbus"
+    && !["source_partial", "source_stale", "source_unavailable"].includes(
+      item.reasonCode
+    )
+  );
+  if (
+    today.length === 0
+    && REVIEW_TODAY_STATUS_CODES.includes(file.statusCode)
+    && hasActionableJobNimbusReview
+  ) {
+    today.push({
+      reasonCode: "file_review_today",
+      source: "jobnimbus",
+      reference: file.fileRef,
+      at: generatedAt
+    });
   }
 
   const compare = (left, right) =>

@@ -1780,7 +1780,10 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.match(html, /id="management-sweep-source-health"/);
   assert.match(html, /id="system-health"/);
   assert.match(html, /This first report uses JobNimbus activity only/);
-  assert.match(html, /longest verified\s+JobNimbus activity\s+gap/);
+  assert.match(
+    html,
+    /longest verified\s+gap since a qualifying JobNimbus operational activity/
+  );
   assert.match(html, /Company-wide Gmail,[\s\S]*Quo,[\s\S]*calendar communication evidence is not available/);
   assert.match(html, /delivery, export, delegation, and follow-up creation belong to[\s\S]*a later approval-gated phase/);
 
@@ -2057,4 +2060,54 @@ test("action and receipt data are memory-only, purge on operational loss, and by
 
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /action-plans|action-receipts/);
+});
+
+test("assistant chat UX opens the chat-type chooser and bounds display titles", async () => {
+  const script = (await readHcnConsoleAsset("/hcn/app.js")).body.toString("utf8");
+  assert.match(
+    script,
+    /function openAssistantNewDialog\(\)[\s\S]*elements\["assistant-new-form"\]\.reset\(\)[\s\S]*elements\["assistant-new-dialog"\]\.showModal\(\)/
+  );
+  assert.doesNotMatch(
+    script,
+    /function openAssistantNewDialog\(\)[\s\S]{0,700}createAssistantConversation/
+  );
+  assert.match(
+    script,
+    /function assistantConversationDisplayTitle\(value, maximum = 48\)/
+  );
+  assert.match(script, /assistantConversationDisplayTitle\(conversation\.title\)/);
+  assert.match(script, /boundedString\(prompt, 52\)/);
+});
+
+test("file evidence hides unavailable action controls", async () => {
+  const script = (await readHcnConsoleAsset("/hcn/app.js")).body.toString("utf8");
+  assert.match(script, /elements\["action-form"\]\.hidden = !sessionCanPrepare/);
+  assert.match(script, /Actions are read only for this session/);
+});
+
+test("management sweep labels gaps as qualifying operational activity", async () => {
+  const [htmlAsset, scriptAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  assert.match(html, /gap since a qualifying JobNimbus operational activity/);
+  assert.match(html, /Longest qualifying operational-activity gaps/);
+  assert.match(script, /Last qualifying operational activity/);
+  assert.doesNotMatch(script, /"Last JobNimbus touch"/);
+});
+
+test("file review today lane reason is clear", async () => {
+  const script = (await readHcnConsoleAsset("/hcn/app.js")).body.toString("utf8");
+  assert.match(script, /file_review_today: "Review this file today"/);
+});
+
+test("known estimating statuses are labeled as derived workflow, not provider stage", async () => {
+  const script = (await readHcnConsoleAsset("/hcn/app.js")).body.toString("utf8");
+  assert.match(script, /ready_for_pa_review: "Estimating workflow"/);
+  assert.match(script, /"unknown", "unavailable", "stage_unavailable"/);
+  assert.match(script, /workflowLabel \+ " \(from status\)"/);
+  assert.match(script, /\["Stage", fileStageLabel\(file\)\]/);
 });

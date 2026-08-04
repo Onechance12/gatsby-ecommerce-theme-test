@@ -352,7 +352,11 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     true
   );
   assert.equal(health.hcnAssistant.modelCanExecute, false);
-  assert.equal(health.hcnAssistant.responsesApiStore, false);
+  assert.equal(health.hcnAssistant.responsesApiStore, null);
+  assert.equal(
+    health.hcnAssistant.providerState,
+    "no_provider_conversation_ids_bounded_hcn_replay_only"
+  );
   assert.equal(health.hcnAssistant.historyConfigured, true);
   assert.equal(health.hcnAssistant.historyReady, true);
   assert.equal(
@@ -372,8 +376,10 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     privacyNotice,
     /prompt and the necessary allowlisted read-only evidence/i
   );
-  assert.match(privacyNotice, /explicitly requests store:false/i);
-  assert.match(privacyNotice, /does not establish zero data retention/i);
+  assert.match(privacyNotice, /does not send provider conversation identifiers/i);
+  assert.match(privacyNotice, /does not accept a store request field/i);
+  assert.match(privacyNotice, /Data Controls and retention terms still apply/i);
+  assert.doesNotMatch(privacyNotice, /explicitly (?:requests|sends) store:false/i);
   assert.doesNotMatch(privacyNotice, /session-scoped process memory/i);
 
   const loginResponse = await fetch(
@@ -1009,7 +1015,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(providerRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(providerRequest.body.reasoning.effort, "medium");
   assert.equal(providerRequest.body.max_output_tokens, 1800);
-  assert.equal(providerRequest.body.store, false);
+  assert.equal(Object.hasOwn(providerRequest.body, "store"), false);
   assert.equal(Object.hasOwn(providerRequest.body, "stream"), false);
   assert.equal(providerRequest.body.parallel_tool_calls, false);
   assert.equal(
