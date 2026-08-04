@@ -1323,6 +1323,21 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       fixedToolNames
     );
     assert.match(serializedInput(rounds[1]), /hcn\.console\.file\.v1/);
+    const reviewOutput = rounds[1].body.input.find(
+      (item) => item?.type === "function_call_output"
+    );
+    assert.ok(reviewOutput);
+    assert.ok(
+      Buffer.byteLength(reviewOutput.output, "utf8") <= 24 * 1024
+    );
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(rounds[1].body), "utf8")
+        <= 48 * 1024
+    );
+    assert.equal(
+      Object.hasOwn(JSON.parse(reviewOutput.output), "thresher"),
+      false
+    );
   }
 
   const noReviewRounds = requestsForPrompt(

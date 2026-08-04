@@ -213,6 +213,9 @@ import {
   hcnAssistantFailureStatus
 } from "./hcn-assistant/failure-telemetry.js";
 import {
+  projectHcnAssistantFileReview
+} from "./hcn-assistant/file-review-projection.js";
+import {
   readGoogleCalendarDayAvailability,
   readGoogleCalendarFileAppointments
 } from "./hcn-assistant/calendar-read.js";
@@ -5691,10 +5694,10 @@ async function runHcnModelAssistantTurn({
           toolResult = await hcnReadWorkCenter(toolInput);
           break;
         case "review_file":
-          toolResult = await hcnReadFile({
+          toolResult = projectHcnAssistantFileReview(await hcnReadFile({
             ...toolInput,
             recentLimit: 20
-          });
+          }));
           break;
         case "read_file_document_catalog":
           toolResult = await hcnReadFileDocumentCatalog(toolInput);
