@@ -16,6 +16,9 @@ import test from "node:test";
 import {
   createHcnInvitationStore
 } from "../auth/hcn-invitation-store.js";
+import {
+  createHcnAssistantFailureTelemetry
+} from "./failure-telemetry.js";
 
 const ASSISTANT_RESPONSE =
   "You are signed in. I can review assigned files and recommend next steps; this chat cannot prepare or execute actions.";
@@ -24,6 +27,46 @@ const EMPLOYEE_SUBJECT = "assigned-employee-google-subject";
 const EMPLOYEE_OWNER_ID = "assigned-employee-jobnimbus-owner";
 const HCN_REFERENCE_KEY =
   Buffer.alloc(32, 0x41).toString("base64url");
+
+test("assistant failure telemetry permits only fixed safe fields and codes", () => {
+  const sensitiveError = new Error(
+    "Private homeowner message and provider body must not be logged."
+  );
+  sensitiveError.name = "PrivateHomeownerError";
+  sensitiveError.code = "PRIVATE_CLIENT_CODE";
+  const unknown = createHcnAssistantFailureTelemetry({
+    error: sensitiveError,
+    statusCode: 502,
+    durationMs: 90_000
+  });
+  assert.deepEqual(unknown, {
+    type: "hcn_assistant_turn_failed",
+    errorCode: "HTTP_502",
+    errorName: "Error",
+    statusCode: 502,
+    durationMs: 60_000
+  });
+  assert.doesNotMatch(
+    JSON.stringify(unknown),
+    /Private homeowner|provider body|PRIVATE_CLIENT_CODE|PrivateHomeownerError/
+  );
+
+  const known = createHcnAssistantFailureTelemetry({
+    error: Object.assign(new Error("Still private."), {
+      name: "HcnAssistantError",
+      code: "tool_execution_failed"
+    }),
+    statusCode: 502,
+    durationMs: 7
+  });
+  assert.deepEqual(known, {
+    type: "hcn_assistant_turn_failed",
+    errorCode: "tool_execution_failed",
+    errorName: "HcnAssistantError",
+    statusCode: 502,
+    durationMs: 7
+  });
+});
 
 test("enabled assistant route uses fixed routed reasoning without external mutation", async (t) => {
   const temporaryRoot = await mkdtemp(
@@ -307,6 +350,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       stdio: ["ignore", "pipe", "pipe"]
     }
   );
+  let bridgeOutput = "";
+  const captureBridgeOutput = (chunk) => {
+    bridgeOutput += chunk.toString("utf8");
+  };
+  child.stdout.on("data", captureBridgeOutput);
+  child.stderr.on("data", captureBridgeOutput);
   t.after(() => stopChild(child));
   await waitForServer(child, bridgePort);
 
@@ -819,15 +868,49 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     fileExpectedRevision = turn.revision;
   }
 
+  const sensitiveFailurePrompt =
+    "fixture-skip-required-review: PRIVATE_PROMPT_MARKER summarize this exact file without the required evidence.";
+  const failureLogOffset = bridgeOutput.length;
   const noReviewResponse = await postFileAssistantTurn({
-    prompt:
-      "fixture-skip-required-review: summarize this exact file without the required evidence."
+    prompt: sensitiveFailurePrompt
   });
   const noReviewBody = await noReviewResponse.text();
   assert.equal(noReviewResponse.status, 502, noReviewBody);
+  const noReviewError = JSON.parse(noReviewBody).error;
   assert.match(
-    JSON.parse(noReviewBody).error,
+    noReviewError,
     /required fresh file review/i
+  );
+  await waitForOutput(
+    () => bridgeOutput.slice(failureLogOffset),
+    '"type":"hcn_assistant_turn_failed"'
+  );
+  const failureOutput = bridgeOutput.slice(failureLogOffset);
+  const failureLogs = failureOutput
+    .split(/\r?\n/)
+    .filter((line) => line.includes('"type":"hcn_assistant_turn_failed"'))
+    .map((line) => JSON.parse(line));
+  assert.equal(failureLogs.length, 1);
+  assert.deepEqual(
+    Object.keys(failureLogs[0]).sort(),
+    ["durationMs", "errorCode", "errorName", "statusCode", "type"]
+  );
+  assert.equal(
+    failureLogs[0].errorCode,
+    "required_first_tool_call_missing"
+  );
+  assert.equal(failureLogs[0].errorName, "HcnAssistantError");
+  assert.equal(failureLogs[0].statusCode, 502);
+  assert.equal(Number.isSafeInteger(failureLogs[0].durationMs), true);
+  assert.equal(failureLogs[0].durationMs >= 0, true);
+  assert.equal(failureLogs[0].durationMs <= 60_000, true);
+  assert.doesNotMatch(
+    JSON.stringify(failureLogs[0]),
+    /PRIVATE_PROMPT_MARKER|required fresh file review|subject_|conversation_/
+  );
+  assert.equal(
+    JSON.stringify(failureLogs[0]).includes(noReviewError),
+    false
   );
 
   const calendarResponse = await fetch(
@@ -1367,6 +1450,14 @@ async function waitForServer(child, port) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for server: ${output}`);
+}
+
+async function waitForOutput(readOutput, expected) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (readOutput().includes(expected)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for server output: ${expected}`);
 }
 
 async function stopChild(child) {

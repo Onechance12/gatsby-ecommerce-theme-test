@@ -209,6 +209,10 @@ import {
   createHcnAssistantConversationStore
 } from "./hcn-assistant/conversation-store.js";
 import {
+  createHcnAssistantFailureTelemetry,
+  hcnAssistantFailureStatus
+} from "./hcn-assistant/failure-telemetry.js";
+import {
   readGoogleCalendarDayAvailability,
   readGoogleCalendarFileAppointments
 } from "./hcn-assistant/calendar-read.js";
@@ -990,8 +994,11 @@ const routes = new Map([
 await hydrateHcnIdentityPins();
 
 const server = createServer(async (req, res) => {
+  const requestStartedAt = Date.now();
+  let requestPathname = "";
   try {
     const url = new URL(req.url, "http://localhost");
+    requestPathname = url.pathname;
     if (req.method === "GET" && url.pathname === "/oauth/authorize") return oauthAuthorize(res, url);
     if (req.method === "GET" && url.pathname === "/oauth/google/callback") {
       return oauthGoogleCallback(req, res, url);
@@ -1145,10 +1152,21 @@ const server = createServer(async (req, res) => {
         : {}
     );
   } catch (error) {
+    const statusCode = hcnAssistantFailureStatus(error?.statusCode);
+    if (
+      req.method === "POST"
+      && requestPathname === "/hcn/api/v1/assistant/turns"
+    ) {
+      logHcnAssistantTurnFailure({
+        error,
+        statusCode,
+        requestStartedAt
+      });
+    }
     const retryAfterSeconds = Number(error?.retryAfterSeconds);
     send(
       res,
-      error.statusCode || 500,
+      statusCode,
       {
         error: redactSensitiveText(error.message || String(error))
       },
@@ -1160,6 +1178,18 @@ const server = createServer(async (req, res) => {
     );
   }
 });
+
+function logHcnAssistantTurnFailure({
+  error,
+  statusCode,
+  requestStartedAt
+}) {
+  console.error(JSON.stringify(createHcnAssistantFailureTelemetry({
+    error,
+    statusCode,
+    durationMs: Date.now() - requestStartedAt
+  })));
+}
 
 const voiceWebSocketServer = new WebSocketServer({ noServer: true });
 
