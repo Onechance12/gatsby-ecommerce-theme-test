@@ -44,7 +44,8 @@ test("Thresher AI adapter uses only the fixed Groq endpoint and model", async ()
   );
   const body = JSON.parse(requests[0].options.body);
   assert.equal(body.model, THRESHER_AI_MODEL);
-  assert.equal(body.tool_choice, "auto");
+  assert.equal(Object.hasOwn(body, "tool_choice"), false);
+  assert.equal(Object.hasOwn(body, "tools"), false);
   assert.equal(body.parallel_tool_calls, false);
   assert.equal(Object.hasOwn(body, "store"), false);
   assert.equal(body.max_output_tokens, 1600);
@@ -180,7 +181,11 @@ test("Thresher AI adapter rejects built-in or remote provider tools", async () =
     { type: "mcp", server_url: "https://example.com/mcp" }
   ]) {
     await assert.rejects(
-      () => client({ ...fixedRequest(), tools: [tool] }),
+      () => client({
+        ...fixedRequest(),
+        tools: [tool],
+        tool_choice: "auto"
+      }),
       /fixed HCN contract/
     );
   }
@@ -225,8 +230,6 @@ function fixedRequest() {
     model: THRESHER_AI_MODEL,
     instructions: "Use fresh HCN evidence.",
     input: [{ role: "user", content: "Work my files." }],
-    tools: [],
-    tool_choice: "auto",
     parallel_tool_calls: false,
     store: false,
     max_output_tokens: 1600

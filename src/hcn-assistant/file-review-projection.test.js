@@ -115,9 +115,9 @@ test("file review projection preserves operational truth within provider replay 
     projected.intelligence.workflows.follow_up.readiness,
     "partially_ready"
   );
-  assert.equal(projected.recent.activities.returnedCount, 4);
-  assert.equal(projected.recent.gmail.returnedCount, 4);
-  assert.equal(projected.recent.gmail.omittedCount, 16);
+  assert.equal(projected.recent.activities.returnedCount, 1);
+  assert.equal(projected.recent.gmail.returnedCount, 1);
+  assert.equal(projected.recent.gmail.omittedCount, 19);
   assert.equal(
     projected.recent.gmail.items.some(
       (item) => item.reference === actionableLaterReference

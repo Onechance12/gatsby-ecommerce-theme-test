@@ -59,6 +59,7 @@ export async function runHcnAssistant({
   model = DEFAULT_HCN_ASSISTANT_MODEL,
   instructions = DEFAULT_HCN_ASSISTANT_INSTRUCTIONS,
   requiredFirstToolName = "",
+  availableToolNames = HCN_ASSISTANT_TOOL_NAMES,
   maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS,
   maxToolCalls = DEFAULT_MAX_TOOL_CALLS,
   maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS
@@ -99,6 +100,9 @@ export async function runHcnAssistant({
     requiredFirstToolName,
     "requiredFirstToolName"
   );
+  const normalizedAvailableToolNames = normalizeAvailableToolNames(
+    availableToolNames
+  );
   integerBetween(
     maxToolRounds,
     0,
@@ -134,6 +138,11 @@ export async function runHcnAssistant({
   const requiredFirstTools = requiredFirstTool
     ? Object.freeze([requiredFirstTool])
     : null;
+  const availableTools = Object.freeze(
+    normalizedAvailableToolNames.map((name) =>
+      HCN_ASSISTANT_TOOLS.find((tool) => tool.name === name)
+    )
+  );
 
   const replayInput = [
     ...normalizedHistory,
@@ -149,6 +158,10 @@ export async function runHcnAssistant({
   while (true) {
     assertReplayBound(replayInput);
     const requiresFirstTool = responseCount === 0 && requiredFirstTool;
+    const roundTools = requiresFirstTool
+      ? requiredFirstTools
+      : availableTools;
+    const roundToolNames = new Set(roundTools.map((tool) => tool.name));
     const request = {
       model: normalizedModel,
       instructions: normalizedInstructions,
@@ -157,8 +170,12 @@ export async function runHcnAssistant({
         "response input",
         MAX_REPLAY_INPUT_BYTES
       ),
-      tools: requiresFirstTool ? requiredFirstTools : HCN_ASSISTANT_TOOLS,
-      tool_choice: requiresFirstTool ? "required" : "auto",
+      ...(roundTools.length > 0
+        ? {
+            tools: roundTools,
+            tool_choice: requiresFirstTool ? "required" : "auto"
+          }
+        : {}),
       parallel_tool_calls: false,
       store: false,
       max_output_tokens: maxOutputTokens
@@ -217,6 +234,14 @@ export async function runHcnAssistant({
       providerError(
         "required_first_tool_call_mismatch",
         "The assistant requested a different tool before fresh file review."
+      );
+    }
+    if (
+      functionCalls.some((call) => !roundToolNames.has(call.name))
+    ) {
+      providerError(
+        "unavailable_tool_call",
+        "The assistant requested a read tool that was not enabled for this round."
       );
     }
 
@@ -326,6 +351,26 @@ function optionalToolName(value, label) {
     invalidInput(`${label} must name a fixed HCN read tool`);
   }
   return value;
+}
+
+function normalizeAvailableToolNames(value) {
+  if (!Array.isArray(value) || value.length > HCN_ASSISTANT_TOOL_NAMES.length) {
+    invalidInput("availableToolNames must be a bounded fixed-tool array");
+  }
+  const seen = new Set();
+  const result = value.map((name, index) => {
+    if (typeof name !== "string" || !TOOL_NAME_SET.has(name)) {
+      invalidInput(
+        `availableToolNames[${index}] must name a fixed HCN read tool`
+      );
+    }
+    if (seen.has(name)) {
+      invalidInput("availableToolNames must not contain duplicates");
+    }
+    seen.add(name);
+    return name;
+  });
+  return Object.freeze(result);
 }
 
 /**

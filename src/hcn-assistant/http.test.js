@@ -1317,11 +1317,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     const rounds = requestsForPrompt(prompt);
     assert.equal(rounds.length, 2);
     assert.equal(rounds[0].body.tool_choice, "required");
-    assert.equal(rounds[1].body.tool_choice, "auto");
-    assert.deepEqual(
-      rounds[1].body.tools.map((tool) => tool.name),
-      fixedToolNames
-    );
+    assert.equal(Object.hasOwn(rounds[1].body, "tool_choice"), false);
+    assert.equal(Object.hasOwn(rounds[1].body, "tools"), false);
     assert.match(serializedInput(rounds[1]), /hcn\.console\.file\.v1/);
     const reviewOutput = rounds[1].body.input.find(
       (item) => item?.type === "function_call_output"
@@ -1332,7 +1329,11 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     );
     assert.ok(
       Buffer.byteLength(JSON.stringify(rounds[1].body), "utf8")
-        <= 48 * 1024
+        <= 20 * 1024,
+      `ordinary exact-file provider request is ${Buffer.byteLength(
+        JSON.stringify(rounds[1].body),
+        "utf8"
+      )} bytes`
     );
     assert.equal(
       Object.hasOwn(JSON.parse(reviewOutput.output), "thresher"),
@@ -1350,6 +1351,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(calendarRounds.length, 3);
   assert.equal(calendarRounds[0].body.tool_choice, "required");
   assert.equal(calendarRounds[1].body.tool_choice, "auto");
+  for (const request of calendarRounds.slice(1)) {
+    assert.deepEqual(
+      request.body.tools.map((tool) => tool.name),
+      ["read_calendar_day"]
+    );
+  }
   assert.match(serializedInput(calendarRounds[1]), /hcn\.console\.file\.v1/);
   assert.match(
     serializedInput(calendarRounds[2]),
@@ -1362,6 +1369,13 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     (request) => request.body.tool_choice === "required"
   );
   assert.equal(requiredCatalogIndex, 1);
+  for (const request of catalogRounds.slice(requiredCatalogIndex + 1)) {
+    assert.equal(request.body.tool_choice, "auto");
+    assert.deepEqual(
+      request.body.tools.map((tool) => tool.name),
+      ["read_file_document_catalog", "read_file_document"]
+    );
+  }
   assert.match(
     serializedInput(catalogRounds[requiredCatalogIndex + 1]),
     /hcn\.console\.file\.v1/
@@ -1380,7 +1394,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       false
     );
     assert.equal(
-      request.body.tools.some((tool) =>
+      (request.body.tools || []).some((tool) =>
         /execute|approve/i.test(tool.name)
       ),
       false

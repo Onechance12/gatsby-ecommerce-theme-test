@@ -79,6 +79,13 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
           .map((item) => item.name)
       : []
   );
+  const advertisedToolNames = new Set(
+    Array.isArray(body.tools)
+      ? body.tools
+          .filter((tool) => typeof tool?.name === "string")
+          .map((tool) => tool.name)
+      : []
+  );
   if (
     body.tool_choice === "required"
     && Array.isArray(body.tools)
@@ -123,6 +130,11 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
     && latestUserMessage.includes(calendarToolPromptMarker)
   ) {
     if (!functionCallNames.has("read_calendar_day")) {
+      if (!advertisedToolNames.has("read_calendar_day")) {
+        throw new Error(
+          "HCN test Calendar tool call was not advertised by the server."
+        );
+      }
       const fileRef = serializedContext.match(
         /subject_[a-f0-9]{32}/
       )?.[0];
@@ -163,6 +175,11 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
   }
   if (toolPromptMarker && latestUserMessage.includes(toolPromptMarker)) {
     if (!functionCallNames.has("read_file_document_catalog")) {
+      if (!advertisedToolNames.has("read_file_document_catalog")) {
+        throw new Error(
+          "HCN test document-catalog tool was not advertised by the server."
+        );
+      }
       const fileRef = serializedInput.match(/subject_[a-f0-9]{32}/)?.[0];
       if (!fileRef) {
         throw new Error("HCN test document-catalog tool call is missing file_ref.");

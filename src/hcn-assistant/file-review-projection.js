@@ -1,5 +1,5 @@
 const MODEL_FILE_REVIEW_MAX_BYTES = 24 * 1024;
-const RECENT_DETAIL_LIMIT = 4;
+const RECENT_DETAIL_LIMIT = 1;
 const MAX_LANE_ITEMS = 20;
 
 const WORKFLOW_NAMES = Object.freeze([

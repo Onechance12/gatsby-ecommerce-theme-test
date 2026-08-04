@@ -280,6 +280,7 @@ test("exact-file turns require review_file first, then resume the serial auto to
 
   const result = await defaultRun({
     requiredFirstToolName: "review_file",
+    availableToolNames: ["read_file_document_catalog"],
     async createResponse(request) {
       requests.push(request);
       return responses.shift();
@@ -309,13 +310,97 @@ test("exact-file turns require review_file first, then resume the serial auto to
     assert.equal(request.tool_choice, "auto");
     assert.deepEqual(
       request.tools.map((tool) => tool.name),
-      HCN_ASSISTANT_TOOL_NAMES
+      ["read_file_document_catalog"]
     );
   }
   assert.match(
     JSON.stringify(requests[1].input),
     /hcn\.console\.file\.v1/
   );
+});
+
+test("exact-file turns can finish after required review with no follow-up tool schemas", async () => {
+  const requests = [];
+  const responses = [
+    functionCallResponse({
+      name: "review_file",
+      arguments: JSON.stringify({ file_ref: FILE_REF }),
+      callId: "call_review_only"
+    }),
+    finalResponse("Fresh file evidence was reviewed.")
+  ];
+
+  const result = await defaultRun({
+    requiredFirstToolName: "review_file",
+    availableToolNames: [],
+    async createResponse(request) {
+      requests.push(request);
+      return responses.shift();
+    },
+    async executeTool() {
+      return { schema: "hcn.console.file.v1", file: { fileRef: FILE_REF } };
+    }
+  });
+
+  assert.equal(result.message, "Fresh file evidence was reviewed.");
+  assert.deepEqual(
+    requests[0].tools.map((tool) => tool.name),
+    ["review_file"]
+  );
+  assert.equal(requests[0].tool_choice, "required");
+  assert.equal(Object.hasOwn(requests[1], "tools"), false);
+  assert.equal(Object.hasOwn(requests[1], "tool_choice"), false);
+});
+
+test("post-review tool selection rejects invalid configuration and unavailable provider calls", async (t) => {
+  for (const availableToolNames of [
+    null,
+    ["not_a_tool"],
+    ["read_calendar_day", "read_calendar_day"]
+  ]) {
+    await t.test(`invalid ${JSON.stringify(availableToolNames)}`, async () => {
+      await assert.rejects(
+        defaultRun({ availableToolNames }),
+        (error) =>
+          error instanceof HcnAssistantError
+          && error.code === "invalid_assistant_input"
+      );
+    });
+  }
+
+  let responseCount = 0;
+  let executionCount = 0;
+  await assert.rejects(
+    defaultRun({
+      requiredFirstToolName: "review_file",
+      availableToolNames: [],
+      async createResponse() {
+        responseCount += 1;
+        return responseCount === 1
+          ? functionCallResponse({
+              name: "review_file",
+              arguments: JSON.stringify({ file_ref: FILE_REF }),
+              callId: "call_review_before_unavailable"
+            })
+          : functionCallResponse({
+              name: "read_calendar_day",
+              arguments: JSON.stringify({
+                date: "2026-08-04",
+                file_ref: FILE_REF
+              }),
+              callId: "call_unavailable"
+            });
+      },
+      async executeTool() {
+        executionCount += 1;
+        return { schema: "hcn.console.file.v1", file: { fileRef: FILE_REF } };
+      }
+    }),
+    (error) =>
+      error instanceof HcnAssistantError
+      && error.code === "unavailable_tool_call"
+  );
+  assert.equal(executionCount, 1);
 });
 
 test("exact-file required review fails closed on first-round text or a different tool", async (t) => {

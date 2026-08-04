@@ -4,15 +4,18 @@ import { THRESHER_AI_MODEL } from "./thresher-ai-runtime.js";
 export const THRESHER_GROQ_RESPONSES_URL =
   "https://api.groq.com/openai/v1/responses";
 
-const REQUEST_FIELDS = Object.freeze([
+const BASE_REQUEST_FIELDS = Object.freeze([
   "model",
   "instructions",
   "input",
-  "tools",
-  "tool_choice",
   "parallel_tool_calls",
   "store",
   "max_output_tokens"
+]);
+const TOOLED_REQUEST_FIELDS = Object.freeze([
+  ...BASE_REQUEST_FIELDS,
+  "tools",
+  "tool_choice"
 ]);
 
 /**
@@ -43,6 +46,12 @@ export function createThresherGroqResponsesClient({
 
   return Object.freeze(async function createResponse(request) {
     validateRequest(request, { maxOutputTokens });
+    const toolFields = Object.hasOwn(request, "tools")
+      ? {
+          tools: request.tools,
+          tool_choice: request.tool_choice
+        }
+      : {};
     return fetchBoundedJson(
       fetchImpl,
       THRESHER_GROQ_RESPONSES_URL,
@@ -57,8 +66,7 @@ export function createThresherGroqResponsesClient({
           model: THRESHER_AI_MODEL,
           instructions: request.instructions,
           input: request.input,
-          tools: request.tools,
-          tool_choice: request.tool_choice,
+          ...toolFields,
           parallel_tool_calls: false,
           max_output_tokens: maxOutputTokens,
           reasoning: { effort }
@@ -74,19 +82,31 @@ export function createThresherGroqResponsesClient({
 }
 
 function validateRequest(request, { maxOutputTokens }) {
-  exactRecord(request, REQUEST_FIELDS, "Thresher AI provider request");
+  const hasTools = Object.hasOwn(request, "tools");
+  const hasToolChoice = Object.hasOwn(request, "tool_choice");
+  if (hasTools !== hasToolChoice) {
+    throw new TypeError(
+      "Thresher AI provider request does not match the fixed HCN contract"
+    );
+  }
+  exactRecord(
+    request,
+    hasTools ? TOOLED_REQUEST_FIELDS : BASE_REQUEST_FIELDS,
+    "Thresher AI provider request"
+  );
   if (
     request.model !== THRESHER_AI_MODEL
     || request.store !== false
     || request.parallel_tool_calls !== false
-    || !["auto", "required"].includes(request.tool_choice)
-    || !Array.isArray(request.tools)
+    || (hasTools && !["auto", "required"].includes(request.tool_choice))
+    || (hasTools && !Array.isArray(request.tools))
+    || (hasTools && request.tools.length === 0)
     || (request.tool_choice === "required" && request.tools.length !== 1)
     || request.max_output_tokens !== maxOutputTokens
     || typeof request.instructions !== "string"
     || !request.instructions
     || !Array.isArray(request.input)
-    || request.tools.some((tool) => tool?.type !== "function")
+    || (hasTools && request.tools.some((tool) => tool?.type !== "function"))
   ) {
     throw new TypeError(
       "Thresher AI provider request does not match the fixed HCN contract"
