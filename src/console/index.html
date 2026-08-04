@@ -48,6 +48,16 @@
             <span class="nav-glyph glyph-overview" aria-hidden="true"></span>
             <span>Ask Thresher</span>
           </a>
+          <button
+            id="assistant-chats-nav"
+            class="nav-item nav-action"
+            type="button"
+            aria-controls="assistant-chat-sidebar"
+            aria-expanded="false"
+          >
+            <span class="nav-glyph glyph-chats" aria-hidden="true"></span>
+            <span>Chats</span>
+          </button>
           <a class="nav-item" href="#work-center">
             <span class="nav-glyph glyph-work" aria-hidden="true"></span>
             <span>Work My Files</span>
@@ -124,11 +134,19 @@
                   <p class="eyebrow">Saved work</p>
                   <h2>Chats</h2>
                 </div>
-                <button
-                  id="assistant-new-chat"
-                  class="button button-primary button-compact"
-                  type="button"
-                >+ New chat</button>
+                <div class="assistant-chat-sidebar-actions">
+                  <button
+                    id="assistant-new-chat"
+                    class="button button-primary button-compact"
+                    type="button"
+                  >+ New chat</button>
+                  <button
+                    id="assistant-chat-drawer-close"
+                    class="button button-surface button-compact assistant-chat-drawer-close"
+                    type="button"
+                    aria-label="Close chats"
+                  >Close</button>
+                </div>
               </div>
               <div
                 id="assistant-chat-filters"
@@ -218,6 +236,11 @@
                   <strong id="assistant-current-title">Choose or start a chat</strong>
                   <span id="assistant-current-kind" class="assistant-kind-pill">General</span>
                 </div>
+                <a
+                  id="assistant-chat-files-link"
+                  class="button button-surface button-compact assistant-chat-files-link"
+                  href="#work-center"
+                >Files</a>
                 <div class="assistant-current-actions">
                   <button
                     id="assistant-rename-chat"
@@ -897,6 +920,14 @@
                         type="button"
                         disabled
                       >Start client chat</button>
+                      <button
+                        id="file-actions"
+                        class="button button-surface button-compact"
+                        type="button"
+                        data-hcn-capability="hcn.action_plans.prepare"
+                        hidden
+                        disabled
+                      >File actions</button>
                       <button
                         id="file-refresh"
                         class="button button-surface button-compact"

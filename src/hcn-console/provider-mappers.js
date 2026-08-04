@@ -275,6 +275,10 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     options.expectedProviderFileId,
     'expectedProviderFileId',
   );
+  const knownProviderFileIds = normalizeKnownProviderFileIds(
+    options.knownProviderFileIds,
+    expectedProviderFileId,
+  );
   const freshness = normalizeFreshness(input);
   for (const collection of ['activities', 'tasks', 'documents']) {
     requireCompletePagination(input, collection);
@@ -296,6 +300,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     value: input.activities,
     label: 'activities',
     expectedProviderFileId,
+    knownProviderFileIds,
     mapper: (record) =>
       mapActivity(record, assignedOwnerId, legacyChanceField),
   });
@@ -303,6 +308,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     value: input.tasks,
     label: 'tasks',
     expectedProviderFileId,
+    knownProviderFileIds,
     mapper: (record) =>
       mapTask(record, assignedOwnerId, legacyChanceField),
   });
@@ -310,6 +316,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     value: input.documents,
     label: 'documents',
     expectedProviderFileId,
+    knownProviderFileIds,
     mapper: mapDocument,
     filter: (record) => !isPhotoLikeDocument(record),
   });
@@ -583,6 +590,7 @@ function mapScopedCollection({
   value,
   label,
   expectedProviderFileId,
+  knownProviderFileIds,
   mapper,
   filter = () => true,
 }) {
@@ -592,7 +600,11 @@ function mapScopedCollection({
   }
   const mapped = [];
   for (const row of rows) {
-    if (!recordReferencesFile(row, expectedProviderFileId)) {
+    if (!recordReferencesFile(
+      row,
+      expectedProviderFileId,
+      knownProviderFileIds,
+    )) {
       fail(
         'scope_mismatch',
         `JobNimbus ${label} escaped the exact file scope.`,
@@ -611,8 +623,54 @@ function mapScopedCollection({
   return mapped;
 }
 
-function recordReferencesFile(record, expectedProviderFileId) {
+function normalizeKnownProviderFileIds(value, expectedProviderFileId) {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 5000) {
+    fail(
+      'invalid_configuration',
+      'Known JobNimbus file scope is unavailable.',
+    );
+  }
+  const ids = new Set();
+  for (const valueId of value) {
+    ids.add(requireProviderId(valueId, 'knownProviderFileIds'));
+  }
+  if (!ids.has(expectedProviderFileId)) {
+    fail(
+      'scope_mismatch',
+      'Known JobNimbus file scope does not contain the exact file.',
+    );
+  }
+  return ids;
+}
+
+function recordReferencesFile(
+  record,
+  expectedProviderFileId,
+  knownProviderFileIds,
+) {
   if (!isPlainObject(record)) return false;
+  if (knownProviderFileIds) {
+    const relatedIds = [];
+    collectReferenceIds(record.related, relatedIds);
+    if (!relatedIds.includes(expectedProviderFileId)) return false;
+
+    const allIds = [];
+    for (const value of [
+      record.primary,
+      record.related,
+      record.customer,
+      record.contact,
+      record.parent,
+    ]) {
+      collectReferenceIds(value, allIds);
+    }
+    return !allIds.some(
+      (id) =>
+        id !== expectedProviderFileId
+        && knownProviderFileIds.has(id),
+    );
+  }
   const containers = [
     record.primary,
     record.related,
@@ -1181,12 +1239,14 @@ function normalizeProviderDate(value) {
       : value.toISOString().slice(0, 10);
   }
   if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value <= 0) return null;
     const timestamp = normalizeProviderTimestamp(value);
     return timestamp ? timestamp.slice(0, 10) : null;
   }
   if (typeof value !== 'string') return null;
   const text = value.trim();
   if (!text) return null;
+  if (/^0+(?:\.0+)?$/.test(text)) return null;
   const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
   const usDate = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text);
   let year;

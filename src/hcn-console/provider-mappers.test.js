@@ -446,6 +446,100 @@ test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete
   );
 });
 
+test('exact JobNimbus file permits non-contact task references but rejects cross-client references', () => {
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+  };
+
+  const result = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activities: [
+        {
+          jnid: 'task-related-activity',
+          primary: { id: 'jobnimbus-task-id' },
+          related: [{ id: FILE_ID }],
+          date_created: 1785261000,
+        },
+      ],
+    },
+    options,
+  );
+  assert.equal(result.data.activities.length, 1);
+
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          activities: [
+            {
+              jnid: 'cross-client-activity',
+              primary: { id: 'another-known-client-file' },
+              related: [{ id: FILE_ID }],
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+    mappingError('scope_mismatch'),
+  );
+
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          activities: [
+            {
+              jnid: 'missing-exact-related-file',
+              primary: { id: FILE_ID },
+              related: [{ id: 'jobnimbus-task-id' }],
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+    mappingError('scope_mismatch'),
+  );
+});
+
+test('JobNimbus zero date sentinels remain missing instead of becoming 1970 dates', () => {
+  for (const dateOfLoss of [0, '0', '0000']) {
+    const result = mapJobNimbusFileEnvelope(
+      {
+        ...FRESHNESS,
+        activitiesComplete: true,
+        tasksComplete: true,
+        documentsComplete: true,
+        contact: contact({ 'Date of Loss': dateOfLoss }),
+        activities: [],
+        tasks: [],
+        documents: [],
+      },
+      {
+        chanceOwnerId: CHANCE_ID,
+        expectedProviderFileId: FILE_ID,
+      },
+    );
+    assert.equal(result.data.file.dateOfLoss, null);
+  }
+});
+
 test('Gmail mapper requires an exact complete scope and emits only bounded fresh-read fields', () => {
   const result = mapScopedGmailEnvelope(
     {

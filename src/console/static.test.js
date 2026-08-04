@@ -9,9 +9,14 @@ import {
 } from "./static.js";
 
 function extractConsoleFunction(script, name) {
-  const start = script.indexOf(`  function ${name}(`);
+  const starts = [
+    script.indexOf(`  function ${name}(`),
+    script.indexOf(`  async function ${name}(`)
+  ].filter((candidate) => candidate >= 0);
+  const start = starts.length ? Math.min(...starts) : -1;
   assert.notEqual(start, -1, `${name} must exist`);
-  const next = script.indexOf("\n  function ", start + 1);
+  const nextMatch = /\n  (?:async )?function /.exec(script.slice(start + 1));
+  const next = nextMatch ? start + 1 + nextMatch.index : -1;
   assert.notEqual(next, -1, `${name} must be followed by another function`);
   return script.slice(start, next);
 }
@@ -538,7 +543,10 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
     /const ASSISTANT_CONVERSATION_MANAGE_CAPABILITY =\s*"hcn\.assistant\.conversations\.manage"/
   );
   assert.match(script, /function loadAssistantConversations\(options\)/);
-  assert.match(script, /function loadAssistantConversation\(conversationRef\)/);
+  assert.match(
+    script,
+    /function loadAssistantConversation\(conversationRef, options\)/
+  );
   assert.match(script, /function loadOlderAssistantMessages\(\)/);
   assert.match(script, /function createAssistantConversation\(input\)/);
   assert.match(script, /function submitAssistantRename\(event\)/);
@@ -663,6 +671,95 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
   assert.doesNotMatch(worker, /assistant\/conversations|assistant\/turns/);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
+});
+
+test("saved chats are persistent navigation and a full-height mobile workspace", async () => {
+  const [htmlAsset, scriptAsset, styleAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/app.css")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const style = styleAsset.body.toString("utf8");
+
+  assert.match(
+    html,
+    /<span>Ask Thresher<\/span>[\s\S]*id="assistant-chats-nav"[\s\S]*<span>Chats<\/span>[\s\S]*<span>Work My Files<\/span>/
+  );
+  assert.match(
+    html,
+    /id="assistant-chats-nav"[\s\S]*aria-controls="assistant-chat-sidebar"[\s\S]*aria-expanded="false"/
+  );
+  assert.match(
+    html,
+    /id="assistant-chat-drawer-close"[\s\S]*aria-label="Close chats"/
+  );
+  assert.match(
+    html,
+    /id="assistant-chat-files-link"[\s\S]*href="#work-center"[\s\S]*>Files<\/a>/
+  );
+  assert.match(
+    script,
+    /function openAssistantChatsNavigation\(\)[\s\S]*window\.location\.hash = "#overview";[\s\S]*toggleAssistantDrawer\(true\);[\s\S]*focusAssistantChatList\(\);/
+  );
+  assert.match(
+    script,
+    /elements\["assistant-chat-drawer-open"\]\.setAttribute\([\s\S]*"aria-expanded"[\s\S]*elements\["assistant-chats-nav"\]\.setAttribute\([\s\S]*"aria-expanded"/
+  );
+  assert.match(
+    script,
+    /loadAssistantConversation\([\s\S]*conversation\.conversationRef,[\s\S]*\{ focusComposer: true \}[\s\S]*\);/
+  );
+  assert.match(
+    script,
+    /toggleAssistantDrawer\(false, \{ restoreFocus: !focusComposer \}\);[\s\S]*elements\["assistant-prompt"\]\.focus|target\.focus\(\)/
+  );
+  assert.match(
+    script,
+    /document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
+  );
+
+  assert.match(style, /width: min\(94vw, 390px\)/);
+  assert.match(style, /grid-template-rows: auto auto minmax\(0, 1fr\) auto/);
+  assert.match(style, /\.assistant-chat-sidebar button,[\s\S]*min-height: 44px/);
+  assert.match(
+    style,
+    /body\[data-assistant-chat-workspace\] #overview\.assistant-view[\s\S]*height: 100vh;[\s\S]*height: 100dvh/
+  );
+  assert.match(
+    style,
+    /body\[data-assistant-chat-workspace\] \.assistant-transcript[\s\S]*min-height: 0;[\s\S]*max-height: none;[\s\S]*flex: 1 1 auto/
+  );
+  assert.match(
+    style,
+    /body\[data-assistant-chat-workspace\] \.assistant-composer[\s\S]*position: sticky;[\s\S]*env\(safe-area-inset-bottom\)/
+  );
+  assert.match(
+    style,
+    /body\[data-assistant-chat-workspace\] \.assistant-chat-files-link[\s\S]*display: inline-flex;[\s\S]*min-height: 44px/
+  );
+});
+
+test("a fresh selected Work Center summary can start an exact-file chat", async () => {
+  const scriptAsset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = scriptAsset.body.toString("utf8");
+  const start = extractConsoleFunction(script, "startSelectedFileConversation");
+  const controls = extractConsoleFunction(script, "syncAssistantConversationControls");
+  const selected = extractConsoleFunction(script, "selectedFreshWorkCenterFile");
+
+  assert.match(start, /const selected = selectedFreshWorkCenterFile\(\)/);
+  assert.match(start, /record\(state\.fileReview\)\.file/);
+  assert.match(start, /reviewed\?\.fileRef === selected\.fileRef \? reviewed : selected/);
+  assert.doesNotMatch(start, /!state\.fileReview/);
+  assert.match(start, /kind: "file"[\s\S]*fileRef: state\.selectedFileRef/);
+  assert.match(selected, /record\(state\.workCenter\)\.files/);
+  assert.match(selected, /file\.fileRef === fileRef/);
+  assert.match(controls, /navigator\.onLine[\s\S]*selectedFreshWorkCenterFile\(\)/);
+  assert.doesNotMatch(
+    controls,
+    /elements\["file-start-chat"\]\.disabled = !\([\s\S]*&& state\.fileReview/
+  );
 });
 
 test("exact-file claim filing is pilot-hidden, approval-gated, and provider-opaque", async () => {
@@ -1642,6 +1739,14 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   assert.match(html, /id="update-event-ref"/);
   assert.match(html, /id="gmail-send-draft-ref"/);
   assert.match(html, /id="quo-text-to"[\s\S]*placeholder="\+15551234567"/);
+  assert.match(
+    html,
+    /id="file-actions"[\s\S]*data-hcn-capability="hcn\.action_plans\.prepare"[\s\S]*>File actions<\/button>/
+  );
+  assert.match(
+    script,
+    /elements\["file-actions"\]\.addEventListener\("click"[\s\S]*elements\["action-composer"\]\.scrollIntoView/
+  );
   assert.match(html, /Central time/);
   assert.match(html, /id="approval-acknowledge" type="checkbox" disabled/);
   assert.match(html, /Prepare immutable review/);

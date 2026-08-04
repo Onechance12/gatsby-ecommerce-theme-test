@@ -427,7 +427,9 @@
       "assistant-chat-sidebar",
       "assistant-chat-main",
       "assistant-chat-backdrop",
+      "assistant-chats-nav",
       "assistant-chat-drawer-open",
+      "assistant-chat-drawer-close",
       "assistant-new-chat",
       "assistant-chat-filters",
       "assistant-conversation-list",
@@ -533,6 +535,7 @@
       "file-stage",
       "file-evidence-status",
       "file-start-chat",
+      "file-actions",
       "file-refresh",
       "file-alert",
       "file-freshness",
@@ -675,9 +678,17 @@
       "click",
       openAssistantNewDialog
     );
+    elements["assistant-chats-nav"].addEventListener(
+      "click",
+      openAssistantChatsNavigation
+    );
     elements["assistant-chat-drawer-open"].addEventListener(
       "click",
       function () { toggleAssistantDrawer(true); }
+    );
+    elements["assistant-chat-drawer-close"].addEventListener(
+      "click",
+      function () { toggleAssistantDrawer(false); }
     );
     elements["assistant-chat-backdrop"].addEventListener(
       "click",
@@ -820,6 +831,16 @@
       "click",
       startSelectedFileConversation
     );
+    elements["file-actions"].addEventListener("click", function () {
+      if (elements["file-actions"].disabled) return;
+      elements["action-composer"].scrollIntoView({
+        block: "start",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth"
+      });
+      elements["action-type"].focus();
+    });
     elements["file-back"].addEventListener("click", closeFileReview);
     elements["action-type"].addEventListener("change", renderActionFields);
     elements["action-form"].addEventListener("submit", addDraftAction);
@@ -888,7 +909,7 @@
       assistantDrawerMedia.addListener(syncAssistantDrawerViewport);
     }
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    document.querySelectorAll(".primary-nav .nav-item").forEach(function (link) {
+    document.querySelectorAll(".primary-nav a.nav-item").forEach(function (link) {
       link.addEventListener("click", function () {
         setActiveNavigation(link);
       });
@@ -1004,7 +1025,7 @@
     const capabilities = new Set(sessionCapabilities());
     const authorized = hasBrowserAuthority();
     const allowedHashes = new Set(
-      Array.from(document.querySelectorAll(".primary-nav .nav-item"))
+      Array.from(document.querySelectorAll(".primary-nav a.nav-item"))
         .map(function (link) {
           return link.getAttribute("href");
         })
@@ -1047,7 +1068,7 @@
   }
 
   function setActiveNavigation(activeLink) {
-    document.querySelectorAll(".primary-nav .nav-item").forEach(function (link) {
+    document.querySelectorAll(".primary-nav a.nav-item").forEach(function (link) {
       const active = link === activeLink && !link.hidden;
       link.classList.toggle("is-active", active);
       if (active) link.setAttribute("aria-current", "page");
@@ -1058,7 +1079,7 @@
   function syncActiveNavigation() {
     const hash = window.location.hash || "#overview";
     const links = Array.from(
-      document.querySelectorAll(".primary-nav .nav-item")
+      document.querySelectorAll(".primary-nav a.nav-item")
     ).filter(function (link) {
       return !link.hidden;
     });
@@ -1076,6 +1097,7 @@
         "#" + section.id === activeHash && !section.hidden
       );
     });
+    syncAssistantMobileWorkspace();
   }
 
   function syncHomeGuidance() {
@@ -1535,7 +1557,7 @@
     }
   }
 
-  async function loadAssistantConversation(conversationRef) {
+  async function loadAssistantConversation(conversationRef, options) {
     if (
       !ASSISTANT_CONVERSATION_REF.test(String(conversationRef || ""))
       || !hasAssistantConversationReadAuthority()
@@ -1605,7 +1627,19 @@
       upsertAssistantConversation(detail.conversation);
       renderAssistantConversation();
       renderAssistantConversationList();
-      toggleAssistantDrawer(false);
+      const focusComposer = options?.focusComposer === true;
+      toggleAssistantDrawer(false, { restoreFocus: !focusComposer });
+      if (focusComposer) {
+        window.requestAnimationFrame(function () {
+          const target = !elements["assistant-prompt"].disabled
+            ? elements["assistant-prompt"]
+            : !elements["assistant-restore-chat"].hidden
+                && !elements["assistant-restore-chat"].disabled
+              ? elements["assistant-restore-chat"]
+              : elements["assistant-chat-drawer-open"];
+          target.focus();
+        });
+      }
       loadAssistantClaimStatus();
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -1838,7 +1872,10 @@
     );
     select.addEventListener("click", function () {
       if (state.assistantLoading) return;
-      loadAssistantConversation(conversation.conversationRef);
+      loadAssistantConversation(
+        conversation.conversationRef,
+        { focusComposer: true }
+      );
     });
     setText(title, conversation.title);
     meta.className = "assistant-conversation-meta";
@@ -1934,6 +1971,7 @@
       setText(elements["assistant-current-kind"], "General");
       syncAssistantStarters("general", false);
       syncAssistantConversationControls();
+      syncAssistantMobileWorkspace();
       return;
     }
     setText(elements["assistant-current-title"], conversation.title);
@@ -1968,6 +2006,17 @@
     elements["assistant-transcript"].scrollTop =
       elements["assistant-transcript"].scrollHeight;
     syncAssistantConversationControls();
+    syncAssistantMobileWorkspace();
+  }
+
+  function syncAssistantMobileWorkspace() {
+    const conversation = currentAssistantConversation();
+    const selected = ASSISTANT_CONVERSATION_REF.test(
+      conversation.conversationRef || ""
+    );
+    const overview = document.getElementById("overview");
+    const active = selected && overview?.classList.contains("is-current-view");
+    document.body.toggleAttribute("data-assistant-chat-workspace", active);
   }
 
   function clearSelectedAssistantConversation() {
@@ -2030,8 +2079,8 @@
     );
     elements["file-start-chat"].disabled = !(
       canManage
-      && state.fileReview
-      && FILE_REF.test(String(state.selectedFileRef || ""))
+      && navigator.onLine
+      && selectedFreshWorkCenterFile()
     );
     const page = record(record(state.assistantConversation).page);
     const hasOlder = Number.isSafeInteger(page.offset) && page.offset > 0;
@@ -2729,13 +2778,10 @@
   }
 
   async function startSelectedFileConversation() {
-    if (
-      !state.fileReview
-      || !FILE_REF.test(String(state.selectedFileRef || ""))
-    ) {
-      return;
-    }
-    const file = record(state.fileReview.file);
+    const selected = selectedFreshWorkCenterFile();
+    if (!selected || !navigator.onLine) return;
+    const reviewed = record(state.fileReview).file;
+    const file = reviewed?.fileRef === selected.fileRef ? reviewed : selected;
     const title = boundedString(
       [file.displayName, file.jobNumber].filter(Boolean).join(" · "),
       120
@@ -2745,6 +2791,17 @@
       title: title,
       fileRef: state.selectedFileRef
     });
+  }
+
+  function selectedFreshWorkCenterFile() {
+    const fileRef = String(state.selectedFileRef || "");
+    const files = Array.isArray(record(state.workCenter).files)
+      ? state.workCenter.files
+      : [];
+    if (!FILE_REF.test(fileRef)) return null;
+    return files.find(function (file) {
+      return file.fileRef === fileRef;
+    }) || null;
   }
 
   async function createAssistantConversation(input) {
@@ -2968,20 +3025,43 @@
     });
   }
 
-  function toggleAssistantDrawer(open) {
+  function openAssistantChatsNavigation() {
+    if (window.location.hash !== "#overview") {
+      window.location.hash = "#overview";
+    }
+    syncActiveNavigation();
+    if (window.matchMedia("(max-width: 620px)").matches) {
+      toggleAssistantDrawer(true);
+    } else {
+      focusAssistantChatList();
+    }
+  }
+
+  function focusAssistantChatList() {
+    const current = elements["assistant-conversation-list"].querySelector(
+      '.assistant-conversation-select[aria-current="true"]:not([disabled])'
+    );
+    const first = elements["assistant-conversation-list"].querySelector(
+      ".assistant-conversation-select:not([disabled])"
+    );
+    (current || first || elements["assistant-new-chat"]).focus();
+  }
+
+  function toggleAssistantDrawer(open, options) {
     const mobile = window.matchMedia("(max-width: 620px)").matches;
     const next = open === true && mobile;
     const wasOpen = state.assistantDrawerOpen;
+    const restoreFocus = options?.restoreFocus !== false;
     if (next && !wasOpen) {
       state.assistantDrawerReturnFocus = document.activeElement instanceof Element
         ? document.activeElement
         : elements["assistant-chat-drawer-open"];
     }
     state.assistantDrawerOpen = next;
-    syncAssistantDrawerViewport();
+    syncAssistantDrawerViewport({ suppressFocusReturn: !restoreFocus });
     if (next) {
-      elements["assistant-new-chat"].focus();
-    } else if (wasOpen) {
+      focusAssistantChatList();
+    } else if (wasOpen && restoreFocus) {
       const returnFocus = state.assistantDrawerReturnFocus;
       state.assistantDrawerReturnFocus = null;
       const target = returnFocus instanceof HTMLElement
@@ -2989,16 +3069,22 @@
         ? returnFocus
         : elements["assistant-chat-drawer-open"];
       target.focus();
+    } else if (wasOpen) {
+      state.assistantDrawerReturnFocus = null;
     }
   }
 
-  function syncAssistantDrawerViewport() {
+  function syncAssistantDrawerViewport(options) {
     const mobile = window.matchMedia("(max-width: 620px)").matches;
     const open = mobile && state.assistantDrawerOpen;
     if (!mobile) state.assistantDrawerOpen = false;
     document.body.toggleAttribute("data-assistant-drawer", open);
     if (open) document.body.dataset.assistantDrawer = "open";
     elements["assistant-chat-drawer-open"].setAttribute(
+      "aria-expanded",
+      open ? "true" : "false"
+    );
+    elements["assistant-chats-nav"].setAttribute(
       "aria-expanded",
       open ? "true" : "false"
     );
@@ -3025,6 +3111,7 @@
       elements["assistant-chat-sidebar"].removeAttribute("aria-modal");
       if (
         mobile
+        && options?.suppressFocusReturn !== true
         && elements["assistant-chat-sidebar"].contains(document.activeElement)
       ) {
         elements["assistant-chat-drawer-open"].focus();
@@ -7797,6 +7884,7 @@
     elements["file-review"].hidden = false;
     elements["file-refresh"].disabled = true;
     elements["file-start-chat"].disabled = true;
+    elements["file-actions"].disabled = true;
     setText(elements["file-job-number"], selected.jobNumber || "Exact file");
     setText(elements["file-name"], selected.displayName || "Assigned file");
     setText(
@@ -7824,6 +7912,7 @@
     state.selectedFileRef = null;
     state.fileReview = null;
     elements["file-start-chat"].disabled = true;
+    elements["file-actions"].disabled = true;
     elements["work-center-workspace"].removeAttribute("data-file-open");
     elements["file-placeholder"].hidden = false;
     elements["file-review"].hidden = true;
@@ -7835,6 +7924,7 @@
 
   function purgeFileReviewDom() {
     elements["file-start-chat"].disabled = true;
+    elements["file-actions"].disabled = true;
     setText(elements["file-job-number"], "No file selected");
     setText(elements["file-name"], "Choose a file from the fresh queue");
     setText(elements["file-stage"], "No client data is retained");
@@ -8757,6 +8847,7 @@
     const controls = elements["action-form"].querySelectorAll(
       "input, select, textarea, button"
     );
+    elements["file-actions"].disabled = !available || state.actionLoading;
     controls.forEach(function (control) {
       control.disabled = !available || state.actionLoading;
     });

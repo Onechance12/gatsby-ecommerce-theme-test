@@ -14278,8 +14278,9 @@ async function loadHcnJobNimbusFile({
     500,
     Math.max(50, Number(recentLimit || 20) * 5)
   );
-  const [contact, activities, tasks, documents] = await Promise.all([
+  const [contact, contactIndex, activities, tasks, documents] = await Promise.all([
     hcnCachedContact(id),
+    hcnCachedContactIndex({ maxRecords: 5000 }),
     listHcnResourceComplete("/activities", {
       maxRecords: maximumRelated,
       relatedContactId: id
@@ -14293,6 +14294,12 @@ async function loadHcnJobNimbusFile({
       relatedContactId: id
     })
   ]);
+  if (contactIndex.complete !== true) {
+    throw new Error("JobNimbus contact scope is incomplete.");
+  }
+  const knownProviderFileIds = contactIndex.rows.map(
+    (row) => hcnProviderFileId(row?.jnid || row?.id)
+  );
 
   return mapJobNimbusFileEnvelope({
     contact,
@@ -14305,7 +14312,8 @@ async function loadHcnJobNimbusFile({
     ...hcnFreshnessWindow(requestedAt)
   }, {
     assignedOwnerId,
-    expectedProviderFileId: id
+    expectedProviderFileId: id,
+    knownProviderFileIds
   });
 }
 
