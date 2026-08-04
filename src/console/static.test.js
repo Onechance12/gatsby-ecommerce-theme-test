@@ -22,6 +22,41 @@ function extractConsoleFunction(script, name) {
   return script.slice(start, next);
 }
 
+function extractCssRule(style, selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|})\\s*${escaped}\\s*\\{([^}]*)\\}`, "m")
+    .exec(style);
+  assert.ok(match, `${selector} CSS rule must exist`);
+  return match[1];
+}
+
+function extractCssMediaBlocks(style, maximumWidth) {
+  const matcher = new RegExp(
+    `@media\\s*\\(\\s*max-width\\s*:\\s*${maximumWidth}px\\s*\\)\\s*\\{`,
+    "g"
+  );
+  const blocks = [];
+  let match;
+  while ((match = matcher.exec(style)) !== null) {
+    const openingBrace = match.index + match[0].lastIndexOf("{");
+    let depth = 0;
+    let closed = false;
+    for (let index = openingBrace; index < style.length; index += 1) {
+      if (style[index] === "{") depth += 1;
+      if (style[index] !== "}") continue;
+      depth -= 1;
+      if (depth !== 0) continue;
+      blocks.push(style.slice(openingBrace + 1, index));
+      matcher.lastIndex = index + 1;
+      closed = true;
+      break;
+    }
+    assert.equal(closed, true, `@media max-width ${maximumWidth}px must close`);
+  }
+  assert.ok(blocks.length > 0, `@media max-width ${maximumWidth}px must exist`);
+  return blocks;
+}
+
 function evaluateAuthOutcome(functionSource, href) {
   const replacements = [];
   const context = {
@@ -712,7 +747,7 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
   );
   assert.match(
     script,
-    /const desktopFallback = window\.matchMedia\("\(max-width: 620px\)"\)\.matches[\s\S]*\? null[\s\S]*: list\.items\[0\];[\s\S]*\|\| desktopFallback;/
+    /const desktopFallback = window\.matchMedia\(\s*ASSISTANT_DRAWER_MEDIA_QUERY\s*\)\.matches[\s\S]*\? null[\s\S]*: list\.items\[0\];[\s\S]*\|\| desktopFallback;/
   );
   assert.match(script, /function loadOlderAssistantMessages\(\)/);
   assert.match(script, /function createAssistantConversation\(input\)/);
@@ -888,7 +923,7 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
   );
   assert.match(
     script,
-    /const wasActive = document\.body\.hasAttribute\([\s\S]*active[\s\S]*!wasActive[\s\S]*window\.matchMedia\("\(max-width: 620px\)"\)\.matches[\s\S]*document\.documentElement\.scrollTop = 0;[\s\S]*document\.body\.scrollTop = 0;[\s\S]*document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
+    /const wasActive = document\.body\.hasAttribute\([\s\S]*active[\s\S]*!wasActive[\s\S]*window\.matchMedia\(ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY\)\.matches[\s\S]*document\.documentElement\.scrollTop = 0;[\s\S]*document\.body\.scrollTop = 0;[\s\S]*document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
   );
   assert.match(
     script,
@@ -925,6 +960,158 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
   assert.match(
     style,
     /body\[data-assistant-chat-workspace\] \.assistant-chat-files-link[\s\S]*display: inline-flex;[\s\S]*min-height: 44px/
+  );
+});
+
+test("responsive console contains long text and separates compact chat navigation from the phone workspace", async () => {
+  const [scriptAsset, styleAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/app.css")
+  ]);
+  const script = scriptAsset.body.toString("utf8");
+  const style = styleAsset.body.toString("utf8");
+
+  const chatMain = extractCssRule(style, ".assistant-chat-main");
+  assert.match(chatMain, /min-width\s*:\s*0\s*;/);
+  assert.match(
+    chatMain,
+    /grid-template-columns\s*:\s*minmax\(\s*0\s*,\s*1fr\s*\)\s*;/
+  );
+  const chatChildren = extractCssRule(style, ".assistant-chat-main > *");
+  assert.match(chatChildren, /min-width\s*:\s*0\s*;/);
+  assert.match(chatChildren, /max-width\s*:\s*100%\s*;/);
+
+  for (const selector of [".assistant-message", ".assistant-message p"]) {
+    const rule = extractCssRule(style, selector);
+    assert.match(rule, /min-width\s*:\s*0\s*;/);
+    assert.match(rule, /overflow-wrap\s*:\s*anywhere\s*;/);
+    assert.match(rule, /word-break\s*:\s*break-word\s*;/);
+  }
+  assert.match(
+    extractCssRule(style, "#assistant-composer-help"),
+    /overflow-wrap\s*:\s*anywhere\s*;/
+  );
+  const longTextGroup = /\.assistant-alert\s*,\s*\.assistant-claim-help\s*,\s*\.assistant-conversation-empty\s*,\s*\.assistant-pilot\s*,\s*\.operations-alert\s*\{([^}]*)\}/m
+    .exec(style);
+  assert.ok(longTextGroup, "dynamic assistant notices must share a wrapping rule");
+  assert.match(longTextGroup[1], /min-width\s*:\s*0\s*;/);
+  assert.match(longTextGroup[1], /overflow-wrap\s*:\s*anywhere\s*;/);
+  assert.match(longTextGroup[1], /word-break\s*:\s*break-word\s*;/);
+
+  const medium = extractCssMediaBlocks(style, 1120).join("\n");
+  const mediumGridGroup = /\.connections-grid\s*,\s*\.source-health-grid\s*,\s*\.key-facts-grid\s*,\s*\.intelligence-workflows\s*,\s*\.lane-grid\s*\{([^}]*)\}/m
+    .exec(medium);
+  assert.ok(
+    mediumGridGroup,
+    "connections and file-workflow grids must reduce before phone widths"
+  );
+  assert.match(
+    mediumGridGroup[1],
+    /grid-template-columns\s*:\s*repeat\(\s*2\s*,\s*minmax\(\s*0\s*,\s*1fr\s*\)\s*\)\s*;/
+  );
+  assert.match(
+    extractCssRule(medium, ".team-workspace"),
+    /grid-template-columns\s*:\s*1fr\s*;/
+  );
+  const mediumHeadings = /\.card-heading\s*,\s*\.connection-card-heading\s*\{([^}]*)\}/m
+    .exec(medium);
+  assert.ok(mediumHeadings, "medium-width card headings must have a shared rule");
+  assert.match(mediumHeadings[1], /flex-wrap\s*:\s*wrap\s*;/);
+  const mediumHeadingChildren = /\.card-heading\s*>\s*\*\s*,\s*\.connection-card-heading\s*>\s*\*\s*\{([^}]*)\}/m
+    .exec(medium);
+  assert.ok(
+    mediumHeadingChildren,
+    "medium-width card-heading children must be shrinkable"
+  );
+  assert.match(mediumHeadingChildren[1], /min-width\s*:\s*0\s*;/);
+  assert.match(mediumHeadingChildren[1], /max-width\s*:\s*100%\s*;/);
+
+  const compact = extractCssMediaBlocks(style, 1060).join("\n");
+  assert.match(
+    extractCssRule(compact, ".assistant-workspace"),
+    /display\s*:\s*block\s*;/
+  );
+  const compactSidebar = extractCssRule(compact, ".assistant-chat-sidebar");
+  assert.match(compactSidebar, /position\s*:\s*fixed\s*;/);
+  assert.match(
+    compactSidebar,
+    /width\s*:\s*min\(\s*94vw\s*,\s*390px\s*\)\s*;/
+  );
+  assert.match(compactSidebar, /transform\s*:\s*translateX\(\s*-105%\s*\)\s*;/);
+  assert.match(
+    compact,
+    /body\[data-assistant-drawer="open"\]\s+\.assistant-chat-sidebar\s*\{[^}]*transform\s*:\s*translateX\(\s*0\s*\)/m
+  );
+  assert.match(
+    compact,
+    /\.assistant-chat-drawer-open\s*\{[^}]*display\s*:\s*inline-flex/m
+  );
+  assert.match(
+    compact,
+    /\.assistant-chat-drawer-close\s*\{[^}]*display\s*:\s*inline-flex/m
+  );
+  assert.match(
+    compact,
+    /\.assistant-conversation-list\s*\{[^}]*min-height\s*:\s*0\s*;[^}]*overflow-y\s*:\s*auto/m
+  );
+  assert.match(
+    compact,
+    /\.assistant-chat-sidebar button\s*,[\s\S]*?\.assistant-chat-filters button\s*\{[^}]*min-height\s*:\s*44px/m
+  );
+
+  const phone = extractCssMediaBlocks(style, 620).join("\n");
+  const phoneWorkspace = extractCssRule(
+    phone,
+    "body[data-assistant-chat-workspace] #overview.assistant-view"
+  );
+  assert.match(phoneWorkspace, /height\s*:\s*100vh\s*;/);
+  assert.match(phoneWorkspace, /height\s*:\s*100dvh\s*;/);
+  assert.match(phoneWorkspace, /min-height\s*:\s*0\s*;/);
+  assert.match(phoneWorkspace, /overflow\s*:\s*hidden\s*;/);
+  assert.match(
+    phone,
+    /body\[data-assistant-chat-workspace\]\s+\.assistant-transcript\s*\{[^}]*min-height\s*:\s*0\s*;[^}]*max-height\s*:\s*none\s*;[^}]*flex\s*:\s*1\s+1\s+auto/m
+  );
+  assert.match(
+    phone,
+    /body\[data-assistant-chat-workspace\]\s+\.assistant-composer\s*\{[^}]*position\s*:\s*sticky\s*;[^}]*env\(safe-area-inset-bottom\)/m
+  );
+
+  assert.match(
+    script,
+    /const ASSISTANT_DRAWER_MEDIA_QUERY\s*=\s*"\(max-width: 1060px\)"\s*;/
+  );
+  assert.match(
+    script,
+    /const ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY\s*=\s*"\(max-width: 620px\)"\s*;/
+  );
+  assert.match(
+    extractConsoleFunction(script, "initialize"),
+    /const assistantDrawerMedia = window\.matchMedia\(\s*ASSISTANT_DRAWER_MEDIA_QUERY\s*\)[\s\S]*assistantDrawerMedia\.(?:addEventListener|addListener)\(/
+  );
+  for (const name of [
+    "openAssistantChatsNavigation",
+    "toggleAssistantDrawer",
+    "syncAssistantDrawerViewport"
+  ]) {
+    const source = extractConsoleFunction(script, name);
+    assert.match(source, /window\.matchMedia\(ASSISTANT_DRAWER_MEDIA_QUERY\)/);
+    assert.doesNotMatch(source, /ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY/);
+  }
+  const mobileWorkspace = extractConsoleFunction(
+    script,
+    "syncAssistantMobileWorkspace"
+  );
+  assert.match(
+    mobileWorkspace,
+    /window\.matchMedia\(ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY\)\.matches/
+  );
+  assert.doesNotMatch(mobileWorkspace, /ASSISTANT_DRAWER_MEDIA_QUERY/);
+
+  assert.doesNotMatch(
+    style,
+    /(?:^|})\s*(?::root|html|body|html\s*,\s*body|body\s*,\s*html)\s*\{[^}]*\boverflow(?:-x)?\s*:\s*(?:hidden|clip)\b/m,
+    "responsive containment must not hide overflow on the global root"
   );
 });
 

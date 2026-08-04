@@ -45,6 +45,8 @@
   const ASSISTANT_CONVERSATION_MANAGE_CAPABILITY =
     "hcn.assistant.conversations.manage";
   const ASSISTANT_CONVERSATION_REF = /^conversation_[a-f0-9]{32}$/;
+  const ASSISTANT_DRAWER_MEDIA_QUERY = "(max-width: 1060px)";
+  const ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY = "(max-width: 620px)";
   const CLAIM_FILE_REF = /^subject_[a-f0-9]{32}$/;
   const CLAIM_PLAN_ID = /^plan_[a-f0-9]{32}$/;
   const CLAIM_CALL_REF = /^claim_call_[a-f0-9]{32}$/;
@@ -915,7 +917,9 @@
     window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("pageshow", handlePageShow);
     window.addEventListener("hashchange", syncActiveNavigation);
-    const assistantDrawerMedia = window.matchMedia("(max-width: 620px)");
+    const assistantDrawerMedia = window.matchMedia(
+      ASSISTANT_DRAWER_MEDIA_QUERY
+    );
     if (typeof assistantDrawerMedia.addEventListener === "function") {
       assistantDrawerMedia.addEventListener(
         "change",
@@ -1534,7 +1538,9 @@
         80
       );
       const currentRef = state.assistantConversationRef;
-      const desktopFallback = window.matchMedia("(max-width: 620px)").matches
+      const desktopFallback = window.matchMedia(
+        ASSISTANT_DRAWER_MEDIA_QUERY
+      ).matches
         ? null
         : list.items[0];
       const selected = list.items.find(function (item) {
@@ -2051,7 +2057,7 @@
     if (
       active
       && !wasActive
-      && window.matchMedia("(max-width: 620px)").matches
+      && window.matchMedia(ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY).matches
     ) {
       document.documentElement.scrollTop = 0;
       document.body.scrollTop = 0;
@@ -3070,7 +3076,7 @@
       window.location.hash = "#overview";
     }
     syncActiveNavigation();
-    if (window.matchMedia("(max-width: 620px)").matches) {
+    if (window.matchMedia(ASSISTANT_DRAWER_MEDIA_QUERY).matches) {
       toggleAssistantDrawer(true);
     } else {
       focusAssistantChatList();
@@ -3088,8 +3094,8 @@
   }
 
   function toggleAssistantDrawer(open, options) {
-    const mobile = window.matchMedia("(max-width: 620px)").matches;
-    const next = open === true && mobile;
+    const compact = window.matchMedia(ASSISTANT_DRAWER_MEDIA_QUERY).matches;
+    const next = open === true && compact;
     const wasOpen = state.assistantDrawerOpen;
     const restoreFocus = options?.restoreFocus !== false;
     if (next && !wasOpen) {
@@ -3115,9 +3121,9 @@
   }
 
   function syncAssistantDrawerViewport(options) {
-    const mobile = window.matchMedia("(max-width: 620px)").matches;
-    const open = mobile && state.assistantDrawerOpen;
-    if (!mobile) state.assistantDrawerOpen = false;
+    const compact = window.matchMedia(ASSISTANT_DRAWER_MEDIA_QUERY).matches;
+    const open = compact && state.assistantDrawerOpen;
+    if (!compact) state.assistantDrawerOpen = false;
     document.body.toggleAttribute("data-assistant-drawer", open);
     if (open) document.body.dataset.assistantDrawer = "open";
     elements["assistant-chat-drawer-open"].setAttribute(
@@ -3131,11 +3137,11 @@
     elements["assistant-chat-backdrop"].hidden = !open;
     elements["assistant-chat-sidebar"].setAttribute(
       "aria-hidden",
-      mobile && !open ? "true" : "false"
+      compact && !open ? "true" : "false"
     );
     elements["assistant-chat-sidebar"].toggleAttribute(
       "inert",
-      mobile && !open
+      compact && !open
     );
     elements["assistant-chat-main"].toggleAttribute("inert", open);
     document.querySelector(".topbar")?.toggleAttribute("inert", open);
@@ -3150,7 +3156,7 @@
       elements["assistant-chat-sidebar"].removeAttribute("role");
       elements["assistant-chat-sidebar"].removeAttribute("aria-modal");
       if (
-        mobile
+        compact
         && options?.suppressFocusReturn !== true
         && elements["assistant-chat-sidebar"].contains(document.activeElement)
       ) {
