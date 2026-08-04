@@ -627,6 +627,10 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
   );
   assert.match(
     script,
+    /finally \{[\s\S]*state\.assistantController === controller[\s\S]*state\.assistantLoading = false;[\s\S]*syncAssistantControls\(\);[\s\S]*syncAssistantConversationControls\(\);/
+  );
+  assert.match(
+    script,
     /function openAssistantNewDialog\(\) \{[\s\S]*toggleAssistantDrawer\(false\);[\s\S]*\.showModal\(\)/
   );
   assert.match(
@@ -670,6 +674,7 @@ test("exact-file claim filing is pilot-hidden, approval-gated, and provider-opaq
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /value="injuries_reported">Injuries reported[^<]*stop/);
+  assert.doesNotMatch(html, /Injuries reported \? stop/);
   assert.match(html, /approve one carrier call/);
   assert.match(html, /actual call transcript shown above/);
   assert.doesNotMatch(html, /Carrier phone override/);
@@ -720,6 +725,10 @@ test("exact-file claim filing is pilot-hidden, approval-gated, and provider-opaq
   assert.match(script, /Do not retry automatically/);
   assert.match(script, /model analyzed; human confirmation required/);
   assert.match(script, /Fresh exact-field readback required: Yes/);
+  assert.doesNotMatch(
+    script,
+    /(?:Writeback authorized|Transcript guesses|Callback requested)[^"\n]* \? /
+  );
   assert.match(script, /state\.assistantClaimController\.abort\(\)/);
   assert.doesNotMatch(script, /["']\/claim-filing\//);
   assert.doesNotMatch(script, /call_id|providerCallId|retellCallId/);

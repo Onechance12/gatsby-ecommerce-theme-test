@@ -2259,7 +2259,7 @@
     if (missing.length) {
       lines.push("", "Missing or blocking");
       missing.forEach(function (item) {
-        lines.push("? " + displayClaimValue(
+        lines.push("- " + displayClaimValue(
           record(item).label || record(item).code || item
         ));
       });
@@ -2268,7 +2268,7 @@
     if (stopRules.length) {
       lines.push("", "Stop rules");
       stopRules.forEach(function (rule) {
-        lines.push("? " + displayClaimValue(rule));
+        lines.push("- " + displayClaimValue(rule));
       });
     }
     const digest = String(review.planDigest || "");
@@ -2374,14 +2374,14 @@
       "Status: " + displayClaimValue(result.callStatus),
       "Disconnected because: " + displayClaimValue(result.disconnectionReason),
       "Automatic retry: No",
-      "Writeback authorized: No ? human review required"
+      "Writeback authorized: No - human review required"
     ];
     const outcome = record(result.outcomeSuggestion);
     if (outcome.value) {
       lines.push(
         "",
         "Model-analyzed outcome suggestion",
-        "? " + displayClaimValue(outcome.value) + " (not carrier-confirmed)"
+        "- " + displayClaimValue(outcome.value) + " (not carrier-confirmed)"
       );
     }
     const suggestionLines = claimSuggestionLines(suggestions);
@@ -2392,18 +2392,18 @@
       ? result.transcriptGuesses
       : [];
     if (guesses.length) {
-      lines.push("", "Transcript guesses ? do not write back");
+      lines.push("", "Transcript guesses - do not write back");
       guesses.forEach(function (guess) {
         const item = record(guess);
         lines.push(
-          "? " + displayClaimValue(item.label || item.field)
+          "- " + displayClaimValue(item.label || item.field)
             + ": " + displayClaimValue(item.value)
         );
       });
     }
     if (result.blocker) lines.push("", "Blocker: " + displayClaimValue(result.blocker));
     if (result.callbackRequested === true) {
-      lines.push("", "Callback requested ? stop and reconcile; no automatic retry.");
+      lines.push("", "Callback requested - stop and reconcile; no automatic retry.");
     }
     if (result.evidenceDigest) {
       lines.push("", "Evidence digest: " + displayClaimValue(result.evidenceDigest));
@@ -2500,7 +2500,7 @@
     if (blockers.length) {
       lines.push("", "Blockers");
       blockers.forEach(function (blocker) {
-        lines.push("? " + displayClaimValue(
+        lines.push("- " + displayClaimValue(
           record(blocker).message || record(blocker).code || blocker
         ));
       });
@@ -2634,17 +2634,17 @@
   function claimObjectLines(value) {
     const object = record(value);
     const entries = Object.entries(object);
-    if (!entries.length) return ["? None"];
+    if (!entries.length) return ["- None"];
     return entries.map(function (entry) {
       const raw = Array.isArray(entry[1]) ? entry[1].join("; ") : entry[1];
-      return "? " + humanize(entry[0]) + ": " + displayClaimValue(raw);
+      return "- " + humanize(entry[0]) + ": " + displayClaimValue(raw);
     });
   }
 
   function claimSuggestionLines(suggestions) {
     return Object.entries(record(suggestions)).map(function (entry) {
       const suggestion = record(entry[1]);
-      return "? " + humanize(entry[0]) + ": "
+      return "- " + humanize(entry[0]) + ": "
         + displayClaimValue(suggestion.value)
         + " (model analyzed; human confirmation required)";
     });
@@ -2655,7 +2655,7 @@
     return [
       boundedString(file.jobNumber, 60),
       boundedString(file.displayName, 160)
-    ].filter(Boolean).join(" ? ") || "Selected file";
+    ].filter(Boolean).join(" - ") || "Selected file";
   }
 
   function displayClaimValue(value) {
@@ -3381,6 +3381,7 @@
         state.assistantController = null;
         state.assistantLoading = false;
         syncAssistantControls();
+        syncAssistantConversationControls();
       }
     }
     elements["assistant-prompt"].focus();
