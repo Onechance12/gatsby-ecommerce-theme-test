@@ -58,6 +58,7 @@ export async function runHcnAssistant({
   executeTool,
   model = DEFAULT_HCN_ASSISTANT_MODEL,
   instructions = DEFAULT_HCN_ASSISTANT_INSTRUCTIONS,
+  requiredFirstToolName = "",
   maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS,
   maxToolCalls = DEFAULT_MAX_TOOL_CALLS,
   maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS
@@ -94,6 +95,10 @@ export async function runHcnAssistant({
     maxBytes: MAX_INSTRUCTIONS_BYTES,
     allowEmpty: false
   });
+  const normalizedRequiredFirstToolName = optionalToolName(
+    requiredFirstToolName,
+    "requiredFirstToolName"
+  );
   integerBetween(
     maxToolRounds,
     0,
@@ -112,6 +117,23 @@ export async function runHcnAssistant({
     MAX_CONFIGURED_OUTPUT_TOKENS,
     "maxOutputTokens"
   );
+  if (
+    normalizedRequiredFirstToolName
+    && (maxToolRounds < 1 || maxToolCalls < 1)
+  ) {
+    invalidInput(
+      "requiredFirstToolName requires at least one tool round and tool call"
+    );
+  }
+
+  const requiredFirstTool = normalizedRequiredFirstToolName
+    ? HCN_ASSISTANT_TOOLS.find(
+        (tool) => tool.name === normalizedRequiredFirstToolName
+      )
+    : null;
+  const requiredFirstTools = requiredFirstTool
+    ? Object.freeze([requiredFirstTool])
+    : null;
 
   const replayInput = [
     ...normalizedHistory,
@@ -126,6 +148,7 @@ export async function runHcnAssistant({
   let toolCallCount = 0;
   while (true) {
     assertReplayBound(replayInput);
+    const requiresFirstTool = responseCount === 0 && requiredFirstTool;
     const request = {
       model: normalizedModel,
       instructions: normalizedInstructions,
@@ -134,8 +157,8 @@ export async function runHcnAssistant({
         "response input",
         MAX_REPLAY_INPUT_BYTES
       ),
-      tools: HCN_ASSISTANT_TOOLS,
-      tool_choice: "auto",
+      tools: requiresFirstTool ? requiredFirstTools : HCN_ASSISTANT_TOOLS,
+      tool_choice: requiresFirstTool ? "required" : "auto",
       parallel_tool_calls: false,
       store: false,
       max_output_tokens: maxOutputTokens
@@ -161,6 +184,21 @@ export async function runHcnAssistant({
       providerError(
         "parallel_tool_calls_rejected",
         "The assistant returned more than one tool call in a serial round."
+      );
+    }
+    if (requiresFirstTool && functionCalls.length === 0) {
+      providerError(
+        "required_first_tool_call_missing",
+        "The assistant did not perform the required fresh file review."
+      );
+    }
+    if (
+      requiresFirstTool
+      && functionCalls[0]?.name !== normalizedRequiredFirstToolName
+    ) {
+      providerError(
+        "required_first_tool_call_mismatch",
+        "The assistant requested a different tool before fresh file review."
       );
     }
 
@@ -262,6 +300,14 @@ export async function runHcnAssistant({
       );
     }
   }
+}
+
+function optionalToolName(value, label) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || !TOOL_NAME_SET.has(value)) {
+    invalidInput(`${label} must name a fixed HCN read tool`);
+  }
+  return value;
 }
 
 /**

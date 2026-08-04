@@ -1557,6 +1557,90 @@ h1 {
   line-height: 1.55;
 }
 
+.assistant-message-body {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.assistant-markdown > * {
+  min-width: 0;
+  margin: 0;
+}
+
+.assistant-markdown ul,
+.assistant-markdown ol {
+  display: grid;
+  gap: 5px;
+  padding-inline-start: 1.35rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.assistant-markdown li,
+.assistant-markdown th,
+.assistant-markdown td {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.assistant-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #eff1ec;
+}
+
+.assistant-markdown code {
+  padding: 0.08em 0.28em;
+  border-radius: 4px;
+  background: #eff1ec;
+  font: 0.84em/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.assistant-markdown pre code {
+  padding: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.assistant-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.assistant-table-scroll table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.assistant-table-scroll th,
+.assistant-table-scroll td {
+  min-width: 8rem;
+  max-width: 18rem;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.assistant-table-scroll th {
+  color: var(--forest-2);
+  background: #eff1ec;
+  font-weight: 800;
+}
+
+.assistant-table-scroll tbody tr:last-child td {
+  border-bottom: 0;
+}
+
 .assistant-message-time {
   color: var(--ink-muted);
   font-size: 0.68rem;

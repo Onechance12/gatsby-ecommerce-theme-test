@@ -57,6 +57,56 @@ function extractCssMediaBlocks(style, maximumWidth) {
   return blocks;
 }
 
+function createTestDocument() {
+  function createTextNode(value) {
+    return {
+      nodeType: 3,
+      textContent: String(value)
+    };
+  }
+
+  function createElement(tagName) {
+    const attributes = new Map();
+    const childNodes = [];
+    return {
+      nodeType: 1,
+      tagName: String(tagName).toUpperCase(),
+      className: "",
+      dataset: {},
+      childNodes,
+      attributes,
+      append(...children) {
+        childNodes.push(...children.map(function (child) {
+          return typeof child === "string" ? createTextNode(child) : child;
+        }));
+      },
+      setAttribute(name, value) {
+        attributes.set(String(name), String(value));
+      },
+      get textContent() {
+        return childNodes.map(function (child) { return child.textContent; }).join("");
+      },
+      set textContent(value) {
+        childNodes.splice(0, childNodes.length, createTextNode(value));
+      }
+    };
+  }
+
+  return { createElement, createTextNode };
+}
+
+function descendantElements(root, tagName) {
+  const wanted = tagName ? String(tagName).toUpperCase() : null;
+  const found = [];
+  function visit(node) {
+    if (!node || node.nodeType !== 1) return;
+    if (!wanted || node.tagName === wanted) found.push(node);
+    node.childNodes.forEach(visit);
+  }
+  visit(root);
+  return found;
+}
+
 function evaluateAuthOutcome(functionSource, href) {
   const replacements = [];
   const context = {
@@ -132,6 +182,7 @@ function evaluateAssistantRouting(functionSource, value) {
     ASSISTANT_ROUTE_REASON_CODES: {
       deterministic: [
         "fact_only_work_center",
+        "fact_only_assigned_work_summary",
         "fact_only_management_sweep",
         "fact_only_file_status"
       ],
@@ -692,8 +743,11 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
     script,
     /elements\["assistant-send"\]\.disabled = \(\s*!available \|\| runtimeStatus === "direct_only"\s*\)/
   );
+  assert.match(script, /normalizedSpeaker === "assistant" && options\?\.busy !== true/);
+  assert.match(script, /article\.append\(label, renderAssistantMarkdown\(message\)\)/);
   assert.match(script, /setText\(paragraph, boundedString\(message, 16000\)\)/);
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.doesNotMatch(script, /DOMParser/);
   assert.match(script, /state\.assistantController\.abort\(\)/);
   assert.match(script, /elements\["assistant-transcript"\]\.replaceChildren\(\)/);
   assert.match(script, /elements\["assistant-mode-auto"\]\.checked = true/);
@@ -701,6 +755,132 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB/i);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /assistant\/turns/);
+});
+
+test("Ask Thresher renders a bounded Markdown subset without creating active content", async () => {
+  const [scriptAsset, styleAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/app.css")
+  ]);
+  const script = scriptAsset.body.toString("utf8");
+  const style = styleAsset.body.toString("utf8");
+  const rendererSource = extractConsoleFunction(script, "renderAssistantMarkdown");
+  const testDocument = createTestDocument();
+
+  function render(message) {
+    const context = {
+      document: testDocument,
+      message,
+      result: null,
+      boundedString(input, maximum) {
+        if (typeof input !== "string") return "";
+        return Array.from(input).slice(0, maximum).join("");
+      }
+    };
+    runInNewContext(
+      `${rendererSource}\nresult = renderAssistantMarkdown(message);`,
+      context
+    );
+    return context.result;
+  }
+
+  const rendered = render([
+    "A **verified** fact and `inline code`.",
+    "",
+    "- First item",
+    "- Keep [this link](https://example.com) literal",
+    "",
+    "1. First step",
+    "2. Second step",
+    "",
+    "| Source | Status |",
+    "| --- | :---: |",
+    "| JobNimbus | Fresh |",
+    "| <img src=x onerror=alert(1)> | ![image](https://example.com/x.png) |",
+    "",
+    "```js",
+    "<script>alert(1)</script>",
+    "```",
+    "",
+    "Raw <b>HTML</b> stays visible."
+  ].join("\n"));
+
+  assert.equal(rendered.className, "assistant-message-body assistant-markdown");
+  assert.equal(descendantElements(rendered, "strong").length, 1);
+  assert.equal(descendantElements(rendered, "ul").length, 1);
+  assert.equal(descendantElements(rendered, "ol").length, 1);
+  assert.equal(descendantElements(rendered, "table").length, 1);
+  assert.equal(descendantElements(rendered, "pre").length, 1);
+  assert.equal(descendantElements(rendered, "code").length, 2);
+  assert.equal(descendantElements(rendered, "a").length, 0);
+  assert.equal(descendantElements(rendered, "img").length, 0);
+  assert.equal(descendantElements(rendered, "script").length, 0);
+  assert.match(rendered.textContent, /\[this link\]\(https:\/\/example\.com\)/);
+  assert.match(rendered.textContent, /!\[image\]\(https:\/\/example\.com\/x\.png\)/);
+  assert.match(rendered.textContent, /<script>alert\(1\)<\/script>/);
+  assert.match(rendered.textContent, /Raw <b>HTML<\/b> stays visible\./);
+
+  const headerCells = descendantElements(rendered, "th");
+  assert.equal(headerCells.length, 2);
+  assert.equal(headerCells.every(function (cell) {
+    return cell.attributes.get("scope") === "col";
+  }), true);
+  const tableWrapper = descendantElements(rendered).find(function (element) {
+    return element.className === "assistant-table-scroll";
+  });
+  assert.ok(tableWrapper);
+
+  const malformed = render("Unclosed **bold\n```js\n<script>still text</script>");
+  assert.equal(descendantElements(malformed, "strong").length, 0);
+  assert.equal(descendantElements(malformed, "pre").length, 0);
+  assert.equal(
+    malformed.textContent,
+    "Unclosed **bold\n```js\n<script>still text</script>"
+  );
+  assert.equal(render("x".repeat(20000)).textContent.length, 16000);
+
+  assert.match(style, /\.assistant-table-scroll\s*\{[^}]*max-width:\s*100%;[^}]*overflow-x:\s*auto;/m);
+  assert.match(style, /\.assistant-markdown pre\s*\{[^}]*overflow-x:\s*auto;/m);
+  assert.doesNotMatch(rendererSource, /innerHTML|DOMParser|insertAdjacentHTML/);
+});
+
+test("Ask Thresher keeps user and busy messages literal", async () => {
+  const scriptAsset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = scriptAsset.body.toString("utf8");
+  const appendSource = extractConsoleFunction(script, "appendAssistantMessage");
+  const testDocument = createTestDocument();
+  const transcript = testDocument.createElement("section");
+  transcript.scrollTop = 0;
+  transcript.scrollHeight = 0;
+  const context = {
+    document: testDocument,
+    elements: { "assistant-transcript": transcript },
+    ASSISTANT_MESSAGE_REF: /^msg_[a-z0-9]+$/,
+    boundedString(input, maximum) {
+      if (typeof input !== "string") return "";
+      return Array.from(input).slice(0, maximum).join("");
+    },
+    setText(element, value) { element.textContent = String(value); },
+    validIsoInstant() { return false; },
+    renderAssistantMarkdown() {
+      throw new Error("literal messages must not use the Markdown renderer");
+    },
+    result: null
+  };
+
+  runInNewContext(
+    `${appendSource}\nresult = appendAssistantMessage("user", "**literal** <b>tag</b>", {});`,
+    context
+  );
+  assert.equal(context.result.textContent, "You**literal** <b>tag</b>");
+  assert.equal(descendantElements(context.result, "strong").length, 0);
+
+  runInNewContext(
+    'result = appendAssistantMessage("assistant", "**still literal**", { busy: true });',
+    context
+  );
+  assert.equal(context.result.textContent, "Thresher**still literal**");
+  assert.equal(descendantElements(context.result, "strong").length, 0);
 });
 
 test("Ask Thresher multi-chat history is durable through scoped server APIs only", async () => {
@@ -1241,6 +1421,16 @@ test("Ask Thresher accepts only the exact bounded reasoning-routing contract", a
   };
 
   assert.deepEqual(evaluateAssistantRouting(normalize, valid), valid);
+  const assignedWorkSummary = {
+    route: "deterministic",
+    profileId: "hcn.deterministic.v1",
+    reasonCodes: ["fact_only_assigned_work_summary"],
+    modelUsed: false
+  };
+  assert.deepEqual(
+    evaluateAssistantRouting(normalize, assignedWorkSummary),
+    assignedWorkSummary
+  );
   for (const invalid of [
     { ...valid, route: "unknown" },
     { ...valid, extra: true },

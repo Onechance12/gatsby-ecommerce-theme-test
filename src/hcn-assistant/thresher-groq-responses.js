@@ -58,7 +58,7 @@ export function createThresherGroqResponsesClient({
           instructions: request.instructions,
           input: request.input,
           tools: request.tools,
-          tool_choice: "auto",
+          tool_choice: request.tool_choice,
           parallel_tool_calls: false,
           max_output_tokens: maxOutputTokens,
           reasoning: { effort }
@@ -79,12 +79,13 @@ function validateRequest(request, { maxOutputTokens }) {
     request.model !== THRESHER_AI_MODEL
     || request.store !== false
     || request.parallel_tool_calls !== false
-    || request.tool_choice !== "auto"
+    || !["auto", "required"].includes(request.tool_choice)
+    || !Array.isArray(request.tools)
+    || (request.tool_choice === "required" && request.tools.length !== 1)
     || request.max_output_tokens !== maxOutputTokens
     || typeof request.instructions !== "string"
     || !request.instructions
     || !Array.isArray(request.input)
-    || !Array.isArray(request.tools)
     || request.tools.some((tool) => tool?.type !== "function")
   ) {
     throw new TypeError(

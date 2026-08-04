@@ -261,6 +261,99 @@ test("every Responses API round uses store:false and manually replays provider o
   });
 });
 
+test("exact-file turns require review_file first, then resume the serial auto tool loop", async () => {
+  const requests = [];
+  const calls = [];
+  const responses = [
+    functionCallResponse({
+      name: "review_file",
+      arguments: JSON.stringify({ file_ref: FILE_REF }),
+      callId: "call_review"
+    }),
+    functionCallResponse({
+      name: "read_file_document_catalog",
+      arguments: JSON.stringify({ file_ref: FILE_REF }),
+      callId: "call_catalog"
+    }),
+    finalResponse("Fresh file evidence and the document catalog were reviewed.")
+  ];
+
+  const result = await defaultRun({
+    requiredFirstToolName: "review_file",
+    async createResponse(request) {
+      requests.push(request);
+      return responses.shift();
+    },
+    async executeTool(call) {
+      calls.push(call);
+      return call.name === "review_file"
+        ? { schema: "hcn.console.file.v1", file: { fileRef: FILE_REF } }
+        : { schema: "hcn.assistant.document-catalog.v1", documents: [] };
+    }
+  });
+
+  assert.equal(
+    result.message,
+    "Fresh file evidence and the document catalog were reviewed."
+  );
+  assert.deepEqual(calls.map((call) => call.name), [
+    "review_file",
+    "read_file_document_catalog"
+  ]);
+  assert.equal(requests[0].tool_choice, "required");
+  assert.deepEqual(
+    requests[0].tools.map((tool) => tool.name),
+    ["review_file"]
+  );
+  for (const request of requests.slice(1)) {
+    assert.equal(request.tool_choice, "auto");
+    assert.deepEqual(
+      request.tools.map((tool) => tool.name),
+      HCN_ASSISTANT_TOOL_NAMES
+    );
+  }
+  assert.match(
+    JSON.stringify(requests[1].input),
+    /hcn\.console\.file\.v1/
+  );
+});
+
+test("exact-file required review fails closed on first-round text or a different tool", async (t) => {
+  await t.test("final text without review_file", async () => {
+    let executionCount = 0;
+    await assert.rejects(
+      defaultRun({
+        requiredFirstToolName: "review_file",
+        createResponse: async () => finalResponse("I skipped the file review."),
+        executeTool: async () => {
+          executionCount += 1;
+        }
+      }),
+      (error) =>
+        error instanceof HcnAssistantError
+        && error.code === "required_first_tool_call_missing"
+    );
+    assert.equal(executionCount, 0);
+  });
+
+  await t.test("different first tool", async () => {
+    let executionCount = 0;
+    await assert.rejects(
+      defaultRun({
+        requiredFirstToolName: "review_file",
+        createResponse: async () => functionCallResponse(),
+        executeTool: async () => {
+          executionCount += 1;
+        }
+      }),
+      (error) =>
+        error instanceof HcnAssistantError
+        && error.code === "required_first_tool_call_mismatch"
+    );
+    assert.equal(executionCount, 0);
+  });
+});
+
 test("assigned identity is server-injected and never model-supplied", async () => {
   const requests = [];
   const calls = [];

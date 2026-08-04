@@ -13,6 +13,8 @@ const calendarToolPromptMarker =
   String(
     process.env.HCN_TEST_THRESHER_CALENDAR_TOOL_PROMPT_MARKER || ""
   ).trim();
+const noToolPromptMarker =
+  String(process.env.HCN_TEST_THRESHER_NO_TOOL_PROMPT_MARKER || "").trim();
 
 if (!recordPath || !responseText) {
   throw new Error("HCN test provider stub is not configured.");
@@ -66,15 +68,61 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
       (item) => item?.role === "user" && typeof item?.content === "string"
     )?.content || ""
     : "";
+  const functionCallNames = new Set(
+    Array.isArray(body.input)
+      ? body.input
+          .filter(
+            (item) =>
+              item?.type === "function_call"
+              && typeof item?.name === "string"
+          )
+          .map((item) => item.name)
+      : []
+  );
+  if (
+    body.tool_choice === "required"
+    && Array.isArray(body.tools)
+    && body.tools.length === 1
+    && body.tools[0]?.name === "review_file"
+    && (!noToolPromptMarker || !latestUserMessage.includes(noToolPromptMarker))
+  ) {
+    const fileRef = serializedContext.match(/subject_[a-f0-9]{32}/)?.[0];
+    if (!fileRef) {
+      throw new Error(
+        "HCN test required file review is missing the bound file_ref."
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        status: "completed",
+        output: [
+          {
+            id: "rs_review_file_fixture",
+            type: "reasoning",
+            summary: [],
+            encrypted_content: "encrypted_review_file_fixture"
+          },
+          {
+            id: "fc_review_file_fixture",
+            type: "function_call",
+            call_id: "call_review_file_fixture",
+            name: "review_file",
+            arguments: JSON.stringify({ file_ref: fileRef }),
+            status: "completed"
+          }
+        ]
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }
+    );
+  }
   if (
     calendarToolPromptMarker
     && latestUserMessage.includes(calendarToolPromptMarker)
   ) {
-    const hasToolOutput = Array.isArray(body.input)
-      && body.input.some(
-        (item) => item?.type === "function_call_output"
-      );
-    if (!hasToolOutput) {
+    if (!functionCallNames.has("read_calendar_day")) {
       const fileRef = serializedContext.match(
         /subject_[a-f0-9]{32}/
       )?.[0];
@@ -114,11 +162,7 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
     }
   }
   if (toolPromptMarker && latestUserMessage.includes(toolPromptMarker)) {
-    const hasToolOutput = Array.isArray(body.input)
-      && body.input.some(
-        (item) => item?.type === "function_call_output"
-      );
-    if (!hasToolOutput) {
+    if (!functionCallNames.has("read_file_document_catalog")) {
       const fileRef = serializedInput.match(/subject_[a-f0-9]{32}/)?.[0];
       if (!fileRef) {
         throw new Error("HCN test document-catalog tool call is missing file_ref.");

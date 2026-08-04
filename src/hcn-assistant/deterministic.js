@@ -63,6 +63,45 @@ export function formatDeterministicWorkCenter(workCenter) {
   return boundedMessage(lines.join("\n"));
 }
 
+/**
+ * Format the intentionally minimized general-chat assigned-work summary.
+ * This contract reads only aggregate/source fields, so extra file rows,
+ * names, numbers, or opaque references cannot enter the message.
+ */
+export function formatDeterministicAssignedWorkSummary(summary) {
+  const page = plainObject(summary?.page, "assigned work summary page");
+  const source = plainObject(
+    summary?.source,
+    "assigned work summary source"
+  );
+  const total = boundedInteger(
+    page.total,
+    0,
+    5_000,
+    "assigned work summary total"
+  );
+  const status = humanCode(source.status);
+  const completenessCode = typeof source.completeness === "string"
+    ? source.completeness.toLowerCase()
+    : "";
+  const completeness = ["complete", "partial"].includes(completenessCode)
+    ? humanCode(completenessCode)
+    : "Unknown";
+  const checkedAt = safeTimestamp(
+    source.checkedAt || source.asOf || summary?.generatedAt
+  );
+  if (!checkedAt) {
+    throw new TypeError("assigned work summary checkedAt is invalid");
+  }
+  const lines = [
+    `Assigned files ready for review: ${total}.`,
+    `Source status: JobNimbus ${status} / ${completeness}.`,
+    `Checked: ${checkedAt}.`
+  ];
+  lines.push("Nothing changed.");
+  return boundedMessage(lines.join("\n"));
+}
+
 export function formatDeterministicManagementSweep(sweep) {
   const adjusters = boundedArray(
     sweep?.adjusters,

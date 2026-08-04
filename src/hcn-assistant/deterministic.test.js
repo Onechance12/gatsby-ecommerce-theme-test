@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   extractDeterministicJobNumber,
   formatCodexEscalation,
+  formatDeterministicAssignedWorkSummary,
   formatDeterministicFileStatus,
   formatDeterministicManagementSweep,
   formatDeterministicWorkCenter
@@ -39,6 +40,52 @@ test("formats a bounded Work Center answer without opaque references", () => {
   assert.match(message, /Missing Adjuster/);
   assert.doesNotMatch(message, /subject_[a-f0-9]{32}/);
   assert.match(message, /Nothing was changed/);
+});
+
+test("formats an assigned-work count without file or client detail", () => {
+  const forbidden = [
+    "Example Homeowner",
+    "2862",
+    `subject_${"a".repeat(32)}`,
+    "client@example.com"
+  ];
+  const message = formatDeterministicAssignedWorkSummary({
+    generatedAt: "2026-08-04T20:00:00.000Z",
+    page: { total: 58 },
+    source: {
+      status: "fresh",
+      completeness: "complete",
+      checkedAt: "2026-08-04T20:00:00.000Z"
+    },
+    files: [
+      {
+        jobNumber: forbidden[1],
+        displayName: forbidden[0],
+        fileRef: forbidden[2],
+        email: forbidden[3]
+      }
+    ]
+  });
+
+  assert.match(message, /Assigned files ready for review: 58/);
+  assert.match(message, /Source status: JobNimbus Fresh \/ Complete/);
+  assert.match(message, /Checked: 2026-08-04T20:00:00.000Z/);
+  assert.match(message, /Nothing changed/);
+  for (const value of forbidden) assert.doesNotMatch(message, new RegExp(value));
+});
+
+test("assigned-work count fails closed without a verified check time", () => {
+  assert.throws(
+    () => formatDeterministicAssignedWorkSummary({
+      page: { total: 1 },
+      source: {
+        status: "fresh",
+        completeness: "complete",
+        checkedAt: "not-a-timestamp"
+      }
+    }),
+    /checkedAt is invalid/
+  );
 });
 
 test("labels the management sweep as JobNimbus activity only", () => {

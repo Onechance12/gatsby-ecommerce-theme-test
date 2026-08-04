@@ -193,6 +193,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         ]
       });
     }
+    if (url.pathname === "/activities" && req.method === "GET") {
+      return json(res, 200, { activities: [] });
+    }
+    if (url.pathname === "/tasks" && req.method === "GET") {
+      return json(res, 200, { tasks: [] });
+    }
 
     if (
       ["/contacts", "/activities", "/tasks", "/files"].some(
@@ -249,6 +255,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
           "fixture-document-catalog",
         HCN_TEST_THRESHER_CALENDAR_TOOL_PROMPT_MARKER:
           "fixture-calendar-day",
+        HCN_TEST_THRESHER_NO_TOOL_PROMPT_MARKER:
+          "fixture-skip-required-review",
         HCN_TENANT_ID: "tenant_0123456789abcdef",
         HCN_REFERENCE_KEY,
         HCN_GOOGLE_GRANT_KEY:
@@ -496,6 +504,60 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     createdConversation.conversation.conversationRef;
   let expectedRevision = 0;
 
+  const assignedWorkSummaryResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef,
+        expectedRevision,
+        prompt: "How many assigned files are ready for review right now? Give me only the count and source status. Do not open any individual file and do not take any action.",
+        mode: "auto"
+      })
+    }
+  );
+  assert.equal(assignedWorkSummaryResponse.status, 200);
+  const assignedWorkSummary = await assignedWorkSummaryResponse.json();
+  assert.equal(assignedWorkSummary.message, [
+    "Assigned files ready for review: 1.",
+    "Source status: JobNimbus Fresh / Complete.",
+    `Checked: ${assignedWorkSummary.sources[0].checkedAt}.`,
+    "Nothing changed."
+  ].join("\n"));
+  assert.equal(assignedWorkSummary.routing.route, "deterministic");
+  assert.equal(assignedWorkSummary.routing.modelUsed, false);
+  assert.deepEqual(assignedWorkSummary.routing.reasonCodes, [
+    "fact_only_assigned_work_summary"
+  ]);
+  assert.deepEqual(
+    assignedWorkSummary.sources.map((source) => ({
+      key: source.key,
+      label: source.label,
+      status: source.status
+    })),
+    [{
+      key: "jobnimbus",
+      label: "JobNimbus assigned files",
+      status: "fresh"
+    }]
+  );
+  assert.equal(Object.hasOwn(assignedWorkSummary, "files"), false);
+  assert.doesNotMatch(
+    JSON.stringify({
+      message: assignedWorkSummary.message,
+      sources: assignedWorkSummary.sources
+    }),
+    /Assigned File Fixture|2739|assigned-file-provider-id/
+  );
+  assert.equal((await readFile(providerRecordPath, "utf8")).trim(), "");
+  expectedRevision = assignedWorkSummary.revision;
+
   const deterministicResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
     {
@@ -616,6 +678,27 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const fileConversationRef =
     fileConversation.conversation.conversationRef;
   let fileExpectedRevision = 0;
+  const postFileAssistantTurn = ({
+    prompt,
+    expectedRevision: revision = fileExpectedRevision
+  }) => fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef: fileConversationRef,
+        expectedRevision: revision,
+        prompt,
+        mode: "auto"
+      })
+    }
+  );
 
   const reopenFileConversationResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/conversations/create`,
@@ -690,7 +773,62 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     total: 1,
     hasMore: false
   });
+
+  const providerLinesBeforeReassignment = (
+    await readFile(providerRecordPath, "utf8")
+  ).trim().split(/\r?\n/).filter(Boolean).length;
+  const reassignedTurnResponse = await postFileAssistantTurn({
+    prompt:
+      "Review the latest available evidence for this exact file and tell me what needs attention. Do not take any action.",
+    expectedRevision: 0
+  });
+  assert.equal(reassignedTurnResponse.status, 404);
+  assert.equal(
+    (await readFile(providerRecordPath, "utf8"))
+      .trim().split(/\r?\n/).filter(Boolean).length,
+    providerLinesBeforeReassignment
+  );
   assignedFileActive = true;
+
+  const ordinaryFilePrompts = [
+    "Review the latest available evidence for this exact file and tell me what needs attention. Do not take any action.",
+    "What is the current status of this exact file? Use fresh JobNimbus evidence only and do not take any action."
+  ];
+  for (const prompt of ordinaryFilePrompts) {
+    const response = await postFileAssistantTurn({ prompt });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    const turn = JSON.parse(responseText);
+    assert.equal(turn.message, ASSISTANT_RESPONSE);
+    assert.equal(turn.routing.route, "standard");
+    assert.equal(turn.routing.modelUsed, true);
+    assert.equal(turn.plan, null);
+    const jobNimbusSource = turn.sources.find(
+      (source) => source.key === "jobnimbus"
+    );
+    assert.deepEqual(
+      {
+        label: jobNimbusSource?.label,
+        status: jobNimbusSource?.status
+      },
+      {
+        label: "JobNimbus file",
+        status: "fresh"
+      }
+    );
+    fileExpectedRevision = turn.revision;
+  }
+
+  const noReviewResponse = await postFileAssistantTurn({
+    prompt:
+      "fixture-skip-required-review: summarize this exact file without the required evidence."
+  });
+  const noReviewBody = await noReviewResponse.text();
+  assert.equal(noReviewResponse.status, 502, noReviewBody);
+  assert.match(
+    JSON.parse(noReviewBody).error,
+    /required fresh file review/i
+  );
 
   const calendarResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
@@ -704,7 +842,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       },
       body: JSON.stringify({
         conversationRef: fileConversationRef,
-        expectedRevision: 0,
+        expectedRevision: fileExpectedRevision,
         prompt:
           "fixture-calendar-day: check this file's calendar appointment.",
         mode: "auto"
@@ -715,12 +853,14 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(calendarResponse.status, 200, calendarBody);
   const calendar = JSON.parse(calendarBody);
   fileExpectedRevision = calendar.revision;
-  assert.equal(calendar.sources.length, 1);
+  const calendarSource = calendar.sources.find(
+    (source) => source.key === "google_calendar"
+  );
   assert.deepEqual(
     {
-      key: calendar.sources[0].key,
-      label: calendar.sources[0].label,
-      status: calendar.sources[0].status
+      key: calendarSource?.key,
+      label: calendarSource?.label,
+      status: calendarSource?.status
     },
     {
       key: "google_calendar",
@@ -729,7 +869,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     }
   );
   assert.match(
-    calendar.sources[0].checkedAt,
+    calendarSource?.checkedAt || "",
     /^\d{4}-\d{2}-\d{2}T/
   );
 
@@ -793,17 +933,20 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   fileExpectedRevision = catalog.revision;
   assert.equal(catalog.message, ASSISTANT_RESPONSE);
   assert.equal(catalog.plan, null);
+  const catalogJobNimbusSource = catalog.sources.find(
+    (source) => source.key === "jobnimbus"
+  );
   assert.deepEqual(
-    catalog.sources.map(({ key, label, status }) => ({
-      key,
-      label,
-      status
-    })),
-    [{
+    {
+      key: catalogJobNimbusSource?.key,
+      label: catalogJobNimbusSource?.label,
+      status: catalogJobNimbusSource?.status
+    },
+    {
       key: "jobnimbus",
       label: "JobNimbus document catalog",
       status: "fresh"
-    }]
+    }
   );
 
   assignedFileActive = false;
@@ -903,12 +1046,24 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     detail.schema,
     "hcn.console.assistant-conversation-detail.v1"
   );
-  assert.equal(detail.conversation.messageCount, 6);
-  assert.equal(detail.messages.length, 6);
+  assert.equal(detail.conversation.messageCount, 8);
+  assert.equal(detail.messages.length, 8);
+  assert.equal(
+    detail.messages[0].content,
+    "How many assigned files are ready for review right now? Give me only the count and source status. Do not open any individual file and do not take any action."
+  );
+  assert.equal(detail.messages[1].content, assignedWorkSummary.message);
+  assert.doesNotMatch(
+    JSON.stringify(
+      detail.messages.slice(0, 2).map((message) => message.content)
+    ),
+    /Assigned File Fixture|2739|assigned-file-provider-id/
+  );
   assert.deepEqual(
     detail.messages.map((message) => message.role),
     [
-      "user", "assistant", "user", "assistant", "user", "assistant"
+      "user", "assistant", "user", "assistant",
+      "user", "assistant", "user", "assistant"
     ]
   );
 
@@ -1005,8 +1160,31 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerLines = (
     await readFile(providerRecordPath, "utf8")
   ).trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(providerLines.length, 7);
-  const providerRequest = JSON.parse(providerLines[0]);
+  assert.equal(providerLines.length, 14);
+  const providerRequests = providerLines.map((line) => JSON.parse(line));
+  const serializedInput = (request) => JSON.stringify(request.body.input);
+  const latestUserMessage = (request) => [
+    ...(Array.isArray(request.body.input) ? request.body.input : [])
+  ].reverse().find(
+    (item) => item?.role === "user" && typeof item?.content === "string"
+  )?.content || "";
+  const requestsForPrompt = (prompt) => providerRequests.filter(
+    (request) => latestUserMessage(request).includes(prompt)
+  );
+  const fixedToolNames = [
+    "read_work_center",
+    "review_file",
+    "read_file_document_catalog",
+    "read_file_document",
+    "read_file_photo_catalog",
+    "research_file_hail_dates",
+    "read_calendar_day",
+    "run_management_sweep",
+    "read_closed_file_benchmark"
+  ];
+  const providerRequest = requestsForPrompt(
+    "Tell me what you can safely help with."
+  )[0];
   assert.equal(
     providerRequest.url,
     "https://api.groq.com/openai/v1/responses"
@@ -1015,121 +1193,119 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(providerRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(providerRequest.body.reasoning.effort, "medium");
   assert.equal(providerRequest.body.max_output_tokens, 1800);
-  assert.equal(Object.hasOwn(providerRequest.body, "store"), false);
-  assert.equal(Object.hasOwn(providerRequest.body, "stream"), false);
-  assert.equal(providerRequest.body.parallel_tool_calls, false);
-  assert.equal(
-    Object.hasOwn(providerRequest.body, "previous_response_id"),
-    false
-  );
+  assert.equal(providerRequest.body.tool_choice, "auto");
   assert.deepEqual(
     providerRequest.body.tools.map((tool) => tool.name),
-    [
-      "read_work_center",
-      "review_file",
-      "read_file_document_catalog",
-      "read_file_document",
-      "read_file_photo_catalog",
-      "research_file_hail_dates",
-      "read_calendar_day",
-      "run_management_sweep",
-      "read_closed_file_benchmark"
-    ]
+    fixedToolNames
   );
-  assert.equal(
-    providerRequest.body.tools.some((tool) =>
-      /execute|approve/i.test(tool.name)
-    ),
-    false
+
+  const requiredReviewRequests = providerRequests.filter(
+    (request) => request.body.tool_choice === "required"
   );
-  const calendarToolRequest = JSON.parse(providerLines[1]);
-  const calendarToolOutputRequest = JSON.parse(providerLines[2]);
+  assert.equal(requiredReviewRequests.length, 5);
+  for (const request of requiredReviewRequests) {
+    assert.deepEqual(
+      request.body.tools.map((tool) => tool.name),
+      ["review_file"]
+    );
+  }
+  for (const prompt of ordinaryFilePrompts) {
+    const rounds = requestsForPrompt(prompt);
+    assert.equal(rounds.length, 2);
+    assert.equal(rounds[0].body.tool_choice, "required");
+    assert.equal(rounds[1].body.tool_choice, "auto");
+    assert.deepEqual(
+      rounds[1].body.tools.map((tool) => tool.name),
+      fixedToolNames
+    );
+    assert.match(serializedInput(rounds[1]), /hcn\.console\.file\.v1/);
+  }
+
+  const noReviewRounds = requestsForPrompt(
+    "fixture-skip-required-review"
+  );
+  assert.equal(noReviewRounds.length, 1);
+  assert.equal(noReviewRounds[0].body.tool_choice, "required");
+
+  const calendarRounds = requestsForPrompt("fixture-calendar-day");
+  assert.equal(calendarRounds.length, 3);
+  assert.equal(calendarRounds[0].body.tool_choice, "required");
+  assert.equal(calendarRounds[1].body.tool_choice, "auto");
+  assert.match(serializedInput(calendarRounds[1]), /hcn\.console\.file\.v1/);
   assert.match(
-    JSON.stringify(calendarToolRequest.body.input),
-    /fixture-calendar-day/
-  );
-  assert.match(
-    JSON.stringify(calendarToolOutputRequest.body.input),
+    serializedInput(calendarRounds[2]),
     /hcn\.assistant\.calendar-file-appointments\.v1/
   );
-  assert.doesNotMatch(
-    JSON.stringify(calendarToolOutputRequest),
-    /Assigned File Fixture|assigned-file-provider-id|assigned-employee-connector-access-token/
+
+  const catalogRounds = requestsForPrompt("fixture-document-catalog");
+  assert.equal(catalogRounds.length, 4);
+  const requiredCatalogIndex = catalogRounds.findIndex(
+    (request) => request.body.tool_choice === "required"
   );
-  const blockedGeneralCatalogRequest = JSON.parse(providerLines[3]);
+  assert.equal(requiredCatalogIndex, 1);
   assert.match(
-    JSON.stringify(blockedGeneralCatalogRequest.body.input),
-    /fixture-document-catalog/
-  );
-  const catalogToolRequest = JSON.parse(providerLines[4]);
-  const catalogToolOutputRequest = JSON.parse(providerLines[5]);
-  assert.match(
-    JSON.stringify(catalogToolRequest.body.input),
-    /fixture-document-catalog/
+    serializedInput(catalogRounds[requiredCatalogIndex + 1]),
+    /hcn\.console\.file\.v1/
   );
   assert.match(
-    JSON.stringify(catalogToolOutputRequest.body.input),
+    serializedInput(catalogRounds[requiredCatalogIndex + 2]),
     /hcn\.assistant\.document-catalog\.v1/
   );
-  assert.doesNotMatch(
-    JSON.stringify(catalogToolOutputRequest),
-    /assigned-file-provider-id|assigned-document-provider-id/
-  );
-  const deepProviderRequest = JSON.parse(providerLines[6]);
+
+  for (const request of providerRequests) {
+    assert.equal(Object.hasOwn(request.body, "store"), false);
+    assert.equal(Object.hasOwn(request.body, "stream"), false);
+    assert.equal(request.body.parallel_tool_calls, false);
+    assert.equal(
+      Object.hasOwn(request.body, "previous_response_id"),
+      false
+    );
+    assert.equal(
+      request.body.tools.some((tool) =>
+        /execute|approve/i.test(tool.name)
+      ),
+      false
+    );
+  }
+
+  const deepProviderRequest = requestsForPrompt(
+    "Review the claim evidence carefully."
+  )[0];
   assert.equal(deepProviderRequest.body.model, "openai/gpt-oss-20b");
   assert.equal(deepProviderRequest.body.reasoning.effort, "high");
   assert.equal(deepProviderRequest.body.max_output_tokens, 2400);
-  const serializedProviderRequest = JSON.stringify([
-    providerRequest,
-    deepProviderRequest
-  ]);
+  const serializedProviderRequest = JSON.stringify(providerRequests);
   assert.doesNotMatch(
     serializedProviderRequest,
-    /assigned-employee-google-subject|assigned-employee-jobnimbus-owner|assigned\.employee@wavepa\.com|gsk_hcn_route_fixture_key/
+    /assigned-file-provider-id|assigned-document-provider-id|assigned-employee-google-subject|assigned-employee-jobnimbus-owner|assigned\.employee@wavepa\.com|assigned-employee-connector-access-token|gsk_hcn_route_fixture_key/
   );
 
   assert.deepEqual(externalMutations, []);
-  assert.deepEqual(
-    providerObservations
-      .map(({ method, pathname }) => `${method} ${pathname}`)
-      .sort(),
-    [
-      "GET /account/users",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts",
-      "GET /contacts/assigned-file-provider-id",
-      "GET /contacts/assigned-file-provider-id",
-      "GET /contacts/assigned-file-provider-id",
-      "GET /contacts/assigned-file-provider-id",
-      "GET /contacts/assigned-file-provider-id",
-      "GET /files",
-      "GET /tokeninfo",
-      "GET /tokeninfo",
-      "GET /userinfo",
-      "GET /userinfo",
-      "POST /token",
-      "POST /token"
-    ]
-  );
-  assert.deepEqual(
-    providerObservations.filter(({ pathname }) =>
-      ["/activities", "/tasks"].some(
-        (prefix) =>
-          pathname === prefix || pathname.startsWith(`${prefix}/`)
-      )
-    ),
-    []
-  );
-  assert.deepEqual(
-    providerObservations.filter(({ pathname }) => pathname === "/files"),
-    [{ method: "GET", pathname: "/files" }]
-  );
+  const allowedProviderReads = new Set([
+    "/account/users",
+    "/contacts",
+    "/contacts/assigned-file-provider-id",
+    "/activities",
+    "/tasks",
+    "/files",
+    "/tokeninfo",
+    "/userinfo"
+  ]);
+  for (const observation of providerObservations) {
+    if (observation.pathname === "/token") {
+      assert.equal(observation.method, "POST");
+      continue;
+    }
+    assert.equal(observation.method, "GET");
+    assert.equal(allowedProviderReads.has(observation.pathname), true);
+  }
+  for (const pathname of ["/activities", "/tasks", "/files"]) {
+    const reads = providerObservations.filter(
+      (observation) => observation.pathname === pathname
+    );
+    assert.equal(reads.length >= 4, true);
+    assert.equal(reads.every(({ method }) => method === "GET"), true);
+  }
 });
 
 function json(res, status, body) {

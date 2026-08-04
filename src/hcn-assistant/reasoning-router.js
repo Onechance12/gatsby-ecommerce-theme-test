@@ -28,6 +28,7 @@ const ROUTES = Object.freeze([
 const OPERATIONS = Object.freeze([
   "unknown",
   "work_center",
+  "assigned_work_summary",
   "management_sweep",
   "file_status",
   "interpretation",
@@ -46,6 +47,7 @@ const DOMAINS = Object.freeze([
 
 const CAPABILITIES = Object.freeze([
   "read_work_center",
+  "assigned_work_summary",
   "management_sweep",
   "file_status",
   "interpret_evidence",
@@ -76,6 +78,7 @@ const REASON_CODES = Object.freeze({
   COMPLEX_DOCUMENT: "complex_document",
   HIGH_STAKES_AMBIGUITY: "high_stakes_ambiguity",
   FACT_ONLY_WORK_CENTER: "fact_only_work_center",
+  FACT_ONLY_ASSIGNED_WORK_SUMMARY: "fact_only_assigned_work_summary",
   FACT_ONLY_MANAGEMENT_SWEEP: "fact_only_management_sweep",
   FACT_ONLY_FILE_STATUS: "fact_only_file_status",
   ORDINARY_INTERPRETATION: "ordinary_interpretation",
@@ -157,6 +160,10 @@ const FACT_ONLY_BLOCKER_PATTERN =
 const WORK_CENTER_PATTERNS = Object.freeze([
   /^(?:please\s+)?(?:show|list|display|open)\s+(?:me\s+)?(?:my\s+)?(?:assigned\s+)?(?:work\s*center|files|jobs)(?:\s+assigned\s+to\s+me)?[.?!]*$/i,
   /^(?:please\s+)?what\s+(?:files|jobs)\s+(?:are\s+)?assigned\s+to\s+me[.?!]*$/i
+]);
+const ASSIGNED_WORK_SUMMARY_PATTERNS = Object.freeze([
+  /^(?:please\s+)?how many\s+(?:of\s+)?(?:my\s+)?assigned\s+(?:files|jobs)\s+(?:are\s+)?(?:ready|available)\s+for\s+review(?:\s+(?:right\s+now|today))?\s*\??(?:\s+(?:please\s+)?give(?:\s+me)?\s+only\s+(?:the\s+)?(?:count|number)\s+and\s+(?:the\s+)?source\s+status\s*[.!?]*)?(?:\s+do\s+not\s+open\s+any\s+individual\s+file\s+and\s+do\s+not\s+take\s+any\s+action\s*[.!?]*)?$/i,
+  /^(?:please\s+)?give(?:\s+me)?\s+only\s+(?:the\s+)?(?:count|number)\s+of\s+(?:my\s+)?assigned\s+(?:files|jobs)(?:\s+(?:ready|available)\s+for\s+review)?(?:\s+(?:right\s+now|today))?\s+and\s+(?:the\s+)?source\s+status\s*[.!?]*$/i
 ]);
 const MANAGEMENT_SWEEP_LEAD_PATTERN =
   /^(?:please\s+)?(?:show|list|run|generate|open)\b/i;
@@ -420,6 +427,14 @@ function collectDeepReasons(request, signals) {
 
 function classifyOperation(request) {
   const normalized = request.replace(/\s+/g, " ").trim();
+  if (
+    normalized.length <= 240
+    && ASSIGNED_WORK_SUMMARY_PATTERNS.some((pattern) =>
+      pattern.test(normalized)
+    )
+  ) {
+    return "assigned_work_summary";
+  }
   if (!FACT_ONLY_BLOCKER_PATTERN.test(normalized)) {
     if (WORK_CENTER_PATTERNS.some((pattern) => pattern.test(normalized))) {
       return "work_center";
@@ -470,6 +485,9 @@ function capabilitiesForOperation(operation) {
   if (operation === "work_center") {
     return ["read_work_center"];
   }
+  if (operation === "assigned_work_summary") {
+    return ["assigned_work_summary"];
+  }
   if (operation === "management_sweep") {
     return ["management_sweep"];
   }
@@ -487,6 +505,7 @@ function capabilitiesForOperation(operation) {
 
 function isFactOnlyOperation(operation) {
   return operation === "work_center"
+    || operation === "assigned_work_summary"
     || operation === "management_sweep"
     || operation === "file_status";
 }
@@ -494,6 +513,9 @@ function isFactOnlyOperation(operation) {
 function deterministicReasonFor(operation) {
   if (operation === "work_center") {
     return REASON_CODES.FACT_ONLY_WORK_CENTER;
+  }
+  if (operation === "assigned_work_summary") {
+    return REASON_CODES.FACT_ONLY_ASSIGNED_WORK_SUMMARY;
   }
   if (operation === "management_sweep") {
     return REASON_CODES.FACT_ONLY_MANAGEMENT_SWEEP;

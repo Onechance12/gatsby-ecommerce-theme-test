@@ -86,6 +86,7 @@
   const ASSISTANT_ROUTE_REASON_CODES = Object.freeze({
     deterministic: Object.freeze([
       "fact_only_work_center",
+      "fact_only_assigned_work_summary",
       "fact_only_management_sweep",
       "fact_only_file_status"
     ]),
@@ -3720,10 +3721,199 @@
     setText(elements["assistant-pilot-authority"], "Read only");
   }
 
+  function renderAssistantMarkdown(message) {
+    const maximumCharacters = 16000;
+    const maximumBlocks = 256;
+    const maximumInlineTokens = 512;
+    const maximumListItems = 200;
+    const maximumTableColumns = 12;
+    const maximumTableRows = 80;
+    const container = document.createElement("div");
+    const source = boundedString(message, maximumCharacters).replace(/\r\n?/g, "\n");
+    const lines = source.split("\n");
+
+    container.className = "assistant-message-body assistant-markdown";
+
+    function appendInline(parent, value) {
+      const input = boundedString(value, maximumCharacters);
+      const tokenPattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__)/g;
+      let cursor = 0;
+      let tokens = 0;
+      let match;
+
+      while (tokens < maximumInlineTokens && (match = tokenPattern.exec(input)) !== null) {
+        if (match.index > cursor) {
+          parent.append(document.createTextNode(input.slice(cursor, match.index)));
+        }
+        const token = match[0];
+        const inline = document.createElement(token.startsWith("`") ? "code" : "strong");
+        inline.append(document.createTextNode(token.slice(token.startsWith("`") ? 1 : 2, token.startsWith("`") ? -1 : -2)));
+        parent.append(inline);
+        cursor = match.index + token.length;
+        tokens += 1;
+      }
+      if (cursor < input.length) {
+        parent.append(document.createTextNode(input.slice(cursor)));
+      }
+    }
+
+    function pipeCells(line) {
+      const trimmed = line.trim();
+      if (!trimmed.includes("|")) return null;
+      const withoutEdges = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+      const cells = withoutEdges.split("|").map(function (cell) {
+        return cell.trim();
+      });
+      if (
+        cells.length < 2
+        || cells.length > maximumTableColumns
+        || cells.some(function (cell) { return cell.length > 2000; })
+      ) {
+        return null;
+      }
+      return cells;
+    }
+
+    function tableHeaderAt(index) {
+      const headings = pipeCells(lines[index] || "");
+      const dividers = pipeCells(lines[index + 1] || "");
+      if (
+        !headings
+        || !dividers
+        || headings.length !== dividers.length
+        || !dividers.every(function (cell) { return /^:?-{3,}:?$/.test(cell); })
+      ) {
+        return null;
+      }
+      return headings;
+    }
+
+    function closedFenceAt(index) {
+      if (!/^ {0,3}```[A-Za-z0-9_-]{0,32}\s*$/.test(lines[index] || "")) return -1;
+      for (let candidate = index + 1; candidate < lines.length; candidate += 1) {
+        if (/^ {0,3}```\s*$/.test(lines[candidate])) return candidate;
+      }
+      return -1;
+    }
+
+    function listMatchAt(index) {
+      const line = lines[index] || "";
+      const unordered = /^ {0,3}[-*+]\s+(.+)$/.exec(line);
+      if (unordered) return { ordered: false, text: unordered[1] };
+      const ordered = /^ {0,3}\d+[.)]\s+(.+)$/.exec(line);
+      return ordered ? { ordered: true, text: ordered[1] } : null;
+    }
+
+    function startsStructuredBlock(index) {
+      return closedFenceAt(index) >= 0
+        || Boolean(listMatchAt(index))
+        || Boolean(tableHeaderAt(index));
+    }
+
+    let index = 0;
+    let blocks = 0;
+    while (index < lines.length && blocks < maximumBlocks) {
+      if (lines[index].trim() === "") {
+        index += 1;
+        continue;
+      }
+
+      const fenceEnd = closedFenceAt(index);
+      if (fenceEnd >= 0) {
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.append(document.createTextNode(lines.slice(index + 1, fenceEnd).join("\n")));
+        pre.append(code);
+        container.append(pre);
+        index = fenceEnd + 1;
+        blocks += 1;
+        continue;
+      }
+
+      const firstListItem = listMatchAt(index);
+      if (firstListItem) {
+        const list = document.createElement(firstListItem.ordered ? "ol" : "ul");
+        let items = 0;
+        while (index < lines.length && items < maximumListItems) {
+          const item = listMatchAt(index);
+          if (!item || item.ordered !== firstListItem.ordered) break;
+          const listItem = document.createElement("li");
+          appendInline(listItem, item.text);
+          list.append(listItem);
+          index += 1;
+          items += 1;
+        }
+        container.append(list);
+        blocks += 1;
+        continue;
+      }
+
+      const headings = tableHeaderAt(index);
+      if (headings) {
+        const wrapper = document.createElement("div");
+        const table = document.createElement("table");
+        const head = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        const body = document.createElement("tbody");
+        wrapper.className = "assistant-table-scroll";
+        headings.forEach(function (heading) {
+          const cell = document.createElement("th");
+          cell.setAttribute("scope", "col");
+          appendInline(cell, heading);
+          headRow.append(cell);
+        });
+        head.append(headRow);
+        table.append(head, body);
+        index += 2;
+        let rows = 0;
+        while (index < lines.length && rows < maximumTableRows) {
+          const cells = pipeCells(lines[index]);
+          if (!cells || cells.length !== headings.length) break;
+          const row = document.createElement("tr");
+          cells.forEach(function (value) {
+            const cell = document.createElement("td");
+            appendInline(cell, value);
+            row.append(cell);
+          });
+          body.append(row);
+          index += 1;
+          rows += 1;
+        }
+        wrapper.append(table);
+        container.append(wrapper);
+        blocks += 1;
+        continue;
+      }
+
+      const paragraphLines = [];
+      while (
+        index < lines.length
+        && lines[index].trim() !== ""
+        && (paragraphLines.length === 0 || !startsStructuredBlock(index))
+      ) {
+        paragraphLines.push(lines[index]);
+        index += 1;
+      }
+      const paragraph = document.createElement("p");
+      appendInline(paragraph, paragraphLines.join("\n"));
+      container.append(paragraph);
+      blocks += 1;
+    }
+
+    if (index < lines.length) {
+      const remainder = document.createElement("p");
+      appendInline(remainder, lines.slice(index).join("\n"));
+      container.append(remainder);
+    }
+    if (!container.childNodes.length) {
+      container.append(document.createElement("p"));
+    }
+    return container;
+  }
+
   function appendAssistantMessage(speaker, message, options) {
     const article = document.createElement("article");
     const label = document.createElement("span");
-    const paragraph = document.createElement("p");
     const timestamp = document.createElement("time");
     const normalizedSpeaker = speaker === "user" ? "user" : "assistant";
     article.className = "assistant-message";
@@ -3734,8 +3924,13 @@
     }
     label.className = "assistant-speaker";
     setText(label, normalizedSpeaker === "user" ? "You" : "Thresher");
-    setText(paragraph, boundedString(message, 16000));
-    article.append(label, paragraph);
+    if (normalizedSpeaker === "assistant" && options?.busy !== true) {
+      article.append(label, renderAssistantMarkdown(message));
+    } else {
+      const paragraph = document.createElement("p");
+      setText(paragraph, boundedString(message, 16000));
+      article.append(label, paragraph);
+    }
     if (validIsoInstant(options?.createdAt)) {
       timestamp.className = "assistant-message-time";
       timestamp.dateTime = options.createdAt;

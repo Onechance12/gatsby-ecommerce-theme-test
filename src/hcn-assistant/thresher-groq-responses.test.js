@@ -44,6 +44,7 @@ test("Thresher AI adapter uses only the fixed Groq endpoint and model", async ()
   );
   const body = JSON.parse(requests[0].options.body);
   assert.equal(body.model, THRESHER_AI_MODEL);
+  assert.equal(body.tool_choice, "auto");
   assert.equal(body.parallel_tool_calls, false);
   assert.equal(Object.hasOwn(body, "store"), false);
   assert.equal(body.max_output_tokens, 1600);
@@ -59,6 +60,52 @@ test("Thresher AI adapter uses only the fixed Groq endpoint and model", async ()
   ]) {
     assert.equal(Object.hasOwn(body, forbidden), false);
   }
+});
+
+test("Thresher AI adapter forwards the single-tool required first round", async () => {
+  let providerBody;
+  const client = createThresherGroqResponsesClient({
+    apiKey: API_KEY,
+    reasoningEffort: "medium",
+    maxOutputTokens: 1600,
+    fetchImpl: async (_url, options) => {
+      providerBody = JSON.parse(options.body);
+      return new Response(JSON.stringify({
+        status: "completed",
+        output: [{
+          type: "function_call",
+          call_id: "call_review",
+          name: "review_file",
+          arguments: JSON.stringify({
+            file_ref: `subject_${"a".repeat(32)}`
+          })
+        }]
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  const reviewTool = {
+    type: "function",
+    name: "review_file",
+    strict: true,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+      required: []
+    }
+  };
+
+  await client({
+    ...fixedRequest(),
+    tools: [reviewTool],
+    tool_choice: "required"
+  });
+
+  assert.equal(providerBody.tool_choice, "required");
+  assert.deepEqual(providerBody.tools, [reviewTool]);
 });
 
 test("Thresher AI adapter rejects caller-selected provider state or model", async () => {
@@ -84,6 +131,31 @@ test("Thresher AI adapter rejects caller-selected provider state or model", asyn
     () => client({
       ...fixedRequest(),
       model: "attacker-selected-model"
+    }),
+    /fixed HCN contract/
+  );
+  await assert.rejects(
+    () => client({
+      ...fixedRequest(),
+      tool_choice: "required",
+      tools: []
+    }),
+    /fixed HCN contract/
+  );
+  for (const tools of [null, { name: "review_file" }]) {
+    await assert.rejects(
+      () => client({
+        ...fixedRequest(),
+        tool_choice: "required",
+        tools
+      }),
+      /fixed HCN contract/
+    );
+  }
+  await assert.rejects(
+    () => client({
+      ...fixedRequest(),
+      tool_choice: "none"
     }),
     /fixed HCN contract/
   );

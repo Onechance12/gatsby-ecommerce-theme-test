@@ -237,6 +237,7 @@ import {
 import {
   extractDeterministicJobNumber,
   formatCodexEscalation,
+  formatDeterministicAssignedWorkSummary,
   formatDeterministicFileStatus,
   formatDeterministicManagementSweep,
   formatDeterministicWorkCenter
@@ -5513,6 +5514,40 @@ async function runHcnDeterministicAssistantTurn({
       preparedPlan: null
     };
   }
+  if (operation === "assigned_work_summary") {
+    if (conversation?.kind !== "general") {
+      const error = new Error(
+        "The assigned-work summary is available only in a general chat."
+      );
+      error.statusCode = 403;
+      throw error;
+    }
+    const workCenter = await hcnReadWorkCenter({
+      offset: 0,
+      limit: 1
+    });
+    const summary = {
+      generatedAt: workCenter?.generatedAt,
+      page: {
+        total: workCenter?.page?.total
+      },
+      source: {
+        status: workCenter?.source?.status,
+        completeness: workCenter?.source?.completeness,
+        checkedAt: workCenter?.source?.checkedAt,
+        asOf: workCenter?.source?.asOf
+      }
+    };
+    collectHcnAssistantSources(
+      sources,
+      "read_work_center",
+      summary
+    );
+    return {
+      message: formatDeterministicAssignedWorkSummary(summary),
+      preparedPlan: null
+    };
+  }
   if (operation === "management_sweep") {
     hcnAssertAssistantManagementConversation(conversation);
     assertHcnManagementSession();
@@ -5594,6 +5629,8 @@ async function runHcnModelAssistantTurn({
     assignedIdentity: principal,
     model: profile.model,
     instructions: hcnAssistantInstructions(principal, conversation),
+    requiredFirstToolName:
+      conversation?.kind === "file" ? "review_file" : "",
     maxToolRounds: 6,
     maxToolCalls: 8,
     maxOutputTokens: profile.maxOutputTokens,

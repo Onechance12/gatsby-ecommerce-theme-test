@@ -29,6 +29,11 @@ test("server classifier recognizes only narrow fact-only requests", () => {
     ["Show my assigned files.", "work_center", "fact_only_work_center"],
     ["What files are assigned to me?", "work_center", "fact_only_work_center"],
     [
+      "How many assigned files are ready for review right now? Give me only the count and source status. Do not open any individual file and do not take any action.",
+      "assigned_work_summary",
+      "fact_only_assigned_work_summary"
+    ],
+    [
       "Run the neglected files report.",
       "management_sweep",
       "fact_only_management_sweep"
@@ -83,7 +88,11 @@ test("fact-like requests with analysis or outbound work are not downgraded", () 
     "Review my assigned files and tell me what to do.",
     "Show the neglected-file report and draft follow-ups.",
     "Review the status of file 2705.",
-    "Show the status of file 2705 and send an email."
+    "Show the status of file 2705 and send an email.",
+    "How many assigned files are ready for review right now? Review each one.",
+    "How many assigned files are ready for review right now? Recommend next steps.",
+    "How many assigned files are ready for review right now? Draft an email.",
+    "How many assigned files are ready for review right now? Send me the client list."
   ];
 
   for (const userRequest of cases) {
@@ -152,9 +161,14 @@ test("server classifier infers deep domains only from clear language", () => {
   }
 });
 
-test("fact-only Work Center, sweep, and status requests use no LLM", () => {
+test("fact-only Work Center, aggregate summary, sweep, and status requests use no LLM", () => {
   const cases = [
     ["work_center", "Show my assigned files.", "fact_only_work_center"],
+    [
+      "assigned_work_summary",
+      "How many assigned files are ready for review right now? Give only the count and source status. Do not open any individual file and do not take any action.",
+      "fact_only_assigned_work_summary"
+    ],
     [
       "management_sweep",
       "Show the files with the longest activity gaps.",
