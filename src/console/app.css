@@ -43,6 +43,51 @@ body {
     var(--paper);
 }
 
+.hcn-auth-gate {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.hcn-auth-gate[hidden],
+.private-console[hidden] {
+  display: none !important;
+}
+
+.hcn-auth-card {
+  display: grid;
+  width: min(100%, 430px);
+  justify-items: start;
+  gap: 14px;
+  padding: clamp(28px, 7vw, 44px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.hcn-auth-card h1,
+.hcn-auth-card p {
+  margin: 0;
+}
+
+.hcn-auth-card h1 {
+  font-size: clamp(1.65rem, 7vw, 2.3rem);
+  line-height: 1.05;
+}
+
+.hcn-auth-card > p:not(.eyebrow) {
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+.hcn-auth-card .button {
+  width: 100%;
+  margin-top: 8px;
+  text-align: center;
+}
+
 button,
 a {
   font: inherit;

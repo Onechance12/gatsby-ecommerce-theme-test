@@ -13,15 +13,32 @@
       content="Home Claim Network employee Work Center."
     >
     <title>HCN Work Center</title>
-    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v13">
-    <link rel="stylesheet" href="/hcn/app.css?shell=v13">
-    <script src="/hcn/app.js?shell=v13" defer></script>
+    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v14" crossorigin="use-credentials">
+    <link rel="stylesheet" href="/hcn/app.css?shell=v14">
+    <script src="/hcn/app.js?shell=v14" defer></script>
   </head>
-  <body>
+  <body class="hcn-auth-locked">
+    <main id="hcn-auth-gate" class="hcn-auth-gate" aria-labelledby="hcn-auth-gate-title">
+      <section class="hcn-auth-card">
+        <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
+        <p class="eyebrow">Private employee workspace</p>
+        <h1 id="hcn-auth-gate-title">Secure sign-in required</h1>
+        <p id="hcn-auth-gate-message">
+          Verifying your HCN employee session before opening the workspace.
+        </p>
+        <a
+          id="hcn-auth-gate-action"
+          class="button button-primary"
+          href="/hcn/auth/login?returnTo=%2Fhcn%2F"
+        >Sign in with your work account</a>
+      </section>
+    </main>
+
+    <div id="private-console" class="private-console" hidden inert aria-hidden="true">
     <a class="skip-link" href="#main-content">Skip to employee Work Center</a>
 
     <header class="topbar">
-      <a class="brand" href="/hcn/?shell=v13" aria-label="HCN Work Center home">
+      <a class="brand" href="/hcn/?shell=v14" aria-label="HCN Work Center home">
         <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
         <span class="brand-copy">
           <strong>HCN Work Center</strong>
@@ -2186,6 +2203,7 @@
           <p id="freshness-text">Awaiting fresh platform metadata.</p>
         </footer>
       </main>
+    </div>
     </div>
 
     <noscript>

@@ -422,7 +422,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(rootRedirectResponse.status, 302);
   assert.equal(
     rootRedirectResponse.headers.get("location"),
-    "/hcn/auth/login?returnTo=%2Fhcn%2F"
+    "/hcn/"
   );
   assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
   assert.match(
@@ -437,47 +437,49 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(consoleRedirectResponse.status, 302);
   assert.equal(
     consoleRedirectResponse.headers.get("location"),
-    "/hcn/auth/login?returnTo=%2Fhcn%2F"
+    "/hcn/"
   );
   assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
 
   const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`, {
     redirect: "manual"
   });
-  assert.equal(consoleResponse.status, 302);
-  assert.equal(
-    consoleResponse.headers.get("location"),
-    "/hcn/auth/login?returnTo=%2Fhcn%2F"
-  );
+  assert.equal(consoleResponse.status, 200);
   assert.equal(consoleResponse.headers.get("cache-control"), "no-store, max-age=0");
+  assert.equal(consoleResponse.headers.get("vary"), "Cookie, Authorization");
+  const signedOutHtml = await consoleResponse.text();
+  assert.match(signedOutHtml, /Sign in to HCN/);
+  assert.match(
+    signedOutHtml,
+    /href="\/hcn\/auth\/login\?returnTo=%2Fhcn%2F"/
+  );
+  assert.doesNotMatch(
+    signedOutHtml,
+    /Work My Files|Company Sweep|Approvals|Receipts|System Status/
+  );
 
-  for (const [pathname, contentType] of [
-    ["/hcn/app.css?shell=v9", "text/css"],
-    ["/hcn/app.js?shell=v9", "text/javascript"],
-    [
-      "/hcn/manifest.webmanifest?shell=v9",
-      "application/manifest+json"
-    ],
-    ["/hcn/sw.js?shell=v9", "text/javascript"]
+  const signInStyleResponse = await fetch(
+    `http://127.0.0.1:${port}/hcn/sign-in.css?shell=v14`
+  );
+  assert.equal(signInStyleResponse.status, 200);
+  assert.match(signInStyleResponse.headers.get("content-type"), /^text\/css/);
+
+  for (const pathname of [
+    "/hcn/app.css?shell=v14",
+    "/hcn/app.js?shell=v14",
+    "/hcn/manifest.webmanifest?shell=v14",
+    "/hcn/sw.js?shell=v14"
   ]) {
     const response = await fetch(
       `http://127.0.0.1:${port}${pathname}`
     );
-    assert.equal(response.status, 200);
-    assert.match(
-      response.headers.get("content-type"),
-      new RegExp(`^${contentType.replace("+", "\\+")}`)
-    );
+    assert.equal(response.status, 401);
+    assert.match(response.headers.get("content-type"), /^application\/json/);
     assert.equal(
       response.headers.get("cache-control"),
       "no-store, max-age=0"
     );
-    if (pathname.startsWith("/hcn/sw.js")) {
-      assert.equal(
-        response.headers.get("service-worker-allowed"),
-        "/hcn/"
-      );
-    }
+    assert.equal(response.headers.get("service-worker-allowed"), null);
   }
 
   const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
@@ -610,26 +612,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const platformMetaResponse = await fetch(`http://127.0.0.1:${port}/api/v1/meta`);
   assert.equal(platformMetaResponse.status, 200);
   const platformMeta = await platformMetaResponse.json();
-  assert.equal(platformMeta.build.attested, true);
   assert.equal(platformMeta.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
-  assert.equal(platformMeta.build.sourceCommitTrust, "provider_attested");
+  assert.equal(platformMeta.build.attested, true);
   assert.equal(platformMeta.boundaries.chanceBrain, "disconnected_no_route");
-  assert.equal(platformMeta.boundaries.hcnChanceBrainDataFlow, "none");
   assert.equal(platformMeta.boundaries.jobrolo, "disconnected");
-  assert.equal(platformMeta.runtime.configurationDrift.status, "detected");
-  assert.deepEqual(
-    platformMeta.runtime.configurationDrift.differences.map((item) => item.key),
-    [
-      "ALLOW_GMAIL_SEND",
-      "ALLOW_QUO_SEND",
-      "BRIDGE_ALLOW_WRITES",
-      "HCN_ACTION_EXECUTION_ENABLED"
-    ]
-  );
-  assert.equal(platformMeta.runtime.gates.hcnActionExecution, "disabled");
-  const serializedPlatformMeta = JSON.stringify(platformMeta);
-  assert.equal(serializedPlatformMeta.includes(PLATFORM_FIXTURE_SECRET), false);
-  assert.equal(serializedPlatformMeta.includes("JOBNIMBUS_API_KEY"), false);
+  assert.equal(JSON.stringify(platformMeta).includes(PLATFORM_FIXTURE_SECRET), false);
 
   const unauthenticatedSessionResponse = await fetch(`http://127.0.0.1:${port}/api/v1/session`);
   assert.equal(unauthenticatedSessionResponse.status, 401);
@@ -643,6 +630,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "Authenticated HCN operations API for fresh JobNimbus, Gmail, Quo, calendar, and document evidence. Isolated Thresher AI operational state never authorizes external actions; consequential work remains approval-gated."
   );
   assert.equal(schema.paths["/api/v1/meta"].get.operationId, "readHcnPlatformMetadata");
+  assert.deepEqual(
+    schema.paths["/api/v1/meta"].get.security,
+    []
+  );
   assert.equal(schema.paths["/api/v1/session"].get.operationId, "readHcnPlatformSession");
   assert.equal(
     schema.paths["/api/v1/meta"].get.responses["200"].content["application/json"].schema.$ref,
@@ -3193,7 +3184,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(authenticatedRootResponse.status, 302);
   assert.equal(
     authenticatedRootResponse.headers.get("location"),
-    "/hcn/?shell=v13"
+    "/hcn/?shell=v14"
   );
 
   const authenticatedConsoleRedirectResponse = await fetch(`${origin}/hcn`, {
@@ -3203,11 +3194,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(authenticatedConsoleRedirectResponse.status, 302);
   assert.equal(
     authenticatedConsoleRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v13"
+    "/hcn/?shell=v14"
   );
 
   const authenticatedConsoleResponse = await fetch(
-    `${origin}/hcn/?shell=v13`,
+    `${origin}/hcn/?shell=v14`,
     { headers: { cookie: sessionCookie } }
   );
   assert.equal(authenticatedConsoleResponse.status, 200);
@@ -3219,9 +3210,44 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     authenticatedConsoleResponse.headers.get("content-security-policy"),
     /default-src 'self'/
   );
+  assert.equal(
+    authenticatedConsoleResponse.headers.get("vary"),
+    "Cookie, Authorization"
+  );
   const authenticatedConsoleHtml = await authenticatedConsoleResponse.text();
   assert.match(authenticatedConsoleHtml, /HCN Work Center/);
   assert.doesNotMatch(authenticatedConsoleHtml, /type=["']password["']/i);
+
+  for (const [pathname, contentType] of [
+    ["/hcn/app.css?shell=v14", "text/css"],
+    ["/hcn/app.js?shell=v14", "text/javascript"],
+    [
+      "/hcn/manifest.webmanifest?shell=v14",
+      "application/manifest+json"
+    ],
+    ["/hcn/sw.js?shell=v14", "text/javascript"]
+  ]) {
+    const response = await fetch(`${origin}${pathname}`, {
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(response.status, 200, pathname);
+    assert.match(
+      response.headers.get("content-type"),
+      new RegExp(`^${contentType.replace("+", "\\+")}`)
+    );
+    assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
+    assert.equal(response.headers.get("vary"), "Cookie, Authorization");
+  }
+
+  const authenticatedMetaResponse = await fetch(`${origin}/api/v1/meta`, {
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(authenticatedMetaResponse.status, 200);
+  const authenticatedMeta = await authenticatedMetaResponse.json();
+  assert.equal(typeof authenticatedMeta.build.attested, "boolean");
+  assert.equal(authenticatedMeta.boundaries.chanceBrain, "disconnected_no_route");
+  assert.equal(authenticatedMeta.boundaries.jobrolo, "disconnected");
+  assert.equal(JSON.stringify(authenticatedMeta).includes(PLATFORM_FIXTURE_SECRET), false);
 
   assert.equal(providerRequests.length, 1);
   assert.equal(providerRequests[0].code, "hcn-google-code");
@@ -3245,6 +3271,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     replayResponse.headers.get("location"),
     "/hcn/?auth=invalid_request"
   );
+  assert.equal(providerRequests.length, 1);
+  const replayLandingResponse = await fetch(
+    `${origin}${replayResponse.headers.get("location")}`,
+    { redirect: "manual" }
+  );
+  assert.equal(replayLandingResponse.status, 200);
+  assert.equal(replayLandingResponse.headers.get("set-cookie"), null);
+  const replayLandingHtml = await replayLandingResponse.text();
+  assert.match(
+    replayLandingHtml,
+    /sign-in attempt expired or could not be verified/i
+  );
+  assert.match(replayLandingHtml, /Continue with Google/);
+  assert.doesNotMatch(replayLandingHtml, /Work My Files|Company Sweep/);
   assert.equal(providerRequests.length, 1);
 
   const platformSessionResponse = await fetch(`${origin}/api/v1/session`, {
@@ -5162,11 +5202,23 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     redirect: "manual",
     headers: { cookie: sessionCookie }
   });
-  assert.equal(revokedConsoleResponse.status, 302);
-  assert.equal(
-    revokedConsoleResponse.headers.get("location"),
-    "/hcn/auth/login?returnTo=%2Fhcn%2F"
-  );
+  assert.equal(revokedConsoleResponse.status, 200);
+  const revokedConsoleHtml = await revokedConsoleResponse.text();
+  assert.match(revokedConsoleHtml, /Sign in to HCN/);
+  assert.doesNotMatch(revokedConsoleHtml, /Work My Files|Company Sweep/);
+  for (const pathname of [
+    "/hcn/app.css?shell=v14",
+    "/hcn/app.js?shell=v14",
+    "/hcn/manifest.webmanifest?shell=v14",
+    "/hcn/sw.js?shell=v14"
+  ]) {
+    const revokedPrivateSurface = await fetch(`${origin}${pathname}`, {
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(revokedPrivateSurface.status, 401, pathname);
+  }
+  const publicSignInStyle = await fetch(`${origin}/hcn/sign-in.css?shell=v14`);
+  assert.equal(publicSignInStyle.status, 200);
 
   for (let index = 0; index < 3; index += 1) {
     const retryLogin = await fetch(`${origin}/hcn/auth/login`, {

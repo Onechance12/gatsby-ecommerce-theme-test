@@ -5,6 +5,7 @@ import { runInNewContext } from "node:vm";
 import {
   HCN_CONSOLE_SECURITY_HEADERS,
   hcnConsoleAssetDescriptor,
+  isPublicHcnConsoleAsset,
   readHcnConsoleAsset
 } from "./static.js";
 
@@ -276,6 +277,7 @@ function evaluateInvitationEnvelope(script, value, mode, expectedReview) {
 test("console serves only its fixed application-shell allowlist", async () => {
   const expected = new Map([
     ["/hcn/", "text/html; charset=utf-8"],
+    ["/hcn/sign-in.css", "text/css; charset=utf-8"],
     ["/hcn/app.css", "text/css; charset=utf-8"],
     ["/hcn/app.js", "text/javascript; charset=utf-8"],
     ["/hcn/manifest.webmanifest", "application/manifest+json; charset=utf-8"],
@@ -300,11 +302,17 @@ test("console serves only its fixed application-shell allowlist", async () => {
   const manifest = JSON.parse(
     manifestAsset.body.toString("utf8")
   );
-  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v13/);
-  assert.match(html, /\/hcn\/app\.css\?shell=v13/);
-  assert.match(html, /\/hcn\/app\.js\?shell=v13/);
-  assert.match(html, /href="\/hcn\/\?shell=v13"/);
-  assert.equal(manifest.start_url, "/hcn/?shell=v13");
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v14/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v14/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v14/);
+  assert.match(html, /href="\/hcn\/\?shell=v14"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v14");
+  assert.equal(isPublicHcnConsoleAsset("/hcn/sign-in.css"), true);
+  assert.equal(isPublicHcnConsoleAsset("/hcn/app.css"), false);
+  assert.match(
+    html,
+    /rel="manifest"[^>]*crossorigin="use-credentials"/
+  );
 
   for (const pathname of [
     "/hcn",
@@ -329,6 +337,161 @@ test("console shell uses a strict same-origin browser policy", async () => {
 
   const serviceWorker = await readHcnConsoleAsset("/hcn/sw.js");
   assert.equal(serviceWorker.headers["service-worker-allowed"], "/hcn/");
+});
+
+test("private console stays inert until an exact HCN browser session is verified", async () => {
+  const [htmlAsset, scriptAsset, styleAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/app.css")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const style = styleAsset.body.toString("utf8");
+
+  assert.match(html, /<body class="hcn-auth-locked">/);
+  assert.match(html, /id="hcn-auth-gate"/);
+  assert.match(html, /id="private-console"[^>]*hidden inert aria-hidden="true"/);
+  assert.match(style, /\.private-console\[hidden\][\s\S]*display: none !important/);
+  assert.match(script, /lockPrivateConsole\("Verifying your HCN employee session/);
+  assert.match(script, /identity\.type === "hcn_browser_session"/);
+  assert.match(script, /window\.addEventListener\("pagehide", handlePageHide\)/);
+  assert.match(script, /window\.addEventListener\("pageshow", handlePageShow\)/);
+  assert.match(script, /event\.persisted !== true/);
+  assert.match(script, /if \(!document\.hidden\) revalidatePrivateConsole\(\)/);
+
+  const lockSource = extractConsoleFunction(script, "lockPrivateConsole");
+  const unlockSource = extractConsoleFunction(script, "unlockPrivateConsole");
+  const attributes = new Map();
+  const classes = new Set(["console-ready"]);
+  const privateConsole = {
+    hidden: false,
+    setAttribute(name, value) { attributes.set(name, value); },
+    removeAttribute(name) { attributes.delete(name); }
+  };
+  const gate = { hidden: true };
+  const message = { textContent: "" };
+  const context = {
+    elements: {
+      "private-console": privateConsole,
+      "hcn-auth-gate": gate,
+      "hcn-auth-gate-message": message
+    },
+    state: {
+      session: {
+        authenticated: true,
+        identity: {
+          authentication: "authenticated",
+          type: "google_oauth"
+        }
+      }
+    },
+    document: {
+      body: {
+        classList: {
+          add(value) { classes.add(value); },
+          remove(value) { classes.delete(value); }
+        }
+      }
+    },
+    record(value) {
+      return value && typeof value === "object" && !Array.isArray(value)
+        ? value
+        : {};
+    },
+    setText(element, value) { element.textContent = String(value); },
+    result: null
+  };
+
+  runInNewContext(
+    `${lockSource}\n${unlockSource}\nresult = unlockPrivateConsole();`,
+    context
+  );
+  assert.equal(context.result, false);
+  assert.equal(privateConsole.hidden, true);
+  assert.equal(attributes.get("inert"), "");
+  assert.equal(attributes.get("aria-hidden"), "true");
+  assert.equal(gate.hidden, false);
+  assert.equal(classes.has("hcn-auth-locked"), true);
+  assert.equal(classes.has("console-ready"), false);
+
+  context.state.session.identity.type = "hcn_browser_session";
+  runInNewContext("result = unlockPrivateConsole();", context);
+  assert.equal(context.result, true);
+  assert.equal(privateConsole.hidden, false);
+  assert.equal(attributes.has("inert"), false);
+  assert.equal(attributes.get("aria-hidden"), "false");
+  assert.equal(gate.hidden, true);
+  assert.equal(classes.has("hcn-auth-locked"), false);
+  assert.equal(classes.has("console-ready"), true);
+});
+
+test("return-to-app revalidation preserves valid work and clears it on denial", async () => {
+  const scriptAsset = await readHcnConsoleAsset("/hcn/app.js");
+  const script = scriptAsset.body.toString("utf8");
+  const source = extractConsoleFunction(script, "revalidatePrivateConsole");
+
+  async function runRevalidation({ session, error }) {
+    const events = [];
+    const context = {
+      ENDPOINTS: { session: "/hcn/auth/session" },
+      state: {
+        loading: false,
+        sessionRevalidating: false,
+        leavingForLogin: false,
+        session: { existing: true },
+        sessionError: null
+      },
+      lockPrivateConsole() { events.push("lock"); },
+      async fetchJson() {
+        events.push("fetch");
+        if (error) throw error;
+        return session;
+      },
+      renderSession(value) { events.push(["render", value]); },
+      clearOperationalData() { events.push("clear"); },
+      renderSessionError(value) { events.push(["error", value]); },
+      renderOverallState() { events.push("overall"); },
+      syncOperationalAccess() { events.push("sync"); },
+      result: null
+    };
+    runInNewContext(
+      `${source}\nresult = revalidatePrivateConsole();`,
+      context
+    );
+    await context.result;
+    return { context, events };
+  }
+
+  const verified = {
+    authenticated: true,
+    identity: {
+      authentication: "authenticated",
+      type: "hcn_browser_session"
+    }
+  };
+  const allowed = await runRevalidation({ session: verified });
+  assert.equal(allowed.context.state.session, verified);
+  assert.equal(allowed.context.state.sessionError, null);
+  assert.equal(allowed.context.state.sessionRevalidating, false);
+  assert.equal(allowed.events.includes("clear"), false);
+  assert.deepEqual(allowed.events.slice(0, 3), [
+    "lock",
+    "fetch",
+    ["render", verified]
+  ]);
+
+  const deniedError = { status: 401 };
+  const denied = await runRevalidation({ error: deniedError });
+  assert.equal(denied.context.state.session, null);
+  assert.equal(denied.context.state.sessionError, deniedError);
+  assert.equal(denied.events.includes("clear"), true);
+  assert.equal(
+    denied.events.some((event) =>
+      Array.isArray(event) && event[0] === "error" && event[1] === deniedError
+    ),
+    true
+  );
 });
 
 test("console shell contains no client records, bearer-token field, or browser storage", async () => {
@@ -967,7 +1130,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.match(worker, /self\.registration\.unregister\(\)/);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /caches\.open|caches\.match|cache\.addAll/);
-  assert.match(script, /\/hcn\/sw\.js\?shell=v13/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v14/);
   assert.match(script, /serviceWorker\.getRegistration\("\/hcn\/"\)/);
   assert.match(script, /window\.location\.replace\(ENDPOINTS\.login\)/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);

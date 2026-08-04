@@ -135,6 +135,7 @@ import { buildPlatformMeta, buildPlatformSession } from "./platform/metadata.js"
 import { readReleaseGates } from "./platform/release-gates.js";
 import {
   HCN_CONSOLE_SECURITY_HEADERS,
+  isPublicHcnConsoleAsset,
   readHcnConsoleAsset
 } from "./console/static.js";
 import {
@@ -1024,29 +1025,50 @@ const server = createServer(async (req, res) => {
         consoleAuthentication?.authenticationMethod !== "hcn_cookie"
         || consoleAuthentication.identity?.type !== "hcn_browser_session"
       ) {
+        if (url.pathname === "/hcn/") {
+          return sendHcnConsoleSignIn(res, url);
+        }
         res.writeHead(302, {
           ...hcnNoStoreSecurityHeaders(),
           vary: "Cookie, Authorization",
-          location: "/hcn/auth/login?returnTo=%2Fhcn%2F"
+          location: "/hcn/"
         });
         return res.end();
       }
       if (url.pathname === "/hcn/") {
         const consoleAsset = await readHcnConsoleAsset(url.pathname);
         if (!consoleAsset) return send(res, 404, { error: "Not found" });
-        res.writeHead(200, consoleAsset.headers);
+        res.writeHead(200, {
+          ...consoleAsset.headers,
+          vary: "Cookie, Authorization"
+        });
         return res.end(consoleAsset.body);
       }
       res.writeHead(302, {
         ...HCN_CONSOLE_SECURITY_HEADERS,
-        location: "/hcn/?shell=v13"
+        vary: "Cookie, Authorization",
+        location: "/hcn/?shell=v14"
       });
       return res.end();
     }
     if (HCN_CONSOLE_ENABLED && req.method === "GET") {
       const consoleAsset = await readHcnConsoleAsset(url.pathname);
       if (consoleAsset) {
-        res.writeHead(200, consoleAsset.headers);
+        if (
+          !isPublicHcnConsoleAsset(url.pathname)
+          && !hasLiveHcnConsoleAssetSession(req)
+        ) {
+          return send(res, 401, { error: "HCN sign-in is required." }, {
+            ...hcnNoStoreSecurityHeaders(),
+            vary: "Cookie, Authorization"
+          });
+        }
+        res.writeHead(200, {
+          ...consoleAsset.headers,
+          ...(!isPublicHcnConsoleAsset(url.pathname)
+            ? { vary: "Cookie, Authorization" }
+            : {})
+        });
         return res.end(consoleAsset.body);
       }
     }
@@ -2030,6 +2052,57 @@ function hcnConsoleOAuthCoordinator() {
     });
   }
   return hcnConsoleOAuthCoordinatorInstance;
+}
+
+function sendHcnConsoleSignIn(res, url) {
+  const outcome = String(url.searchParams.get("auth") || "")
+    .trim()
+    .toLowerCase();
+  const messages = Object.freeze({
+    access_denied:
+      "Google sign-in was not approved. Try again with your invited HCN work account.",
+    cancelled:
+      "Google sign-in was canceled. Nothing was opened.",
+    invalid_request:
+      "That sign-in attempt expired or could not be verified. Start a new sign-in.",
+    provider_error:
+      "Google sign-in did not finish. Try again in a moment.",
+    temporarily_unavailable:
+      "HCN sign-in is temporarily unavailable. Try again in a moment."
+  });
+  const message = messages[outcome]
+    || "Only invited Home Claim Network employees can open this workspace.";
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101814">
+  <meta name="description" content="Secure Home Claim Network employee sign-in.">
+  <title>Sign in · HCN Work Center</title>
+  <link rel="stylesheet" href="/hcn/sign-in.css?shell=v14">
+</head>
+<body>
+  <main class="sign-in-page">
+    <section class="sign-in-card" aria-labelledby="sign-in-title">
+      <span class="sign-in-mark" aria-hidden="true">HCN</span>
+      <p class="eyebrow">Private employee workspace</p>
+      <h1 id="sign-in-title">Sign in to HCN</h1>
+      <p class="sign-in-message" role="status">${message}</p>
+      <a class="sign-in-action" href="/hcn/auth/login?returnTo=%2Fhcn%2F">
+        Continue with Google
+      </a>
+      <p class="sign-in-note">Use the work account Chance invited. There is no public signup.</p>
+    </section>
+  </main>
+</body>
+</html>`;
+  res.writeHead(200, {
+    ...hcnNoStoreSecurityHeaders({ document: true }),
+    vary: "Cookie, Authorization",
+    "content-type": "text/html; charset=utf-8"
+  });
+  res.end(html);
 }
 
 async function hcnConsoleLogin(req, res, url) {
@@ -18555,6 +18628,26 @@ async function findActiveJobNimbusUser(
 async function listCompleteJobNimbusUsers() {
   return validateCompleteJobNimbusUserSnapshot(
     await jobNimbus("/account/users")
+  );
+}
+
+function hasLiveHcnConsoleAssetSession(req) {
+  if (!hcnConsoleAuthConfigured()) return false;
+  if (String(req.headers.authorization || "").trim()) return false;
+  const sessionId = readHcnCookie(
+    req.headers.cookie,
+    HCN_SESSION_COOKIE_NAME
+  );
+  if (!sessionId) return false;
+  const session = HCN_CONSOLE_SESSION_STORE.resolveSession(sessionId);
+  if (!session) return false;
+  const approvedUser = WAVE_AUTH_USERS.get(
+    String(session.subject || "").trim().toLowerCase()
+  );
+  return Boolean(
+    approvedUser
+    && approvedUser.enabled !== false
+    && hcnConsoleSessionMatchesApprovedUser(session, approvedUser)
   );
 }
 

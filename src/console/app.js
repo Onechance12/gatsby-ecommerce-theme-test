@@ -376,6 +376,7 @@
     assistantClaimWritebackPlan: null,
     assistantClaimScopeKey: "",
     leavingForLogin: false,
+    sessionRevalidating: false,
     sessionDeadlineMs: 0,
     sessionExpiryTimer: null
   };
@@ -388,6 +389,10 @@
     state.authCallbackOutcome = consumeAuthCallbackOutcome();
     state.googleCallbackOutcome = consumeGoogleCallbackOutcome();
     [
+      "hcn-auth-gate",
+      "hcn-auth-gate-message",
+      "hcn-auth-gate-action",
+      "private-console",
       "connection-status",
       "connection-status-text",
       "sign-in-action",
@@ -672,6 +677,8 @@
       elements[id] = document.getElementById(id);
     });
 
+    lockPrivateConsole("Verifying your HCN employee session before opening the workspace.");
+
     elements["retry-action"].addEventListener("click", loadPlatformState);
     elements["sign-out-action"].addEventListener("click", signOut);
     elements["assistant-new-chat"].addEventListener(
@@ -898,6 +905,8 @@
     );
     window.addEventListener("online", handleNetworkChange);
     window.addEventListener("offline", handleNetworkChange);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", handlePageShow);
     window.addEventListener("hashchange", syncActiveNavigation);
     const assistantDrawerMedia = window.matchMedia("(max-width: 620px)");
     if (typeof assistantDrawerMedia.addEventListener === "function") {
@@ -917,7 +926,6 @@
 
     syncActiveNavigation();
     syncAssistantDrawerViewport();
-    document.body.classList.add("console-ready");
     loadPlatformState();
     registerServiceWorker();
   }
@@ -3787,6 +3795,7 @@
 
   async function loadPlatformState() {
     if (state.loading) return;
+    lockPrivateConsole("Verifying your HCN employee session before opening the workspace.");
     cancelSessionExpiryTimer();
     cancelManagementSweepExpiryTimer();
     state.loading = true;
@@ -4167,10 +4176,12 @@
         })
       : [];
     const authenticated = session.authenticated === true &&
-      identity.authentication === "authenticated";
+      identity.authentication === "authenticated" &&
+      identity.type === "hcn_browser_session";
 
     if (!authenticated) {
-      renderSignedOut("The session did not provide an authenticated operating identity.");
+      lockPrivateConsole("Your secure HCN session could not be verified. Sign in again.");
+      leaveConsoleForLogin();
       return;
     }
     if (!scheduleSessionExpiryFromSession(session)) {
@@ -4179,6 +4190,8 @@
       );
       return;
     }
+
+    unlockPrivateConsole();
 
     const identityType = stringValue(identity.type);
     const role = stringValue(identity.role) || "authorized operator";
@@ -4228,6 +4241,11 @@
 
   function renderSessionError(error) {
     const status = statusOf(error);
+    lockPrivateConsole(
+      status === 401 || status === 403
+        ? "Your HCN session ended. Sign in again to reopen the workspace."
+        : "HCN could not verify your secure session. Sign in again or retry when connected."
+    );
     if (status === 401 || status === 403) {
       leaveConsoleForLogin();
       return;
@@ -4249,6 +4267,7 @@
 
   function renderSignedOut(message) {
     cancelSessionExpiryTimer();
+    lockPrivateConsole(message || "Sign in to open the private HCN workspace.");
     elements["sign-in-action"].hidden = false;
     elements["sign-out-action"].hidden = true;
     elements["work-center-sign-in"].hidden = false;
@@ -10903,7 +10922,51 @@
     cancelSessionExpiryTimer();
     cancelManagementSweepExpiryTimer();
     clearOperationalData("Leaving the private HCN workspace.");
+    lockPrivateConsole("Opening secure HCN sign-in.");
     window.location.replace(ENDPOINTS.login);
+  }
+
+  function lockPrivateConsole(message) {
+    const privateConsole = elements["private-console"];
+    const gate = elements["hcn-auth-gate"];
+    if (privateConsole) {
+      privateConsole.hidden = true;
+      privateConsole.setAttribute("inert", "");
+      privateConsole.setAttribute("aria-hidden", "true");
+    }
+    if (gate) gate.hidden = false;
+    if (elements["hcn-auth-gate-message"]) {
+      setText(
+        elements["hcn-auth-gate-message"],
+        message || "Secure HCN sign-in is required."
+      );
+    }
+    document.body.classList.add("hcn-auth-locked");
+    document.body.classList.remove("console-ready");
+  }
+
+  function unlockPrivateConsole() {
+    const session = record(state.session);
+    const identity = record(session.identity);
+    if (
+      session.authenticated !== true
+      || identity.authentication !== "authenticated"
+      || identity.type !== "hcn_browser_session"
+    ) {
+      lockPrivateConsole("Secure HCN sign-in is required.");
+      return false;
+    }
+    const privateConsole = elements["private-console"];
+    const gate = elements["hcn-auth-gate"];
+    if (privateConsole) {
+      privateConsole.hidden = false;
+      privateConsole.removeAttribute("inert");
+      privateConsole.setAttribute("aria-hidden", "false");
+    }
+    if (gate) gate.hidden = true;
+    document.body.classList.remove("hcn-auth-locked");
+    document.body.classList.add("console-ready");
+    return true;
   }
 
   function isAuthorizationStatus(error) {
@@ -10984,7 +11047,10 @@
 
     if (!navigator.onLine) {
       setConnection("offline", "Offline");
-      setText(elements["load-message"], "You are offline. Only the console shell may be available.");
+      setText(
+        elements["load-message"],
+        "You are offline. The private workspace remains locked until your session can be verified."
+      );
       setText(elements["readiness-score"], "OFF");
       setText(elements["readiness-label"], "Connection unavailable");
       setText(elements["readiness-summary"], "Reconnect to verify fresh bridge and session status.");
@@ -11102,6 +11168,9 @@
     } else {
       cancelManagementSweepExpiryTimer();
       clearOperationalData("Client data was cleared when the connection went offline.");
+      lockPrivateConsole(
+        "HCN is offline and cannot verify your session. Reconnect, then sign in again."
+      );
       renderOperationsLocked(
         "Offline",
         "Reconnect to verify the session and request fresh evidence."
@@ -11114,6 +11183,46 @@
   function handleVisibilityChange() {
     enforceSessionDeadline();
     enforceManagementSweepExpiry();
+    if (!document.hidden) revalidatePrivateConsole();
+  }
+
+  function handlePageHide() {
+    lockPrivateConsole("Rechecking your secure HCN session when you return.");
+  }
+
+  function handlePageShow(event) {
+    if (!event || event.persisted !== true) return;
+    lockPrivateConsole("Rechecking your secure HCN session.");
+    revalidatePrivateConsole();
+  }
+
+  async function revalidatePrivateConsole() {
+    if (
+      state.loading
+      || state.sessionRevalidating
+      || state.leavingForLogin
+    ) return;
+    state.sessionRevalidating = true;
+    lockPrivateConsole("Rechecking your secure HCN session.");
+    try {
+      const session = await fetchJson(ENDPOINTS.session);
+      state.session = session;
+      state.sessionError = null;
+      renderSession(session);
+    } catch (error) {
+      clearOperationalData(
+        "Client data was cleared because the HCN session could not be reverified."
+      );
+      state.session = null;
+      state.sessionError = error;
+      renderSessionError(error);
+    } finally {
+      state.sessionRevalidating = false;
+    }
+    if (!state.leavingForLogin) {
+      renderOverallState();
+      syncOperationalAccess();
+    }
   }
 
   function readableTime(value) {
@@ -11197,7 +11306,7 @@
       navigator.serviceWorker.getRegistration("/hcn/").then(function (registration) {
         if (!registration) return null;
         return navigator.serviceWorker.register(
-          "/hcn/sw.js?shell=v13",
+          "/hcn/sw.js?shell=v14",
           { scope: "/hcn/" }
         );
       }).catch(function () {
