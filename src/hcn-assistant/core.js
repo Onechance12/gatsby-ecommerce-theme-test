@@ -167,12 +167,30 @@ export async function runHcnAssistant({
     let providerResponse;
     try {
       providerResponse = await createResponse(request);
-    } catch {
-      throw new HcnAssistantError(
+    } catch (providerErrorCause) {
+      const failure = new HcnAssistantError(
         "provider_request_failed",
         502,
         "The assistant provider request failed."
       );
+      failure.providerPhase = responseCount === 0
+        ? "initial"
+        : "after_tool";
+      failure.replayInputBytes = Buffer.byteLength(
+        JSON.stringify(replayInput),
+        "utf8"
+      );
+      const upstreamStatusCode = Number(
+        providerErrorCause?.statusCode
+      );
+      failure.upstreamStatusCode = Number.isSafeInteger(
+        upstreamStatusCode
+      )
+        && upstreamStatusCode >= 400
+        && upstreamStatusCode <= 599
+        ? upstreamStatusCode
+        : 0;
+      throw failure;
     }
     responseCount += 1;
 

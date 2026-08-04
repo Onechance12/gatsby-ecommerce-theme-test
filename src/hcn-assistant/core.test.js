@@ -354,6 +354,62 @@ test("exact-file required review fails closed on first-round text or a different
   });
 });
 
+test("provider failures expose only bounded round diagnostics", async (t) => {
+  await t.test("initial request", async () => {
+    await assert.rejects(
+      defaultRun({
+        createResponse: async () => {
+          throw Object.assign(new Error("private provider body"), {
+            statusCode: 429
+          });
+        }
+      }),
+      (error) =>
+        error instanceof HcnAssistantError
+        && error.code === "provider_request_failed"
+        && error.providerPhase === "initial"
+        && error.replayInputBytes > 0
+        && error.upstreamStatusCode === 429
+        && !JSON.stringify(error).includes("private provider body")
+    );
+  });
+
+  await t.test("request after one tool result", async () => {
+    let responseCount = 0;
+    await assert.rejects(
+      defaultRun({
+        requiredFirstToolName: "review_file",
+        async createResponse() {
+          responseCount += 1;
+          if (responseCount === 1) {
+            return functionCallResponse({
+              name: "review_file",
+              arguments: JSON.stringify({ file_ref: FILE_REF }),
+              callId: "call_review_failure"
+            });
+          }
+          throw Object.assign(new Error("private provider body"), {
+            statusCode: 400
+          });
+        },
+        executeTool: async () => ({
+          schema: "hcn.console.file.v1",
+          file: { fileRef: FILE_REF }
+        })
+      }),
+      (error) =>
+        error instanceof HcnAssistantError
+        && error.code === "provider_request_failed"
+        && error.providerPhase === "after_tool"
+        && error.replayInputBytes > 0
+        && error.replayInputBytes <= 1024 * 1024
+        && error.upstreamStatusCode === 400
+        && !JSON.stringify(error).includes("private provider body")
+    );
+    assert.equal(responseCount, 2);
+  });
+});
+
 test("assigned identity is server-injected and never model-supplied", async () => {
   const requests = [];
   const calls = [];

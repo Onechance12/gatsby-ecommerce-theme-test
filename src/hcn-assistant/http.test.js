@@ -44,7 +44,10 @@ test("assistant failure telemetry permits only fixed safe fields and codes", () 
     errorCode: "HTTP_502",
     errorName: "Error",
     statusCode: 502,
-    durationMs: 60_000
+    durationMs: 60_000,
+    providerPhase: "unknown",
+    replayInputBytes: 0,
+    upstreamStatusCode: 0
   });
   assert.doesNotMatch(
     JSON.stringify(unknown),
@@ -54,7 +57,10 @@ test("assistant failure telemetry permits only fixed safe fields and codes", () 
   const known = createHcnAssistantFailureTelemetry({
     error: Object.assign(new Error("Still private."), {
       name: "HcnAssistantError",
-      code: "tool_execution_failed"
+      code: "tool_execution_failed",
+      providerPhase: "after_tool",
+      replayInputBytes: 12_345,
+      upstreamStatusCode: 413
     }),
     statusCode: 502,
     durationMs: 7
@@ -64,7 +70,10 @@ test("assistant failure telemetry permits only fixed safe fields and codes", () 
     errorCode: "tool_execution_failed",
     errorName: "HcnAssistantError",
     statusCode: 502,
-    durationMs: 7
+    durationMs: 7,
+    providerPhase: "after_tool",
+    replayInputBytes: 12_345,
+    upstreamStatusCode: 413
   });
 });
 
@@ -893,7 +902,16 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(failureLogs.length, 1);
   assert.deepEqual(
     Object.keys(failureLogs[0]).sort(),
-    ["durationMs", "errorCode", "errorName", "statusCode", "type"]
+    [
+      "durationMs",
+      "errorCode",
+      "errorName",
+      "providerPhase",
+      "replayInputBytes",
+      "statusCode",
+      "type",
+      "upstreamStatusCode"
+    ]
   );
   assert.equal(
     failureLogs[0].errorCode,
@@ -904,6 +922,9 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(Number.isSafeInteger(failureLogs[0].durationMs), true);
   assert.equal(failureLogs[0].durationMs >= 0, true);
   assert.equal(failureLogs[0].durationMs <= 60_000, true);
+  assert.equal(failureLogs[0].providerPhase, "unknown");
+  assert.equal(failureLogs[0].replayInputBytes, 0);
+  assert.equal(failureLogs[0].upstreamStatusCode, 0);
   assert.doesNotMatch(
     JSON.stringify(failureLogs[0]),
     /PRIVATE_PROMPT_MARKER|required fresh file review|subject_|conversation_/

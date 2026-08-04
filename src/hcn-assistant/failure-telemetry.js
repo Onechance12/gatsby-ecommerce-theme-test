@@ -55,12 +55,36 @@ export function createHcnAssistantFailureTelemetry({
   const safeDurationMs = Number.isSafeInteger(elapsed)
     ? Math.max(0, Math.min(60_000, elapsed))
     : 0;
+  const providerPhase = ["initial", "after_tool"].includes(
+    error?.providerPhase
+  )
+    ? error.providerPhase
+    : "unknown";
+  const replayInputBytes = Number(error?.replayInputBytes);
+  const safeReplayInputBytes = Number.isSafeInteger(replayInputBytes)
+    ? Math.max(0, Math.min(1024 * 1024, replayInputBytes))
+    : 0;
+  const upstreamStatusCode = hcnAssistantUpstreamStatus(
+    error?.upstreamStatusCode
+  );
 
   return Object.freeze({
     type: "hcn_assistant_turn_failed",
     errorCode,
     errorName,
     statusCode: safeStatusCode,
-    durationMs: safeDurationMs
+    durationMs: safeDurationMs,
+    providerPhase,
+    replayInputBytes: safeReplayInputBytes,
+    upstreamStatusCode
   });
+}
+
+function hcnAssistantUpstreamStatus(value) {
+  const statusCode = Number(value);
+  return Number.isSafeInteger(statusCode)
+    && statusCode >= 400
+    && statusCode <= 599
+    ? statusCode
+    : 0;
 }
