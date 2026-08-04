@@ -1125,6 +1125,7 @@ h1 {
 
 .assistant-conversation-list {
   display: grid;
+  align-content: start;
   gap: 7px;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1132,11 +1133,13 @@ h1 {
 
 .assistant-conversation-group {
   display: grid;
+  align-content: start;
   gap: 6px;
 }
 
 .assistant-conversation-group-list {
   display: grid;
+  align-content: start;
   gap: 6px;
 }
 
@@ -1156,6 +1159,7 @@ h1 {
 .assistant-conversation-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 5px;
 }
 

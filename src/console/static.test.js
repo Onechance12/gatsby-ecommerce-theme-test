@@ -547,6 +547,10 @@ test("Ask Thresher multi-chat history is durable through scoped server APIs only
     script,
     /function loadAssistantConversation\(conversationRef, options\)/
   );
+  assert.match(
+    script,
+    /const desktopFallback = window\.matchMedia\("\(max-width: 620px\)"\)\.matches[\s\S]*\? null[\s\S]*: list\.items\[0\];[\s\S]*\|\| desktopFallback;/
+  );
   assert.match(script, /function loadOlderAssistantMessages\(\)/);
   assert.match(script, /function createAssistantConversation\(input\)/);
   assert.match(script, /function submitAssistantRename\(event\)/);
@@ -719,9 +723,29 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
     script,
     /document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
   );
+  assert.match(
+    script,
+    /const wasActive = document\.body\.hasAttribute\([\s\S]*active[\s\S]*!wasActive[\s\S]*window\.matchMedia\("\(max-width: 620px\)"\)\.matches[\s\S]*document\.documentElement\.scrollTop = 0;[\s\S]*document\.body\.scrollTop = 0;[\s\S]*document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
+  );
+  assert.match(
+    script,
+    /function syncActiveNavigation\(\)[\s\S]*activeHash !== "#overview"[\s\S]*state\.assistantDrawerOpen[\s\S]*toggleAssistantDrawer\(false, \{ restoreFocus: false \}\)/
+  );
+  assert.match(
+    script,
+    /function clearAssistantData\(message\)[\s\S]*toggleAssistantDrawer\(false\);[\s\S]*syncAssistantMobileWorkspace\(\)/
+  );
 
   assert.match(style, /width: min\(94vw, 390px\)/);
   assert.match(style, /grid-template-rows: auto auto minmax\(0, 1fr\) auto/);
+  assert.match(
+    style,
+    /\.assistant-conversation-list \{[\s\S]*align-content: start;[\s\S]*\.assistant-conversation-group \{[\s\S]*align-content: start;[\s\S]*\.assistant-conversation-group-list \{[\s\S]*align-content: start;/
+  );
+  assert.match(
+    style,
+    /\.assistant-conversation-row \{[\s\S]*align-items: start;/
+  );
   assert.match(style, /\.assistant-chat-sidebar button,[\s\S]*min-height: 44px/);
   assert.match(
     style,

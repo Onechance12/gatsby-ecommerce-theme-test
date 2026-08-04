@@ -1091,6 +1091,9 @@
     const activeHash = activeLink
       ? activeLink.getAttribute("href")
       : "#overview";
+    if (activeHash !== "#overview" && state.assistantDrawerOpen) {
+      toggleAssistantDrawer(false, { restoreFocus: false });
+    }
     document.querySelectorAll(".console-view").forEach(function (section) {
       section.classList.toggle(
         "is-current-view",
@@ -1516,11 +1519,14 @@
         80
       );
       const currentRef = state.assistantConversationRef;
+      const desktopFallback = window.matchMedia("(max-width: 620px)").matches
+        ? null
+        : list.items[0];
       const selected = list.items.find(function (item) {
         return item.conversationRef === preferredRef;
       }) || list.items.find(function (item) {
         return item.conversationRef === currentRef;
-      }) || list.items[0];
+      }) || desktopFallback;
       if (selected) {
         await loadAssistantConversation(selected.conversationRef);
       } else {
@@ -2016,6 +2022,17 @@
     );
     const overview = document.getElementById("overview");
     const active = selected && overview?.classList.contains("is-current-view");
+    const wasActive = document.body.hasAttribute(
+      "data-assistant-chat-workspace"
+    );
+    if (
+      active
+      && !wasActive
+      && window.matchMedia("(max-width: 620px)").matches
+    ) {
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
     document.body.toggleAttribute("data-assistant-chat-workspace", active);
   }
 
@@ -3748,6 +3765,7 @@
     elements["assistant-starters"].hidden = false;
     closeAssistantDialogs();
     toggleAssistantDrawer(false);
+    syncAssistantMobileWorkspace();
     syncAssistantFilterButtons();
     syncAssistantConversationControls();
     syncAssistantControls();
