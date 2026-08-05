@@ -126,6 +126,23 @@ test("public metadata reports only the explicitly active isolated Thresher bound
   assert.equal(meta.boundaries.jobrolo, "disconnected");
 });
 
+test("public metadata reports only the narrow signed Jobrolo adapter when it is ready", () => {
+  const meta = buildPlatformMeta({
+    env: {},
+    runtime: {
+      jobroloAdapter: {
+        ready: true
+      }
+    },
+    nodeRuntime: NODE_RUNTIME,
+    now: NOW
+  });
+
+  assert.equal(meta.boundaries.jobrolo, "narrow_signed_thresher_adapter");
+  assert.equal(meta.boundaries.chanceBrain, "disconnected_no_route");
+  assert.equal(meta.boundaries.hcnChanceBrainDataFlow, "none");
+});
+
 test("legacy shared-token sessions fail closed instead of inheriting wildcard authority", () => {
   const session = buildPlatformSession({
     identity: { type: "bridge_token", role: "chance" },

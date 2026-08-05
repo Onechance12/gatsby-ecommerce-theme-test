@@ -20772,7 +20772,10 @@ const OPENAPI = {
             properties: {
               chanceBrain: { type: "string", const: "disconnected_no_route" },
               hcnChanceBrainDataFlow: { type: "string", const: "none" },
-              jobrolo: { type: "string", const: "disconnected" },
+              jobrolo: {
+                type: "string",
+                enum: ["disconnected", "narrow_signed_thresher_adapter"]
+              },
               hcnOperationsBrain: {
                 type: "string",
                 enum: [
