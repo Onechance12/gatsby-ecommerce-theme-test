@@ -182,6 +182,8 @@ function evaluateAssistantRouting(functionSource, value) {
     ASSISTANT_ROUTE_REASON_CODES: {
       deterministic: [
         "fact_only_work_center",
+        "fact_only_general_work_center_summary",
+        "fact_only_general_help",
         "fact_only_assigned_work_summary",
         "fact_only_management_sweep",
         "fact_only_file_status"
@@ -691,7 +693,7 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /Model authority[\s\S]*Read only/);
   assert.match(html, /Nothing executes in chat/);
   for (const label of [
-    "Work my files",
+    "Review my workload",
     "Find a file",
     "Show neglected files",
     "Review communications",
@@ -1113,9 +1115,33 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
     script,
     /function clearAssistantData\(message\)[\s\S]*toggleAssistantDrawer\(false\);[\s\S]*syncAssistantMobileWorkspace\(\)/
   );
+  assert.match(
+    script,
+    /const overviewIsCurrent = document[\s\S]*classList\.contains\("is-current-view"\)[\s\S]*selectedConversation\.conversationRef === conversation\.conversationRef[\s\S]*focus\(\{ preventScroll: true \}\)/
+  );
+  assert.match(
+    script,
+    /const generalConversation = hasConversation && conversation\.kind === "general";[\s\S]*elements\["assistant-rename-chat"\]\.hidden = generalConversation;/
+  );
+  assert.match(
+    script,
+    /function openAssistantRenameDialog\(\)[\s\S]*conversation\.kind === "general"\) return;/
+  );
 
   assert.match(style, /width: min\(94vw, 390px\)/);
   assert.match(style, /grid-template-rows: auto auto minmax\(0, 1fr\) auto/);
+  assert.match(
+    extractCssRule(style, ".assistant-compose-row textarea"),
+    /font-size\s*:\s*16px\s*;/
+  );
+  assert.doesNotMatch(html, /maximum-scale|user-scalable/i);
+  assert.match(
+    extractCssRule(
+      style,
+      'body[data-assistant-chat-workspace] .assistant-chat-files-link'
+    ),
+    /display\s*:\s*inline-flex\s*;[\s\S]*min-height\s*:\s*44px\s*;/
+  );
   assert.match(
     style,
     /\.assistant-conversation-list \{[\s\S]*align-content: start;[\s\S]*\.assistant-conversation-group \{[\s\S]*align-content: start;[\s\S]*\.assistant-conversation-group-list \{[\s\S]*align-content: start;/
@@ -1232,6 +1258,10 @@ test("responsive console contains long text and separates compact chat navigatio
   );
   assert.match(
     compact,
+    /body\[data-assistant-chat-workspace\]\s+\.assistant-current-actions\s*\{[^}]*display\s*:\s*flex\s*;[^}]*grid-column\s*:\s*1\s*\/\s*-1/m
+  );
+  assert.match(
+    compact,
     /\.assistant-conversation-list\s*\{[^}]*min-height\s*:\s*0\s*;[^}]*overflow-y\s*:\s*auto/m
   );
   assert.match(
@@ -1255,6 +1285,10 @@ test("responsive console contains long text and separates compact chat navigatio
   assert.match(
     phone,
     /body\[data-assistant-chat-workspace\]\s+\.assistant-composer\s*\{[^}]*position\s*:\s*sticky\s*;[^}]*env\(safe-area-inset-bottom\)/m
+  );
+  assert.match(
+    phone,
+    /\.action-composer\s+\.field\s+input\s*,[\s\S]*?\.action-composer\s+\.field\s+textarea\s*\{[^}]*font-size\s*:\s*16px\s*;/m
   );
 
   assert.match(
@@ -2121,12 +2155,16 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.match(html, /<strong>HCN Work Center<\/strong>/);
   assert.match(html, /Ask Thresher/);
   assert.match(html, /aria-live="polite"[\s\S]*id="home-next-action"/);
-  assert.equal((html.match(/data-assistant-starter=/g) || []).length, 4);
+  assert.equal((html.match(/data-assistant-starter=/g) || []).length, 5);
   assert.equal(
     (html.match(/class="assistant-starter"\s+href="#work-center"/g) || []).length,
-    2
+    1
   );
-  assert.match(html, /href="#work-center"[\s\S]*>Work my files<\/a>/);
+  assert.match(html, /href="#work-center"[\s\S]*>Find a file<\/a>/);
+  assert.match(
+    html,
+    /data-assistant-starter="Show my assigned files\."[\s\S]*>Review my workload<\/button>/
+  );
   assert.match(html, /data-assistant-kinds="general"/);
   assert.match(html, /data-assistant-kinds="file"/);
   assert.match(html, /data-assistant-kinds="sweep"/);
@@ -2308,11 +2346,42 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   assert.match(html, /id="quo-text-to"[\s\S]*placeholder="\+15551234567"/);
   assert.match(
     html,
-    /id="file-actions"[\s\S]*data-hcn-capability="hcn\.action_plans\.prepare"[\s\S]*>File actions<\/button>/
+    /id="file-refresh"[\s\S]*>Update file<\/button>[\s\S]*id="file-start-chat"[\s\S]*>Ask Thresher<\/button>/
+  );
+  for (const [id, label] of [
+    ["file-quick-note", "Add note"],
+    ["file-quick-task", "Create task"],
+    ["file-quick-email", "Draft email"],
+    ["file-quick-text", "Text client"]
+  ]) {
+    assert.match(
+      html,
+      new RegExp(`id="${id}"[\\s\\S]*>${label}<\\/button>`)
+    );
+  }
+  assert.match(
+    html,
+    /Update file performs a fresh read across JobNimbus, Gmail, and[\s\S]*Quo\.[\s\S]*does not change anything/i
+  );
+  assert.match(
+    html,
+    /<details class="file-block file-detail"[\s\S]*Source health[\s\S]*<details class="file-block file-detail"[\s\S]*Key facts/
+  );
+  assert.match(
+    html,
+    /<summary class="file-block-heading">\s*<strong id="source-health-title">Source health<\/strong>[\s\S]*<summary class="file-block-heading">\s*<strong id="key-facts-title">Key facts<\/strong>/
+  );
+  assert.doesNotMatch(
+    html,
+    /<summary class="file-block-heading">\s*<(?:div|h4|p)\b/
+  );
+  assert.match(
+    html,
+    /id="file-actions"[\s\S]*data-hcn-capability="hcn\.action_plans\.prepare"[\s\S]*>More actions<\/button>/
   );
   assert.match(
     script,
-    /elements\["file-actions"\]\.addEventListener\("click"[\s\S]*elements\["action-composer"\]\.scrollIntoView/
+    /elements\["file-actions"\]\.addEventListener\("click"[\s\S]*openFileActionComposer\(""\)/
   );
   const fileLoader = extractConsoleFunction(script, "loadFileReview");
   assert.match(

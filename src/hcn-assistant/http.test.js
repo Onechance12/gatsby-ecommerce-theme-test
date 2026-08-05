@@ -19,6 +19,12 @@ import {
 import {
   createHcnAssistantFailureTelemetry
 } from "./failure-telemetry.js";
+import {
+  createHcnAssistantConversationStore
+} from "./conversation-store.js";
+import {
+  createHcnReferenceFactory
+} from "../hcn-ops/references.js";
 
 const ASSISTANT_RESPONSE =
   "You are signed in. I can review assigned files and recommend next steps; this chat cannot prepare or execute actions.";
@@ -27,6 +33,10 @@ const EMPLOYEE_SUBJECT = "assigned-employee-google-subject";
 const EMPLOYEE_OWNER_ID = "assigned-employee-jobnimbus-owner";
 const HCN_REFERENCE_KEY =
   Buffer.alloc(32, 0x41).toString("base64url");
+const HCN_ASSISTANT_HISTORY_KEY =
+  Buffer.alloc(32, 0x44).toString("base64url");
+const HCN_TENANT_ID = "tenant_0123456789abcdef";
+const GENERAL_CONVERSATION_TITLE = "Workload overview";
 
 test("assistant failure telemetry permits only fixed safe fields and codes", () => {
   const sensitiveError = new Error(
@@ -295,8 +305,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         HCN_THRESHER_AI_ENABLED: "true",
         HCN_THRESHER_AI_GROQ_API_KEY:
           "gsk_hcn_route_fixture_key_1234567890",
-        HCN_ASSISTANT_HISTORY_KEY:
-          Buffer.alloc(32, 0x44).toString("base64url"),
+        HCN_ASSISTANT_HISTORY_KEY,
         // These legacy values must not override the fixed reasoning router.
         HCN_ASSISTANT_MODEL: "gpt-5.6-terra",
         HCN_ASSISTANT_REASONING_EFFORT: "low",
@@ -309,7 +318,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
           "fixture-calendar-day",
         HCN_TEST_THRESHER_NO_TOOL_PROMPT_MARKER:
           "fixture-skip-required-review",
-        HCN_TENANT_ID: "tenant_0123456789abcdef",
+        HCN_TENANT_ID,
         HCN_REFERENCE_KEY,
         HCN_GOOGLE_GRANT_KEY:
           Buffer.alloc(32, 0x42).toString("base64url"),
@@ -547,7 +556,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       },
       body: JSON.stringify({
         kind: "general",
-        title: "Assigned work",
+        title: "Assigned File Fixture / Job 2739",
         fileRef: ""
       })
     }
@@ -560,6 +569,10 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   const conversationRef =
     createdConversation.conversation.conversationRef;
+  assert.equal(
+    createdConversation.conversation.title,
+    GENERAL_CONVERSATION_TITLE
+  );
   let expectedRevision = 0;
 
   const assignedWorkSummaryResponse = await fetch(
@@ -635,15 +648,23 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     }
   );
   const deterministicBody = await deterministicResponse.text();
-  assert.equal(
-    deterministicResponse.status,
-    403,
-    deterministicBody
+  assert.equal(deterministicResponse.status, 200, deterministicBody);
+  const deterministic = JSON.parse(deterministicBody);
+  assert.match(deterministic.message, /Assigned files ready for review: 1/);
+  assert.match(deterministic.message, /Open Work My Files/);
+  assert.match(deterministic.message, /Client details stay out/i);
+  assert.deepEqual(deterministic.routing.reasonCodes, [
+    "fact_only_general_work_center_summary"
+  ]);
+  assert.deepEqual(
+    deterministic.sources.map((source) => source.key),
+    ["jobnimbus"]
   );
-  assert.match(
-    JSON.parse(deterministicBody).error,
-    /Work Center, not a durable general chat/i
+  assert.doesNotMatch(
+    JSON.stringify(deterministic),
+    /Assigned File Fixture|2739|assigned-file-provider-id/
   );
+  expectedRevision = deterministic.revision;
 
   const assistantResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
@@ -670,7 +691,9 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   const assistant = await assistantResponse.json();
   assert.equal(assistant.schema, "hcn.console.assistant-turn.v4");
-  assert.equal(assistant.message, ASSISTANT_RESPONSE);
+  assert.match(assistant.message, /fresh assigned-work total/i);
+  assert.match(assistant.message, /open Work My Files/i);
+  assert.match(assistant.message, /JobNimbus, Gmail, Quo/i);
   assert.equal(assistant.plan, null);
   assert.deepEqual(assistant.sources, []);
   assert.equal(assistant.persisted, true);
@@ -686,15 +709,85 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     canExecuteActions: false,
     exactHumanApprovalRequired: true
   });
-  assert.equal(assistant.routing.route, "standard");
+  assert.equal(assistant.routing.route, "deterministic");
   assert.equal(
     assistant.routing.profileId,
-    "hcn.thresher.groq.gpt-oss-20b.medium.v1"
+    "hcn.deterministic.v1"
   );
   assert.deepEqual(assistant.routing.reasonCodes, [
-    "general_assistance"
+    "fact_only_general_help"
   ]);
-  assert.equal(assistant.routing.modelUsed, true);
+  assert.equal(assistant.routing.modelUsed, false);
+  assert.equal((await readFile(providerRecordPath, "utf8")).trim(), "");
+
+  const blockedGeneralClientResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef,
+        expectedRevision,
+        prompt:
+          "Review Assigned File Fixture at 123 Main Street, JobNimbus file 2739.",
+        mode: "auto"
+      })
+    }
+  );
+  assert.equal(blockedGeneralClientResponse.status, 403);
+  assert.match(
+    (await blockedGeneralClientResponse.json()).error,
+    /choose the exact assigned client/i
+  );
+  assert.equal((await readFile(providerRecordPath, "utf8")).trim(), "");
+
+  // Simulate history written by the pre-hardening build. Public projections
+  // and replay must hide both the unsafe title and the unsafe message pair.
+  const referenceFactory = createHcnReferenceFactory({
+    hmacKey: Buffer.from(HCN_REFERENCE_KEY, "base64url"),
+    tenantId: HCN_TENANT_ID
+  });
+  const subjectRef = referenceFactory.subjectId(
+    "hcn_operator",
+    `google:${EMPLOYEE_SUBJECT}`
+  );
+  const principalRef = `principal_${subjectRef.slice("subject_".length)}`;
+  const legacyStore = createHcnAssistantConversationStore({
+    filePath: path.join(
+      temporaryRoot,
+      "platform",
+      "assistant-conversations.enc.json"
+    ),
+    encryptionKey: HCN_ASSISTANT_HISTORY_KEY
+  });
+  const legacyRename = await legacyStore.rename({
+    principalRef,
+    conversationRef,
+    title: "Assigned File Fixture / Job 2739",
+    expectedRevision
+  });
+  expectedRevision = legacyRename.revision;
+  const legacyTurn = await legacyStore.appendTurn({
+    principalRef,
+    conversationRef,
+    expectedRevision,
+    prompt: "Legacy unsafe prompt for Assigned File Fixture at 123 Main Street, JobNimbus 2739.",
+    message: "Legacy unsafe response for assigned-file-provider-id.",
+    mode: "auto",
+    routing: {
+      route: "deterministic",
+      profileId: "hcn.deterministic.v1",
+      reasonCodes: ["fact_only_work_center"],
+      modelUsed: false
+    },
+    sources: []
+  });
+  expectedRevision = legacyTurn.conversation.revision;
 
   const workCenterResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/work-center`,
@@ -802,7 +895,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(crossFileToolResponse.status, 403);
   assert.match(
     (await crossFileToolResponse.json()).error,
-    /file chat may use only exact-file read tools/i
+    /available only from general Thresher chat/i
   );
 
   assignedFileActive = false;
@@ -825,12 +918,45 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     filteredList.items.map((conversation) => conversation.conversationRef),
     [conversationRef]
   );
+  assert.equal(
+    filteredList.items[0].title,
+    GENERAL_CONVERSATION_TITLE
+  );
   assert.deepEqual(filteredList.page, {
     offset: 0,
     limit: 100,
     total: 1,
     hasMore: false
   });
+
+  const reassignedGeneralDetailResponse = await fetch(
+    `${bridgeOrigin}/hcn/api/v1/assistant/conversations/detail`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin: bridgeOrigin,
+        "x-hcn-csrf": session.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef,
+        offset: 0,
+        limit: 100
+      })
+    }
+  );
+  assert.equal(reassignedGeneralDetailResponse.status, 200);
+  const reassignedGeneralDetail = await reassignedGeneralDetailResponse.json();
+  assert.equal(
+    reassignedGeneralDetail.conversation.title,
+    GENERAL_CONVERSATION_TITLE
+  );
+  assert.equal(reassignedGeneralDetail.messages.length, 6);
+  assert.doesNotMatch(
+    JSON.stringify(reassignedGeneralDetail.messages),
+    /Assigned File Fixture|123 Main Street|2739|assigned-file-provider-id/
+  );
 
   const providerLinesBeforeReassignment = (
     await readFile(providerRecordPath, "utf8")
@@ -1000,12 +1126,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     await blockedGeneralCatalogResponse.text();
   assert.equal(
     blockedGeneralCatalogResponse.status,
-    502,
+    403,
     blockedGeneralCatalogBody
   );
   assert.match(
     JSON.parse(blockedGeneralCatalogBody).error,
-    /requested HCN read tool failed/i
+    /choose the exact assigned client/i
   );
 
   const catalogResponse = await fetch(
@@ -1085,8 +1211,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        conversationRef,
-        expectedRevision,
+        conversationRef: fileConversationRef,
+        expectedRevision: fileExpectedRevision,
         prompt: "Review the claim evidence carefully.",
         mode: "deep"
       })
@@ -1101,7 +1227,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     "hcn.thresher.groq.gpt-oss-20b.high.v1"
   );
   assert.equal(deep.routing.modelUsed, true);
-  expectedRevision = deep.revision;
+  fileExpectedRevision = deep.revision;
 
   const escalationResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
@@ -1114,8 +1240,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        conversationRef,
-        expectedRevision,
+        conversationRef: fileConversationRef,
+        expectedRevision: fileExpectedRevision,
         prompt: "Call the homeowner right now.",
         mode: "auto"
       })
@@ -1150,8 +1276,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     detail.schema,
     "hcn.console.assistant-conversation-detail.v1"
   );
-  assert.equal(detail.conversation.messageCount, 8);
-  assert.equal(detail.messages.length, 8);
+  assert.equal(detail.conversation.messageCount, 6);
+  assert.equal(detail.messages.length, 6);
   assert.equal(
     detail.messages[0].content,
     "How many assigned files are ready for review right now? Give me only the count and source status. Do not open any individual file and do not take any action."
@@ -1159,15 +1285,15 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(detail.messages[1].content, assignedWorkSummary.message);
   assert.doesNotMatch(
     JSON.stringify(
-      detail.messages.slice(0, 2).map((message) => message.content)
+      detail.messages.map((message) => message.content)
     ),
-    /Assigned File Fixture|2739|assigned-file-provider-id/
+    /Assigned File Fixture|123 Main Street|2739|assigned-file-provider-id/
   );
   assert.deepEqual(
     detail.messages.map((message) => message.role),
     [
       "user", "assistant", "user", "assistant",
-      "user", "assistant", "user", "assistant"
+      "user", "assistant"
     ]
   );
 
@@ -1183,16 +1309,15 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       },
       body: JSON.stringify({
         conversationRef,
-        title: "Assigned work follow-up",
-        expectedRevision: escalation.revision
+        title: "Assigned File Fixture / Job 2739",
+        expectedRevision
       })
     }
   );
-  assert.equal(renamedResponse.status, 200);
-  const renamed = await renamedResponse.json();
-  assert.equal(
-    renamed.conversation.title,
-    "Assigned work follow-up"
+  assert.equal(renamedResponse.status, 403);
+  assert.match(
+    (await renamedResponse.json()).error,
+    /fixed privacy-safe title/i
   );
 
   const archivedResponse = await fetch(
@@ -1207,13 +1332,14 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       },
       body: JSON.stringify({
         conversationRef,
-        expectedRevision: renamed.conversation.revision
+        expectedRevision
       })
     }
   );
   assert.equal(archivedResponse.status, 200);
   const archived = await archivedResponse.json();
   assert.equal(archived.conversation.state, "archived");
+  assert.equal(archived.conversation.title, GENERAL_CONVERSATION_TITLE);
 
   const archivedListResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/conversations/list`,
@@ -1238,6 +1364,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     archivedList.items.map((conversation) => conversation.conversationRef),
     [conversationRef]
   );
+  assert.equal(archivedList.items[0].title, GENERAL_CONVERSATION_TITLE);
 
   const restoredResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/conversations/restore`,
@@ -1264,7 +1391,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerLines = (
     await readFile(providerRecordPath, "utf8")
   ).trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(providerLines.length, 10);
+  assert.equal(providerLines.length, 8);
   const providerRequests = providerLines.map((line) => JSON.parse(line));
   const serializedInput = (request) => JSON.stringify(request.body.input);
   const latestUserMessage = (request) => [
@@ -1275,33 +1402,11 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const requestsForPrompt = (prompt) => providerRequests.filter(
     (request) => latestUserMessage(request).includes(prompt)
   );
-  const fixedToolNames = [
-    "read_work_center",
-    "review_file",
-    "read_file_document_catalog",
-    "read_file_document",
-    "read_file_photo_catalog",
-    "research_file_hail_dates",
-    "read_calendar_day",
-    "run_management_sweep",
-    "read_closed_file_benchmark"
-  ];
-  const providerRequest = requestsForPrompt(
-    "Tell me what you can safely help with."
-  )[0];
-  assert.equal(
-    providerRequest.url,
-    "https://api.groq.com/openai/v1/responses"
-  );
-  assert.equal(providerRequest.method, "POST");
-  assert.equal(providerRequest.body.model, "openai/gpt-oss-20b");
-  assert.equal(providerRequest.body.reasoning.effort, "medium");
-  assert.equal(providerRequest.body.max_output_tokens, 1800);
-  assert.equal(providerRequest.body.tool_choice, "auto");
   assert.deepEqual(
-    providerRequest.body.tools.map((tool) => tool.name),
-    fixedToolNames
+    requestsForPrompt("Tell me what you can safely help with."),
+    []
   );
+  assert.deepEqual(requestsForPrompt("Assigned File Fixture"), []);
 
   const requiredReviewRequests = providerRequests.filter(
     (request) => request.body.tool_choice === "required"
@@ -1316,7 +1421,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     const reviewEvidence = rounds[0].body.input.find(
       (item) =>
         item?.role === "user"
-        && item?.content?.startsWith("Server-fetched evidence")
+        && item?.content?.startsWith("Server-fetched read-only HCN evidence")
     );
     assert.ok(reviewEvidence);
     assert.ok(
@@ -1358,11 +1463,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
 
   const catalogRounds = requestsForPrompt("fixture-document-catalog");
-  assert.equal(catalogRounds.length, 3);
+  assert.equal(catalogRounds.length, 2);
   const fileCatalogRounds = catalogRounds.filter(
-    (request) => serializedInput(request).includes(
-      "Server-fetched evidence"
-    )
+    (request) => Array.isArray(request.body.tools)
+      && request.body.tools.some(
+        (tool) => tool.name === "read_file_document_catalog"
+      )
   );
   assert.equal(fileCatalogRounds.length, 2);
   for (const request of fileCatalogRounds) {

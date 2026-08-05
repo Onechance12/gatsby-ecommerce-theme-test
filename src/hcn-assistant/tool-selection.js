@@ -1,5 +1,3 @@
-import { HCN_ASSISTANT_TOOL_NAMES } from "./tools.js";
-
 const EXACT_FILE_TOOL_INTENTS = Object.freeze([
   Object.freeze({
     tools: Object.freeze([
@@ -26,6 +24,11 @@ const EXACT_FILE_TOOL_INTENTS = Object.freeze([
   })
 ]);
 
+const SWEEP_TOOL_NAMES = Object.freeze([
+  "run_management_sweep",
+  "read_closed_file_benchmark"
+]);
+
 /**
  * Select only the read tools explicitly requested for the current exact-file
  * turn. A mention of a document or appointment is not authority to retrieve
@@ -35,10 +38,16 @@ export function hcnAssistantAvailableToolNames({
   prompt,
   conversationKind
 } = {}) {
-  if (conversationKind !== "file") {
-    return HCN_ASSISTANT_TOOL_NAMES;
-  }
   const text = String(prompt || "");
+  if (conversationKind === "general") {
+    return Object.freeze([]);
+  }
+  if (conversationKind === "sweep") {
+    return SWEEP_TOOL_NAMES;
+  }
+  if (conversationKind !== "file") {
+    return Object.freeze([]);
+  }
   const selected = [];
   for (const rule of EXACT_FILE_TOOL_INTENTS) {
     if (rule.negated.test(text) || !rule.intent.test(text)) continue;

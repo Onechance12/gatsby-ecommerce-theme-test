@@ -26,8 +26,12 @@ function classifyAndRoute(userRequest, requestedMode = "auto") {
 
 test("server classifier recognizes only narrow fact-only requests", () => {
   const cases = [
-    ["Show my assigned files.", "work_center", "fact_only_work_center"],
-    ["What files are assigned to me?", "work_center", "fact_only_work_center"],
+    ["What can you help me with?", "general_help", "fact_only_general_help"],
+    ["Show my assigned files.", "work_center", "fact_only_general_work_center_summary"],
+    ["What files are assigned to me?", "work_center", "fact_only_general_work_center_summary"],
+    ["Review my queue.", "work_center", "fact_only_general_work_center_summary"],
+    ["Which files need my attention today?", "work_center", "fact_only_general_work_center_summary"],
+    ["Where should I start in my work?", "work_center", "fact_only_general_work_center_summary"],
     [
       "How many assigned files are ready for review right now? Give me only the count and source status. Do not open any individual file and do not take any action.",
       "assigned_work_summary",
@@ -163,7 +167,12 @@ test("server classifier infers deep domains only from clear language", () => {
 
 test("fact-only Work Center, aggregate summary, sweep, and status requests use no LLM", () => {
   const cases = [
-    ["work_center", "Show my assigned files.", "fact_only_work_center"],
+    [
+      "work_center",
+      "Show my assigned files.",
+      "fact_only_general_work_center_summary"
+    ],
+    ["general_help", "What can you do?", "fact_only_general_help"],
     [
       "assigned_work_summary",
       "How many assigned files are ready for review right now? Give only the count and source status. Do not open any individual file and do not take any action.",

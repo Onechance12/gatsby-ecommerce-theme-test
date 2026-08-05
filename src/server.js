@@ -249,8 +249,7 @@ import {
   formatCodexEscalation,
   formatDeterministicAssignedWorkSummary,
   formatDeterministicFileStatus,
-  formatDeterministicManagementSweep,
-  formatDeterministicWorkCenter
+  formatDeterministicManagementSweep
 } from "./hcn-assistant/deterministic.js";
 import {
   deriveFileIntelligence
@@ -5074,7 +5073,9 @@ async function hcnListAssistantConversations(input = {}) {
         || assignedFileRefs.has(conversation.fileRef);
     }
   );
-  const items = authorized.slice(offset, offset + limit);
+  const items = authorized
+    .slice(offset, offset + limit)
+    .map((conversation) => hcnAssistantConversationProjection(conversation));
   return {
     schema: "hcn.console.assistant-conversation-list.v1",
     generatedAt: new Date().toISOString(),
@@ -5131,7 +5132,10 @@ async function hcnCreateAssistantConversation(input = {}) {
     "Assistant conversation create"
   );
   const kind = hcnAssistantConversationKind(input.kind);
-  const title = hcnAssistantConversationTitle(input.title);
+  const requestedTitle = hcnAssistantConversationTitle(input.title);
+  const title = kind === "general"
+    ? HCN_GENERAL_CONVERSATION_TITLE
+    : requestedTitle;
   const fileRef = hcnAssistantConversationFileRef(input.fileRef, kind);
   const scope = kind === "sweep" ? "management" : "assigned";
   if (scope === "management") assertHcnManagementSession();
@@ -5166,17 +5170,22 @@ async function hcnReadAssistantConversation(input = {}) {
     principal,
     conversationRef
   });
-  const messages = conversation.messages.slice(offset, offset + limit);
+  const visibleMessages = hcnAssistantVisibleConversationMessages(conversation);
+  const messages = visibleMessages.slice(offset, offset + limit);
+  const conversationProjection = hcnAssistantConversationProjection(
+    conversation,
+    visibleMessages.length
+  );
   return {
     schema: "hcn.console.assistant-conversation-detail.v1",
     generatedAt: new Date().toISOString(),
-    conversation: hcnAssistantConversationProjection(conversation),
+    conversation: conversationProjection,
     messages,
     page: {
       offset,
       limit,
-      total: conversation.messages.length,
-      hasMore: offset + messages.length < conversation.messages.length
+      total: visibleMessages.length,
+      hasMore: offset + messages.length < visibleMessages.length
     }
   };
 }
@@ -5212,7 +5221,17 @@ async function hcnMutateAssistantConversation(input, operation) {
     1_000_000,
     "expectedRevision"
   );
-  await hcnRequireAssistantConversation({ principal, conversationRef });
+  const existingConversation = await hcnRequireAssistantConversation({
+    principal,
+    conversationRef
+  });
+  if (operation === "rename" && existingConversation.kind === "general") {
+    const error = new Error(
+      "General workload chats use a fixed privacy-safe title and cannot be renamed."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
   const request = {
     principalRef: hcnGooglePrincipalRef(principal.googleSubject),
     conversationRef,
@@ -5268,20 +5287,27 @@ function hcnAssistantConversationEnvelope(conversation) {
   return {
     schema: "hcn.console.assistant-conversation.v1",
     generatedAt: new Date().toISOString(),
-    conversation
+    conversation: hcnAssistantConversationProjection(conversation)
   };
 }
 
-function hcnAssistantConversationProjection(conversation) {
+function hcnAssistantConversationProjection(
+  conversation,
+  messageCount = Array.isArray(conversation.messages)
+    ? conversation.messages.length
+    : conversation.messageCount
+) {
   return {
     conversationRef: conversation.conversationRef,
     scope: conversation.scope,
     kind: conversation.kind,
     fileRef: conversation.fileRef,
-    title: conversation.title,
+    title: conversation.kind === "general"
+      ? HCN_GENERAL_CONVERSATION_TITLE
+      : conversation.title,
     state: conversation.state,
     revision: conversation.revision,
-    messageCount: conversation.messages.length,
+    messageCount,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     archivedAt: conversation.archivedAt
@@ -5400,9 +5426,14 @@ async function hcnAssistantTurn(input = {}) {
         userRequest: prompt,
         serverSignals
       });
+      hcnAssertSafeGeneralAssistantTurn({
+        conversation,
+        operation: serverSignals.operation,
+        routing
+      });
       const principalBinding = hcnAssistantPrincipalBinding(principal);
       const history = boundedHcnAssistantHistory(
-        conversation.messages
+        hcnAssistantVisibleConversationMessages(conversation)
       );
       const sources = new Map();
       const result = routing.route === "deterministic"
@@ -5524,29 +5555,128 @@ function hcnAssistantFoundationConfigured() {
   );
 }
 
+const HCN_GENERAL_SAFE_OPERATIONS = Object.freeze([
+  "general_help",
+  "work_center",
+  "assigned_work_summary"
+]);
+
+const HCN_GENERAL_CONVERSATION_TITLE = "Workload overview";
+
+const HCN_GENERAL_SAFE_REASON_CODES = Object.freeze([
+  "fact_only_general_help",
+  "fact_only_general_work_center_summary",
+  "fact_only_assigned_work_summary"
+]);
+
+function hcnAssistantVisibleConversationMessages(conversation) {
+  const messages = Array.isArray(conversation?.messages)
+    ? conversation.messages
+    : [];
+  if (conversation?.kind !== "general") return messages;
+  const visible = [];
+  for (let index = 0; index + 1 < messages.length; index += 2) {
+    const userMessage = messages[index];
+    const assistantMessage = messages[index + 1];
+    const routing = assistantMessage?.routing;
+    if (
+      userMessage?.role !== "user"
+      || assistantMessage?.role !== "assistant"
+      || routing?.route !== "deterministic"
+      || routing?.modelUsed !== false
+      || !Array.isArray(routing.reasonCodes)
+      || routing.reasonCodes.length !== 1
+      || !HCN_GENERAL_SAFE_REASON_CODES.includes(routing.reasonCodes[0])
+    ) {
+      continue;
+    }
+    visible.push(userMessage, assistantMessage);
+  }
+  return visible;
+}
+
+function hcnAssertSafeGeneralAssistantTurn({
+  conversation,
+  operation,
+  routing
+}) {
+  if (conversation?.kind !== "general") return;
+  if (
+    routing?.route === "deterministic"
+    && HCN_GENERAL_SAFE_OPERATIONS.includes(operation)
+  ) {
+    return;
+  }
+  const error = new Error(
+    "General Thresher chat is limited to privacy-safe workload overview. Open Work My Files and choose the exact assigned client before discussing a name, address, job number, communication, claim, or file detail."
+  );
+  error.statusCode = 403;
+  throw error;
+}
+
+function hcnAssistantAssignedWorkSummary(workCenter) {
+  return {
+    schema: "hcn.assistant.general-context.v1",
+    generatedAt: workCenter?.generatedAt,
+    assignedWork: {
+      total: workCenter?.page?.total,
+      source: {
+        status: workCenter?.source?.status,
+        completeness: workCenter?.source?.completeness,
+        checkedAt: workCenter?.source?.checkedAt,
+        asOf: workCenter?.source?.asOf
+      }
+    }
+  };
+}
+
 async function runHcnDeterministicAssistantTurn({
   operation,
   prompt,
   sources,
   conversation
 }) {
+  if (operation === "general_help") {
+    if (conversation?.kind !== "general") {
+      const error = new Error(
+        "General help is available only from general Thresher chat."
+      );
+      error.statusCode = 403;
+      throw error;
+    }
+    return {
+      message: [
+        "I can check your fresh assigned-work total and show where to start.",
+        "For a client, open Work My Files and choose the exact assigned file. That protected client chat can review fresh JobNimbus, Gmail, Quo, documents, photos, and supported Calendar evidence.",
+        "Chat stays read-only. Notes, tasks, drafts, texts, calls, uploads, and JobNimbus changes use separate review and approval gates."
+      ].join("\n"),
+      preparedPlan: null
+    };
+  }
   if (operation === "work_center") {
-    hcnAssertAssistantToolConversationScope(
-      "read_work_center",
-      {},
-      conversation
-    );
+    if (conversation?.kind !== "general") {
+      const error = new Error(
+        "Assigned-work discovery is available only from general Thresher chat."
+      );
+      error.statusCode = 403;
+      throw error;
+    }
     const workCenter = await hcnReadWorkCenter({
       offset: 0,
-      limit: 25
+      limit: 1
     });
+    const summary = hcnAssistantAssignedWorkSummary(workCenter);
     collectHcnAssistantSources(
       sources,
       "read_work_center",
-      workCenter
+      { source: summary.assignedWork.source }
     );
     return {
-      message: formatDeterministicWorkCenter(workCenter),
+      message: formatDeterministicAssignedWorkSummary({
+        generatedAt: summary.generatedAt,
+        page: { total: summary.assignedWork.total },
+        source: summary.assignedWork.source
+      }) + "\n\nOpen Work My Files to choose an exact assigned client. Client details stay out of this general chat.",
       preparedPlan: null
     };
   }
@@ -5562,17 +5692,11 @@ async function runHcnDeterministicAssistantTurn({
       offset: 0,
       limit: 1
     });
+    const generalContext = hcnAssistantAssignedWorkSummary(workCenter);
     const summary = {
-      generatedAt: workCenter?.generatedAt,
-      page: {
-        total: workCenter?.page?.total
-      },
-      source: {
-        status: workCenter?.source?.status,
-        completeness: workCenter?.source?.completeness,
-        checkedAt: workCenter?.source?.checkedAt,
-        asOf: workCenter?.source?.asOf
-      }
+      generatedAt: generalContext.generatedAt,
+      page: { total: generalContext.assignedWork.total },
+      source: generalContext.assignedWork.source
     };
     collectHcnAssistantSources(
       sources,
@@ -5779,7 +5903,7 @@ function hcnAssistantInstructions(principal, conversation) {
     conversation?.kind === "file"
       ? `- This chat is locked to opaque file reference ${conversation.fileRef}; never request or discuss a different file in this chat.`
       : conversation?.kind === "general"
-        ? "- General chat cannot retrieve assigned-file listings or exact-file evidence. Direct the employee to Work Center and an exact client chat for file details."
+        ? "- General chat is a deterministic privacy-safe workload dispatcher. It accepts no client-specific content and uses no model provider. Direct the employee to Work My Files and an exact assigned client chat for file details."
         : "- This conversation is not locked to one file.",
     "- Every file lookup is restricted server-side to the signed-in employee's authorized JobNimbus scope.",
     "- Management sweep and benchmark access are decided by the server; do not claim access unless the relevant tool succeeds.",
@@ -5823,6 +5947,15 @@ function hcnAssertAssistantToolConversationScope(
     error.statusCode = 403;
     throw error;
   }
+  if (
+    conversation?.kind === "general"
+  ) {
+    const error = new Error(
+      "General chat does not expose model tools. Use Work My Files and an exact assigned client chat for connected evidence."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
   if (conversation?.kind !== "file" && requestsExactFile) {
     const error = new Error(
       "Exact-file evidence may be read only from that assigned file chat."
@@ -5855,6 +5988,16 @@ function hcnAssertAssistantToolConversationScope(
     ["run_management_sweep", "read_closed_file_benchmark"].includes(name)
   ) {
     hcnAssertAssistantManagementConversation(conversation);
+  }
+  if (
+    conversation?.kind === "sweep"
+    && !["run_management_sweep", "read_closed_file_benchmark"].includes(name)
+  ) {
+    const error = new Error(
+      "A management chat may use only role-authorized management reads."
+    );
+    error.statusCode = 403;
+    throw error;
   }
   if (
     conversation?.kind === "file"

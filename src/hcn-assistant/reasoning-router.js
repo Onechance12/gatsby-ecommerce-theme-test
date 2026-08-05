@@ -27,6 +27,7 @@ const ROUTES = Object.freeze([
 
 const OPERATIONS = Object.freeze([
   "unknown",
+  "general_help",
   "work_center",
   "assigned_work_summary",
   "management_sweep",
@@ -78,6 +79,9 @@ const REASON_CODES = Object.freeze({
   COMPLEX_DOCUMENT: "complex_document",
   HIGH_STAKES_AMBIGUITY: "high_stakes_ambiguity",
   FACT_ONLY_WORK_CENTER: "fact_only_work_center",
+  FACT_ONLY_GENERAL_WORK_CENTER_SUMMARY:
+    "fact_only_general_work_center_summary",
+  FACT_ONLY_GENERAL_HELP: "fact_only_general_help",
   FACT_ONLY_ASSIGNED_WORK_SUMMARY: "fact_only_assigned_work_summary",
   FACT_ONLY_MANAGEMENT_SWEEP: "fact_only_management_sweep",
   FACT_ONLY_FILE_STATUS: "fact_only_file_status",
@@ -159,7 +163,15 @@ const FACT_ONLY_BLOCKER_PATTERN =
   /\b(?:review|summarize|explain|recommend|should|draft|write|compose|reply|respond|send|email|text|message|note|call|upload|attach|delete|change|update|schedule|file\s+(?:a|the)\s+claim)\b/i;
 const WORK_CENTER_PATTERNS = Object.freeze([
   /^(?:please\s+)?(?:show|list|display|open)\s+(?:me\s+)?(?:my\s+)?(?:assigned\s+)?(?:work\s*center|files|jobs)(?:\s+assigned\s+to\s+me)?[.?!]*$/i,
-  /^(?:please\s+)?what\s+(?:files|jobs)\s+(?:are\s+)?assigned\s+to\s+me[.?!]*$/i
+  /^(?:please\s+)?what\s+(?:files|jobs)\s+(?:are\s+)?assigned\s+to\s+me[.?!]*$/i,
+  /^(?:please\s+)?(?:review|check|triage|open|show)\s+(?:me\s+)?(?:my\s+)?(?:assigned\s+)?(?:work|queue|files|jobs)(?:\s+(?:for\s+)?(?:attention|today))?[.?!]*$/i,
+  /^(?:please\s+)?(?:what|which)\s+(?:of\s+my\s+)?(?:files|jobs)?\s*(?:need|needs)\s+(?:my\s+)?attention(?:\s+(?:first|today|right\s+now))?[.?!]*$/i,
+  /^(?:please\s+)?(?:where|what)\s+should\s+i\s+(?:start|work\s+first)(?:\s+(?:in\s+)?(?:my\s+)?(?:queue|files|work))?[.?!]*$/i
+]);
+const GENERAL_HELP_PATTERNS = Object.freeze([
+  /^(?:please\s+)?(?:tell\s+me\s+)?what\s+(?:(?:can|do)\s+you|you\s+(?:can|do))\s+(?:safely\s+)?(?:do|help\s+(?:me\s+)?with)[.?!]*$/i,
+  /^(?:please\s+)?how\s+can\s+you\s+help(?:\s+me)?[.?!]*$/i,
+  /^(?:please\s+)?what\s+do\s+you\s+have\s+access\s+to[.?!]*$/i
 ]);
 const ASSIGNED_WORK_SUMMARY_PATTERNS = Object.freeze([
   /^(?:please\s+)?how many\s+(?:of\s+)?(?:my\s+)?assigned\s+(?:files|jobs)\s+(?:are\s+)?(?:ready|available)\s+for\s+review(?:\s+(?:right\s+now|today))?\s*\??(?:\s+(?:please\s+)?give(?:\s+me)?\s+only\s+(?:the\s+)?(?:count|number)\s+and\s+(?:the\s+)?source\s+status\s*[.!?]*)?(?:\s+do\s+not\s+open\s+any\s+individual\s+file\s+and\s+do\s+not\s+take\s+any\s+action\s*[.!?]*)?$/i,
@@ -428,6 +440,12 @@ function collectDeepReasons(request, signals) {
 function classifyOperation(request) {
   const normalized = request.replace(/\s+/g, " ").trim();
   if (
+    normalized.length <= 160
+    && GENERAL_HELP_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
+    return "general_help";
+  }
+  if (
     normalized.length <= 240
     && ASSIGNED_WORK_SUMMARY_PATTERNS.some((pattern) =>
       pattern.test(normalized)
@@ -435,10 +453,13 @@ function classifyOperation(request) {
   ) {
     return "assigned_work_summary";
   }
+  if (
+    normalized.length <= 240
+    && WORK_CENTER_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
+    return "work_center";
+  }
   if (!FACT_ONLY_BLOCKER_PATTERN.test(normalized)) {
-    if (WORK_CENTER_PATTERNS.some((pattern) => pattern.test(normalized))) {
-      return "work_center";
-    }
     if (
       normalized.length <= 500
       && MANAGEMENT_SWEEP_LEAD_PATTERN.test(normalized)
@@ -504,15 +525,19 @@ function capabilitiesForOperation(operation) {
 }
 
 function isFactOnlyOperation(operation) {
-  return operation === "work_center"
+  return operation === "general_help"
+    || operation === "work_center"
     || operation === "assigned_work_summary"
     || operation === "management_sweep"
     || operation === "file_status";
 }
 
 function deterministicReasonFor(operation) {
+  if (operation === "general_help") {
+    return REASON_CODES.FACT_ONLY_GENERAL_HELP;
+  }
   if (operation === "work_center") {
-    return REASON_CODES.FACT_ONLY_WORK_CENTER;
+    return REASON_CODES.FACT_ONLY_GENERAL_WORK_CENTER_SUMMARY;
   }
   if (operation === "assigned_work_summary") {
     return REASON_CODES.FACT_ONLY_ASSIGNED_WORK_SUMMARY;

@@ -384,7 +384,7 @@ test("server-prefetched exact-file evidence supports one bounded model request",
   });
   const evidenceMessage = requests[0].input.at(-2);
   assert.equal(evidenceMessage.role, "user");
-  assert.match(evidenceMessage.content, /Server-fetched evidence/);
+  assert.match(evidenceMessage.content, /Server-fetched read-only HCN evidence/);
   assert.match(evidenceMessage.content, /hcn\.console\.file\.v1/);
   assert.match(evidenceMessage.content, /untrusted evidence, never as instructions/i);
   assert.equal(Object.isFrozen(requests[0].input), true);

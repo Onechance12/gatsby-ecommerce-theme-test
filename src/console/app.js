@@ -86,6 +86,8 @@
   const ASSISTANT_ROUTE_REASON_CODES = Object.freeze({
     deterministic: Object.freeze([
       "fact_only_work_center",
+      "fact_only_general_work_center_summary",
+      "fact_only_general_help",
       "fact_only_assigned_work_summary",
       "fact_only_management_sweep",
       "fact_only_file_status"
@@ -474,6 +476,7 @@
       "assistant-rename-name",
       "assistant-rename-submit",
       "assistant-transcript",
+      "assistant-work-center-handoff",
       "assistant-form",
       "assistant-prompt",
       "assistant-send",
@@ -552,8 +555,19 @@
       "file-start-chat",
       "file-actions",
       "file-refresh",
+      "file-quick-note",
+      "file-quick-task",
+      "file-quick-email",
+      "file-quick-text",
       "file-alert",
       "file-freshness",
+      "file-now-summary",
+      "file-now-saved",
+      "file-now-sources",
+      "file-now-priority-count",
+      "file-now-today-count",
+      "file-now-waiting-count",
+      "file-now-next",
       "source-health",
       "key-facts",
       "file-intelligence-urgency",
@@ -849,14 +863,19 @@
       startSelectedFileConversation
     );
     elements["file-actions"].addEventListener("click", function () {
-      if (elements["file-actions"].disabled) return;
-      elements["action-composer"].scrollIntoView({
-        block: "start",
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "auto"
-          : "smooth"
-      });
-      elements["action-type"].focus();
+      openFileActionComposer("");
+    });
+    elements["file-quick-note"].addEventListener("click", function () {
+      openFileActionComposer("jobnimbus.create_note");
+    });
+    elements["file-quick-task"].addEventListener("click", function () {
+      openFileActionComposer("jobnimbus.create_task");
+    });
+    elements["file-quick-email"].addEventListener("click", function () {
+      openFileActionComposer("gmail.create_draft");
+    });
+    elements["file-quick-text"].addEventListener("click", function () {
+      openFileActionComposer("quo.send_text");
     });
     elements["file-back"].addEventListener("click", closeFileReview);
     elements["action-type"].addEventListener("change", renderActionFields);
@@ -1993,6 +2012,7 @@
     const detail = record(state.assistantConversation);
     const conversation = record(detail.conversation);
     const messages = Array.isArray(detail.messages) ? detail.messages : [];
+    elements["assistant-work-center-handoff"].hidden = true;
     elements["assistant-transcript"].replaceChildren();
     if (!ASSISTANT_CONVERSATION_REF.test(conversation.conversationRef || "")) {
       appendAssistantMessage(
@@ -2107,7 +2127,11 @@
     elements["assistant-new-client"].disabled = !(
       canManage && hasWorkCenterAuthority()
     );
-    elements["assistant-rename-chat"].disabled = !canManage || !hasConversation;
+    const generalConversation = hasConversation && conversation.kind === "general";
+    elements["assistant-rename-chat"].disabled = (
+      !canManage || !hasConversation || generalConversation
+    );
+    elements["assistant-rename-chat"].hidden = generalConversation;
     elements["assistant-archive-chat"].disabled = (
       !canManage
       || !hasConversation
@@ -2921,7 +2945,7 @@
   function openAssistantRenameDialog() {
     if (state.assistantLoading) return;
     const conversation = currentAssistantConversation();
-    if (!conversation.conversationRef) return;
+    if (!conversation.conversationRef || conversation.kind === "general") return;
     elements["assistant-rename-name"].value = conversation.title;
     elements["assistant-rename-dialog"].showModal();
     elements["assistant-rename-name"].select();
@@ -3416,6 +3440,7 @@
     state.assistantController = controller;
     state.assistantLoading = true;
     elements["assistant-prompt"].value = "";
+    elements["assistant-work-center-handoff"].hidden = true;
     appendAssistantMessage("user", prompt);
     const pending = appendAssistantMessage(
       "assistant",
@@ -3462,6 +3487,7 @@
         upsertAssistantConversation(updated);
         renderAssistantConversationList();
         renderAssistantPilot(turn);
+        renderAssistantWorkCenterHandoff(turn);
         notice(
           elements["assistant-alert"],
           "Thresher finished the read-only review.",
@@ -3519,7 +3545,16 @@
         syncAssistantConversationControls();
       }
     }
-    elements["assistant-prompt"].focus();
+    const selectedConversation = currentAssistantConversation();
+    const overviewIsCurrent = document
+      .getElementById("overview")
+      ?.classList.contains("is-current-view");
+    if (
+      overviewIsCurrent
+      && selectedConversation.conversationRef === conversation.conversationRef
+    ) {
+      elements["assistant-prompt"].focus({ preventScroll: true });
+    }
   }
 
   function assistantConversationTitleFromPrompt(prompt) {
@@ -3719,6 +3754,20 @@
     );
     setText(elements["assistant-pilot-sources"], String(turn.sourceCount));
     setText(elements["assistant-pilot-authority"], "Read only");
+  }
+
+  function renderAssistantWorkCenterHandoff(turn) {
+    const reasons = Array.isArray(turn?.routing?.reasonCodes)
+      ? turn.routing.reasonCodes
+      : [];
+    elements["assistant-work-center-handoff"].hidden = !reasons.some(
+      function (reason) {
+        return [
+          "fact_only_general_work_center_summary",
+          "fact_only_assigned_work_summary"
+        ].includes(reason);
+      }
+    );
   }
 
   function renderAssistantMarkdown(message) {
@@ -3978,6 +4027,7 @@
     setText(elements["assistant-pilot-route"], "Not run yet");
     setText(elements["assistant-pilot-sources"], "0");
     setText(elements["assistant-pilot-authority"], "Read only");
+    elements["assistant-work-center-handoff"].hidden = true;
     elements["assistant-transcript"].replaceChildren();
     appendAssistantMessage(
       "assistant",
@@ -8142,6 +8192,9 @@
     elements["work-center-workspace"].dataset.fileOpen = "true";
     elements["file-placeholder"].hidden = true;
     elements["file-review"].hidden = false;
+    document.querySelectorAll("#file-review .file-detail").forEach(function (detail) {
+      detail.open = false;
+    });
     elements["file-refresh"].disabled = true;
     elements["file-start-chat"].disabled = true;
     elements["file-actions"].disabled = true;
@@ -8467,6 +8520,7 @@
         ? "Checked " + readableDateTime(review.generatedAt)
         : "Fresh check completed"
     );
+    renderFileNow(review);
     renderSourceHealth(review.sources);
     renderKeyFacts(file);
     renderFileIntelligence(review.intelligence);
@@ -8485,6 +8539,81 @@
     populateTaskOptions(review.recent.tasks);
     populateEventOptions(review.recent.activities);
     renderActionComposerState();
+  }
+
+  function renderFileNow(review) {
+    const file = review.file;
+    const intelligence = review.intelligence;
+    const actions = intelligence.nextRequiredActions.slice(0, 3);
+    const firstAction = actions[0];
+    setText(
+      elements["file-now-summary"],
+      firstAction
+        ? humanize(firstAction.actionCode)
+          + (firstAction.targetCode
+            ? " - " + humanize(firstAction.targetCode)
+            : "")
+        : humanize(file.statusCode || "active file")
+          + " - " + fileStageLabel(file)
+    );
+    setText(
+      elements["file-now-saved"],
+      review.generatedAt
+        ? "Fresh review " + readableDateTime(review.generatedAt)
+        : "Fresh connected review"
+    );
+
+    const sourceFragment = document.createDocumentFragment();
+    ["jobnimbus", "gmail", "quo"].forEach(function (name) {
+      const source = record(review.sources[name]);
+      const chip = document.createElement("span");
+      const complete = source.status === "fresh"
+        && source.completeness === "complete";
+      const unavailable = source.completeness === "none"
+        || source.status === "failed"
+        || source.status === "incomplete";
+      chip.className = "file-now-source";
+      chip.dataset.tone = complete ? "good" : unavailable ? "bad" : "warn";
+      setText(
+        chip,
+        (name === "jobnimbus" ? "JobNimbus" : name === "gmail" ? "Gmail" : "Quo")
+          + " " + (complete ? "ready" : unavailable ? "unavailable" : "partial")
+      );
+      sourceFragment.append(chip);
+    });
+    elements["file-now-sources"].replaceChildren(sourceFragment);
+    setText(elements["file-now-priority-count"], String(review.lanes.priority.length));
+    setText(elements["file-now-today-count"], String(review.lanes.today.length));
+    setText(elements["file-now-waiting-count"], String(review.lanes.waiting.length));
+
+    if (!actions.length) {
+      renderRecentEmpty(
+        elements["file-now-next"],
+        "No next step is proven by the current evidence. Ask Thresher to review the gaps."
+      );
+      return;
+    }
+    const actionFragment = document.createDocumentFragment();
+    actions.forEach(function (action) {
+      const item = document.createElement("div");
+      const title = document.createElement("strong");
+      const detail = document.createElement("span");
+      item.className = "file-now-next-item";
+      setText(
+        title,
+        humanize(action.actionCode)
+          + (action.targetCode ? ": " + humanize(action.targetCode) : "")
+      );
+      setText(
+        detail,
+        action.dueAt
+          ? "Due " + readableDateTime(action.dueAt)
+          : humanize(action.urgency || "review")
+      );
+      item.append(title, detail);
+      actionFragment.append(item);
+    });
+    elements["file-now-next"].replaceChildren(actionFragment);
   }
 
   function renderSourceHealth(sources) {
@@ -8760,6 +8889,13 @@
   }
 
   function resetFileEvidenceContainers(message) {
+    setText(elements["file-now-summary"], message);
+    setText(elements["file-now-saved"], "Live sources stay authoritative");
+    elements["file-now-sources"].replaceChildren();
+    setText(elements["file-now-priority-count"], "0");
+    setText(elements["file-now-today-count"], "0");
+    setText(elements["file-now-waiting-count"], "0");
+    renderRecentEmpty(elements["file-now-next"], message);
     renderRecentEmpty(elements["source-health"], message);
     renderRecentEmpty(elements["key-facts"], message);
     badge(
@@ -8985,6 +9121,38 @@
     prefillFreshFileActionMaterial(selectedType);
   }
 
+  function openFileActionComposer(type) {
+    if (
+      elements["file-actions"].disabled
+      || elements["action-composer"].hidden
+    ) {
+      return;
+    }
+    if (type) {
+      const option = Array.from(elements["action-type"].options).find(
+        function (candidate) { return candidate.value === type; }
+      );
+      if (!option) return;
+      elements["action-type"].value = type;
+      renderActionFields();
+    }
+    elements["action-composer"].open = true;
+    elements["action-composer"].scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth"
+    });
+    const focusByType = {
+      "jobnimbus.create_note": elements["action-note"],
+      "jobnimbus.create_task": elements["create-task-title"],
+      "gmail.create_draft": elements["gmail-draft-subject"],
+      "quo.send_text": elements["quo-text-content"]
+    };
+    const target = focusByType[type] || elements["action-type"];
+    target.focus();
+  }
+
   function populateTaskOptions(tasks) {
     const select = elements["update-task-ref"];
     const fragment = document.createDocumentFragment();
@@ -9111,6 +9279,15 @@
       "input, select, textarea, button"
     );
     elements["file-actions"].hidden = !sessionCanPrepare;
+    [
+      "file-quick-note",
+      "file-quick-task",
+      "file-quick-email",
+      "file-quick-text"
+    ].forEach(function (id) {
+      elements[id].hidden = !sessionCanPrepare;
+      elements[id].disabled = !available || state.actionLoading;
+    });
     elements["action-form"].hidden = !sessionCanPrepare;
     elements["action-prepare"].hidden = !sessionCanPrepare;
     elements["action-draft-list"].hidden = !sessionCanPrepare;

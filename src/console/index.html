@@ -211,8 +211,9 @@
                   <p class="eyebrow">Your HCN work assistant</p>
                   <h1 id="company-today-title">Ask Thresher</h1>
                   <p>
-                    Tell Thresher what you need. It understands the HCN operating
-                    model and can read the live work your account is allowed to use.
+                    Use this chat for a live workload overview. Thresher can check
+                    your assigned-work totals and route you into a protected client
+                    chat for full JobNimbus, Gmail, and Quo file review.
                   </p>
                 </div>
                 <a
@@ -324,14 +325,22 @@
                 </article>
               </div>
 
+              <div id="assistant-work-center-handoff" class="assistant-handoff" hidden>
+                <span>Fresh assigned work is ready.</span>
+                <a class="button button-primary button-compact" href="#work-center">
+                  Open Work My Files
+                </a>
+              </div>
+
               <div id="assistant-starters" class="assistant-starters" aria-labelledby="assistant-starters-title">
                 <p id="assistant-starters-title">Start with one of these</p>
                 <div class="assistant-starter-grid">
-                  <a
+                  <button
                     class="assistant-starter"
-                    href="#work-center"
+                    type="button"
                     data-assistant-kinds="general"
-                  >Work my files</a>
+                    data-assistant-starter="Show my assigned files."
+                  >Review my workload</button>
                   <a
                     class="assistant-starter"
                     href="#work-center"
@@ -931,27 +940,6 @@
                     </div>
                     <div class="file-heading-actions">
                       <span id="file-evidence-status" class="card-status">Checking</span>
-                      <button
-                        id="file-start-chat"
-                        class="button button-primary button-compact"
-                        type="button"
-                        disabled
-                      >Start client chat</button>
-                      <button
-                        id="file-actions"
-                        class="button button-surface button-compact"
-                        type="button"
-                        data-hcn-capability="hcn.action_plans.prepare"
-                        hidden
-                        disabled
-                      >File actions</button>
-                      <button
-                        id="file-refresh"
-                        class="button button-surface button-compact"
-                        type="button"
-                      >
-                        Refresh file
-                      </button>
                     </div>
                   </div>
                 </div>
@@ -966,38 +954,116 @@
                   Loading fresh file evidence.
                 </div>
 
-                <section class="file-block" aria-labelledby="source-health-title">
-                  <div class="file-block-heading">
-                    <h4 id="source-health-title">Source health</h4>
+                <section class="file-now" aria-labelledby="file-now-title">
+                  <div class="file-now-heading">
+                    <div>
+                      <p class="eyebrow">Right now</p>
+                      <h4 id="file-now-title">What moves this file</h4>
+                      <p id="file-now-summary">Waiting for a fresh connected review.</p>
+                    </div>
+                    <span id="file-now-saved" class="file-now-saved">
+                      Live sources stay authoritative
+                    </span>
+                  </div>
+                  <div id="file-now-sources" class="file-now-sources" aria-label="Connected source status"></div>
+                  <div class="file-now-counts" aria-label="File work counts">
+                    <span><strong id="file-now-priority-count">0</strong>Priority</span>
+                    <span><strong id="file-now-today-count">0</strong>Today</span>
+                    <span><strong id="file-now-waiting-count">0</strong>Waiting</span>
+                  </div>
+                  <div id="file-now-next" class="file-now-next"></div>
+                  <div class="file-quick-actions" aria-label="Quick file actions">
+                    <button
+                      id="file-refresh"
+                      class="button button-primary button-compact"
+                      type="button"
+                    >Update file</button>
+                    <button
+                      id="file-start-chat"
+                      class="button button-surface button-compact"
+                      type="button"
+                      disabled
+                    >Ask Thresher</button>
+                    <button
+                      id="file-quick-note"
+                      class="button button-surface button-compact"
+                      type="button"
+                      data-hcn-capability="hcn.action_plans.prepare"
+                      hidden
+                      disabled
+                    >Add note</button>
+                    <button
+                      id="file-quick-task"
+                      class="button button-surface button-compact"
+                      type="button"
+                      data-hcn-capability="hcn.action_plans.prepare"
+                      hidden
+                      disabled
+                    >Create task</button>
+                    <button
+                      id="file-quick-email"
+                      class="button button-surface button-compact"
+                      type="button"
+                      data-hcn-capability="hcn.action_plans.prepare"
+                      hidden
+                      disabled
+                    >Draft email</button>
+                    <button
+                      id="file-quick-text"
+                      class="button button-surface button-compact"
+                      type="button"
+                      data-hcn-capability="hcn.action_plans.prepare"
+                      hidden
+                      disabled
+                    >Text client</button>
+                    <button
+                      id="file-actions"
+                      class="button button-surface button-compact"
+                      type="button"
+                      data-hcn-capability="hcn.action_plans.prepare"
+                      hidden
+                      disabled
+                    >More actions</button>
+                  </div>
+                  <p class="file-now-note">
+                    Update file performs a fresh read across JobNimbus, Gmail, and
+                    Quo. It does not change anything. Notes, tasks, emails, and texts
+                    still require an exact review plan and your approval.
+                  </p>
+                </section>
+
+                <details class="file-block file-detail" aria-labelledby="source-health-title">
+                  <summary class="file-block-heading">
+                    <strong id="source-health-title">Source health</strong>
                     <span id="file-freshness">Checking now</span>
-                  </div>
+                  </summary>
                   <div id="source-health" class="source-health-grid"></div>
-                </section>
+                </details>
 
-                <section class="file-block" aria-labelledby="key-facts-title">
-                  <div class="file-block-heading">
-                    <h4 id="key-facts-title">Key facts</h4>
+                <details class="file-block file-detail" aria-labelledby="key-facts-title">
+                  <summary class="file-block-heading">
+                    <strong id="key-facts-title">Key facts</strong>
                     <span>Fresh JobNimbus detail</span>
-                  </div>
+                  </summary>
                   <div id="key-facts" class="key-facts-grid"></div>
-                </section>
+                </details>
 
-                <section
-                  class="file-block"
+                <details
+                  class="file-block file-detail"
                   aria-labelledby="file-intelligence-title"
                 >
-                  <div class="file-block-heading">
-                    <div>
-                      <h4 id="file-intelligence-title">What Thresher sees</h4>
-                      <p class="file-block-caption">
+                  <summary class="file-block-heading">
+                    <span class="file-summary-copy">
+                      <strong id="file-intelligence-title">What Thresher sees</strong>
+                      <span class="file-block-caption">
                         Next steps based on the latest file information.
-                      </p>
-                    </div>
+                      </span>
+                    </span>
                     <span
                       id="file-intelligence-urgency"
                       class="card-status"
                     >Checking</span>
-                  </div>
+                  </summary>
                   <p
                     id="file-intelligence-summary"
                     class="intelligence-summary"
@@ -1011,13 +1077,13 @@
                     id="file-intelligence-actions"
                     class="intelligence-actions"
                   ></div>
-                </section>
+                </details>
 
-                <section class="file-block" aria-labelledby="operating-lanes-title">
-                  <div class="file-block-heading">
-                    <h4 id="operating-lanes-title">Operating lanes</h4>
+                <details class="file-block file-detail" aria-labelledby="operating-lanes-title">
+                  <summary class="file-block-heading">
+                    <strong id="operating-lanes-title">Operating lanes</strong>
                     <span>Evidence-backed signals</span>
-                  </div>
+                  </summary>
                   <div class="lane-grid">
                     <article class="lane-card" data-lane="priority">
                       <div class="lane-heading">
@@ -1041,13 +1107,13 @@
                       <div id="waiting-lane" class="lane-list"></div>
                     </article>
                   </div>
-                </section>
+                </details>
 
-                <section class="file-block" aria-labelledby="recent-evidence-title">
-                  <div class="file-block-heading">
-                    <h4 id="recent-evidence-title">Recent evidence</h4>
+                <details class="file-block file-detail" aria-labelledby="recent-evidence-title">
+                  <summary class="file-block-heading">
+                    <strong id="recent-evidence-title">Recent evidence</strong>
                     <span>Up to 20 items per source</span>
-                  </div>
+                  </summary>
                   <div class="recent-grid">
                     <article class="recent-card">
                       <h5>Tasks</h5>
@@ -1070,25 +1136,25 @@
                       <div id="recent-activities" class="recent-list"></div>
                     </article>
                   </div>
-                </section>
+                </details>
 
-                <section
+                <details
                   id="action-composer"
-                  class="file-block action-composer"
+                  class="file-block file-detail action-composer"
                   data-hcn-capability="hcn.action_plans.prepare"
                   aria-labelledby="action-composer-title"
                   hidden
                 >
-                  <div class="file-block-heading">
-                    <div>
-                      <h4 id="action-composer-title">Prepare exact actions</h4>
-                      <p>
+                  <summary class="file-block-heading">
+                    <span class="file-summary-copy">
+                      <strong id="action-composer-title">Prepare exact actions</strong>
+                      <span class="file-block-caption">
                         Choose one thing for this file. Preparing it only creates a
                         review—nothing is changed or sent.
-                      </p>
-                    </div>
+                      </span>
+                    </span>
                     <span id="action-composer-count">0 / 12 actions</span>
-                  </div>
+                  </summary>
 
                   <div
                     id="action-composer-alert"
@@ -1399,7 +1465,7 @@
                   >
                     Prepare immutable review
                   </button>
-                </section>
+                </details>
               </div>
             </section>
           </div>

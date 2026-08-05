@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { hcnAssistantAvailableToolNames } from "./tool-selection.js";
-import { HCN_ASSISTANT_TOOL_NAMES } from "./tools.js";
 
 const select = (prompt) => hcnAssistantAvailableToolNames({
   prompt,
@@ -45,7 +44,7 @@ test("explicit and non-negated file requests select only necessary read tools", 
   );
 });
 
-test("negated requests stay closed and non-file chats retain the fixed registry", () => {
+test("negated requests stay closed and chat kinds receive narrow read registries", () => {
   assert.deepEqual(select("Do not check the calendar appointment."), []);
   assert.deepEqual(select("Don't review the policy document."), []);
   assert.deepEqual(select("Skip the photos and just summarize the file."), []);
@@ -55,6 +54,22 @@ test("negated requests stay closed and non-file chats retain the fixed registry"
     prompt: "Tell me what you can do.",
     conversationKind: "general"
   });
-  assert.deepEqual(general, HCN_ASSISTANT_TOOL_NAMES);
+  assert.deepEqual(general, []);
   assert.equal(Object.isFrozen(general), true);
+  assert.deepEqual(hcnAssistantAvailableToolNames({
+    prompt: "Check my calendar availability tomorrow.",
+    conversationKind: "general"
+  }), []);
+  assert.deepEqual(hcnAssistantAvailableToolNames({
+    prompt: "Do not check my calendar availability.",
+    conversationKind: "general"
+  }), []);
+  assert.deepEqual(hcnAssistantAvailableToolNames({
+    prompt: "Review the management picture.",
+    conversationKind: "sweep"
+  }), ["run_management_sweep", "read_closed_file_benchmark"]);
+  assert.deepEqual(hcnAssistantAvailableToolNames({
+    prompt: "Anything",
+    conversationKind: "unknown"
+  }), []);
 });
