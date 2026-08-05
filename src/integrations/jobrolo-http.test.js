@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -30,6 +30,17 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     is_active: true,
     date_updated: 1785261000
   };
+  const assignedContactB = {
+    jnid: "assigned-file-provider-id-b",
+    number: 2740,
+    record_type_name: "Insurance",
+    owners: [{ id: OWNER_ID }],
+    display_name: "Assigned File Fixture B",
+    status_name: "Ready for Review",
+    stage_name: "Carrier Review",
+    is_active: true,
+    date_updated: 1785260900
+  };
   const provider = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://provider.invalid");
     providerCalls.push(url.pathname);
@@ -46,7 +57,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     }
     if (req.method === "GET" && url.pathname === "/contacts") {
       return json(res, 200, {
-        contacts: [assignedContact]
+        contacts: [assignedContact, assignedContactB]
       });
     }
     if (
@@ -54,6 +65,21 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       && url.pathname === "/contacts/assigned-file-provider-id"
     ) {
       return json(res, 200, assignedContact);
+    }
+    if (
+      req.method === "GET"
+      && url.pathname === "/contacts/assigned-file-provider-id-b"
+    ) {
+      return json(res, 200, assignedContactB);
+    }
+    if (req.method === "GET" && url.pathname === "/activities") {
+      return json(res, 200, { activities: [] });
+    }
+    if (req.method === "GET" && url.pathname === "/tasks") {
+      return json(res, 200, { tasks: [] });
+    }
+    if (req.method === "GET" && url.pathname === "/files") {
+      return json(res, 200, { files: [] });
     }
     if (req.method === "POST" && url.pathname === "/activities") {
       let raw = "";
@@ -78,7 +104,8 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       NODE_ENV: "test",
       PORT: String(bridgePort),
       PUBLIC_BASE_URL: `http://127.0.0.1:${bridgePort}`,
-      HCN_CONSOLE_ENABLED: "false",
+      HCN_CONSOLE_ENABLED: "true",
+      HCN_CONSOLE_ORIGIN: `http://127.0.0.1:${bridgePort}`,
       HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN: "wavepa.com",
       CHANCE_GOOGLE_EMAIL: EMAIL,
       CHANCE_GOOGLE_SUBJECT: SUBJECT,
@@ -104,7 +131,9 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       HCN_GOOGLE_CLIENT_SECRET: "",
       HCN_GOOGLE_GRANT_KEY: "",
       HCN_QUO_LINK_KEY: "",
-      HCN_ASSISTANT_HISTORY_KEY: "",
+      HCN_ASSISTANT_HISTORY_KEY:
+        Buffer.alloc(32, 0x62).toString("base64url"),
+      HCN_THRESHER_AI_ENABLED: "true",
       HCN_THRESHER_AI_GROQ_API_KEY: "",
       QUO_API_KEY: "",
       TWILIO_AUTH_TOKEN: "",
@@ -153,13 +182,114 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   );
   assert.equal(workCenter.response.status, 200, workCenter.text);
   assert.equal(workCenter.body.result.schema, "hcn.console.work-center.v1");
-  assert.equal(workCenter.body.result.files.length, 1);
-  assert.equal(workCenter.body.result.files[0].displayName, "Assigned File Fixture");
-  assert.match(workCenter.body.result.files[0].fileRef, /^subject_[a-f0-9]{32}$/);
+  assert.equal(workCenter.body.result.files.length, 2);
+  const workCenterByName = new Map(
+    workCenter.body.result.files.map((file) => [file.displayName, file])
+  );
+  assert.equal(workCenterByName.size, 2);
+  assert.match(
+    workCenterByName.get("Assigned File Fixture").fileRef,
+    /^subject_[a-f0-9]{32}$/
+  );
   assert.equal(providerCalls.includes("/account/users"), true);
   assert.equal(providerCalls.includes("/contacts"), true);
 
-  const fileRef = workCenter.body.result.files[0].fileRef;
+  const concurrentTurns = await Promise.all([
+    signedPost(origin, "/integrations/jobrolo/v1/assistant/turn", {
+      requestId: "request_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sessionRef,
+      nonce: "nonce_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      input: {
+        kind: "general",
+        fileRef: "",
+        prompt: "What can you help me with?",
+        mode: "auto"
+      }
+    }),
+    signedPost(origin, "/integrations/jobrolo/v1/assistant/turn", {
+      requestId: "request_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      sessionRef,
+      nonce: "nonce_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      input: {
+        kind: "general",
+        fileRef: "",
+        prompt: "What can you do?",
+        mode: "auto"
+      }
+    })
+  ]);
+  for (const turn of concurrentTurns) {
+    assert.equal(turn.response.status, 200, turn.text);
+    assert.equal(
+      turn.body.result.schema,
+      "hcn.console.assistant-turn.v4"
+    );
+    assert.doesNotMatch(
+      JSON.stringify(turn.body),
+      /(?:conversation|message)_[a-f0-9]{32}/
+    );
+  }
+  const encryptedHistory = await readFile(
+    path.join(root, "platform", "assistant-conversations.enc.json"),
+    "utf8"
+  );
+  assert.doesNotMatch(
+    encryptedHistory,
+    /What can you help me with|What can you do/
+  );
+
+  const fileRef = workCenterByName.get("Assigned File Fixture").fileRef;
+  const fileRefB = workCenterByName.get("Assigned File Fixture B").fileRef;
+  const transitionSessionRef =
+    "session_fedcba9876543210fedcba9876543210";
+  const transitionInputs = [
+    {
+      kind: "general",
+      fileRef: "",
+      prompt: "What can you help me with?",
+      mode: "auto"
+    },
+    {
+      kind: "file",
+      fileRef,
+      prompt: "Show the current file status for Job 2739.",
+      mode: "auto"
+    },
+    {
+      kind: "file",
+      fileRef: fileRefB,
+      prompt: "Show the current file status for Job 2740.",
+      mode: "auto"
+    },
+    {
+      kind: "file",
+      fileRef,
+      prompt: "Show the current file status for Job 2739.",
+      mode: "auto"
+    }
+  ];
+  for (let index = 0; index < transitionInputs.length; index += 1) {
+    const digit = ["c", "d", "e", "f"][index];
+    const turn = await signedPost(
+      origin,
+      "/integrations/jobrolo/v1/assistant/turn",
+      {
+        requestId: `request_${digit.repeat(32)}`,
+        sessionRef: transitionSessionRef,
+        nonce: `nonce_${digit.repeat(32)}`,
+        input: transitionInputs[index]
+      }
+    );
+    assert.equal(turn.response.status, 200, turn.text);
+    assert.equal(
+      turn.body.result.schema,
+      "hcn.console.assistant-turn.v4"
+    );
+    assert.doesNotMatch(
+      JSON.stringify(turn.body),
+      /(?:conversation|message)_[a-f0-9]{32}/
+    );
+  }
   const prepared = await signedPost(
     origin,
     "/integrations/jobrolo/v1/action-plans/prepare",

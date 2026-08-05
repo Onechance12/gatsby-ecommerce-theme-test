@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  hkdfSync,
+  randomBytes
+} from "node:crypto";
 import {
   mkdtemp,
   readFile,
@@ -18,6 +23,10 @@ import {
 const PRINCIPAL_A = `principal_${"a".repeat(32)}`;
 const PRINCIPAL_B = `principal_${"b".repeat(32)}`;
 const FILE_REF = `subject_${"c".repeat(32)}`;
+const FILE_REF_B = `subject_${"d".repeat(32)}`;
+const BINDING_A = `binding_${"1".repeat(64)}`;
+const BINDING_B = `binding_${"2".repeat(64)}`;
+const BINDING_C = `binding_${"3".repeat(64)}`;
 const KEY_A = Buffer.alloc(32, 0x41).toString("base64url");
 const KEY_B = Buffer.alloc(32, 0x42).toString("base64url");
 const ROUTING = Object.freeze({
@@ -449,3 +458,320 @@ test("wrong keys, tampering, malformed scopes, and unknown fields fail closed", 
     (error) => error.code === "invalid_configuration"
   );
 });
+
+test("bound conversations persist continuity, isolate exact scopes, and stay out of employee chat lists", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hcn-conversation-bound-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, "history.enc.json");
+  let timestamp = Date.parse("2026-08-05T12:00:00.000Z");
+  const store = createHcnAssistantConversationStore({
+    filePath,
+    encryptionKey: KEY_A,
+    now: () => timestamp
+  });
+  const general = await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Jobrolo workload",
+    externalBindingRef: BINDING_A
+  });
+  await store.appendTurn({
+    principalRef: PRINCIPAL_A,
+    conversationRef: general.conversationRef,
+    expectedRevision: 0,
+    prompt: "Remember this scoped context.",
+    message: "This exact scoped context is durable.",
+    mode: "auto",
+    routing: ROUTING,
+    sources: []
+  });
+  const fileA = await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "file",
+    fileRef: FILE_REF,
+    title: "Jobrolo file A",
+    externalBindingRef: BINDING_B
+  });
+  const fileB = await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "file",
+    fileRef: FILE_REF_B,
+    title: "Jobrolo file B",
+    externalBindingRef: BINDING_C
+  });
+  assert.equal(new Set([
+    general.conversationRef,
+    fileA.conversationRef,
+    fileB.conversationRef
+  ]).size, 3);
+  assert.equal((await store.list({
+    principalRef: PRINCIPAL_A,
+    state: "active",
+    offset: 0,
+    limit: 50
+  })).page.total, 0);
+
+  timestamp += 5_000;
+  const reopened = createHcnAssistantConversationStore({
+    filePath,
+    encryptionKey: KEY_A,
+    now: () => timestamp
+  });
+  const resumed = await reopened.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "A later title cannot fork the binding",
+    externalBindingRef: BINDING_A
+  });
+  assert.equal(resumed.conversationRef, general.conversationRef);
+  assert.equal(resumed.revision, 1);
+  const stored = await reopened.get({
+    principalRef: PRINCIPAL_A,
+    conversationRef: resumed.conversationRef
+  });
+  assert.deepEqual(
+    stored.messages.map((message) => message.content),
+    [
+      "Remember this scoped context.",
+      "This exact scoped context is durable."
+    ]
+  );
+  assert.equal(
+    await reopened.get({
+      principalRef: PRINCIPAL_B,
+      conversationRef: resumed.conversationRef
+    }),
+    null
+  );
+  await assert.rejects(
+    reopened.getOrCreateBound({
+      principalRef: PRINCIPAL_A,
+      scope: "assigned",
+      kind: "file",
+      fileRef: FILE_REF,
+      title: "Binding collision",
+      externalBindingRef: BINDING_A
+    }),
+    (error) =>
+      error.code === "conversation_binding_scope_changed"
+      && error.statusCode === 409
+  );
+});
+
+test("bound conversation idle expiry slides, prunes atomically, and frees capacity", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hcn-conversation-expiry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let timestamp = Date.parse("2026-08-05T13:00:00.000Z");
+  const store = createHcnAssistantConversationStore({
+    filePath: path.join(root, "history.enc.json"),
+    encryptionKey: KEY_A,
+    now: () => timestamp,
+    boundConversationIdleTtlMs: 1_000,
+    maxConversations: 4,
+    maxConversationsPerPrincipal: 4,
+    maxBoundConversations: 1,
+    maxBoundConversationsPerPrincipal: 1
+  });
+  const first = await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Sliding",
+    externalBindingRef: BINDING_A
+  });
+  timestamp += 800;
+  assert.equal((await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Sliding",
+    externalBindingRef: BINDING_A
+  })).conversationRef, first.conversationRef);
+  timestamp += 700;
+  assert.equal((await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Sliding",
+    externalBindingRef: BINDING_A
+  })).conversationRef, first.conversationRef);
+
+  await assert.rejects(
+    store.getOrCreateBound({
+      principalRef: PRINCIPAL_B,
+      scope: "assigned",
+      kind: "general",
+      fileRef: "",
+      title: "Global cap",
+      externalBindingRef: BINDING_B
+    }),
+    (error) =>
+      error.code === "bound_conversation_capacity_reached"
+      && error.statusCode === 409
+  );
+
+  timestamp += 1_001;
+  const replacement = await store.getOrCreateBound({
+    principalRef: PRINCIPAL_B,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "After safe prune",
+    externalBindingRef: BINDING_B
+  });
+  assert.notEqual(replacement.conversationRef, first.conversationRef);
+  assert.equal(await store.get({
+    principalRef: PRINCIPAL_A,
+    conversationRef: first.conversationRef
+  }), null);
+});
+
+test("bound conversation per-principal capacity fails closed", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hcn-conversation-capacity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createHcnAssistantConversationStore({
+    filePath: path.join(root, "history.enc.json"),
+    encryptionKey: KEY_A,
+    maxConversations: 4,
+    maxConversationsPerPrincipal: 3,
+    maxBoundConversations: 3,
+    maxBoundConversationsPerPrincipal: 1
+  });
+  await store.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "First",
+    externalBindingRef: BINDING_A
+  });
+  await assert.rejects(
+    store.getOrCreateBound({
+      principalRef: PRINCIPAL_A,
+      scope: "assigned",
+      kind: "file",
+      fileRef: FILE_REF,
+      title: "Second",
+      externalBindingRef: BINDING_B
+    }),
+    (error) =>
+      error.code === "principal_bound_conversation_capacity_reached"
+      && error.statusCode === 409
+  );
+});
+
+test("legacy v1.0 encrypted history migrates on the next bound mutation", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hcn-conversation-migrate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, "history.enc.json");
+  const initial = createHcnAssistantConversationStore({
+    filePath,
+    encryptionKey: KEY_A
+  });
+  const existing = await initial.create({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Legacy chat"
+  });
+  const currentDocument = await decryptTestDocument(filePath, KEY_A);
+  currentDocument.schemaVersion = "1.0.0";
+  for (const conversation of currentDocument.conversations) {
+    delete conversation.externalBindingRef;
+    delete conversation.externalBindingExpiresAt;
+  }
+  await encryptTestDocument(filePath, KEY_A, currentDocument);
+
+  const migrated = createHcnAssistantConversationStore({
+    filePath,
+    encryptionKey: KEY_A
+  });
+  assert.equal((await migrated.get({
+    principalRef: PRINCIPAL_A,
+    conversationRef: existing.conversationRef
+  })).title, "Legacy chat");
+  await migrated.getOrCreateBound({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "file",
+    fileRef: FILE_REF,
+    title: "New bound chat",
+    externalBindingRef: BINDING_A
+  });
+  const savedDocument = await decryptTestDocument(filePath, KEY_A);
+  assert.equal(savedDocument.schemaVersion, "1.1.0");
+  assert.equal(
+    savedDocument.conversations.every((conversation) =>
+      Object.hasOwn(conversation, "externalBindingRef")
+      && Object.hasOwn(conversation, "externalBindingExpiresAt")
+    ),
+    true
+  );
+});
+
+const TEST_ENVELOPE_AAD = Buffer.from(JSON.stringify({
+  schema: "hcn.assistant.conversation-store.encrypted",
+  schemaVersion: "1.0.0",
+  algorithm: "A256GCM",
+  purpose: "hcn-employee-assistant-conversations"
+}), "utf8");
+
+function deriveTestStoreKey(masterKey) {
+  return Buffer.from(hkdfSync(
+    "sha256",
+    Buffer.from(masterKey, "base64url"),
+    Buffer.from("hcn-assistant-conversation-store:hkdf-salt:v1", "utf8"),
+    Buffer.from("hcn-assistant-conversation-store:aes-256-gcm-key:v1", "utf8"),
+    32
+  ));
+}
+
+async function decryptTestDocument(filePath, masterKey) {
+  const envelope = JSON.parse(await readFile(filePath, "utf8"));
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    deriveTestStoreKey(masterKey),
+    Buffer.from(envelope.nonce, "base64url"),
+    { authTagLength: 16 }
+  );
+  decipher.setAAD(TEST_ENVELOPE_AAD);
+  decipher.setAuthTag(Buffer.from(envelope.authTag, "base64url"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
+    decipher.final()
+  ]);
+  return JSON.parse(plaintext.toString("utf8"));
+}
+
+async function encryptTestDocument(filePath, masterKey, document) {
+  const nonce = Buffer.alloc(12, 0x55);
+  const cipher = createCipheriv(
+    "aes-256-gcm",
+    deriveTestStoreKey(masterKey),
+    nonce,
+    { authTagLength: 16 }
+  );
+  cipher.setAAD(TEST_ENVELOPE_AAD);
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(JSON.stringify(document), "utf8")),
+    cipher.final()
+  ]);
+  await writeFile(filePath, `${JSON.stringify({
+    schema: "hcn.assistant.conversation-store.encrypted",
+    schemaVersion: "1.0.0",
+    algorithm: "A256GCM",
+    nonce: nonce.toString("base64url"),
+    ciphertext: ciphertext.toString("base64url"),
+    authTag: cipher.getAuthTag().toString("base64url")
+  })}\n`, "utf8");
+}

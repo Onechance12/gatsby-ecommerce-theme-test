@@ -122,6 +122,60 @@ export function jobroloHcnResponse(requestId, result) {
   });
 }
 
+export function projectJobroloAssistantTurnResult(value) {
+  if (!isPlainRecord(value)) invalid("assistant turn result must be an object");
+  const allowed = [
+    "schema",
+    "generatedAt",
+    "persisted",
+    "cachePolicy",
+    "authority",
+    "routing",
+    "message",
+    "plan",
+    "sources",
+    "uiDirective"
+  ];
+  const result = {};
+  for (const key of allowed) {
+    if (Object.hasOwn(value, key)) result[key] = value[key];
+  }
+  if (
+    result.schema !== "hcn.console.assistant-turn.v4"
+    || typeof result.message !== "string"
+    || !result.message.trim()
+  ) {
+    invalid("assistant turn result is invalid");
+  }
+  assertNoInternalAssistantReferences(result);
+  return Object.freeze(result);
+}
+
+function assertNoInternalAssistantReferences(value) {
+  const pending = [value];
+  const visited = new Set();
+  while (pending.length) {
+    const item = pending.pop();
+    if (!item || typeof item !== "object") continue;
+    if (visited.has(item)) {
+      invalid("assistant turn result contains a cyclic value");
+    }
+    visited.add(item);
+    for (const [key, child] of Object.entries(item)) {
+      if (key === "conversationRef" || key === "messageRef") {
+        invalid("assistant turn result exposes internal HCN references");
+      }
+      if (
+        typeof child === "string"
+        && /\b(?:conversation|message)_[a-f0-9]{32}\b/.test(child)
+      ) {
+        invalid("assistant turn result exposes internal HCN references");
+      }
+      if (child && typeof child === "object") pending.push(child);
+    }
+  }
+}
+
 function exactRecord(value, keys, label) {
   if (!isPlainRecord(value)) invalid(`${label} must be an object`);
   const actual = Object.keys(value);

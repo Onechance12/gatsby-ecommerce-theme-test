@@ -93,6 +93,25 @@ evidence wins. Assistant calls reuse the principal-scoped encrypted HCN
 conversation store and the existing read-only Thresher runtime. Thresher can
 read and explain; it cannot prepare, approve, or execute a mutation.
 
+HCN derives an internal continuity binding from the authenticated tenant,
+Jobrolo client, fixed HCN principal, and opaque Jobrolo session. It then derives
+a second binding for the exact assistant scope: general chat or one opaque HCN
+file reference. Repeated turns in the same Jobrolo session and exact scope reuse
+one encrypted HCN conversation across process restarts. General chat, file A,
+file B, and a different Jobrolo session remain separate, so moving among them
+does not collide or mix histories. Neither binding nor any HCN conversation or
+message reference is returned to Jobrolo, and bound conversations are excluded
+from ordinary HCN conversation lists.
+
+Bound conversations have a sliding 30-day idle lifetime. Resolution prunes
+expired bindings atomically before reuse or creation. The pilot store permits
+at most 128 live bound conversations globally and 128 for one principal, still
+subject to the lower parent conversation-store limits if other history already
+uses capacity. Capacity fails closed; it does not evict a live binding or reuse
+another scope. Turns for one scoped binding are queued around both resolution
+and append, so concurrent signed turns preserve order instead of racing on a
+stale revision.
+
 Jobrolo may display or retain the user-visible result needed for its own chat,
 but it does not receive HCN provider credentials, private provider identifiers,
 the HCN approval challenge, or unrestricted HCN storage access. There is no
@@ -131,6 +150,16 @@ HCN requires four dedicated variables:
 Partial, disabled-with-credentials, malformed, or reused-secret configuration
 fails closed. Health metadata reports the boundary as connected only when this
 configuration and the HCN fresh-read foundation are ready.
+
+Continuity also requires `HCN_ASSISTANT_HISTORY_STORE_PATH` to be on the
+dedicated persistent HCN disk and `HCN_ASSISTANT_HISTORY_KEY` to remain stable.
+The repository Render blueprint mounts `hcn-operations-data` at
+`/var/data/hcn-operations` and places the encrypted assistant store beneath
+that mount. Startup/readiness checks authenticate the encrypted file and reject
+wrong-key or tampered state, but an operator must still attest the actual Render
+disk attachment and restart persistence; a syntactically correct path alone
+cannot prove physical durability. Existing encrypted v1.0 history is accepted
+and is rewritten as v1.1 on the next mutation.
 
 ## Consequences
 
