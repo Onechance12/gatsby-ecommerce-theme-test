@@ -49,6 +49,16 @@ test("conversation store persists encrypted principal-scoped multi-chat history"
   assert.equal(general.revision, 0);
   assert.equal(general.messageCount, 0);
 
+  const sameGeneral = await store.create({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Another workload chat"
+  });
+  assert.equal(sameGeneral.conversationRef, general.conversationRef);
+  assert.equal(sameGeneral.title, "Daily sweep");
+
   timestamp += 1_000;
   const client = await store.create({
     principalRef: PRINCIPAL_A,
@@ -131,6 +141,43 @@ test("conversation store persists encrypted principal-scoped multi-chat history"
     principalRef: PRINCIPAL_A,
     conversationRef: client.conversationRef
   })).messages.length, 2);
+});
+
+test("conversation store atomically reuses active workload and sweep chats", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hcn-conversation-singletons-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = createHcnAssistantConversationStore({
+    filePath: path.join(root, "history.enc.json"),
+    encryptionKey: KEY_A
+  });
+
+  const generalRequests = Array.from({ length: 8 }, () => store.create({
+    principalRef: PRINCIPAL_A,
+    scope: "assigned",
+    kind: "general",
+    fileRef: "",
+    title: "Workload overview"
+  }));
+  const general = await Promise.all(generalRequests);
+  assert.equal(new Set(general.map((item) => item.conversationRef)).size, 1);
+
+  const sweepRequests = Array.from({ length: 8 }, () => store.create({
+    principalRef: PRINCIPAL_A,
+    scope: "management",
+    kind: "sweep",
+    fileRef: "",
+    title: "Company sweep"
+  }));
+  const sweeps = await Promise.all(sweepRequests);
+  assert.equal(new Set(sweeps.map((item) => item.conversationRef)).size, 1);
+
+  const active = await store.list({
+    principalRef: PRINCIPAL_A,
+    state: "active",
+    offset: 0,
+    limit: 50
+  });
+  assert.equal(active.page.total, 2);
 });
 
 test("conversation mutations use exact revisions and archive/restore safely", async (t) => {

@@ -10,7 +10,7 @@ export const THRESHER_AI_PROVIDER = "groq";
 export const THRESHER_AI_PROVIDER_API = "groq_responses_api";
 export const THRESHER_AI_MODEL = "openai/gpt-oss-20b";
 export const THRESHER_AI_INSTRUCTIONS_VERSION =
-  "hcn.thresher-ai.instructions.v2";
+  "hcn.thresher-ai.instructions.v3";
 
 export const THRESHER_AI_RUNTIME = Object.freeze({
   identity: THRESHER_AI_IDENTITY,

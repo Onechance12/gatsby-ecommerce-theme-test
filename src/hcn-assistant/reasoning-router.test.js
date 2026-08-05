@@ -29,6 +29,8 @@ test("server classifier recognizes only narrow fact-only requests", () => {
     ["What can you help me with?", "general_help", "fact_only_general_help"],
     ["Show my assigned files.", "work_center", "fact_only_general_work_center_summary"],
     ["Review my workload.", "work_center", "fact_only_general_work_center_summary"],
+    ["Work my assigned files.", "work_center", "fact_only_general_work_center_summary"],
+    ["Review my assigned files.", "work_center", "fact_only_general_work_center_summary"],
     ["What files are assigned to me?", "work_center", "fact_only_general_work_center_summary"],
     ["Review my queue.", "work_center", "fact_only_general_work_center_summary"],
     ["Which files need my attention today?", "work_center", "fact_only_general_work_center_summary"],

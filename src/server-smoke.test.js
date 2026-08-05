@@ -459,16 +459,16 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   );
 
   const signInStyleResponse = await fetch(
-    `http://127.0.0.1:${port}/hcn/sign-in.css?shell=v14`
+    `http://127.0.0.1:${port}/hcn/sign-in.css?shell=v15`
   );
   assert.equal(signInStyleResponse.status, 200);
   assert.match(signInStyleResponse.headers.get("content-type"), /^text\/css/);
 
   for (const pathname of [
-    "/hcn/app.css?shell=v14",
-    "/hcn/app.js?shell=v14",
-    "/hcn/manifest.webmanifest?shell=v14",
-    "/hcn/sw.js?shell=v14"
+    "/hcn/app.css?shell=v15",
+    "/hcn/app.js?shell=v15",
+    "/hcn/manifest.webmanifest?shell=v15",
+    "/hcn/sw.js?shell=v15"
   ]) {
     const response = await fetch(
       `http://127.0.0.1:${port}${pathname}`
@@ -528,7 +528,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   );
   assert.equal(
     health.hcnOperationsBrain.modelInstructionsVersion,
-    "hcn.thresher-ai.instructions.v2"
+    "hcn.thresher-ai.instructions.v3"
   );
   assert.equal(health.hcnOperationsBrain.optionalModelAdvisory, false);
   assert.equal(health.hcnOperationsBrain.operationalProviderConfigured, false);
@@ -3033,7 +3033,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(managementHealth.gmailConfigured, true);
   assert.deepEqual(managementHealth.hcnAssistant, {
     identity: "hcn.thresher-ai.v1",
-    instructionsVersion: "hcn.thresher-ai.instructions.v2",
+    instructionsVersion: "hcn.thresher-ai.instructions.v3",
     enabled: false,
     configured: false,
     ready: false,
@@ -3184,7 +3184,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(authenticatedRootResponse.status, 302);
   assert.equal(
     authenticatedRootResponse.headers.get("location"),
-    "/hcn/?shell=v14"
+    "/hcn/?shell=v15"
   );
 
   const authenticatedConsoleRedirectResponse = await fetch(`${origin}/hcn`, {
@@ -3194,11 +3194,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(authenticatedConsoleRedirectResponse.status, 302);
   assert.equal(
     authenticatedConsoleRedirectResponse.headers.get("location"),
-    "/hcn/?shell=v14"
+    "/hcn/?shell=v15"
   );
 
   const authenticatedConsoleResponse = await fetch(
-    `${origin}/hcn/?shell=v14`,
+    `${origin}/hcn/?shell=v15`,
     { headers: { cookie: sessionCookie } }
   );
   assert.equal(authenticatedConsoleResponse.status, 200);
@@ -3219,13 +3219,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.doesNotMatch(authenticatedConsoleHtml, /type=["']password["']/i);
 
   for (const [pathname, contentType] of [
-    ["/hcn/app.css?shell=v14", "text/css"],
-    ["/hcn/app.js?shell=v14", "text/javascript"],
+    ["/hcn/app.css?shell=v15", "text/css"],
+    ["/hcn/app.js?shell=v15", "text/javascript"],
     [
-      "/hcn/manifest.webmanifest?shell=v14",
+      "/hcn/manifest.webmanifest?shell=v15",
       "application/manifest+json"
     ],
-    ["/hcn/sw.js?shell=v14", "text/javascript"]
+    ["/hcn/sw.js?shell=v15", "text/javascript"]
   ]) {
     const response = await fetch(`${origin}${pathname}`, {
       headers: { cookie: sessionCookie }
@@ -5039,7 +5039,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       {
         status: "incomplete",
         completeness: "none",
-        failureCode: "source_unavailable"
+        failureCode:
+          source === "quo"
+            ? "phone_match_unverified"
+            : "source_unavailable"
       }
     );
     assert.deepEqual(ambiguousCorrelationFile.recent[source], []);
@@ -5207,17 +5210,17 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.match(revokedConsoleHtml, /Sign in to HCN/);
   assert.doesNotMatch(revokedConsoleHtml, /Work My Files|Company Sweep/);
   for (const pathname of [
-    "/hcn/app.css?shell=v14",
-    "/hcn/app.js?shell=v14",
-    "/hcn/manifest.webmanifest?shell=v14",
-    "/hcn/sw.js?shell=v14"
+    "/hcn/app.css?shell=v15",
+    "/hcn/app.js?shell=v15",
+    "/hcn/manifest.webmanifest?shell=v15",
+    "/hcn/sw.js?shell=v15"
   ]) {
     const revokedPrivateSurface = await fetch(`${origin}${pathname}`, {
       headers: { cookie: sessionCookie }
     });
     assert.equal(revokedPrivateSurface.status, 401, pathname);
   }
-  const publicSignInStyle = await fetch(`${origin}/hcn/sign-in.css?shell=v14`);
+  const publicSignInStyle = await fetch(`${origin}/hcn/sign-in.css?shell=v15`);
   assert.equal(publicSignInStyle.status, 200);
 
   for (let index = 0; index < 3; index += 1) {

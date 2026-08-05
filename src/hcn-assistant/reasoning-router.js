@@ -164,7 +164,7 @@ const FACT_ONLY_BLOCKER_PATTERN =
 const WORK_CENTER_PATTERNS = Object.freeze([
   /^(?:please\s+)?(?:show|list|display|open)\s+(?:me\s+)?(?:my\s+)?(?:assigned\s+)?(?:work\s*center|files|jobs)(?:\s+assigned\s+to\s+me)?[.?!]*$/i,
   /^(?:please\s+)?what\s+(?:files|jobs)\s+(?:are\s+)?assigned\s+to\s+me[.?!]*$/i,
-  /^(?:please\s+)?(?:review|check|triage|open|show)\s+(?:me\s+)?(?:my\s+)?(?:assigned\s+)?(?:work|workload|queue|files|jobs)(?:\s+(?:for\s+)?(?:attention|today))?[.?!]*$/i,
+  /^(?:please\s+)?(?:work|review|check|triage|open|show)\s+(?:me\s+)?(?:my\s+)?(?:assigned\s+)?(?:work|workload|queue|files|jobs)(?:\s+(?:for\s+)?(?:attention|today))?[.?!]*$/i,
   /^(?:please\s+)?(?:what|which)\s+(?:of\s+my\s+)?(?:files|jobs)?\s*(?:need|needs)\s+(?:my\s+)?attention(?:\s+(?:first|today|right\s+now))?[.?!]*$/i,
   /^(?:please\s+)?(?:where|what)\s+should\s+i\s+(?:start|work\s+first)(?:\s+(?:in\s+)?(?:my\s+)?(?:queue|files|work))?[.?!]*$/i
 ]);

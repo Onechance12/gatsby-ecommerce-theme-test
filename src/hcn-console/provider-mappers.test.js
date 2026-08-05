@@ -697,6 +697,50 @@ test('Gmail delivery proof and per-thread ordering prevent drafts and answered m
   );
 });
 
+test('automated JobNimbus task reminders remain evidence but never become response due', () => {
+  const result = mapScopedGmailEnvelope(
+    {
+      ...FRESHNESS,
+      scope: {
+        providerFileId: FILE_ID,
+        exactFileMatch: true,
+      },
+      itemsComplete: true,
+      items: [
+        {
+          id: 'jobnimbus-task-reminder',
+          threadId: 'automated-reminder-thread',
+          direction: 'incoming',
+          internalDate: '1785261000000',
+          subject: 'JobNimbus Task Reminders',
+          plainText: 'Tasks are due.',
+        },
+        {
+          id: 'human-inbound',
+          threadId: 'human-thread',
+          direction: 'incoming',
+          internalDate: '1785262000000',
+          subject: 'Question about the inspection',
+        },
+      ],
+    },
+    { expectedProviderFileId: FILE_ID },
+  );
+
+  const byId = new Map(
+    result.data.items.map((item) => [item.providerRecordId, item]),
+  );
+  assert.equal(
+    byId.get('jobnimbus-task-reminder').deliveryState,
+    'received',
+  );
+  assert.equal(
+    byId.get('jobnimbus-task-reminder').actionState,
+    'no_action',
+  );
+  assert.equal(byId.get('human-inbound').actionState, 'needs_reply');
+});
+
 test('Quo mapper normalizes call/text aliases without exposing participants, lines, or transcripts', () => {
   const result = mapScopedQuoEnvelope(
     {

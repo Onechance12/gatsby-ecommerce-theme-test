@@ -204,6 +204,13 @@ export function createHcnAssistantConversationStore({
           request.fileRef
         );
         if (existing) return projectConversation(existing);
+      } else if (["general", "sweep"].includes(request.kind)) {
+        const existing = findActiveConversationKind(
+          document,
+          request.principalRef,
+          request.kind
+        );
+        if (existing) return projectConversation(existing);
       }
       const ownedCount = document.conversations.filter(
         (item) => item.principalRef === request.principalRef
@@ -810,6 +817,16 @@ function findActiveFileConversation(
     && item.state === "active"
     && item.conversationRef !== excludedConversationRef
   ) || null;
+}
+
+function findActiveConversationKind(document, principalRef, kind) {
+  return document.conversations
+    .filter((item) =>
+      item.principalRef === principalRef
+      && item.kind === kind
+      && item.state === "active"
+    )
+    .sort(compareConversationRecency)[0] || null;
 }
 
 function assertRevision(conversation, expected) {

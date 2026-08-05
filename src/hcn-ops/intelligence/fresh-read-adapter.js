@@ -222,7 +222,10 @@ function mapActivity(activity, ownerRef) {
 function mapGmailEvent(item) {
   let eventCode = "unknown";
   let actionState = "unknown";
-  if (item.deliveryState === "draft") {
+  if (isAutomatedJobNimbusTaskReminder(item)) {
+    eventCode = "reminder_generated";
+    actionState = "none";
+  } else if (item.deliveryState === "draft") {
     eventCode = "email_draft";
     actionState = "draft";
   } else if (item.deliveryState === "failed") {
@@ -252,6 +255,14 @@ function mapGmailEvent(item) {
     occurredAt: item.occurredAt,
     actorRef: null
   };
+}
+
+function isAutomatedJobNimbusTaskReminder(item) {
+  const subject = String(item?.subject || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  return /^jobnimbus task reminders?(?:\b|$)/.test(subject);
 }
 
 function mapQuoEvent(item) {

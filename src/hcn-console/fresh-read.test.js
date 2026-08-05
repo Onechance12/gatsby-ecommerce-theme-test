@@ -586,7 +586,7 @@ test("later estimate evidence never silently removes an open inspection task", a
   );
 });
 
-test("recent projections enforce the requested maximum and mark partial evidence", async () => {
+test("recent projections omit older valid items without marking complete evidence partial", async () => {
   const details = jobNimbusDetail();
   details.data.activities = Array.from({ length: 25 }, (_, index) => ({
     providerRecordId: `activity-${index}`,
@@ -606,8 +606,34 @@ test("recent projections enforce the requested maximum and mark partial evidence
   });
 
   assert.equal(result.recent.activities.length, 5);
+  assert.equal(result.sources.jobnimbus.completeness, "complete");
+  assert.equal(result.sources.jobnimbus.failureCode, null);
+  assert.equal(result.sources.jobnimbus.droppedItems, 0);
+  assert.equal(result.evidenceStatus, "complete");
+});
+
+test("invalid recent items remain dropped evidence and mark the source partial", async () => {
+  const details = jobNimbusDetail();
+  details.data.activities.push({
+    providerRecordId: "malformed-activity",
+    kind: "status_change",
+    state: "completed",
+    occurredAt: "not-a-timestamp",
+    actorRole: "team",
+    label: "Malformed activity"
+  });
+  const result = await createService({
+    dependencies: {
+      loadJobNimbusFile: async () => details
+    }
+  }).readFile({
+    fileRef: fileRef(),
+    recentLimit: 10
+  });
+
   assert.equal(result.sources.jobnimbus.completeness, "partial");
   assert.equal(result.sources.jobnimbus.failureCode, "source_partial");
+  assert.equal(result.sources.jobnimbus.droppedItems, 1);
   assert.equal(result.evidenceStatus, "partial");
 });
 
@@ -724,6 +750,43 @@ test("Gmail and Quo failures become coded incomplete empty sources", async () =>
   assert.equal(serialized.includes("GMAIL-SECRET"), false);
   assert.equal(serialized.includes("QUO-SECRET"), false);
   assert.equal(serialized.includes("QUO-PROVIDER-ERROR"), false);
+});
+
+test("optional source failures expose only allowlisted employee-safe reason codes", async () => {
+  const providerError = new Error("PRIVATE provider response");
+  providerError.hcnSourceFailureCode = "provider_check_failed";
+  const phoneMatchError = new Error("PRIVATE phone correlation response");
+  phoneMatchError.hcnSourceFailureCode = "phone_match_unverified";
+  const forgedError = new Error("PRIVATE forged response");
+  forgedError.hcnSourceFailureCode = "private_provider_secret";
+  const result = await createService({
+    dependencies: {
+      loadGmailFile: async () => { throw forgedError; },
+      loadQuoFile: async () => { throw providerError; }
+    }
+  }).readFile({
+    fileRef: fileRef(),
+    recentLimit: 10
+  });
+
+  assert.equal(result.sources.quo.failureCode, "provider_check_failed");
+  assert.equal(result.sources.gmail.failureCode, "source_unavailable");
+  const phoneResult = await createService({
+    dependencies: {
+      loadGmailFile: async () => { throw phoneMatchError; }
+    }
+  }).readFile({
+    fileRef: fileRef(),
+    recentLimit: 10
+  });
+  assert.equal(
+    phoneResult.sources.gmail.failureCode,
+    "phone_match_unverified"
+  );
+  assert.doesNotMatch(
+    JSON.stringify([result, phoneResult]),
+    /private_provider_secret|forged response|provider response|correlation response/
+  );
 });
 
 test("proved exact optional evidence remains visible when provider pagination is partial", async () => {

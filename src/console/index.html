@@ -13,9 +13,9 @@
       content="Home Claim Network employee Work Center."
     >
     <title>HCN Work Center</title>
-    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v14" crossorigin="use-credentials">
-    <link rel="stylesheet" href="/hcn/app.css?shell=v14">
-    <script src="/hcn/app.js?shell=v14" defer></script>
+    <link rel="manifest" href="/hcn/manifest.webmanifest?shell=v15" crossorigin="use-credentials">
+    <link rel="stylesheet" href="/hcn/app.css?shell=v15">
+    <script src="/hcn/app.js?shell=v15" defer></script>
   </head>
   <body class="hcn-auth-locked">
     <main id="hcn-auth-gate" class="hcn-auth-gate" aria-labelledby="hcn-auth-gate-title">
@@ -38,7 +38,7 @@
     <a class="skip-link" href="#main-content">Skip to employee Work Center</a>
 
     <header class="topbar">
-      <a class="brand" href="/hcn/?shell=v14" aria-label="HCN Work Center home">
+      <a class="brand" href="/hcn/?shell=v15#work-center" aria-label="HCN My Work home">
         <span class="brand-mark" aria-hidden="true"><span>HCN</span></span>
         <span class="brand-copy">
           <strong>HCN Work Center</strong>
@@ -60,24 +60,19 @@
     <div class="app-layout">
       <aside class="sidebar" aria-label="Console navigation">
         <nav class="primary-nav">
-          <p class="nav-label">Start</p>
-          <a class="nav-item is-active" href="#overview" aria-current="page">
-            <span class="nav-glyph glyph-overview" aria-hidden="true"></span>
-            <span>Ask Thresher</span>
+          <a class="nav-item is-active" href="#work-center" aria-current="page">
+            <span class="nav-glyph glyph-work" aria-hidden="true"></span>
+            <span>My Work</span>
           </a>
-          <button
+          <a
             id="assistant-chats-nav"
-            class="nav-item nav-action"
-            type="button"
+            class="nav-item"
+            href="#overview"
             aria-controls="assistant-chat-sidebar"
             aria-expanded="false"
           >
             <span class="nav-glyph glyph-chats" aria-hidden="true"></span>
             <span>Chats</span>
-          </button>
-          <a class="nav-item" href="#work-center">
-            <span class="nav-glyph glyph-work" aria-hidden="true"></span>
-            <span>Work My Files</span>
           </a>
           <a
             class="nav-item"
@@ -88,43 +83,49 @@
             <span class="nav-glyph glyph-files" aria-hidden="true"></span>
             <span>Company Sweep</span>
           </a>
-          <a class="nav-item" href="#connections">
-            <span class="nav-glyph glyph-connections" aria-hidden="true"></span>
-            <span>Connections</span>
-          </a>
-
-          <p class="nav-label">More</p>
-          <a
-            class="nav-item"
-            href="#team"
-            data-hcn-team-invitations
-            hidden
-          >
-            <span class="nav-glyph glyph-team" aria-hidden="true"></span>
-            <span>Team</span>
-          </a>
-          <a
-            class="nav-item"
-            href="#approvals"
-            data-hcn-capability="hcn.action_plans.read"
-            hidden
-          >
-            <span class="nav-glyph glyph-approval" aria-hidden="true"></span>
-            <span>Approvals</span>
-          </a>
-          <a
-            class="nav-item"
-            href="#receipts"
-            data-hcn-capability="hcn.action_receipts.read"
-            hidden
-          >
-            <span class="nav-glyph glyph-receipt" aria-hidden="true"></span>
-            <span>Receipts</span>
-          </a>
-          <a class="nav-item" href="#system-health">
-            <span class="nav-glyph glyph-health" aria-hidden="true"></span>
-            <span>System Status</span>
-          </a>
+          <details class="nav-admin">
+            <summary class="nav-item">
+              <span class="nav-glyph glyph-health" aria-hidden="true"></span>
+              <span>Admin</span>
+            </summary>
+            <div class="nav-admin-items">
+              <a class="nav-item" href="#connections">
+                <span class="nav-glyph glyph-connections" aria-hidden="true"></span>
+                <span>Connections</span>
+              </a>
+              <a
+                class="nav-item"
+                href="#team"
+                data-hcn-team-invitations
+                hidden
+              >
+                <span class="nav-glyph glyph-team" aria-hidden="true"></span>
+                <span>Team</span>
+              </a>
+              <a
+                class="nav-item"
+                href="#approvals"
+                data-hcn-capability="hcn.action_plans.read"
+                hidden
+              >
+                <span class="nav-glyph glyph-approval" aria-hidden="true"></span>
+                <span>Approvals</span>
+              </a>
+              <a
+                class="nav-item"
+                href="#receipts"
+                data-hcn-capability="hcn.action_receipts.read"
+                hidden
+              >
+                <span class="nav-glyph glyph-receipt" aria-hidden="true"></span>
+                <span>Receipts</span>
+              </a>
+              <a class="nav-item" href="#system-health">
+                <span class="nav-glyph glyph-health" aria-hidden="true"></span>
+                <span>System Status</span>
+              </a>
+            </div>
+          </details>
         </nav>
 
         <div class="sidebar-note">
@@ -137,7 +138,7 @@
       <main id="main-content" class="main-content" tabindex="-1">
         <section
           id="overview"
-          class="assistant-view console-view is-current-view"
+          class="assistant-view console-view"
           aria-labelledby="company-today-title"
         >
           <div class="assistant-workspace">
@@ -282,7 +283,7 @@
                 </div>
               </div>
 
-              <a class="assistant-connection-strip" href="#connections">
+              <a class="assistant-connection-strip" href="#connections" hidden>
                 <span>Live connections</span>
                 <strong id="assistant-connection-jobnimbus">JobNimbus checking</strong>
                 <strong id="assistant-connection-gmail">Gmail checking</strong>
@@ -328,7 +329,7 @@
               <div id="assistant-work-center-handoff" class="assistant-handoff" hidden>
                 <span>Fresh assigned work is ready.</span>
                 <a class="button button-primary button-compact" href="#work-center">
-                  Open Work My Files
+                  Open My Work
                 </a>
               </div>
 
@@ -574,6 +575,7 @@
                 id="assistant-pilot"
                 class="assistant-pilot"
                 aria-label="Pilot check for this session"
+                hidden
               >
                 <span class="assistant-pilot-label">Pilot check</span>
                 <span>
@@ -824,18 +826,26 @@
 
         <section
           id="work-center"
-          class="work-center-section console-view"
+          class="work-center-section console-view is-current-view"
           aria-labelledby="work-center-title"
         >
           <div class="work-center-heading">
             <div>
               <p class="eyebrow">Your assigned work</p>
-              <h2 id="work-center-title">Work My Files</h2>
+              <h2 id="work-center-title">My Work</h2>
               <p id="work-center-summary">
                 Sign in to see the files assigned to you.
               </p>
             </div>
             <div class="work-center-actions">
+              <button
+                id="work-center-next-file"
+                class="button button-primary work-next-file"
+                type="button"
+                disabled
+              >
+                Work next file
+              </button>
               <span id="work-center-status" class="card-status" data-tone="neutral">
                 Sign in required
               </span>
@@ -878,8 +888,8 @@
             <section class="queue-panel" aria-labelledby="queue-title">
               <div class="workspace-panel-heading">
                 <div>
-                  <p class="eyebrow">Assigned to you</p>
-                  <h3 id="queue-title">Active files</h3>
+                  <p class="eyebrow">Secondary list</p>
+                  <h3 id="queue-title">All assigned files</h3>
                 </div>
                 <span id="work-center-count" class="queue-count">—</span>
               </div>
@@ -965,19 +975,14 @@
                       Live sources stay authoritative
                     </span>
                   </div>
-                  <div id="file-now-sources" class="file-now-sources" aria-label="Connected source status"></div>
-                  <div class="file-now-counts" aria-label="File work counts">
-                    <span><strong id="file-now-priority-count">0</strong>Priority</span>
-                    <span><strong id="file-now-today-count">0</strong>Today</span>
-                    <span><strong id="file-now-waiting-count">0</strong>Waiting</span>
-                  </div>
                   <div id="file-now-next" class="file-now-next"></div>
                   <div class="file-quick-actions" aria-label="Quick file actions">
                     <button
-                      id="file-refresh"
+                      id="file-do-next"
                       class="button button-primary button-compact"
                       type="button"
-                    >Update file</button>
+                      disabled
+                    >Do this</button>
                     <button
                       id="file-start-chat"
                       class="button button-surface button-compact"
@@ -985,52 +990,74 @@
                       disabled
                     >Ask Thresher</button>
                     <button
-                      id="file-quick-note"
-                      class="button button-surface button-compact"
-                      type="button"
-                      data-hcn-capability="hcn.action_plans.prepare"
-                      hidden
-                      disabled
-                    >Add note</button>
-                    <button
-                      id="file-quick-task"
-                      class="button button-surface button-compact"
-                      type="button"
-                      data-hcn-capability="hcn.action_plans.prepare"
-                      hidden
-                      disabled
-                    >Create task</button>
-                    <button
-                      id="file-quick-email"
-                      class="button button-surface button-compact"
-                      type="button"
-                      data-hcn-capability="hcn.action_plans.prepare"
-                      hidden
-                      disabled
-                    >Draft email</button>
-                    <button
-                      id="file-quick-text"
-                      class="button button-surface button-compact"
-                      type="button"
-                      data-hcn-capability="hcn.action_plans.prepare"
-                      hidden
-                      disabled
-                    >Text client</button>
-                    <button
                       id="file-actions"
                       class="button button-surface button-compact"
                       type="button"
-                      data-hcn-capability="hcn.action_plans.prepare"
-                      hidden
                       disabled
-                    >More actions</button>
+                    >More</button>
                   </div>
-                  <p class="file-now-note">
-                    Update file performs a fresh read across JobNimbus, Gmail, and
-                    Quo. It does not change anything. Notes, tasks, emails, and texts
-                    still require an exact review plan and your approval.
-                  </p>
                 </section>
+
+                <details id="file-more-panel" class="file-more-panel file-block">
+                  <summary class="file-block-heading">
+                    <span class="file-summary-copy">
+                      <strong>More file details and actions</strong>
+                      <span class="file-block-caption">
+                        Account setup and this file's live evidence are checked separately.
+                      </span>
+                    </span>
+                  </summary>
+                  <div class="file-more-content">
+                    <div class="file-more-toolbar" aria-label="Additional file actions">
+                      <button
+                        id="file-refresh"
+                        class="button button-surface button-compact"
+                        type="button"
+                      >Update file</button>
+                      <button
+                        id="file-quick-note"
+                        class="button button-surface button-compact"
+                        type="button"
+                        data-hcn-capability="hcn.action_plans.prepare"
+                        hidden
+                        disabled
+                      >Add note</button>
+                      <button
+                        id="file-quick-task"
+                        class="button button-surface button-compact"
+                        type="button"
+                        data-hcn-capability="hcn.action_plans.prepare"
+                        hidden
+                        disabled
+                      >Create task</button>
+                      <button
+                        id="file-quick-email"
+                        class="button button-surface button-compact"
+                        type="button"
+                        data-hcn-capability="hcn.action_plans.prepare"
+                        hidden
+                        disabled
+                      >Draft email</button>
+                      <button
+                        id="file-quick-text"
+                        class="button button-surface button-compact"
+                        type="button"
+                        data-hcn-capability="hcn.action_plans.prepare"
+                        hidden
+                        disabled
+                      >Text client</button>
+                    </div>
+                    <p class="file-now-note">
+                      Update file rechecks this exact file in JobNimbus, Gmail, and
+                      Quo. A linked account does not guarantee every file check will
+                      succeed. Nothing changes without a separate review and approval.
+                    </p>
+                    <div id="file-now-sources" class="file-now-sources" aria-label="Exact file source checks"></div>
+                    <div class="file-now-counts" aria-label="File work counts">
+                      <span><strong id="file-now-priority-count">0</strong>Priority</span>
+                      <span><strong id="file-now-today-count">0</strong>Today</span>
+                      <span><strong id="file-now-waiting-count">0</strong>Waiting</span>
+                    </div>
 
                 <details class="file-block file-detail" aria-labelledby="source-health-title">
                   <summary class="file-block-heading">
@@ -1466,6 +1493,8 @@
                     Prepare immutable review
                   </button>
                 </details>
+                  </div>
+                </details>
               </div>
             </section>
           </div>
@@ -1717,7 +1746,8 @@
               <p class="eyebrow">Set up once</p>
               <h2 id="connections-title">Connections</h2>
               <p>
-                Connect the work accounts HCN needs to show a complete file.
+                Link the work accounts HCN may use. Each client file is checked
+                separately when you open or update it.
               </p>
             </div>
             <div class="work-center-actions">

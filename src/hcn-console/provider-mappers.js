@@ -1035,6 +1035,7 @@ function resolveCommunicationActionStates(source, items, complete) {
 
 function responseCandidate(source, item) {
   if (source === 'gmail') {
+    if (isAutomatedJobNimbusTaskReminder(item)) return false;
     return item.deliveryState === 'received'
       || item.deliveryState === 'sent_verified';
   }
@@ -1046,6 +1047,14 @@ function responseCandidate(source, item) {
       );
   }
   return false;
+}
+
+function isAutomatedJobNimbusTaskReminder(item) {
+  const subject = String(item?.subject || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  return /^jobnimbus task reminders?(?:\b|$)/.test(subject);
 }
 
 function normalizeFreshness(input) {

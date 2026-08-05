@@ -387,7 +387,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   assert.equal(health.hcnAssistant.identity, "hcn.thresher-ai.v1");
   assert.equal(
     health.hcnAssistant.instructionsVersion,
-    "hcn.thresher-ai.instructions.v2"
+    "hcn.thresher-ai.instructions.v3"
   );
   assert.equal(health.hcnAssistant.provider, "groq_responses_api");
   assert.equal(health.hcnAssistant.model, "openai/gpt-oss-20b");
@@ -595,6 +595,10 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   assert.equal(assignedWorkSummaryResponse.status, 200);
   const assignedWorkSummary = await assignedWorkSummaryResponse.json();
+  assert.equal(
+    Object.hasOwn(assignedWorkSummary, "uiDirective"),
+    false
+  );
   assert.equal(assignedWorkSummary.message, [
     "Assigned files ready for review: 1.",
     "Source status: JobNimbus Fresh / Complete.",
@@ -650,6 +654,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const deterministicBody = await deterministicResponse.text();
   assert.equal(deterministicResponse.status, 200, deterministicBody);
   const deterministic = JSON.parse(deterministicBody);
+  assert.equal(deterministic.uiDirective, "open_work_center");
   assert.match(deterministic.message, /Assigned files ready for review: 1/);
   assert.match(deterministic.message, /Open Work My Files/);
   assert.match(deterministic.message, /Client details stay out/i);
@@ -664,6 +669,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     JSON.stringify(deterministic),
     /Assigned File Fixture|2739|assigned-file-provider-id/
   );
+  assert.equal((await readFile(providerRecordPath, "utf8")).trim(), "");
   expectedRevision = deterministic.revision;
 
   const assistantResponse = await fetch(

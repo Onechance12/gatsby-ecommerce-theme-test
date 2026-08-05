@@ -61,6 +61,14 @@ test("negated requests stay closed and chat kinds receive narrow read registries
     conversationKind: "general"
   }), []);
   assert.deepEqual(hcnAssistantAvailableToolNames({
+    prompt: "Review JobNimbus file 2739 and its policy documents.",
+    conversationKind: "general"
+  }), []);
+  assert.deepEqual(hcnAssistantAvailableToolNames({
+    prompt: "Run the management sweep and closed-file benchmark.",
+    conversationKind: "general"
+  }), []);
+  assert.deepEqual(hcnAssistantAvailableToolNames({
     prompt: "Do not check my calendar availability.",
     conversationKind: "general"
   }), []);

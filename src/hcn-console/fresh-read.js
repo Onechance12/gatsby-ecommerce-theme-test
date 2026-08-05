@@ -29,6 +29,14 @@ const SAFE_PROVIDER_ID = /^[^\s\x00-\x1f\x7f]{1,512}$/;
 const SAFE_JOB_NUMBER = /^[a-z0-9][a-z0-9._/-]{0,63}$/i;
 const SAFE_CODE = /^[a-z][a-z0-9_.-]{0,63}$/;
 const MAX_PROVIDER_ITEMS = 500;
+const OPTIONAL_SOURCE_FAILURE_CODES = Object.freeze([
+  "file_phone_missing",
+  "google_not_linked",
+  "phone_match_unverified",
+  "provider_check_failed",
+  "scope_check_failed",
+  "work_line_not_linked"
+]);
 const WORK_CENTER_STATUS_WEIGHTS = Object.freeze({
   ready_for_pa_review: 200,
   photo_file_estimate_needed: 180,
@@ -820,8 +828,13 @@ async function readOptionalSource({
   let envelope;
   try {
     envelope = await loader(request);
-  } catch {
-    return optionalUnavailable(source, generatedAt, "source_unavailable");
+  } catch (error) {
+    const safeFailureCode = OPTIONAL_SOURCE_FAILURE_CODES.includes(
+      error?.hcnSourceFailureCode
+    )
+      ? error.hcnSourceFailureCode
+      : "source_unavailable";
+    return optionalUnavailable(source, generatedAt, safeFailureCode);
   }
 
   let fresh;
@@ -898,7 +911,7 @@ function normalizeItems({
   timestampField
 }) {
   if (!Array.isArray(value)) {
-    return { items: [], droppedItems: 1 };
+    return { items: [], droppedItems: 1, omittedItems: 0 };
   }
   let droppedItems = Math.max(0, value.length - MAX_PROVIDER_ITEMS);
   const items = [];
@@ -924,10 +937,14 @@ function normalizeItems({
     const byTime = Date.parse(rightValue) - Date.parse(leftValue);
     return byTime || left.reference.localeCompare(right.reference);
   });
-  droppedItems += Math.max(0, items.length - recentLimit);
+  // `recentLimit` bounds only the presentation returned to the employee. A
+  // valid older record omitted from that view is not rejected evidence and
+  // must not make an otherwise complete provider read look partial.
+  const omittedItems = Math.max(0, items.length - recentLimit);
   return {
     items: items.slice(0, recentLimit),
-    droppedItems
+    droppedItems,
+    omittedItems
   };
 }
 

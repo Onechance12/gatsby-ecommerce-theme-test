@@ -263,6 +263,38 @@ test("draft Gmail is never verified contact or response due", () => {
   );
 });
 
+test("automated JobNimbus task reminders are system evidence, not contact or response due", () => {
+  const candidate = review();
+  candidate.recent.gmail = [{
+    reference: ref(9),
+    direction: "inbound",
+    occurredAt: "2026-07-30T09:30:00.000Z",
+    hasAttachment: false,
+    deliveryState: "received",
+    actionState: "no_action",
+    subject: "JobNimbus Task Reminders",
+    snippet: "Tasks are due."
+  }];
+  const input = adaptFreshReviewToFileEvidence({
+    review: candidate,
+    ownerRef: OWNER_REF,
+    ownerEvidenceRef: OWNER_EVIDENCE_REF,
+    ...references
+  });
+  const intelligence = deriveFileIntelligence(input);
+
+  assert.equal(
+    input.events.some(({ eventCode }) => eventCode === "reminder_generated"),
+    true
+  );
+  assert.equal(intelligence.lastMeaningfulContact, null);
+  assert.equal(
+    intelligence.workflows.communications.escalationFlags
+      .includes("response_due"),
+    false
+  );
+});
+
 test("scheduling requires a real contact channel and supported facts can make claim filing ready", () => {
   const nameOnly = review();
   nameOnly.file.adjuster = {

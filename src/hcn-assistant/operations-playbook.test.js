@@ -49,6 +49,9 @@ test("HCN assistant playbook attaches HCN workflows to a read-only model", () =>
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /absence of a match does not prove no appointment exists/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /read authority only/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Never create or store an action plan/i);
+  assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /is not proof that no communication exists/i);
+  assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Automated reminders and system-generated notices/i);
+  assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Never expose opaque HCN references/i);
   assert.match(HCN_ASSISTANT_OPERATIONS_PLAYBOOK, /Chance Brain and Jobrolo are separate systems/i);
   assert.doesNotMatch(
     HCN_ASSISTANT_OPERATIONS_PLAYBOOK,
@@ -62,7 +65,7 @@ test("Thresher AI has a fixed HCN-only model identity and no execution path", ()
     provider: "groq",
     providerApi: "groq_responses_api",
     model: "openai/gpt-oss-20b",
-    instructionsVersion: "hcn.thresher-ai.instructions.v2",
+    instructionsVersion: "hcn.thresher-ai.instructions.v3",
     providerSelectable: false,
     modelSelectable: false,
     providerStateEnabled: false,

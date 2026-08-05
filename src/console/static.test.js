@@ -390,11 +390,11 @@ test("console serves only its fixed application-shell allowlist", async () => {
   const manifest = JSON.parse(
     manifestAsset.body.toString("utf8")
   );
-  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v14/);
-  assert.match(html, /\/hcn\/app\.css\?shell=v14/);
-  assert.match(html, /\/hcn\/app\.js\?shell=v14/);
-  assert.match(html, /href="\/hcn\/\?shell=v14"/);
-  assert.equal(manifest.start_url, "/hcn/?shell=v14");
+  assert.match(html, /\/hcn\/manifest\.webmanifest\?shell=v15/);
+  assert.match(html, /\/hcn\/app\.css\?shell=v15/);
+  assert.match(html, /\/hcn\/app\.js\?shell=v15/);
+  assert.match(html, /href="\/hcn\/\?shell=v15#work-center"/);
+  assert.equal(manifest.start_url, "/hcn/?shell=v15");
   assert.equal(isPublicHcnConsoleAsset("/hcn/sign-in.css"), true);
   assert.equal(isPublicHcnConsoleAsset("/hcn/app.css"), false);
   assert.match(
@@ -680,6 +680,10 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(html, /necessary retrieved excerpts are sent[\s\S]*Groq model provider/);
   assert.match(html, /HCN makes no retention promise/);
   assert.match(html, /id="file-start-chat"/);
+  assert.match(
+    html,
+    /id="assistant-work-center-handoff"[\s\S]*href="#work-center"[\s\S]*Open My Work/
+  );
   assert.match(html, /id="assistant-mode"[\s\S]*<legend>Thinking mode<\/legend>/);
   assert.match(
     html,
@@ -735,7 +739,18 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   assert.match(script, /function selectedAssistantMode\(\)/);
   assert.match(script, /function renderAssistantPilot\(turn\)/);
   assert.doesNotMatch(script, /assistantPreparedPlanCount/);
-  assert.match(script, /keys\.length !== allowed\.size/);
+  assert.match(
+    script,
+    /hasUiDirective = Object\.hasOwn\(value, "uiDirective"\)[\s\S]*keys\.length !== allowed\.size - \(hasUiDirective \? 0 : 1\)/
+  );
+  assert.match(
+    script,
+    /hasUiDirective && value\.uiDirective !== "open_work_center"/
+  );
+  assert.match(
+    script,
+    /turn\?\.uiDirective === "open_work_center" \|\| routePointsToWorkCenter/
+  );
   assert.match(script, /value\.persisted !== true/);
   assert.match(script, /value\.cachePolicy !== "no_store"/);
   assert.match(script, /!ASSISTANT_CONVERSATION_REF\.test\(value\.conversationRef\)/);
@@ -1078,7 +1093,7 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
 
   assert.match(
     html,
-    /<span>Ask Thresher<\/span>[\s\S]*id="assistant-chats-nav"[\s\S]*<span>Chats<\/span>[\s\S]*<span>Work My Files<\/span>/
+    /<span>My Work<\/span>[\s\S]*id="assistant-chats-nav"[\s\S]*<span>Chats<\/span>[\s\S]*<span>Company Sweep<\/span>[\s\S]*<span>Admin<\/span>/
   );
   assert.match(
     html,
@@ -1114,7 +1129,7 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
   );
   assert.match(
     script,
-    /const wasActive = document\.body\.hasAttribute\([\s\S]*active[\s\S]*!wasActive[\s\S]*window\.matchMedia\(ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY\)\.matches[\s\S]*document\.documentElement\.scrollTop = 0;[\s\S]*document\.body\.scrollTop = 0;[\s\S]*document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
+    /const wasActive = document\.body\.hasAttribute\([\s\S]*if \(active && !wasActive\)[\s\S]*document\.documentElement\.scrollTop = 0;[\s\S]*document\.body\.scrollTop = 0;[\s\S]*document\.body\.toggleAttribute\("data-assistant-chat-workspace", active\)/
   );
   assert.match(
     script,
@@ -1175,6 +1190,14 @@ test("saved chats are persistent navigation and a full-height mobile workspace",
   assert.match(
     style,
     /body\[data-assistant-chat-workspace\] \.assistant-chat-files-link[\s\S]*display: inline-flex;[\s\S]*min-height: 44px/
+  );
+  assert.match(
+    style,
+    /@media \(min-width: 621px\)[\s\S]*body\[data-assistant-chat-workspace\] \.topbar,[\s\S]*display: none;[\s\S]*body\[data-assistant-chat-workspace\] \.app-layout[\s\S]*display: block;/
+  );
+  assert.match(
+    style,
+    /@media \(min-width: 621px\)[\s\S]*body\[data-assistant-chat-workspace\] \.assistant-chat-main[\s\S]*height: 100%;[\s\S]*overflow: hidden;[\s\S]*body\[data-assistant-chat-workspace\] \.assistant-transcript[\s\S]*max-height: none;[\s\S]*flex: 1 1 auto;/
   );
 });
 
@@ -1305,10 +1328,6 @@ test("responsive console contains long text and separates compact chat navigatio
     /const ASSISTANT_DRAWER_MEDIA_QUERY\s*=\s*"\(max-width: 1060px\)"\s*;/
   );
   assert.match(
-    script,
-    /const ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY\s*=\s*"\(max-width: 620px\)"\s*;/
-  );
-  assert.match(
     extractConsoleFunction(script, "initialize"),
     /const assistantDrawerMedia = window\.matchMedia\(\s*ASSISTANT_DRAWER_MEDIA_QUERY\s*\)[\s\S]*assistantDrawerMedia\.(?:addEventListener|addListener)\(/
   );
@@ -1327,8 +1346,9 @@ test("responsive console contains long text and separates compact chat navigatio
   );
   assert.match(
     mobileWorkspace,
-    /window\.matchMedia\(ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY\)\.matches/
+    /if \(active && !wasActive\)[\s\S]*document\.documentElement\.scrollTop = 0;[\s\S]*document\.body\.scrollTop = 0;/
   );
+  assert.doesNotMatch(mobileWorkspace, /ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY/);
   assert.doesNotMatch(mobileWorkspace, /ASSISTANT_DRAWER_MEDIA_QUERY/);
 
   assert.doesNotMatch(
@@ -1550,7 +1570,7 @@ test("Work Center requests remain same-origin, CSRF-bound, fresh, and memory-onl
   assert.match(worker, /self\.registration\.unregister\(\)/);
   assert.doesNotMatch(worker, /addEventListener\("fetch"/);
   assert.doesNotMatch(worker, /caches\.open|caches\.match|cache\.addAll/);
-  assert.match(script, /\/hcn\/sw\.js\?shell=v14/);
+  assert.match(script, /\/hcn\/sw\.js\?shell=v15/);
   assert.match(script, /serviceWorker\.getRegistration\("\/hcn\/"\)/);
   assert.match(script, /window\.location\.replace\(ENDPOINTS\.login\)/);
   assert.match(script, /identity\.type === "hcn_browser_session"/);
@@ -2158,9 +2178,9 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
 
   assert.match(
     html,
-    /id="overview"[\s\S]*class="assistant-view console-view is-current-view"/
+    /id="work-center"[\s\S]*class="work-center-section console-view is-current-view"/
   );
-  assert.match(html, /aria-label="HCN Work Center home"/);
+  assert.match(html, /aria-label="HCN My Work home"/);
   assert.match(html, /<strong>HCN Work Center<\/strong>/);
   assert.match(html, /Ask Thresher/);
   assert.match(html, /aria-live="polite"[\s\S]*id="home-next-action"/);
@@ -2217,11 +2237,11 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.match(script, /runtimeStatus !== "configured"/);
   assert.match(script, /function syncCapabilityAwareConsole\(\)/);
   assert.match(script, /document\.querySelectorAll\("\[data-hcn-capability\]"\)/);
-  assert.match(script, /preferredHash = "#overview"/);
+  assert.match(script, /preferredHash = "#work-center"/);
   assert.match(script, /function syncHomeGuidance\(\)/);
   assert.match(script, /document\.querySelectorAll\("\.console-view"\)/);
   assert.match(script, /document\.body\.classList\.add\("console-ready"\)/);
-  assert.match(script, /"Finish your connections"/);
+  assert.match(script, /"Finish account setup"/);
   assert.match(script, /"Open your assigned files"/);
   assert.match(script, /\{ limitPerAdjuster: 10 \}/);
   assert.match(script, /"hcn\.console\.management-sweep\.v1"/);
@@ -2355,7 +2375,11 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   assert.match(html, /id="quo-text-to"[\s\S]*placeholder="\+15551234567"/);
   assert.match(
     html,
-    /id="file-refresh"[\s\S]*>Update file<\/button>[\s\S]*id="file-start-chat"[\s\S]*>Ask Thresher<\/button>/
+    /id="file-do-next"[\s\S]*>Do this<\/button>[\s\S]*id="file-start-chat"[\s\S]*>Ask Thresher<\/button>[\s\S]*id="file-actions"[\s\S]*>More<\/button>/
+  );
+  assert.match(
+    html,
+    /id="file-more-panel"[\s\S]*id="file-refresh"[\s\S]*>Update file<\/button>/
   );
   for (const [id, label] of [
     ["file-quick-note", "Add note"],
@@ -2370,7 +2394,7 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   }
   assert.match(
     html,
-    /Update file performs a fresh read across JobNimbus, Gmail, and[\s\S]*Quo\.[\s\S]*does not change anything/i
+    /Update file rechecks this exact file in JobNimbus, Gmail, and[\s\S]*Quo\.[\s\S]*Nothing changes without a separate review and approval/i
   );
   assert.match(
     html,
@@ -2386,11 +2410,15 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   );
   assert.match(
     html,
-    /id="file-actions"[\s\S]*data-hcn-capability="hcn\.action_plans\.prepare"[\s\S]*>More actions<\/button>/
+    /id="file-actions"[\s\S]*>More<\/button>/
   );
   assert.match(
     script,
-    /elements\["file-actions"\]\.addEventListener\("click"[\s\S]*openFileActionComposer\(""\)/
+    /elements\["file-actions"\]\.addEventListener\("click", function \(\) \{\s*openFileMorePanel\(\);\s*\}\)/
+  );
+  assert.match(
+    script,
+    /window\.location\.hash = "#approvals";[\s\S]*document\.getElementById\("approvals"\)\.scrollIntoView/
   );
   const fileLoader = extractConsoleFunction(script, "loadFileReview");
   assert.match(

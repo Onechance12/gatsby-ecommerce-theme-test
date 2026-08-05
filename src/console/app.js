@@ -46,7 +46,6 @@
     "hcn.assistant.conversations.manage";
   const ASSISTANT_CONVERSATION_REF = /^conversation_[a-f0-9]{32}$/;
   const ASSISTANT_DRAWER_MEDIA_QUERY = "(max-width: 1060px)";
-  const ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY = "(max-width: 620px)";
   const CLAIM_FILE_REF = /^subject_[a-f0-9]{32}$/;
   const CLAIM_PLAN_ID = /^plan_[a-f0-9]{32}$/;
   const CLAIM_CALL_REF = /^claim_call_[a-f0-9]{32}$/;
@@ -272,6 +271,22 @@
     task_due_today: "Task is due today"
   });
 
+  const DIAGNOSTIC_NEXT_ACTIONS = new Set([
+    "refresh_source",
+    "manual_source_review"
+  ]);
+
+  const NEXT_ACTION_LABELS = Object.freeze({
+    fulfill_open_promise: "Complete the promised follow-up",
+    manual_conflict_review: "Resolve conflicting file information",
+    manual_source_review: "Review unavailable file data",
+    obtain_required_document: "Get the missing document",
+    obtain_required_fact: "Get the missing information",
+    refresh_source: "Recheck file data",
+    review_document: "Review the document",
+    review_overdue_task: "Review the overdue task"
+  });
+
   const STATUS_WORKFLOW_LABELS = Object.freeze({
     need_paperwork_info: "Estimating workflow",
     photo_file_estimate_needed: "Estimating workflow",
@@ -347,6 +362,7 @@
     workCenterOffset: 0,
     selectedFileRef: null,
     fileReview: null,
+    primaryFileAction: null,
     workCenterLoading: false,
     fileLoading: false,
     workCenterController: null,
@@ -534,6 +550,7 @@
       "management-sweep-exclusion-list",
       "work-center-summary",
       "work-center-status",
+      "work-center-next-file",
       "work-center-refresh",
       "work-center-sign-in",
       "work-center-alert",
@@ -552,8 +569,10 @@
       "file-name",
       "file-stage",
       "file-evidence-status",
+      "file-do-next",
       "file-start-chat",
       "file-actions",
+      "file-more-panel",
       "file-refresh",
       "file-quick-note",
       "file-quick-task",
@@ -838,6 +857,10 @@
     elements["work-center-refresh"].addEventListener("click", function () {
       loadWorkCenter({ resetFile: true, offset: 0 });
     });
+    elements["work-center-next-file"].addEventListener(
+      "click",
+      openNextWorkFile
+    );
     elements["work-center-previous"].addEventListener("click", function () {
       const page = record(record(state.workCenter).page);
       const currentOffset = Number.isInteger(page.offset)
@@ -858,12 +881,12 @@
     elements["file-refresh"].addEventListener("click", function () {
       if (state.selectedFileRef) loadFileReview(state.selectedFileRef);
     });
-    elements["file-start-chat"].addEventListener(
-      "click",
-      startSelectedFileConversation
-    );
+    elements["file-do-next"].addEventListener("click", doPrimaryFileAction);
+    elements["file-start-chat"].addEventListener("click", function () {
+      startSelectedFileConversation();
+    });
     elements["file-actions"].addEventListener("click", function () {
-      openFileActionComposer("");
+      openFileMorePanel();
     });
     elements["file-quick-note"].addEventListener("click", function () {
       openFileActionComposer("jobnimbus.create_note");
@@ -1090,10 +1113,10 @@
     if (state.googleCallbackOutcome && hasConnectorReadAuthority()) {
       preferredHash = "#connections";
     } else if (!preferredHash) {
-      preferredHash = "#overview";
+      preferredHash = "#work-center";
     }
 
-    if (!allowedHashes.has(preferredHash)) preferredHash = "#overview";
+    if (!allowedHashes.has(preferredHash)) preferredHash = "#work-center";
     const preferredSection = document.getElementById(preferredHash.slice(1));
     if (!preferredSection || preferredSection.hidden) {
       preferredHash = hasWorkCenterAuthority() ? "#work-center" : "#overview";
@@ -1116,7 +1139,7 @@
   }
 
   function syncActiveNavigation() {
-    const hash = window.location.hash || "#overview";
+    const hash = window.location.hash || "#work-center";
     const links = Array.from(
       document.querySelectorAll(".primary-nav a.nav-item")
     ).filter(function (link) {
@@ -1127,9 +1150,13 @@
     });
     const activeLink = exact || links[0] || null;
     setActiveNavigation(activeLink);
+    const adminNavigation = document.querySelector(".nav-admin");
+    if (adminNavigation) {
+      adminNavigation.open = Boolean(activeLink?.closest(".nav-admin"));
+    }
     const activeHash = activeLink
       ? activeLink.getAttribute("href")
-      : "#overview";
+      : "#work-center";
     if (activeHash !== "#overview" && state.assistantDrawerOpen) {
       toggleAssistantDrawer(false, { restoreFocus: false });
     }
@@ -1216,7 +1243,7 @@
       connectionsNeedSetup = connectedCount < 3;
       badge(
         elements["home-connections-status"],
-        connectedCount === 3 ? "All connected" : connectedCount + " of 3 connected",
+        connectedCount === 3 ? "All set up" : connectedCount + " of 3 set up",
         connectedCount === 3 ? "good" : "warn"
       );
     } else {
@@ -1232,10 +1259,10 @@
       return;
     }
     if (connectionsNeedSetup) {
-      setText(elements["home-next-action"], "Finish your connections");
+      setText(elements["home-next-action"], "Finish account setup");
       setText(
         elements["home-next-detail"],
-        "Open Connections to see which work account needs attention."
+        "Open Admin, then Connections, to see which work account needs attention."
       );
       return;
     }
@@ -2075,11 +2102,7 @@
     const wasActive = document.body.hasAttribute(
       "data-assistant-chat-workspace"
     );
-    if (
-      active
-      && !wasActive
-      && window.matchMedia(ASSISTANT_MOBILE_WORKSPACE_MEDIA_QUERY).matches
-    ) {
+    if (active && !wasActive) {
       document.documentElement.scrollTop = 0;
       document.body.scrollTop = 0;
     }
@@ -2848,19 +2871,69 @@
     await createAssistantConversation({ kind: kind, title: title, fileRef: "" });
   }
 
-  async function startSelectedFileConversation() {
+  async function startSelectedFileConversation(options) {
     const selected = selectedFreshWorkCenterFile();
-    if (!selected || !navigator.onLine) return;
+    if (!selected || !navigator.onLine) return null;
     const reviewed = record(state.fileReview).file;
     const file = reviewed?.fileRef === selected.fileRef ? reviewed : selected;
     const title = boundedString(
       [file.displayName, file.jobNumber].filter(Boolean).join(" · "),
       120
     ).trim() || "Client file chat";
-    await createAssistantConversation({
+    const conversation = await createAssistantConversation({
       kind: "file",
       title: title,
       fileRef: state.selectedFileRef
+    });
+    const starter = boundedString(options?.starter, 4000).trim();
+    if (conversation && starter) {
+      elements["assistant-prompt"].value = starter;
+      elements["assistant-prompt"].focus();
+    }
+    return conversation;
+  }
+
+  async function doPrimaryFileAction() {
+    const action = record(state.primaryFileAction);
+    if (!action.actionCode || elements["file-do-next"].disabled) return;
+    const actionType = primaryFileComposerType(action);
+    if (actionType && hasActionPrepareAuthority()) {
+      openFileMorePanel();
+      openFileActionComposer(actionType);
+      return;
+    }
+    await startSelectedFileConversation({
+      starter: primaryFileActionPrompt(action)
+    });
+  }
+
+  function primaryFileComposerType(action) {
+    if (action.actionCode === "review_overdue_task") {
+      return "jobnimbus.update_task";
+    }
+    if (
+      action.actionCode === "obtain_required_fact"
+      && action.targetCode === "date_of_loss"
+    ) {
+      return "jobnimbus.update_contact";
+    }
+    return "";
+  }
+
+  function primaryFileActionPrompt(action) {
+    return "Help me complete the next move on this file: "
+      + primaryFileActionTitle(action)
+      + ". Review the fresh evidence first and tell me the safest exact action.";
+  }
+
+  function openFileMorePanel() {
+    if (!state.fileReview || elements["file-actions"].disabled) return;
+    elements["file-more-panel"].open = true;
+    elements["file-more-panel"].scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth"
     });
   }
 
@@ -3244,8 +3317,8 @@
     );
     elements["assistant-connection-calendar"].title =
       calendar === "connected"
-        ? "Google Calendar is linked for Thresher's read-only day and assigned-file scheduling checks."
-        : "Open Connections to link Google Calendar.";
+        ? "Google Calendar is linked. Each assigned-file scheduling check still runs separately."
+        : "Open Admin, then Connections, to link Google Calendar.";
     setAssistantConnectionChip(
       elements["assistant-connection-quo"],
       "Quo",
@@ -3266,7 +3339,7 @@
     const checking = !status;
     setText(
       element,
-      label + (connected ? " ready" : checking ? " checking" : " needs setup")
+      label + (connected ? " linked" : checking ? " checking" : " needs setup")
     );
     element.dataset.status = connected ? "connected" : "attention";
   }
@@ -3487,13 +3560,13 @@
         upsertAssistantConversation(updated);
         renderAssistantConversationList();
         renderAssistantPilot(turn);
-        renderAssistantWorkCenterHandoff(turn);
         notice(
           elements["assistant-alert"],
           "Thresher finished the read-only review.",
           "good"
         );
         await loadAssistantConversation(turn.conversationRef);
+        renderAssistantWorkCenterHandoff(turn);
       } else {
         const original = (Array.isArray(state.assistantConversations)
           ? state.assistantConversations
@@ -3585,7 +3658,8 @@
       "message",
       "plan",
       "sources",
-      "routing"
+      "routing",
+      "uiDirective"
     ]);
     const authority = record(value.authority);
     const allowedAuthority = new Set([
@@ -3597,14 +3671,16 @@
       "exactHumanApprovalRequired"
     ]);
     const keys = Object.keys(value);
+    const hasUiDirective = Object.hasOwn(value, "uiDirective");
     const authorityKeys = Object.keys(authority);
     const routing = normalizeAssistantRouting(value.routing);
     const sources = normalizeAssistantSources(value.sources);
     if (
-      keys.length !== allowed.size
+      keys.length !== allowed.size - (hasUiDirective ? 0 : 1)
       || keys.some(function (key) {
         return !allowed.has(key);
       })
+      || (hasUiDirective && value.uiDirective !== "open_work_center")
       || authorityKeys.length !== allowedAuthority.size
       || authorityKeys.some(function (key) {
         return !allowedAuthority.has(key);
@@ -3643,7 +3719,8 @@
       message: message,
       planId: "",
       sourceCount: sources.length,
-      routing: routing
+      routing: routing,
+      uiDirective: hasUiDirective ? value.uiDirective : ""
     };
   }
 
@@ -3760,13 +3837,14 @@
     const reasons = Array.isArray(turn?.routing?.reasonCodes)
       ? turn.routing.reasonCodes
       : [];
-    elements["assistant-work-center-handoff"].hidden = !reasons.some(
-      function (reason) {
-        return [
-          "fact_only_general_work_center_summary",
-          "fact_only_assigned_work_summary"
-        ].includes(reason);
-      }
+    const routePointsToWorkCenter = reasons.some(function (reason) {
+      return [
+        "fact_only_general_work_center_summary",
+        "fact_only_assigned_work_summary"
+      ].includes(reason);
+    });
+    elements["assistant-work-center-handoff"].hidden = !(
+      turn?.uiDirective === "open_work_center" || routePointsToWorkCenter
     );
   }
 
@@ -5352,31 +5430,34 @@
 
     renderConnectionBadge(
       elements["jobnimbus-connection-status"],
-      connections.jobNimbus.status
+      connections.jobNimbus.status,
+      "Configured"
     );
     setText(
       elements["jobnimbus-connection-detail"],
       connections.jobNimbus.status === "connected"
-        ? "Connected with assigned-file scope."
+        ? "Configured for assigned-file scope. Each file is checked separately when opened."
         : "Your assigned JobNimbus identity is unavailable."
     );
 
     renderConnectionBadge(
       elements["google-connection-status"],
-      connections.google.status
+      connections.google.status,
+      "Linked"
     );
     setText(
       elements["google-gmail-status"],
-      connectionStatusLabel(connections.google.gmail)
+      connectionStatusLabel(connections.google.gmail, "Linked")
     );
     setText(
       elements["google-calendar-status"],
-      connectionStatusLabel(connections.google.calendar)
+      connectionStatusLabel(connections.google.calendar, "Linked")
     );
 
     renderConnectionBadge(
       elements["quo-connection-status"],
-      connections.quo.status
+      connections.quo.status,
+      "Linked"
     );
     const line = connections.quo.line;
     const lineDetail = line
@@ -5395,21 +5476,26 @@
     notice(
       elements["connections-alert"],
       connections.generatedAt
-        ? "Connection status checked " + readableDateTime(connections.generatedAt) + "."
-        : "Connection status is current for this session.",
+        ? "Account setup checked " + readableDateTime(connections.generatedAt)
+          + ". Exact-file availability is checked separately."
+        : "Account setup is current. Exact-file availability is checked separately.",
       "good"
     );
     syncAssistantConnectionStrip();
     syncConnectionControls();
   }
 
-  function renderConnectionBadge(element, status) {
-    badge(element, connectionStatusLabel(status), connectionStatusTone(status));
+  function renderConnectionBadge(element, status, connectedLabel) {
+    badge(
+      element,
+      connectionStatusLabel(status, connectedLabel),
+      connectionStatusTone(status)
+    );
   }
 
-  function connectionStatusLabel(status) {
-    if (status === "connected") return "Connected";
-    if (status === "not_connected") return "Not connected";
+  function connectionStatusLabel(status, connectedLabel) {
+    if (status === "connected") return connectedLabel || "Linked";
+    if (status === "not_connected") return "Not linked";
     return "Unavailable";
   }
 
@@ -7856,6 +7942,7 @@
     }
 
     elements["work-center-list"].setAttribute("aria-busy", "true");
+    elements["work-center-next-file"].disabled = true;
     elements["work-center-refresh"].disabled = true;
     elements["work-center-previous"].disabled = true;
     elements["work-center-next"].disabled = true;
@@ -7891,6 +7978,7 @@
         return;
       }
       state.workCenter = null;
+      elements["work-center-next-file"].disabled = true;
       badge(elements["work-center-status"], "Unavailable", "bad");
       notice(
         elements["work-center-alert"],
@@ -7921,6 +8009,10 @@
         elements["work-center-refresh"].disabled = false;
         elements["work-center-previous"].disabled = false;
         elements["work-center-next"].disabled = false;
+        elements["work-center-next-file"].disabled = !(
+          Array.isArray(record(state.workCenter).files)
+          && state.workCenter.files.length
+        );
         syncHomeGuidance();
       }
     }
@@ -8022,6 +8114,7 @@
     );
     elements["work-center-previous"].hidden = offset === 0;
     elements["work-center-next"].hidden = !workCenter.page.hasMore;
+    elements["work-center-next-file"].disabled = files.length === 0;
     setText(
       elements["work-center-freshness"],
       "Fresh JobNimbus check " + readableDateTime(workCenter.generatedAt) +
@@ -8055,6 +8148,15 @@
     });
     elements["work-center-list"].replaceChildren(fragment);
     refreshManagementSweepFileLinks();
+  }
+
+  function openNextWorkFile() {
+    const files = Array.isArray(record(state.workCenter).files)
+      ? state.workCenter.files
+      : [];
+    const next = files[0];
+    if (!next || state.workCenterLoading || state.fileLoading) return;
+    loadFileReview(next.fileRef);
   }
 
   function refreshManagementSweepFileLinks() {
@@ -8192,9 +8294,12 @@
     elements["work-center-workspace"].dataset.fileOpen = "true";
     elements["file-placeholder"].hidden = true;
     elements["file-review"].hidden = false;
+    elements["file-more-panel"].open = false;
     document.querySelectorAll("#file-review .file-detail").forEach(function (detail) {
       detail.open = false;
     });
+    state.primaryFileAction = null;
+    elements["file-do-next"].disabled = true;
     elements["file-refresh"].disabled = true;
     elements["file-start-chat"].disabled = true;
     elements["file-actions"].disabled = true;
@@ -8224,6 +8329,8 @@
     state.fileLoading = false;
     state.selectedFileRef = null;
     state.fileReview = null;
+    state.primaryFileAction = null;
+    elements["file-do-next"].disabled = true;
     elements["file-start-chat"].disabled = true;
     elements["file-actions"].disabled = true;
     elements["work-center-workspace"].removeAttribute("data-file-open");
@@ -8236,6 +8343,8 @@
   }
 
   function purgeFileReviewDom() {
+    state.primaryFileAction = null;
+    elements["file-do-next"].disabled = true;
     elements["file-start-chat"].disabled = true;
     elements["file-actions"].disabled = true;
     setText(elements["file-job-number"], "No file selected");
@@ -8504,14 +8613,14 @@
     const complete = review.evidenceStatus === "complete";
     badge(
       elements["file-evidence-status"],
-      complete ? "Evidence complete" : "Evidence partial",
-      complete ? "good" : "neutral"
+      complete ? "File data checked" : "Some file data missing",
+      complete ? "good" : "warn"
     );
     notice(
       elements["file-alert"],
       complete
-        ? "Fresh evidence is complete across JobNimbus, Gmail, and Quo."
-        : "Fresh JobNimbus detail is available; one or more optional sources are incomplete.",
+        ? "This exact file was checked in JobNimbus, Gmail, and Quo."
+        : "The main file loaded, but one or more exact-file checks could not be completed.",
       complete ? "good" : "warn"
     );
     setText(
@@ -8544,15 +8653,14 @@
   function renderFileNow(review) {
     const file = review.file;
     const intelligence = review.intelligence;
-    const actions = intelligence.nextRequiredActions.slice(0, 3);
-    const firstAction = actions[0];
+    const actions = intelligence.nextRequiredActions;
+    const firstAction = selectPrimaryFileAction(actions);
+    state.primaryFileAction = firstAction;
+    elements["file-do-next"].disabled = !firstAction;
     setText(
       elements["file-now-summary"],
       firstAction
-        ? humanize(firstAction.actionCode)
-          + (firstAction.targetCode
-            ? " - " + humanize(firstAction.targetCode)
-            : "")
+        ? primaryFileActionTitle(firstAction)
         : humanize(file.statusCode || "active file")
           + " - " + fileStageLabel(file)
     );
@@ -8577,7 +8685,13 @@
       setText(
         chip,
         (name === "jobnimbus" ? "JobNimbus" : name === "gmail" ? "Gmail" : "Quo")
-          + " " + (complete ? "ready" : unavailable ? "unavailable" : "partial")
+          + " " + (
+            complete
+              ? "checked"
+              : unavailable
+                ? "could not be checked"
+                : "some items skipped"
+          )
       );
       sourceFragment.append(chip);
     });
@@ -8586,7 +8700,7 @@
     setText(elements["file-now-today-count"], String(review.lanes.today.length));
     setText(elements["file-now-waiting-count"], String(review.lanes.waiting.length));
 
-    if (!actions.length) {
+    if (!firstAction) {
       renderRecentEmpty(
         elements["file-now-next"],
         "No next step is proven by the current evidence. Ask Thresher to review the gaps."
@@ -8594,26 +8708,44 @@
       return;
     }
     const actionFragment = document.createDocumentFragment();
-    actions.forEach(function (action) {
-      const item = document.createElement("div");
-      const title = document.createElement("strong");
-      const detail = document.createElement("span");
-      item.className = "file-now-next-item";
-      setText(
-        title,
-        humanize(action.actionCode)
-          + (action.targetCode ? ": " + humanize(action.targetCode) : "")
-      );
-      setText(
-        detail,
-        action.dueAt
-          ? "Due " + readableDateTime(action.dueAt)
-          : humanize(action.urgency || "review")
-      );
-      item.append(title, detail);
-      actionFragment.append(item);
-    });
+    const item = document.createElement("div");
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    item.className = "file-now-next-item";
+    setText(title, primaryFileActionTitle(firstAction));
+    setText(
+      detail,
+      firstAction.dueAt
+        ? "Due " + readableDateTime(firstAction.dueAt)
+        : primaryFileActionDetail(firstAction)
+    );
+    item.append(title, detail);
+    actionFragment.append(item);
     elements["file-now-next"].replaceChildren(actionFragment);
+  }
+
+  function selectPrimaryFileAction(actions) {
+    const candidates = Array.isArray(actions) ? actions : [];
+    return candidates.find(function (action) {
+      return !DIAGNOSTIC_NEXT_ACTIONS.has(action.actionCode);
+    }) || candidates[0] || null;
+  }
+
+  function primaryFileActionTitle(action) {
+    const label = NEXT_ACTION_LABELS[action.actionCode]
+      || "Review the next file step";
+    return action.targetCode
+      ? label + ": " + humanize(action.targetCode)
+      : label;
+  }
+
+  function primaryFileActionDetail(action) {
+    if (DIAGNOSTIC_NEXT_ACTIONS.has(action.actionCode)) {
+      return "File data needs another check";
+    }
+    if (action.urgency === "urgent") return "Needs attention now";
+    if (action.urgency === "high") return "Needs attention";
+    return "Ready to work";
   }
 
   function renderSourceHealth(sources) {
@@ -8640,11 +8772,13 @@
       setText(
         detail,
         complete
-          ? source.acceptedItems + " recent item" +
-            (source.acceptedItems === 1 ? "" : "s") + " accepted"
-          : humanize(
-              source.failureCode || source.completeness || "source incomplete"
-            )
+          ? "Checked for this file"
+          : unavailable
+            ? "Could not check this source for the selected file"
+            : source.droppedItems
+              ? source.droppedItems + " item" +
+                (source.droppedItems === 1 ? " was" : "s were") + " skipped"
+              : "Some file data could not be confirmed"
       );
       top.append(title, dot);
       item.append(top, detail);
@@ -9128,6 +9262,7 @@
     ) {
       return;
     }
+    elements["file-more-panel"].open = true;
     if (type) {
       const option = Array.from(elements["action-type"].options).find(
         function (candidate) { return candidate.value === type; }
@@ -10060,6 +10195,8 @@
         "Immutable review prepared. Nothing has been executed.",
         "good"
       );
+      window.location.hash = "#approvals";
+      syncActiveNavigation();
       document.getElementById("approvals").scrollIntoView({ block: "start" });
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -11734,7 +11871,7 @@
       navigator.serviceWorker.getRegistration("/hcn/").then(function (registration) {
         if (!registration) return null;
         return navigator.serviceWorker.register(
-          "/hcn/sw.js?shell=v14",
+          "/hcn/sw.js?shell=v15",
           { scope: "/hcn/" }
         );
       }).catch(function () {
