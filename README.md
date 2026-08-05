@@ -26,9 +26,12 @@ transport is unavailable.
 
 ## Safety
 
-- HCN Operations Brain and Jobrolo are permanently separate from Chance Brain.
+- HCN Operations Brain, Jobrolo, and Chance Brain remain separate systems.
   The HCN/JobNimbus surface has no Chance Brain route, capability, credential,
-  import, fallback, or data flow. Existing legacy-v1 client-memory files remain
+  import, fallback, or data flow. Jobrolo has only the narrow, dedicated,
+  signed Thresher adapter defined by ADR 003; it receives no HCN/provider
+  credential, shared database, backup, broad route, or caller-selected HCN
+  identity. Existing legacy-v1 client-memory files remain
   untouched and quarantined; they are not readable or trusted by HCN,
   JobNimbus tools, Custom GPT actions, or local operators.
 - Thresher's isolated HCN Operations Brain provides versioned contracts,

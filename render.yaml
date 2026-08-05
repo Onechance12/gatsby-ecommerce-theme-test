@@ -43,6 +43,18 @@ services:
       # Isolated HCN-only identity, storage, and Thresher operational state.
       - key: HCN_SERVICE_NAME
         value: hcn-operations-platform
+      # Narrow, signed Jobrolo -> HCN seam. Jobrolo receives no provider
+      # credentials or broad bridge token, and the caller cannot select the
+      # HCN principal. Actions still require the exact Jobrolo approval
+      # attestation plus HCN's private one-use challenge and durable receipt.
+      - key: HCN_JOBROLO_ADAPTER_ENABLED
+        value: "true"
+      - key: HCN_JOBROLO_CLIENT_ID
+        value: jobrolo-production
+      - key: HCN_JOBROLO_SHARED_SECRET
+        sync: false
+      - key: HCN_JOBROLO_PRINCIPAL_EMAIL
+        value: cpearson@wavepa.com
       - key: HCN_OPERATIONS_ROOT
         value: /var/data/hcn-operations
       - key: HCN_THRESHER_ENABLED

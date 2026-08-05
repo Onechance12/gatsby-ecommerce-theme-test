@@ -1,6 +1,7 @@
 # ADR 001: Permanent HCN System Boundaries
 
-- Status: Accepted and enforced on HCN operational surfaces; legacy-v1 storage
+- Status: Accepted and enforced on HCN operational surfaces; amended only by
+  the narrow signed owner-pilot adapter in ADR 003; legacy-v1 storage
   quarantine remediation pending
 - Decision date: 2026-07-28
 - Applies to: Home Claim Network bridge, operator clients, Work Center,
@@ -9,7 +10,8 @@
 ## Decision
 
 Chance Brain, HCN Operations Brain, and Jobrolo are three independent systems.
-This separation is permanent. They must never share:
+This separation is permanent. Except for the dedicated signed delegation
+contract defined in ADR 003, they must never share:
 
 - storage, databases, tables, object buckets, disks, or filesystem roots;
 - credentials, signing keys, bearer tokens, OAuth grants, service accounts, or
@@ -21,7 +23,9 @@ This separation is permanent. They must never share:
   client snapshots, or learned state.
 
 There is no synchronization, federation, migration, fallback, or
-"temporarily shared" path between the three systems.
+"temporarily shared" path between the three systems. ADR 003 is a bounded API
+delegation into HCN authority, not shared storage, credentials, code, memory,
+or provider access.
 
 ## Current implementation state
 
@@ -108,7 +112,9 @@ Jobrolo is a separate commercial CRM product. It is not an HCN bridge module,
 data source, fallback, prototype database, or shared library. HCN code may not
 import from Jobrolo, and Jobrolo code may not import from HCN. Similar business
 concepts must be implemented independently behind each product's own contracts,
-credentials, storage, tests, releases, and backups.
+credentials, storage, tests, releases, and backups. The only exception is the
+fixed-principal, signed server-to-server Thresher adapter specified in ADR 003;
+that adapter delegates to these HCN controls and does not weaken them.
 
 ## Allowed HCN data flow
 
@@ -128,7 +134,10 @@ capabilities:
    minimized receipt reference.
 8. Fresh provider readback reconciles the outcome.
 
-Neither Chance Brain nor Jobrolo participates in this flow.
+Chance Brain never participates in this flow. Jobrolo may request the bounded
+ADR 003 owner-pilot delegation, but HCN still owns identity, assigned-file
+scope, provider credentials, private approval challenge, execution, receipt,
+and readback at every step.
 
 ## Isolation invariants
 

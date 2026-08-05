@@ -644,6 +644,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "#/components/schemas/PlatformSessionResponse"
   );
   assert.equal(schema.components.schemas.PlatformMetadataResponse.additionalProperties, false);
+  assert.deepEqual(
+    schema.components.schemas.PlatformMetadataResponse.properties.boundaries
+      .properties.jobrolo.enum,
+    ["disconnected", "narrow_signed_thresher_adapter"]
+  );
   assert.equal(schema.components.schemas.PlatformSessionResponse.additionalProperties, false);
   assert.equal(schema.components.schemas.PlatformRuntimeStatus.additionalProperties, false);
   assert.equal(

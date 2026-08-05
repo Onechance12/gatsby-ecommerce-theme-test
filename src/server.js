@@ -266,6 +266,17 @@ import {
   projectThresherRuntimeConfiguration
 } from "./hcn-ops/thresher/runtime-config.js";
 import { fetchBoundedJson } from "./http/bounded-json.js";
+import {
+  createJobroloHcnAuthenticator,
+  isJobroloHcnRoute,
+  loadJobroloHcnIntegrationConfiguration
+} from "./integrations/jobrolo-service-auth.js";
+import {
+  jobroloHcnResponse,
+  validateJobroloActionExecuteInput,
+  validateJobroloAssistantTurnInput,
+  validateJobroloReceiptDetailInput
+} from "./integrations/jobrolo-contracts.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -528,6 +539,45 @@ const QUO_API_KEY = process.env.QUO_API_KEY || "";
 const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
 const ALLOW_QUO_SEND = RELEASE_GATES.ALLOW_QUO_SEND;
+const HCN_JOBROLO_CONFIGURATION =
+  loadJobroloHcnIntegrationConfiguration(process.env, {
+    disallowedSecrets: [
+      ["JOBNIMBUS_API_KEY", API_KEY],
+      ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+      ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+      ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+      ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+      ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
+      ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
+      ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
+      ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
+      ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
+      ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
+      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
+      ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
+      ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
+      ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
+      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY],
+      ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+      ["QUO_API_KEY", QUO_API_KEY],
+      ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
+      ["RETELL_API_KEY", RETELL_API_KEY],
+      ["RETELL_INBOUND_WEBHOOK_TOKEN", process.env.RETELL_INBOUND_WEBHOOK_TOKEN || ""],
+      ["VOICE_STREAM_TOKEN", process.env.VOICE_STREAM_TOKEN || ""],
+      ["OPENAI_API_KEY", OPENAI_API_KEY]
+    ].map(([name, value]) => ({ name, value }))
+  });
+const HCN_JOBROLO_AUTHENTICATOR = createJobroloHcnAuthenticator({
+  configuration: HCN_JOBROLO_CONFIGURATION
+});
+if (
+  HCN_JOBROLO_CONFIGURATION.ready
+  && HCN_JOBROLO_CONFIGURATION.principalEmail !== CHANCE_GOOGLE_EMAIL
+) {
+  throw new Error(
+    "The owner-pilot Jobrolo adapter principal must exactly match CHANCE_GOOGLE_EMAIL."
+  );
+}
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
@@ -1000,6 +1050,16 @@ const routes = new Map([
   ["POST /quo/send", quoSend]
 ]);
 
+const HCN_JOBROLO_ROUTES = new Map([
+  ["POST /integrations/jobrolo/v1/status", jobroloHcnStatus],
+  ["POST /integrations/jobrolo/v1/work-center", hcnReadWorkCenter],
+  ["POST /integrations/jobrolo/v1/file-review", hcnReadFile],
+  ["POST /integrations/jobrolo/v1/assistant/turn", jobroloHcnAssistantTurn],
+  ["POST /integrations/jobrolo/v1/action-plans/prepare", hcnPrepareActionPlan],
+  ["POST /integrations/jobrolo/v1/action-plans/execute", jobroloHcnExecuteActionPlan],
+  ["POST /integrations/jobrolo/v1/action-receipts/detail", jobroloHcnReadActionReceipt]
+]);
+
 await hydrateHcnIdentityPins();
 
 const server = createServer(async (req, res) => {
@@ -1088,6 +1148,37 @@ const server = createServer(async (req, res) => {
         });
         return res.end(consoleAsset.body);
       }
+    }
+    if (isJobroloHcnRoute(url.pathname)) {
+      const integrationHandler = HCN_JOBROLO_ROUTES.get(
+        `${req.method} ${url.pathname}`
+      );
+      if (!integrationHandler) {
+        return send(res, 404, { error: "Not found" });
+      }
+      assertJobroloHcnContentType(req);
+      const body = await readJson(req, HCN_ACTION_PREPARE_BODY_BYTES);
+      const verified = HCN_JOBROLO_AUTHENTICATOR.authenticate({
+        method: req.method,
+        pathname: url.pathname,
+        headers: req.headers,
+        body
+      });
+      const authentication =
+        await authenticateJobroloHcnPrincipal(verified);
+      const result = await REQUEST_CONTEXT.run(
+        authentication,
+        () => integrationHandler(verified.input)
+      );
+      return send(
+        res,
+        200,
+        jobroloHcnResponse(verified.requestId, result),
+        {
+          ...hcnNoStoreSecurityHeaders(),
+          vary: "Authorization"
+        }
+      );
     }
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
@@ -1402,7 +1493,9 @@ function health() {
         ),
       providerTokensExposedToBrowser: false,
       chanceBrainDataFlow: false,
-      jobroloDataFlow: false,
+      jobroloDataFlow:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured(),
       loginAdmission: HCN_CONSOLE_LOGIN_ADMISSION.stats()
     },
     codexOperator: {
@@ -1486,6 +1579,26 @@ function health() {
       automaticRetry: false,
       prepareAdmission: HCN_ACTION_PREPARE_ADMISSION.stats(),
       executeAdmission: HCN_ACTION_EXECUTE_ADMISSION.stats()
+    },
+    jobroloAdapter: {
+      enabled: HCN_JOBROLO_CONFIGURATION.enabled === true,
+      ready:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured(),
+      authentication:
+        "dedicated_hmac_timestamp_nonce_body_hash",
+      principalMode: "fixed_server_side_approved_employee",
+      principalSelectableByCaller: false,
+      fileScope: "assigned_only",
+      assistant: "existing_thresher_read_only_runtime",
+      actionPreparation: "existing_hcn_exact_plan",
+      actionExecution:
+        "jobrolo_exact_approval_attestation_plus_private_hcn_challenge",
+      durableHcnReceiptAndReadback: true,
+      automaticExecution: false,
+      providerCredentialsExposed: false,
+      claimFilingExposed: false,
+      legacyTokensAccepted: false
     },
     hcnAssistant: {
       identity: THRESHER_AI_RUNTIME.identity,
@@ -2049,11 +2162,11 @@ function hcnGooglePrincipalRef(googleSubject) {
 function currentHcnGooglePrincipalRef() {
   const context = currentRequestAuthentication();
   if (
-    context?.authenticationMethod !== "hcn_cookie"
+    !isHcnEmployeeSessionContext(context, currentRequestIdentity())
     || !context.hcnSession?.googleSubject
   ) {
     const error = new Error(
-      "HCN browser session authentication is required."
+      "HCN employee authentication is required."
     );
     error.statusCode = 403;
     throw error;
@@ -3098,6 +3211,28 @@ async function hcnConnectorStatus(input = {}) {
     google,
     quo
   };
+}
+
+async function jobroloHcnStatus(input = {}) {
+  const connectors = await hcnConnectorStatus(input);
+  return Object.freeze({
+    ...connectors,
+    adapter: Object.freeze({
+      status: HCN_JOBROLO_CONFIGURATION.ready ? "connected" : "unavailable",
+      principalMode: "fixed_server_side",
+      fileScope: "assigned_only",
+      thresherAssistant: hcnAssistantConfigured()
+        ? "connected"
+        : "unavailable",
+      actions: (
+        ALLOW_WRITES
+        && HCN_ACTION_EXECUTION_ENABLED
+        && HCN_ACTION_RECEIPT_STORE_PATH
+      ) ? "approval_gated" : "unavailable",
+      claimFilingExposed: false,
+      providerCredentialsExposed: false
+    })
+  });
 }
 
 async function hcnGoogleConnectorDisconnect(input = {}) {
@@ -4787,8 +4922,10 @@ async function hcnReadCalendarDay(input = {}) {
 
 async function hcnAssistantCalendarAccessToken() {
   if (
-    currentRequestAuthentication()?.authenticationMethod
-      !== "hcn_cookie"
+    !isHcnEmployeeSessionContext(
+      currentRequestAuthentication(),
+      currentRequestIdentity()
+    )
   ) {
     const error = new Error(
       "The employee Google Calendar connector is required."
@@ -5538,6 +5675,23 @@ async function hcnAssistantTurn(input = {}) {
       }
     )
   );
+}
+
+async function jobroloHcnAssistantTurn(input = {}) {
+  const request = validateJobroloAssistantTurnInput(input);
+  const created = await hcnCreateAssistantConversation({
+    kind: request.kind,
+    title: request.kind === "general"
+      ? HCN_GENERAL_CONVERSATION_TITLE
+      : "Jobrolo exact-file conversation",
+    fileRef: request.fileRef
+  });
+  return hcnAssistantTurn({
+    conversationRef: created.conversation.conversationRef,
+    expectedRevision: created.conversation.revision,
+    prompt: request.prompt,
+    mode: request.mode
+  });
 }
 
 function validateHcnAssistantTurnInput(input) {
@@ -8043,6 +8197,20 @@ async function hcnExecuteActionPlan(input = {}) {
   );
 }
 
+async function jobroloHcnExecuteActionPlan(input = {}) {
+  const planRequest = validateJobroloReceiptDetailInput({
+    planId: input?.planId
+  });
+  const pending = HCN_PENDING_ACTION_PLANS.get({
+    sessionBinding: hcnActionSessionBinding(),
+    planId: planRequest.planId
+  });
+  const approved = validateJobroloActionExecuteInput(input, {
+    plan: pending
+  });
+  return hcnExecuteActionPlan({ planId: approved.planId });
+}
+
 function hcnListActionReceipts(input = {}) {
   assertHcnActionSession();
   validateHcnBrowserActionListInput(input);
@@ -8063,14 +8231,23 @@ function hcnReadActionReceipt(input = {}) {
   return hcnActionEnvelope({ receipt });
 }
 
+function jobroloHcnReadActionReceipt(input = {}) {
+  const request = validateJobroloReceiptDetailInput(input);
+  return hcnReadActionReceipt(request);
+}
+
 function hcnActionEnvelope(value) {
+  const delegated = currentRequestAuthentication()?.authenticationMethod
+    === "jobrolo_hmac";
   return {
     schema: "hcn.console.actions.v1",
     generatedAt: new Date().toISOString(),
     ephemeral: true,
     cachePolicy: "no_store",
     authority: {
-      mode: "explicit_signed_in_employee_approval",
+      mode: delegated
+        ? "signed_jobrolo_exact_approval_plus_private_hcn_challenge"
+        : "explicit_signed_in_employee_approval",
       fileScope: "assigned_only",
       automaticExecution: false,
       automaticRetry: false,
@@ -8086,9 +8263,10 @@ function hcnActionSessionBinding() {
 
 function hcnActionReceiptPrincipalRef() {
   const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
   const googleSubject = String(context?.hcnSession?.googleSubject || "");
   if (
-    context?.authenticationMethod !== "hcn_cookie"
+    !isHcnEmployeeSessionContext(context, identity)
     || !context.hcnSessionId
     || !googleSubject
   ) {
@@ -8114,9 +8292,10 @@ function hcnActionReceiptPrincipalRef() {
 
 function hcnSessionDerivedHash(domain) {
   const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
   const sessionId = String(context?.hcnSessionId || "");
   if (
-    context?.authenticationMethod !== "hcn_cookie"
+    !isHcnEmployeeSessionContext(context, identity)
     || !sessionId
   ) {
     const error = new Error(
@@ -8769,8 +8948,7 @@ function assertHcnAssignedReadSession() {
   const ownerId = String(identity?.jobNimbusOwnerId || "").trim();
   const email = String(identity?.email || "").trim().toLowerCase();
   if (
-    context?.authenticationMethod !== "hcn_cookie"
-    || identity?.type !== "hcn_browser_session"
+    !isHcnEmployeeSessionContext(context, identity)
     || !email
     || !ownerId
     || !["assigned", "company"].includes(
@@ -8915,7 +9093,7 @@ async function withHcnReadAdmission(callback) {
   const identity = currentRequestIdentity();
   const sessionId = String(context?.hcnSessionId || "");
   const bindingMaterial =
-    context?.authenticationMethod === "hcn_cookie" && sessionId
+    isHcnEmployeeSessionContext(context, identity) && sessionId
       ? {
           namespace: "hcn-console:fresh-read:session:v1",
           value: sessionId
@@ -9032,7 +9210,7 @@ function hcnRestrictedEffectOwnerId() {
   const identity = currentRequestIdentity();
   const ownerId = String(identity?.jobNimbusOwnerId || "").trim();
   if (
-    identity?.type !== "hcn_browser_session"
+    !["hcn_browser_session", "hcn_jobrolo_service"].includes(identity?.type)
     || !ownerId
   ) {
     const error = new Error(
@@ -9050,9 +9228,10 @@ function restrictedAssignedOwnerId() {
 
 async function withHcnRestrictedEffects(callback) {
   const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
   if (
     typeof callback !== "function"
-    || context?.authenticationMethod !== "hcn_cookie"
+    || !isHcnEmployeeSessionContext(context, identity)
     || !context.hcnSessionId
   ) {
     const error = new Error(
@@ -15054,7 +15233,9 @@ async function buildHcnExactCommunicationScope(
 
 function hcnFreshProviderCache() {
   const context = currentRequestAuthentication();
-  if (context?.authenticationMethod !== "hcn_cookie") return null;
+  if (!isHcnEmployeeSessionContext(context, currentRequestIdentity())) {
+    return null;
+  }
   if (!context[HCN_FRESH_PROVIDER_CACHE]) {
     Object.defineProperty(context, HCN_FRESH_PROVIDER_CACHE, {
       value: {
@@ -16714,8 +16895,10 @@ async function getGoogleAccessToken() {
   const userToken = requestGoogleAccessToken();
   if (userToken) return userToken;
   if (
-    currentRequestAuthentication()?.authenticationMethod
-      === "hcn_cookie"
+    isHcnEmployeeSessionContext(
+      currentRequestAuthentication(),
+      currentRequestIdentity()
+    )
   ) {
     return getHcnGoogleAccessToken();
   }
@@ -18305,6 +18488,7 @@ function redactSensitiveText(value) {
     HCN_GOOGLE_GRANT_KEY,
     HCN_QUO_LINK_KEY,
     HCN_ASSISTANT_HISTORY_KEY,
+    HCN_JOBROLO_CONFIGURATION.secret,
     process.env.HCN_REFERENCE_KEY,
     process.env.HCN_THRESHER_STORE_KEY,
     process.env.HCN_THRESHER_REFERENCE_KEY,
@@ -18367,6 +18551,108 @@ function hcnResolveClaimWritebackStatus(writeback, knownStatusNames) {
 function authorized(req) {
   if (!BRIDGE_TOKEN) return false;
   return req.headers.authorization === `Bearer ${BRIDGE_TOKEN}`;
+}
+
+function assertJobroloHcnContentType(req) {
+  if (String(req.headers.cookie || "").trim()) {
+    const error = new Error(
+      "Ambiguous Jobrolo integration authentication is not allowed."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+  const contentType = String(req.headers["content-type"] || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    const error = new Error(
+      "Jobrolo integration requests require application/json."
+    );
+    error.statusCode = 415;
+    throw error;
+  }
+}
+
+async function authenticateJobroloHcnPrincipal(verified) {
+  const email = HCN_JOBROLO_CONFIGURATION.principalEmail;
+  if (
+    !verified
+    || verified.principalEmail !== email
+    || !/^session_[a-f0-9]{32}$/.test(verified.sessionRef)
+  ) {
+    const error = new Error("Jobrolo integration authorization failed.");
+    error.statusCode = 403;
+    throw error;
+  }
+  let approvedUser = WAVE_AUTH_USERS.get(email);
+  if (
+    approvedUser?.invitationManaged === true
+    && !await hcnInvitationAuthorizationMatchesUser(approvedUser)
+  ) {
+    WAVE_AUTH_USERS.delete(email);
+    approvedUser = null;
+  }
+  let principal = null;
+  try {
+    principal = approvedUser && approvedUser.enabled !== false
+      ? hcnPrincipalForWaveUser(approvedUser)
+      : null;
+  } catch {
+    principal = null;
+  }
+  const activeJobNimbusUser = principal
+    ? await findActiveJobNimbusUser(email, { fresh: true })
+    : null;
+  if (
+    !principal
+    || !principal.googleSubject
+    || principal.jobNimbusScope !== "assigned"
+    || !activeJobNimbusUser
+    || String(activeJobNimbusUser.id || "").trim()
+      !== String(principal.jobNimbusOwnerId || "").trim()
+  ) {
+    const error = new Error(
+      "The fixed Jobrolo HCN principal is not currently authorized."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const sessionId = createHash("sha256")
+    .update("hcn-jobrolo:service-session:v1", "utf8")
+    .update("\0", "utf8")
+    .update(email, "utf8")
+    .update("\0", "utf8")
+    .update(verified.sessionRef, "utf8")
+    .digest("base64url");
+  return {
+    identity: {
+      type: "hcn_jobrolo_service",
+      subject: principal.googleSubject,
+      email: principal.email,
+      name: principal.displayName,
+      role: principal.role,
+      hostedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN,
+      scopes: [
+        "assigned_file:read",
+        "approval_plan:prepare",
+        "approved_action:execute"
+      ],
+      googleAccessToken: "",
+      jobNimbusOwnerId: principal.jobNimbusOwnerId,
+      jobNimbusScope: "assigned",
+      quoLineId: String(approvedUser.quoLineId || ""),
+      enabled: true
+    },
+    authenticationMethod: "jobrolo_hmac",
+    hcnSession: {
+      subject: principal.email,
+      googleSubject: principal.googleSubject
+    },
+    hcnSessionId: sessionId,
+    jobroloRequestId: verified.requestId,
+    operatorScope: "assigned"
+  };
 }
 
 async function authenticateRequest(req) {
@@ -19136,7 +19422,10 @@ async function findActiveJobNimbusUser(
 
 async function listCompleteJobNimbusUsers() {
   return validateCompleteJobNimbusUserSnapshot(
-    await jobNimbus("/account/users")
+    // Principal admission is on the authentication path, before a restricted
+    // request context exists. Use the bounded provider client directly so a
+    // stalled or oversized directory response cannot hold the adapter open.
+    await hcnJobNimbus("/account/users")
   );
 }
 
@@ -19518,6 +19807,26 @@ function currentRequestAuthentication() {
   return REQUEST_CONTEXT.getStore() || null;
 }
 
+function isHcnEmployeeSessionContext(
+  context = currentRequestAuthentication(),
+  identity = currentRequestIdentity()
+) {
+  return Boolean(
+    context?.hcnSessionId
+    && context?.hcnSession?.googleSubject
+    && (
+      (
+        context.authenticationMethod === "hcn_cookie"
+        && identity?.type === "hcn_browser_session"
+      )
+      || (
+        context.authenticationMethod === "jobrolo_hmac"
+        && identity?.type === "hcn_jobrolo_service"
+      )
+    )
+  );
+}
+
 function requestGoogleAccessToken() {
   const identity = currentRequestIdentity();
   return identity?.type === "google_oauth" ? String(identity.googleAccessToken || "") : "";
@@ -19526,8 +19835,10 @@ function requestGoogleAccessToken() {
 function googleAccessConfiguredForRequest() {
   if (requestGoogleAccessToken()) return true;
   if (
-    currentRequestAuthentication()?.authenticationMethod
-      === "hcn_cookie"
+    isHcnEmployeeSessionContext(
+      currentRequestAuthentication(),
+      currentRequestIdentity()
+    )
   ) {
     return hcnGoogleGrantStoreConfigured();
   }
@@ -20461,7 +20772,10 @@ const OPENAPI = {
             properties: {
               chanceBrain: { type: "string", const: "disconnected_no_route" },
               hcnChanceBrainDataFlow: { type: "string", const: "none" },
-              jobrolo: { type: "string", const: "disconnected" },
+              jobrolo: {
+                type: "string",
+                enum: ["disconnected", "narrow_signed_thresher_adapter"]
+              },
               hcnOperationsBrain: {
                 type: "string",
                 enum: [
