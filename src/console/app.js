@@ -277,14 +277,38 @@
   ]);
 
   const NEXT_ACTION_LABELS = Object.freeze({
-    fulfill_open_promise: "Complete the promised follow-up",
+    fulfill_open_promise: "Review the promised follow-up",
+    fulfill_overdue_promise: "Review the overdue promise",
     manual_conflict_review: "Resolve conflicting file information",
     manual_source_review: "Review unavailable file data",
-    obtain_required_document: "Get the missing document",
-    obtain_required_fact: "Get the missing information",
+    manually_reconcile_fact: "Resolve conflicting required information",
+    obtain_required_document: "Review the missing document need",
+    obtain_required_fact: "Review the missing information",
+    prepare_claim_filing_review: "Prepare the claim filing",
+    prepare_inspection_scheduling_request: "Prepare the inspection request",
+    reconcile_delivery_state: "Review the message delivery",
     refresh_source: "Recheck file data",
+    request_homeowner_confirmation: "Prepare the homeowner confirmation",
+    review_activity_gap: "Review the file activity gap",
+    review_and_prepare_response: "Prepare the needed reply",
+    review_confirmed_inspection: "Review the confirmed inspection",
     review_document: "Review the document",
+    review_missing_verified_contact: "Review the client contact gap",
+    review_neglected_file: "Review the file activity gap",
     review_overdue_task: "Review the overdue task"
+  });
+
+  const FILE_SOURCE_FAILURE_LABELS = Object.freeze({
+    bounded_history_window: "recent history only",
+    file_phone_missing: "file phone missing",
+    google_not_linked: "not linked",
+    phone_match_unverified: "phone match unverified",
+    provider_check_failed: "provider check failed",
+    scope_check_failed: "file scope check failed",
+    source_partial: "some items skipped",
+    source_stale: "check expired",
+    source_unavailable: "check unavailable",
+    work_line_not_linked: "work line not linked"
   });
 
   const STATUS_WORKFLOW_LABELS = Object.freeze({
@@ -363,6 +387,7 @@
     selectedFileRef: null,
     fileReview: null,
     primaryFileAction: null,
+    fileNextStepLoading: false,
     workCenterLoading: false,
     fileLoading: false,
     workCenterController: null,
@@ -2171,10 +2196,17 @@
     elements["assistant-restore-chat"].hidden = (
       !hasConversation || conversation.state !== "archived"
     );
+    const selectedFile = selectedFreshWorkCenterFile();
+    const reviewedFile = record(record(state.fileReview).file);
+    const matchingFreshFileReview = Boolean(
+      selectedFile
+      && reviewedFile.fileRef === selectedFile.fileRef
+      && !state.fileLoading
+    );
     elements["file-start-chat"].disabled = !(
       canManage
       && navigator.onLine
-      && selectedFreshWorkCenterFile()
+      && matchingFreshFileReview
     );
     const page = record(record(state.assistantConversation).page);
     const hasOlder = Number.isSafeInteger(page.offset) && page.offset > 0;
@@ -2871,40 +2903,186 @@
     await createAssistantConversation({ kind: kind, title: title, fileRef: "" });
   }
 
-  async function startSelectedFileConversation(options) {
+  async function startSelectedFileConversation() {
     const selected = selectedFreshWorkCenterFile();
-    if (!selected || !navigator.onLine) return null;
     const reviewed = record(state.fileReview).file;
-    const file = reviewed?.fileRef === selected.fileRef ? reviewed : selected;
+    if (
+      !selected
+      || reviewed?.fileRef !== selected.fileRef
+      || state.fileLoading
+      || !navigator.onLine
+    ) {
+      return null;
+    }
+    const file = reviewed;
     const title = boundedString(
       [file.displayName, file.jobNumber].filter(Boolean).join(" · "),
       120
     ).trim() || "Client file chat";
-    const conversation = await createAssistantConversation({
+    return createAssistantConversation({
       kind: "file",
       title: title,
       fileRef: state.selectedFileRef
     });
-    const starter = boundedString(options?.starter, 4000).trim();
-    if (conversation && starter) {
-      elements["assistant-prompt"].value = starter;
-      elements["assistant-prompt"].focus();
-    }
-    return conversation;
   }
 
   async function doPrimaryFileAction() {
     const action = record(state.primaryFileAction);
-    if (!action.actionCode || elements["file-do-next"].disabled) return;
+    if (
+      !action.actionCode
+      || elements["file-do-next"].disabled
+      || state.fileNextStepLoading
+    ) return;
+    if (action.actionCode === "prepare_claim_filing_review") {
+      state.fileNextStepLoading = true;
+      elements["file-do-next"].disabled = true;
+      try {
+        await openSelectedFileClaimWorkflow();
+      } catch (error) {
+        if (isAuthorizationStatus(error)) {
+          handleOperationalAuthLoss();
+        } else {
+          notice(
+            elements["work-center-alert"],
+            "The exact-file claim workflow could not be opened. Nothing was called or changed.",
+            "bad"
+          );
+        }
+      } finally {
+        state.fileNextStepLoading = false;
+        elements["file-do-next"].disabled = !state.primaryFileAction;
+      }
+      return;
+    }
     const actionType = primaryFileComposerType(action);
     if (actionType && hasActionPrepareAuthority()) {
       openFileMorePanel();
       openFileActionComposer(actionType);
       return;
     }
-    await startSelectedFileConversation({
-      starter: primaryFileActionPrompt(action)
+    openFileNextStepDetails();
+  }
+
+  async function openSelectedFileClaimWorkflow() {
+    const selected = selectedFreshWorkCenterFile();
+    const reviewed = record(state.fileReview).file;
+    if (
+      !selected
+      || reviewed.fileRef !== selected.fileRef
+      || state.fileLoading
+      || !navigator.onLine
+      || !hasAssistantConversationReadAuthority()
+      || !hasAssistantConversationManageAuthority()
+    ) {
+      return null;
+    }
+    const fileRef = selected.fileRef;
+    let conversation = await findActiveAssistantFileConversation(fileRef);
+    if (!assistantConversationTargetIsCurrent({ kind: "file", fileRef })) {
+      return null;
+    }
+    if (conversation) {
+      await loadAssistantConversation(conversation.conversationRef);
+      conversation = currentAssistantConversation();
+    } else {
+      const title = boundedString(
+        [reviewed.displayName, reviewed.jobNumber].filter(Boolean).join(" - "),
+        120
+      ).trim() || "Client file chat";
+      conversation = await createAssistantConversation({
+        kind: "file",
+        title,
+        fileRef,
+        deferNavigation: true
+      });
+      conversation = currentAssistantConversation();
+    }
+    if (
+      !assistantConversationTargetIsCurrent({ kind: "file", fileRef })
+      || conversation.kind !== "file"
+      || conversation.state !== "active"
+      || conversation.fileRef !== fileRef
+    ) {
+      return null;
+    }
+    await loadAssistantClaimStatus();
+    const scope = assistantClaimScope();
+    if (
+      !assistantConversationTargetIsCurrent({ kind: "file", fileRef })
+      || scope?.fileRef !== fileRef
+      || elements["assistant-claim-workflow"].hidden
+    ) {
+      if (
+        assistantConversationTargetIsCurrent({ kind: "file", fileRef })
+        && elements["assistant-claim-workflow"].hidden
+      ) {
+        notice(
+          elements["work-center-alert"],
+          "Claim filing is not enabled for this employee or exact file.",
+          "warn"
+        );
+      }
+      return null;
+    }
+    state.assistantConversationFilter = "file";
+    syncAssistantFilterButtons();
+    renderAssistantConversationList();
+    window.location.hash = "#overview";
+    syncActiveNavigation();
+    syncAssistantMobileWorkspace();
+    elements["assistant-claim-workflow"].scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth"
     });
+    elements["assistant-claim-workflow"].focus({ preventScroll: true });
+    return conversation;
+  }
+
+  async function findActiveAssistantFileConversation(fileRef) {
+    const current = currentAssistantConversation();
+    if (
+      current.kind === "file"
+      && current.state === "active"
+      && current.fileRef === fileRef
+      && ASSISTANT_CONVERSATION_REF.test(current.conversationRef || "")
+    ) {
+      return current;
+    }
+    const retained = (Array.isArray(state.assistantConversations)
+      ? state.assistantConversations
+      : []).find(function (conversation) {
+      return conversation.kind === "file"
+        && conversation.state === "active"
+        && conversation.fileRef === fileRef
+        && ASSISTANT_CONVERSATION_REF.test(
+          conversation.conversationRef || ""
+        );
+    });
+    if (retained) return retained;
+
+    let offset = 0;
+    while (offset < 1_000) {
+      const response = await postOperationalJson(
+        ENDPOINTS.assistantConversationList,
+        { state: "active", offset, limit: 100 },
+        undefined,
+        ASSISTANT_CONVERSATION_READ_CAPABILITY
+      );
+      const page = normalizeAssistantConversationListResponse(response);
+      const match = page.items.find(function (conversation) {
+        return conversation.kind === "file"
+          && conversation.state === "active"
+          && conversation.fileRef === fileRef;
+      });
+      if (match) return match;
+      if (!page.page.hasMore || page.items.length === 0) return null;
+      offset += page.items.length;
+    }
+    throw new Error(
+      "The active client-chat lookup exceeded its safe bound."
+    );
   }
 
   function primaryFileComposerType(action) {
@@ -2920,17 +3098,24 @@
     return "";
   }
 
-  function primaryFileActionPrompt(action) {
-    return "Help me complete the next move on this file: "
-      + primaryFileActionTitle(action)
-      + ". Review the fresh evidence first and tell me the safest exact action.";
-  }
-
   function openFileMorePanel() {
-    if (!state.fileReview || elements["file-actions"].disabled) return;
+    if (!state.fileReview) return;
     elements["file-more-panel"].open = true;
     elements["file-more-panel"].scrollIntoView({
       block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth"
+    });
+  }
+
+  function openFileNextStepDetails() {
+    if (!state.fileReview) return;
+    openFileMorePanel();
+    const detail = elements["file-intelligence-actions"].closest("details");
+    if (detail) detail.open = true;
+    elements["file-intelligence-actions"].scrollIntoView({
+      block: "center",
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
         ? "auto"
         : "smooth"
@@ -2981,15 +3166,33 @@
       if (conversation.state !== "active") {
         throw new Error("Invalid new assistant conversation");
       }
-      closeAssistantDialogs();
-      state.assistantConversationFilter = conversation.kind;
-      syncAssistantFilterButtons();
       state.assistantConversations = Array.isArray(state.assistantConversations)
         ? state.assistantConversations
         : [];
       upsertAssistantConversation(conversation);
-      await loadAssistantConversation(conversation.conversationRef);
       renderAssistantConversationList();
+      if (!assistantConversationTargetIsCurrent(input)) {
+        notice(
+          elements["work-center-alert"],
+          "Client chat saved. You stayed on the file you opened next.",
+          "good"
+        );
+        return conversation;
+      }
+      closeAssistantDialogs();
+      state.assistantConversationFilter = conversation.kind;
+      syncAssistantFilterButtons();
+      await loadAssistantConversation(conversation.conversationRef);
+      if (!assistantConversationTargetIsCurrent(input)) {
+        notice(
+          elements["work-center-alert"],
+          "Client chat saved. You stayed on the file you opened next.",
+          "good"
+        );
+        return conversation;
+      }
+      renderAssistantConversationList();
+      if (input.deferNavigation === true) return conversation;
       window.location.hash = "#overview";
       elements["assistant-prompt"].focus();
       notice(elements["assistant-alert"], "Chat saved.", "good");
@@ -3013,6 +3216,18 @@
         syncAssistantConversationControls();
       }
     }
+  }
+
+  function assistantConversationTargetIsCurrent(input) {
+    if (input.kind !== "file") return true;
+    const fileRef = String(input.fileRef || "");
+    const reviewed = record(state.fileReview).file;
+    return Boolean(
+      FILE_REF.test(fileRef)
+      && state.selectedFileRef === fileRef
+      && reviewed.fileRef === fileRef
+      && !state.fileLoading
+    );
   }
 
   function openAssistantRenameDialog() {
@@ -4964,6 +5179,7 @@
     state.receiptController = null;
     state.workCenterLoading = false;
     state.fileLoading = false;
+    state.fileNextStepLoading = false;
     state.workCenter = null;
     state.workCenterOffset = 0;
     state.selectedFileRef = null;
@@ -7777,8 +7993,7 @@
       action.className = "sweep-open-file";
       setText(action, "Open exact file");
       action.addEventListener("click", function () {
-        loadFileReview(item.fileRef);
-        document.getElementById("work-center").scrollIntoView({ block: "start" });
+        openExactWorkFile(item.fileRef);
       });
       article.append(action);
     }
@@ -8156,7 +8371,15 @@
       : [];
     const next = files[0];
     if (!next || state.workCenterLoading || state.fileLoading) return;
-    loadFileReview(next.fileRef);
+    openExactWorkFile(next.fileRef);
+  }
+
+  function openExactWorkFile(fileRef) {
+    if (window.location.hash !== "#work-center") {
+      window.location.hash = "#work-center";
+    }
+    syncActiveNavigation();
+    return loadFileReview(fileRef);
   }
 
   function refreshManagementSweepFileLinks() {
@@ -8209,7 +8432,7 @@
 
     button.append(top, meta, badges);
     button.addEventListener("click", function () {
-      loadFileReview(file.fileRef);
+      openExactWorkFile(file.fileRef);
     });
     return button;
   }
@@ -8278,13 +8501,18 @@
         "Fresh file evidence could not be loaded. No earlier file detail is shown."
       );
     } finally {
-      if (state.fileController === controller) {
-        state.fileController = null;
-        state.fileLoading = false;
-        elements["file-refresh"].disabled = false;
-        renderActionComposerState();
-      }
+      completeFileReviewLoad(controller);
     }
+  }
+
+  function completeFileReviewLoad(controller) {
+    if (state.fileController !== controller) return false;
+    state.fileController = null;
+    state.fileLoading = false;
+    elements["file-refresh"].disabled = false;
+    renderActionComposerState();
+    syncAssistantConversationControls();
+    return true;
   }
 
   function openFileLoading(selected) {
@@ -8535,6 +8763,7 @@
 
   function normalizeSourceSummary(value, expectedSource) {
     const source = record(value);
+    const collections = record(source.collections);
     return {
       source: boundedString(source.source, 32) || expectedSource,
       status: boundedString(source.status, 32),
@@ -8547,8 +8776,48 @@
         : 0,
       droppedItems: Number.isInteger(source.droppedItems)
         ? Math.max(0, source.droppedItems)
+        : 0,
+      collections: {
+        activities: normalizeSourceCollectionCoverage(collections.activities),
+        tasks: normalizeSourceCollectionCoverage(collections.tasks),
+        documents: normalizeSourceCollectionCoverage(collections.documents)
+      }
+    };
+  }
+
+  function normalizeSourceCollectionCoverage(value) {
+    const collection = record(value);
+    const completeness = boundedString(collection.completeness, 32);
+    const limitationCode = boundedString(collection.limitationCode, 64);
+    return {
+      completeness: ["complete", "partial", "none"].includes(completeness)
+        ? completeness
+        : "",
+      limitationCode: [
+        "bounded_history_window",
+        "incomplete_pagination"
+      ].includes(limitationCode)
+        ? limitationCode
+        : "",
+      returnedItems: Number.isInteger(collection.returnedItems)
+        ? Math.max(0, collection.returnedItems)
+        : 0,
+      readLimit: Number.isInteger(collection.readLimit)
+        ? Math.max(0, collection.readLimit)
         : 0
     };
+  }
+
+  function jobNimbusHistoryIsBounded(source) {
+    const collections = record(record(source).collections);
+    return [collections.activities, collections.tasks].some(function (value) {
+      const collection = record(value);
+      return collection.completeness === "partial"
+        && [
+          "bounded_history_window",
+          "incomplete_pagination"
+        ].includes(collection.limitationCode);
+    });
   }
 
   function normalizeLaneItems(value) {
@@ -8611,15 +8880,24 @@
         fileStageLabel(file)
     );
     const complete = review.evidenceStatus === "complete";
+    const boundedJobNimbusHistory = jobNimbusHistoryIsBounded(
+      review.sources.jobnimbus
+    );
     badge(
       elements["file-evidence-status"],
-      complete ? "File data checked" : "Some file data missing",
+      complete
+        ? boundedJobNimbusHistory
+          ? "Current facts checked"
+          : "File data checked"
+        : "Some file data missing",
       complete ? "good" : "warn"
     );
     notice(
       elements["file-alert"],
       complete
-        ? "This exact file was checked in JobNimbus, Gmail, and Quo."
+        ? boundedJobNimbusHistory
+          ? "Current file facts were checked in JobNimbus, Gmail, and Quo. JobNimbus activity and task results are recent history only."
+          : "This exact file was checked in JobNimbus, Gmail, and Quo."
         : "The main file loaded, but one or more exact-file checks could not be completed.",
       complete ? "good" : "warn"
     );
@@ -8653,10 +8931,11 @@
   function renderFileNow(review) {
     const file = review.file;
     const intelligence = review.intelligence;
-    const actions = intelligence.nextRequiredActions;
+    const actions = selectRecommendedFileActions(intelligence);
     const firstAction = selectPrimaryFileAction(actions);
     state.primaryFileAction = firstAction;
-    elements["file-do-next"].disabled = !firstAction;
+    elements["file-do-next"].disabled = !firstAction
+      || state.fileNextStepLoading;
     setText(
       elements["file-now-summary"],
       firstAction
@@ -8684,14 +8963,7 @@
       chip.dataset.tone = complete ? "good" : unavailable ? "bad" : "warn";
       setText(
         chip,
-        (name === "jobnimbus" ? "JobNimbus" : name === "gmail" ? "Gmail" : "Quo")
-          + " " + (
-            complete
-              ? "checked"
-              : unavailable
-                ? "could not be checked"
-                : "some items skipped"
-          )
+        fileSourceChipText(name, source)
       );
       sourceFragment.append(chip);
     });
@@ -8731,6 +9003,149 @@
     }) || candidates[0] || null;
   }
 
+  function selectRecommendedFileActions(intelligence) {
+    const input = intelligence && typeof intelligence === "object"
+      ? intelligence
+      : {};
+    const workflows = input.workflows && typeof input.workflows === "object"
+      ? input.workflows
+      : {};
+    const currentStage = String(input.currentStage || "");
+    const candidates = [];
+    const merged = new Map();
+    let sequence = 0;
+
+    function addCandidate(value, workflowId) {
+      if (!value || typeof value !== "object") return;
+      const actionCode = String(value.actionCode || "").trim();
+      if (!actionCode) return;
+      const targetCode = String(value.targetCode || "").trim();
+      const dueAt = String(value.dueAt || "").trim();
+      const key = [actionCode, targetCode, dueAt].join("|");
+      const existing = merged.get(key);
+      if (existing) {
+        if (!existing.workflowId && workflowId) {
+          existing.workflowId = workflowId;
+        }
+        if (!existing.urgency && value.urgency) {
+          existing.urgency = String(value.urgency);
+        }
+        existing.requiresApproval =
+          existing.requiresApproval || value.requiresApproval === true;
+        return;
+      }
+      const action = {
+        actionCode,
+        targetCode,
+        urgency: String(value.urgency || ""),
+        dueAt,
+        requiresApproval: value.requiresApproval === true,
+        workflowId: workflowId || "",
+        sequence: sequence++
+      };
+      merged.set(key, action);
+      candidates.push(action);
+    }
+
+    (Array.isArray(input.nextRequiredActions)
+      ? input.nextRequiredActions
+      : []).forEach(function (action) {
+      addCandidate(action, "");
+    });
+
+    Object.keys(workflows).forEach(function (workflowId) {
+      const workflow = workflows[workflowId];
+      if (!workflow || typeof workflow !== "object") return;
+      if (
+        workflow.eligibility !== "eligible"
+        || workflow.readiness !== "ready"
+      ) {
+        return;
+      }
+      const flags = Array.isArray(workflow.escalationFlags)
+        ? workflow.escalationFlags
+        : [];
+      if (flags.some(function (flag) {
+        return /conflict|inconsistent/.test(String(flag));
+      })) {
+        return;
+      }
+      if (
+        workflowId === "claim_filing"
+        && !["intake", "claim_readiness"].includes(currentStage)
+      ) {
+        return;
+      }
+      if (
+        workflowId === "inspection_scheduling"
+        && ![
+          "claim_filed",
+          "inspection_scheduling",
+          "inspection_scheduled"
+        ].includes(currentStage)
+      ) {
+        return;
+      }
+      (Array.isArray(workflow.nextActions)
+        ? workflow.nextActions
+        : []).forEach(function (action) {
+        addCandidate(action, workflowId);
+      });
+    });
+
+    function fixedPriority(action) {
+      const code = action.actionCode;
+      if (code === "review_overdue_task") return 0;
+      if (code === "fulfill_overdue_promise") return 1;
+      if (
+        code === "fulfill_open_promise"
+        && ["urgent", "high"].includes(action.urgency)
+      ) return 1;
+      if (code === "review_and_prepare_response") return 2;
+      if ([
+        "prepare_claim_filing_review",
+        "prepare_inspection_scheduling_request",
+        "request_homeowner_confirmation",
+        "review_confirmed_inspection"
+      ].includes(code)) return 10;
+      if ([
+        "manual_conflict_review",
+        "manually_reconcile_fact",
+        "review_document",
+        "obtain_required_document",
+        "obtain_required_fact"
+      ].includes(code)) return 20;
+      if (code === "fulfill_open_promise") return 21;
+      if ([
+        "review_neglected_file",
+        "review_activity_gap",
+        "review_missing_verified_contact"
+      ].includes(code)) return 30;
+      return 40;
+    }
+
+    function urgencyPriority(action) {
+      if (action.urgency === "urgent") return 0;
+      if (action.urgency === "high") return 1;
+      if (action.urgency === "normal") return 2;
+      if (action.urgency === "low") return 3;
+      return 4;
+    }
+
+    return candidates.sort(function (left, right) {
+      return fixedPriority(left) - fixedPriority(right)
+        || urgencyPriority(left) - urgencyPriority(right)
+        || String(left.dueAt || "9999").localeCompare(
+          String(right.dueAt || "9999")
+        )
+        || left.sequence - right.sequence;
+    }).slice(0, 12).map(function (action) {
+      const output = { ...action };
+      delete output.sequence;
+      return output;
+    });
+  }
+
   function primaryFileActionTitle(action) {
     const label = NEXT_ACTION_LABELS[action.actionCode]
       || "Review the next file step";
@@ -8746,6 +9161,74 @@
     if (action.urgency === "urgent") return "Needs attention now";
     if (action.urgency === "high") return "Needs attention";
     return "Ready to work";
+  }
+
+  function fileSourceChipText(name, source) {
+    const label = name === "jobnimbus"
+      ? "JobNimbus"
+      : name === "gmail"
+        ? "Gmail"
+        : "Quo";
+    const complete = source.status === "fresh"
+      && source.completeness === "complete";
+    if (name === "jobnimbus" && jobNimbusHistoryIsBounded(source)) {
+      return "JobNimbus facts checked · recent history only";
+    }
+    if (complete) return label + " checked";
+    const failureLabel = FILE_SOURCE_FAILURE_LABELS[source.failureCode];
+    if (failureLabel) return label + " " + failureLabel;
+    return label + (
+      source.completeness === "partial"
+        ? " some items skipped"
+        : " could not be checked"
+    );
+  }
+
+  function fileSourceHealthDetail(name, source) {
+    const label = name === "jobnimbus"
+      ? "JobNimbus"
+      : name === "gmail"
+        ? "Gmail"
+        : "Quo";
+    if (name === "jobnimbus" && jobNimbusHistoryIsBounded(source)) {
+      return "Current JobNimbus file facts were checked; older activity or task history is outside this review window.";
+    }
+    if (source.status === "fresh" && source.completeness === "complete") {
+      return "Checked for this file";
+    }
+    if (source.failureCode === "google_not_linked") {
+      return "Google access is not linked; Gmail was not checked.";
+    }
+    if (source.failureCode === "work_line_not_linked") {
+      return "The Quo work line is not linked; texts were not checked.";
+    }
+    if (source.failureCode === "file_phone_missing") {
+      return "This file has no phone number for the " + label
+        + " check; " + label + " was not checked.";
+    }
+    if (source.failureCode === "phone_match_unverified") {
+      return "The file phone could not be matched safely; "
+        + label + " was not checked.";
+    }
+    if (source.failureCode === "provider_check_failed") {
+      return label + " provider check failed; source records were not evaluated.";
+    }
+    if (source.failureCode === "scope_check_failed") {
+      return "File access for " + label
+        + " could not be verified; source records were not evaluated.";
+    }
+    if (source.failureCode === "source_stale") {
+      return label + " check expired; refresh this file.";
+    }
+    if (source.droppedItems) {
+      return source.droppedItems + " item"
+        + (source.droppedItems === 1 ? " was" : "s were")
+        + " skipped during this check.";
+    }
+    if (source.failureCode === "source_partial") {
+      return "Some " + label + " file data could not be confirmed.";
+    }
+    return label + " could not be checked right now.";
   }
 
   function renderSourceHealth(sources) {
@@ -8771,14 +9254,7 @@
       setText(title, name === "jobnimbus" ? "JobNimbus" : name === "gmail" ? "Gmail" : "Quo");
       setText(
         detail,
-        complete
-          ? "Checked for this file"
-          : unavailable
-            ? "Could not check this source for the selected file"
-            : source.droppedItems
-              ? source.droppedItems + " item" +
-                (source.droppedItems === 1 ? " was" : "s were") + " skipped"
-              : "Some file data could not be confirmed"
+        fileSourceHealthDetail(name, source)
       );
       top.append(title, dot);
       item.append(top, detail);
@@ -8899,7 +9375,7 @@
       workflowFragment
     );
 
-    const actions = intelligence.nextRequiredActions.slice(0, 6);
+    const actions = selectRecommendedFileActions(intelligence).slice(0, 6);
     if (!actions.length) {
       renderRecentEmpty(
         elements["file-intelligence-actions"],
@@ -8915,7 +9391,7 @@
       item.className = "intelligence-action";
       setText(
         title,
-        humanize(action.actionCode)
+        (NEXT_ACTION_LABELS[action.actionCode] || "Review the next file step")
           + (action.targetCode
             ? ": " + humanize(action.targetCode)
             : "")

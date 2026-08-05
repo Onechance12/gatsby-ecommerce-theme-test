@@ -255,7 +255,8 @@ import {
   formatDeterministicManagementSweep
 } from "./hcn-assistant/deterministic.js";
 import {
-  deriveFileIntelligence
+  deriveFileState,
+  evaluateFileWorkflows
 } from "./hcn-ops/intelligence/index.js";
 import {
   adaptFreshReviewToFileEvidence
@@ -4363,8 +4364,9 @@ async function hcnReadFile(input = {}) {
   const principal = assertHcnAssignedReadSession();
   return withHcnReadAdmission(
     async () => {
-      const review =
-        await hcnConsoleFreshReadService(principal).readFile(input);
+      const review = hcnApplyJobNimbusCollectionCoverage(
+        await hcnConsoleFreshReadService(principal).readFile(input)
+      );
       const intelligence =
         hcnDeriveFreshFileIntelligence(review, principal);
       if (!hcnThresherPersistenceActive()) {
@@ -4387,9 +4389,10 @@ async function hcnReadFileByJobNumber(input = {}) {
   const principal = assertHcnAssignedReadSession();
   return withHcnReadAdmission(
     async () => {
-      const review =
+      const review = hcnApplyJobNimbusCollectionCoverage(
         await hcnConsoleFreshReadService(principal)
-          .readFileByJobNumber(input);
+          .readFileByJobNumber(input)
+      );
       const intelligence =
         hcnDeriveFreshFileIntelligence(review, principal);
       if (!hcnThresherPersistenceActive()) {
@@ -5014,7 +5017,7 @@ function hcnDeriveFreshFileIntelligence(review, principal) {
     return `value_${sourceRef.slice("ref_".length)}`;
   };
   try {
-    return deriveFileIntelligence(
+    const state = deriveFileState(
       adaptFreshReviewToFileEvidence({
         review,
         ownerRef,
@@ -5023,6 +5026,32 @@ function hcnDeriveFreshFileIntelligence(review, principal) {
         valueRefFor
       })
     );
+    const authority = review?.sources?.jobnimbus || {};
+    const collections = authority.collections || {};
+    const authorityCompleteness =
+      authority.status === "fresh"
+        ? String(authority.completeness || "none")
+        : "none";
+    const collectionCompleteness = (name) => {
+      const value = String(collections?.[name]?.completeness || "");
+      return ["complete", "partial", "none"].includes(value)
+        ? value
+        : authorityCompleteness;
+    };
+    const historyCoverage = Object.freeze({
+      currentFacts: authorityCompleteness,
+      documents: collectionCompleteness("documents"),
+      activityHistory: collectionCompleteness("activities"),
+      taskHistory: collectionCompleteness("tasks")
+    });
+    const stateWithCoverage = Object.freeze({
+      ...state,
+      historyCoverage
+    });
+    return Object.freeze({
+      ...stateWithCoverage,
+      workflows: evaluateFileWorkflows(stateWithCoverage)
+    });
   } catch {
     const error = new Error(
       "Deterministic HCN file intelligence is unavailable."
@@ -6172,7 +6201,7 @@ function validateHcnAssistantMessage(value) {
 function collectHcnAssistantSources(sources, toolName, result) {
   if (!(sources instanceof Map)) return;
   if (toolName === "read_work_center" && result?.source) {
-    sources.set("jobnimbus", hcnAssistantSourceProjection(
+    hcnRememberAssistantSource(sources, hcnAssistantSourceProjection(
       "jobnimbus",
       "JobNimbus assigned files",
       result.source
@@ -6181,7 +6210,7 @@ function collectHcnAssistantSources(sources, toolName, result) {
   }
   if (toolName === "review_file" && result?.sources) {
     for (const [key, source] of Object.entries(result.sources)) {
-      sources.set(key, hcnAssistantSourceProjection(
+      hcnRememberAssistantSource(sources, hcnAssistantSourceProjection(
         key,
         key === "jobnimbus"
           ? "JobNimbus file"
@@ -6205,7 +6234,7 @@ function collectHcnAssistantSources(sources, toolName, result) {
     )
     && result?.source
   ) {
-    sources.set("jobnimbus", hcnAssistantSourceProjection(
+    hcnRememberAssistantSource(sources, hcnAssistantSourceProjection(
       "jobnimbus",
       toolName === "read_file_document_catalog"
         ? "JobNimbus document catalog"
@@ -6217,13 +6246,13 @@ function collectHcnAssistantSources(sources, toolName, result) {
     return;
   }
   if (toolName === "research_file_hail_dates" && result?.source) {
-    sources.set("jobnimbus", {
+    hcnRememberAssistantSource(sources, {
       key: "jobnimbus",
       label: "JobNimbus property file",
       status: "fresh",
       checkedAt: String(result.generatedAt || "").slice(0, 40)
     });
-    sources.set("weather", hcnAssistantSourceProjection(
+    hcnRememberAssistantSource(sources, hcnAssistantSourceProjection(
       "weather",
       "Hail report research",
       result.source
@@ -6231,7 +6260,7 @@ function collectHcnAssistantSources(sources, toolName, result) {
     return;
   }
   if (toolName === "read_calendar_day" && result?.source) {
-    sources.set("google_calendar", hcnAssistantSourceProjection(
+    hcnRememberAssistantSource(sources, hcnAssistantSourceProjection(
       "google_calendar",
       result.schema === "hcn.assistant.calendar-file-appointments.v1"
         ? "Google Calendar file appointments"
@@ -6247,7 +6276,7 @@ function collectHcnAssistantSources(sources, toolName, result) {
     for (const source of result.sourceHealth) {
       const key = String(source?.key || "").toLowerCase();
       if (!/^[a-z][a-z0-9_]{0,31}$/.test(key)) continue;
-      sources.set(key, {
+      hcnRememberAssistantSource(sources, {
         key,
         label: String(source?.label || "Connected source").slice(0, 80),
         status: String(source?.status || "unknown").slice(0, 32),
@@ -6260,7 +6289,7 @@ function collectHcnAssistantSources(sources, toolName, result) {
     toolName === "read_closed_file_benchmark"
     && result?.checkedAt
   ) {
-    sources.set("jobnimbus", {
+    hcnRememberAssistantSource(sources, {
       key: "jobnimbus",
       label: "JobNimbus closed-file benchmark",
       status: "complete",
@@ -6269,14 +6298,52 @@ function collectHcnAssistantSources(sources, toolName, result) {
   }
 }
 
+function hcnRememberAssistantSource(sources, candidate) {
+  const key = String(candidate?.key || "").toLowerCase();
+  if (!(sources instanceof Map) || !key) return;
+  const existing = sources.get(key);
+  if (!existing) {
+    sources.set(key, candidate);
+    return;
+  }
+  const statusRank = (value) => {
+    const status = String(value || "").toLowerCase();
+    if (["fresh", "complete"].includes(status)) return 0;
+    if (["partial", "pending_human_review"].includes(status)) return 1;
+    return 2;
+  };
+  const leastComplete =
+    statusRank(existing.status) >= statusRank(candidate.status)
+      ? existing
+      : candidate;
+  sources.set(key, {
+    key,
+    label: candidate.label || leastComplete.label,
+    status: leastComplete.status,
+    checkedAt: [existing.checkedAt, candidate.checkedAt]
+      .map((value) => String(value || ""))
+      .sort()
+      .at(-1)
+  });
+}
+
 function hcnAssistantSourceProjection(key, label, source) {
   const rawStatus = String(source?.status || "unknown").slice(0, 32);
   const completeness = String(source?.completeness || "").slice(0, 32);
+  const historyCollections = ["activities", "tasks"]
+    .map((name) => String(
+      source?.collections?.[name]?.completeness || ""
+    ).slice(0, 32))
+    .filter(Boolean);
   return {
     key,
     label,
     status:
-      rawStatus === "fresh" && completeness === "partial"
+      rawStatus === "fresh"
+      && (
+        completeness === "partial"
+        || historyCollections.some((value) => value !== "complete")
+      )
         ? "partial"
         : rawStatus,
     checkedAt: String(
@@ -7629,11 +7696,12 @@ async function hcnPrepareActionPlan(input = {}) {
       let approval = null;
       try {
         if (hcnThresherPersistenceActive()) {
-          const review =
+          const review = hcnApplyJobNimbusCollectionCoverage(
             await hcnConsoleFreshReadService(principal).readFile({
               fileRef: prepareInput.fileRef,
               recentLimit: 20
-            });
+            })
+          );
           await hcnRecordFreshReview(review);
         }
         const scope = await resolveHcnActionScope({
@@ -14612,9 +14680,8 @@ async function loadHcnJobNimbusFile({
   const [contact, contactIndex, activities, tasks, documents] = await Promise.all([
     hcnCachedContact(id),
     hcnCachedContactIndex({ maxRecords: 5000 }),
-    listHcnResourceComplete("/activities", {
-      maxRecords: maximumRelated,
-      relatedContactId: id
+    listHcnExactFileActivitiesWindow(id, {
+      maxRecords: maximumRelated
     }),
     listHcnResourceComplete("/tasks", {
       maxRecords: maximumRelated,
@@ -14632,7 +14699,7 @@ async function loadHcnJobNimbusFile({
     (row) => hcnProviderFileId(row?.jnid || row?.id)
   );
 
-  return mapJobNimbusFileEnvelope({
+  const mapped = mapJobNimbusFileEnvelope({
     contact,
     activities: activities.rows,
     tasks: tasks.rows,
@@ -14646,6 +14713,27 @@ async function loadHcnJobNimbusFile({
     expectedProviderFileId: id,
     knownProviderFileIds
   });
+  hcnRememberJobNimbusCollectionCoverage(
+    mapped.data.file.jobNumber,
+    {
+      activities: hcnJobNimbusCollectionCoverage({
+        ...mapped.data.collectionCoverage.activities,
+        complete: activities.complete,
+        readLimit: maximumRelated
+      }),
+      tasks: hcnJobNimbusCollectionCoverage({
+        ...mapped.data.collectionCoverage.tasks,
+        complete: tasks.complete,
+        readLimit: maximumRelated
+      }),
+      documents: hcnJobNimbusCollectionCoverage({
+        ...mapped.data.collectionCoverage.documents,
+        complete: documents.complete,
+        readLimit: 500
+      })
+    }
+  );
+  return mapped;
 }
 
 async function loadHcnGmailFile({
@@ -14973,7 +15061,8 @@ function hcnFreshProviderCache() {
         contactIndexPromise: null,
         contactIndexMaximum: 0,
         contactPromises: new Map(),
-        communicationScopePromises: new Map()
+        communicationScopePromises: new Map(),
+        jobNimbusCollectionCoverageByJobNumber: new Map()
       },
       enumerable: false,
       configurable: false,
@@ -14981,6 +15070,72 @@ function hcnFreshProviderCache() {
     });
   }
   return context[HCN_FRESH_PROVIDER_CACHE];
+}
+
+function hcnJobNimbusCollectionCoverage({
+  completeness,
+  returnedItems,
+  duplicateItemsRemoved,
+  complete,
+  readLimit
+} = {}) {
+  const isComplete = complete === true && completeness === "complete";
+  return Object.freeze({
+    completeness: isComplete ? "complete" : "partial",
+    returnedItems:
+      Number.isSafeInteger(returnedItems) && returnedItems >= 0
+        ? returnedItems
+        : 0,
+    duplicateItemsRemoved:
+      Number.isSafeInteger(duplicateItemsRemoved)
+      && duplicateItemsRemoved >= 0
+        ? duplicateItemsRemoved
+        : 0,
+    readLimit:
+      Number.isSafeInteger(readLimit) && readLimit > 0
+        ? readLimit
+        : 0,
+    limitationCode: isComplete ? null : "bounded_history_window"
+  });
+}
+
+function hcnRememberJobNimbusCollectionCoverage(jobNumber, coverage) {
+  const cache = hcnFreshProviderCache();
+  const key = String(jobNumber || "").trim();
+  if (
+    !cache
+    || !key
+    || !coverage
+    || typeof coverage !== "object"
+  ) {
+    return;
+  }
+  cache.jobNimbusCollectionCoverageByJobNumber.set(
+    key,
+    Object.freeze({
+      activities: coverage.activities,
+      tasks: coverage.tasks,
+      documents: coverage.documents
+    })
+  );
+}
+
+function hcnApplyJobNimbusCollectionCoverage(review) {
+  const jobNumber = String(review?.file?.jobNumber || "").trim();
+  const coverage = hcnFreshProviderCache()
+    ?.jobNimbusCollectionCoverageByJobNumber.get(jobNumber);
+  if (!coverage || !review?.sources?.jobnimbus) return review;
+  const source = Object.freeze({
+    ...review.sources.jobnimbus,
+    collections: coverage
+  });
+  return Object.freeze({
+    ...review,
+    sources: Object.freeze({
+      ...review.sources,
+      jobnimbus: source
+    })
+  });
 }
 
 async function hcnCachedContactIndex({
@@ -15229,6 +15384,26 @@ async function listHcnExactFileActivitiesComplete(
     requestBudget = null
   } = {}
 ) {
+  const result = await listHcnExactFileActivitiesWindow(providerFileId, {
+    maxRecords,
+    requestBudget
+  });
+  if (!result.complete) {
+    return {
+      rows: [],
+      complete: false
+    };
+  }
+  return result;
+}
+
+async function listHcnExactFileActivitiesWindow(
+  providerFileId,
+  {
+    maxRecords = HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS,
+    requestBudget = null
+  } = {}
+) {
   const id = hcnProviderFileId(providerFileId);
   const [primary, related] = await Promise.all([
     listHcnResourceComplete("/activities", {
@@ -15244,13 +15419,6 @@ async function listHcnExactFileActivitiesComplete(
       requestBudget
     })
   ]);
-  if (!primary.complete || !related.complete) {
-    return {
-      rows: [],
-      complete: false
-    };
-  }
-
   const unique = new Map();
   for (const [referenceField, rows] of [
     ["primary.id", primary.rows],
@@ -15288,15 +15456,22 @@ async function listHcnExactFileActivitiesComplete(
       }
     }
   }
-  if (unique.size > maxRecords) {
-    return {
-      rows: [],
-      complete: false
-    };
-  }
+  const rows = [...unique.entries()]
+    .sort(([leftId, left], [rightId, right]) => {
+      const leftAt = hcnActivityTimestampMilliseconds(left.activity);
+      const rightAt = hcnActivityTimestampMilliseconds(right.activity);
+      if (leftAt > rightAt) return -1;
+      if (leftAt < rightAt) return 1;
+      return leftId.localeCompare(rightId);
+    })
+    .slice(0, maxRecords)
+    .map(([, entry]) => entry.activity);
   return {
-    rows: [...unique.values()].map((entry) => entry.activity),
-    complete: true
+    rows,
+    complete:
+      primary.complete
+      && related.complete
+      && unique.size <= maxRecords
   };
 }
 
@@ -18145,6 +18320,37 @@ function redactSensitiveText(value) {
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [REDACTED]")
     .replace(/\b(?:gsk|sk|key|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]");
+}
+
+function hcnActivityTimestampMilliseconds(activity) {
+  const value = fieldValue(activity, [
+    "date_created",
+    "created_at",
+    "createdAt",
+    "occurred_at",
+    "occurredAt",
+    "date_updated"
+  ]);
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? Number.NEGATIVE_INFINITY
+      : value.getTime();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = Math.abs(value) < 100_000_000_000
+      ? value * 1000
+      : value;
+    return Number.isFinite(milliseconds)
+      ? milliseconds
+      : Number.NEGATIVE_INFINITY;
+  }
+  const text = String(value ?? "").trim();
+  if (!text) return Number.NEGATIVE_INFINITY;
+  if (/^-?\d+(?:\.\d+)?$/.test(text)) {
+    return hcnActivityTimestampMilliseconds({ date_created: Number(text) });
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
 function hcnResolveClaimWritebackStatus(writeback, knownStatusNames) {

@@ -15,6 +15,9 @@ const calendarToolPromptMarker =
   ).trim();
 const noToolPromptMarker =
   String(process.env.HCN_TEST_THRESHER_NO_TOOL_PROMPT_MARKER || "").trim();
+const historyNegativePromptMarker = String(
+  process.env.HCN_TEST_THRESHER_HISTORY_NEGATIVE_PROMPT_MARKER || ""
+).trim();
 
 if (!recordPath || !responseText) {
   throw new Error("HCN test provider stub is not configured.");
@@ -234,7 +237,11 @@ globalThis.fetch = async function hcnTestFetch(input, init = {}) {
           content: [
             {
               type: "output_text",
-              text: responseText
+              text:
+                historyNegativePromptMarker
+                && latestUserMessage.includes(historyNegativePromptMarker)
+                  ? "There are no JobNimbus notes or tasks on this file."
+                  : responseText
             }
           ]
         }

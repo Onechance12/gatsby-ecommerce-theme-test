@@ -1,6 +1,14 @@
 const MODEL_FILE_REVIEW_MAX_BYTES = 24 * 1024;
-const RECENT_DETAIL_LIMIT = 1;
+const RECENT_DETAIL_LIMIT = 5;
 const MAX_LANE_ITEMS = 20;
+
+const RECENT_COLLECTION_NAMES = Object.freeze([
+  "activities",
+  "tasks",
+  "documents",
+  "gmail",
+  "quo"
+]);
 
 const WORKFLOW_NAMES = Object.freeze([
   "claim_filing",
@@ -63,37 +71,46 @@ export function projectHcnAssistantFileReview(review) {
         review.recent?.activities,
         projectActivity,
         preferredReferences,
-        meaningfulReferences
+        meaningfulReferences,
+        "activities"
       ),
       tasks: projectRecentCollection(
         review.recent?.tasks,
         projectTask,
         preferredReferences,
-        meaningfulReferences
+        meaningfulReferences,
+        "tasks"
       ),
       documents: projectRecentCollection(
         review.recent?.documents,
         projectDocument,
         preferredReferences,
-        meaningfulReferences
+        meaningfulReferences,
+        "documents"
       ),
       gmail: projectRecentCollection(
         review.recent?.gmail,
         projectGmail,
         preferredReferences,
-        meaningfulReferences
+        meaningfulReferences,
+        "gmail"
       ),
       quo: projectRecentCollection(
         review.recent?.quo,
         projectQuo,
         preferredReferences,
-        meaningfulReferences
+        meaningfulReferences,
+        "quo"
       )
     },
     intelligence: projectIntelligence(review.intelligence),
     projection: {
       kind: "bounded_operational_review",
       recentDetailLimitPerSource: RECENT_DETAIL_LIMIT,
+      effectiveRecentDetailLimitPerSource: RECENT_DETAIL_LIMIT,
+      recentDetailReducedForBudget: false,
+      recentSelectionOrder:
+        "meaningful_then_lane_then_operational_priority_then_recent",
       tupleFields: {
         lane: ["reasonCode", "source", "at"],
         promise: ["promiseCode", "madeAt", "dueAt", "overdue", "source"],
@@ -117,6 +134,7 @@ export function projectHcnAssistantFileReview(review) {
     }
   };
 
+  fitRecentDetailToReplayBudget(projected);
   const frozen = deepFreeze(projected);
   const bytes = Buffer.byteLength(JSON.stringify(frozen), "utf8");
   if (bytes > MODEL_FILE_REVIEW_MAX_BYTES) {
@@ -196,8 +214,25 @@ function projectSource(value, fallbackName) {
     checkedAt: optionalText(source.checkedAt, 40),
     validUntil: optionalText(source.validUntil, 40),
     acceptedItems: integer(source.acceptedItems),
-    droppedItems: integer(source.droppedItems)
+    droppedItems: integer(source.droppedItems),
+    ...(isRecord(source.collections)
+      ? { collections: projectSourceCollections(source.collections) }
+      : {})
   };
+}
+
+function projectSourceCollections(value) {
+  return Object.fromEntries(
+    ["activities", "tasks", "documents"]
+      .filter((name) => isRecord(value[name]))
+      .map((name) => {
+        const collection = value[name];
+        return [name, {
+          completeness: text(collection.completeness, 32),
+          limitationCode: optionalText(collection.limitationCode, 64)
+        }];
+      })
+  );
 }
 
 function collectLaneReferences(value) {
@@ -235,7 +270,8 @@ function projectRecentCollection(
   value,
   projector,
   preferredReferences,
-  meaningfulReferences
+  meaningfulReferences,
+  collectionName
 ) {
   const items = Array.isArray(value) ? value : [];
   const ranked = items.map((item, index) => {
@@ -243,13 +279,12 @@ function projectRecentCollection(
     return {
       item,
       index,
-      rank: meaningfulReferences.has(reference)
-        ? 0
-        : preferredReferences.has(reference)
-          ? 1
-          : 2
+      meaningful: meaningfulReferences.has(reference),
+      preferred: preferredReferences.has(reference),
+      operationalPriority: recentOperationalPriority(item, collectionName),
+      timeRank: recentTimeRank(item, collectionName)
     };
-  }).sort((left, right) => left.rank - right.rank || left.index - right.index);
+  }).sort(compareRecentRank);
   const selected = ranked.slice(0, RECENT_DETAIL_LIMIT);
   return {
     availableCount: items.length,
@@ -257,6 +292,156 @@ function projectRecentCollection(
     omittedCount: Math.max(0, items.length - selected.length),
     items: selected.map(({ item }) => projector(item))
   };
+}
+
+function compareRecentRank(left, right) {
+  return Number(right.meaningful) - Number(left.meaningful)
+    || Number(right.preferred) - Number(left.preferred)
+    || right.operationalPriority - left.operationalPriority
+    || right.timeRank - left.timeRank
+    || left.index - right.index;
+}
+
+function recentOperationalPriority(value, collectionName) {
+  const item = isRecord(value) ? value : {};
+  const state = normalizedCode(item.state);
+  const status = normalizedCode(item.status);
+  const priority = normalizedCode(item.priority);
+  const reviewState = normalizedCode(item.reviewState);
+  const actionState = normalizedCode(item.actionState);
+  const deliveryState = normalizedCode(item.deliveryState);
+  const disposition = normalizedCode(item.disposition);
+
+  if (collectionName === "tasks") {
+    const actionable = [
+      "overdue",
+      "blocked",
+      "open",
+      "pending",
+      "in_progress"
+    ].includes(status);
+    if (!actionable) return 0;
+    return 16 + codeWeight(priority, {
+      urgent: 8,
+      critical: 8,
+      high: 6,
+      normal: 3,
+      low: 1
+    }) + codeWeight(status, {
+      overdue: 6,
+      blocked: 5,
+      open: 3,
+      pending: 2,
+      in_progress: 2,
+      complete: 0,
+      completed: 0
+    });
+  }
+  if (collectionName === "documents") {
+    return codeWeight(reviewState, {
+      rejected: 8,
+      needs_review: 7,
+      review_required: 7,
+      missing: 6,
+      pending: 3,
+      reviewed: 0,
+      accepted: 0
+    });
+  }
+  if (collectionName === "gmail") {
+    return codeWeight(actionState, {
+      failed: 9,
+      needs_reply: 8,
+      action_required: 8,
+      awaiting_response: 5,
+      complete: 0
+    }) + codeWeight(deliveryState, {
+      failed: 8,
+      bounced: 8,
+      incomplete: 7,
+      received: 2,
+      delivered: 1
+    });
+  }
+  if (collectionName === "quo") {
+    return codeWeight(actionState, {
+      failed: 9,
+      needs_reply: 8,
+      action_required: 8,
+      awaiting_response: 5,
+      complete: 0
+    }) + codeWeight(disposition, {
+      failed: 8,
+      undelivered: 8,
+      no_answer: 6,
+      voicemail: 5,
+      delivered: 1
+    });
+  }
+  return codeWeight(state, {
+    failed: 9,
+    blocked: 8,
+    needs_review: 7,
+    action_required: 7,
+    open: 4,
+    pending: 3,
+    complete: 0,
+    completed: 0
+  });
+}
+
+function recentTimeRank(value, collectionName) {
+  const item = isRecord(value) ? value : {};
+  const candidate = collectionName === "tasks"
+    ? item.dueAt
+    : collectionName === "documents"
+      ? item.createdAt
+      : item.occurredAt;
+  const parsed = Date.parse(String(candidate || ""));
+  if (!Number.isFinite(parsed)) return Number.NEGATIVE_INFINITY;
+  // Earlier open-task deadlines are more actionable; all other collections
+  // prefer the newest evidence after evidence and operational priority.
+  return collectionName === "tasks" ? -parsed : parsed;
+}
+
+function normalizedCode(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
+
+function codeWeight(value, weights) {
+  return Object.hasOwn(weights, value) ? weights[value] : 0;
+}
+
+function fitRecentDetailToReplayBudget(projected) {
+  let bytes = projectionBytes(projected);
+  if (bytes <= MODEL_FILE_REVIEW_MAX_BYTES) return;
+
+  for (
+    let effectiveLimit = RECENT_DETAIL_LIMIT - 1;
+    effectiveLimit >= 0 && bytes > MODEL_FILE_REVIEW_MAX_BYTES;
+    effectiveLimit -= 1
+  ) {
+    for (const name of RECENT_COLLECTION_NAMES) {
+      const collection = projected.recent[name];
+      if (collection.items.length <= effectiveLimit) continue;
+      collection.items = collection.items.slice(0, effectiveLimit);
+      collection.returnedCount = collection.items.length;
+      collection.omittedCount = Math.max(
+        0,
+        collection.availableCount - collection.returnedCount
+      );
+    }
+    projected.projection.effectiveRecentDetailLimitPerSource = effectiveLimit;
+    projected.projection.recentDetailReducedForBudget = true;
+    bytes = projectionBytes(projected);
+  }
+}
+
+function projectionBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
 function projectActivity(value) {

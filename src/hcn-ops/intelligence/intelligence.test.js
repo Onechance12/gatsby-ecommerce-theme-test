@@ -5,6 +5,7 @@ import {
   FileIntelligenceContractError,
   deriveFileIntelligence,
   deriveFileState,
+  evaluateFileWorkflows,
   evaluateWorkflow,
   normalizeFileEvidence
 } from "./index.js";
@@ -470,6 +471,89 @@ test("partial authoritative evidence can inform state but cannot authorize risky
   );
   assert.equal(result.workflows.neglected_files.readiness, "partially_ready");
   assert.equal(result.workflows.follow_up.readiness, "partially_ready");
+});
+
+test("bounded activity and task history qualifies gap workflows without blocking current file facts", () => {
+  const baseState = deriveFileState(baseInput());
+  const state = Object.freeze({
+    ...baseState,
+    historyCoverage: Object.freeze({
+      currentFacts: "complete",
+      documents: "complete",
+      activityHistory: "partial",
+      taskHistory: "partial"
+    })
+  });
+  const workflows = evaluateFileWorkflows(state);
+
+  assert.equal(workflows.claim_filing.readiness, "ready");
+  assert.equal(workflows.neglected_files.readiness, "partially_ready");
+  assert.equal(workflows.neglected_files.metrics.activityGapDays, null);
+  assert.equal(
+    workflows.neglected_files.nextActions.some(
+      ({ actionCode }) => actionCode === "review_neglected_file"
+    ),
+    false
+  );
+  assert.equal(workflows.follow_up.readiness, "partially_ready");
+  assert.equal(workflows.follow_up.metrics.verifiedActivityGapDays, null);
+  assert.equal(
+    workflows.follow_up.nextActions.some(
+      ({ actionCode }) => actionCode === "review_activity_gap"
+    ),
+    false
+  );
+  assert.equal(
+    workflows.follow_up.nextActions.some(
+      ({ actionCode }) => actionCode === "review_overdue_task"
+    ),
+    true
+  );
+  assert.ok(
+    workflows.neglected_files.blockers.some(
+      ({ blockerCode, targetCode }) =>
+        blockerCode === "authoritative_source_incomplete"
+        && targetCode === "jobnimbus_activity_history"
+    )
+  );
+});
+
+test("bounded history does not block inspection scheduling from complete current facts", () => {
+  const input = baseInput();
+  input.stages = [stage(ref(20), "inspection_scheduling")];
+  input.facts = input.facts.map((candidate) =>
+    candidate.factCode === "claim_identifier"
+      ? fact(ref(21), "claim_identifier", value(21))
+      : candidate
+  );
+  const baseState = deriveFileState(input);
+  const state = Object.freeze({
+    ...baseState,
+    historyCoverage: Object.freeze({
+      currentFacts: "complete",
+      documents: "complete",
+      activityHistory: "partial",
+      taskHistory: "partial"
+    })
+  });
+
+  const workflow = evaluateFileWorkflows(state).inspection_scheduling;
+
+  assert.equal(workflow.readiness, "ready");
+  assert.equal(workflow.eligibility, "eligible");
+  assert.equal(
+    workflow.nextActions.some(
+      ({ actionCode }) =>
+        actionCode === "prepare_inspection_scheduling_request"
+    ),
+    true
+  );
+  assert.equal(
+    workflow.blockers.some(
+      ({ blockerCode }) => blockerCode === "authoritative_source_incomplete"
+    ),
+    false
+  );
 });
 
 test("unsupported sources and their evidence are represented but never trusted", () => {

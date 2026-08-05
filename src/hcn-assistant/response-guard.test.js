@@ -49,3 +49,18 @@ test("assistant response guard permits proven absence from a complete source", (
     message
   );
 });
+
+test("assistant response guard qualifies negative JobNimbus history claims", () => {
+  const result = guardHcnAssistantResponse({
+    message: "There are no JobNimbus notes or tasks on this file.",
+    sources: [{
+      key: "jobnimbus",
+      status: "partial"
+    }]
+  });
+
+  assert.doesNotMatch(result, /There are no JobNimbus notes/);
+  assert.match(result, /bounded JobNimbus history check/i);
+  assert.match(result, /cannot verify that no older notes/i);
+  assert.match(result, /Current file facts and documents were evaluated separately/i);
+});

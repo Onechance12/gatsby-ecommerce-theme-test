@@ -19,6 +19,8 @@ const CHANNEL_PATTERNS = Object.freeze({
   gmail: /\b(?:gmail|email|emails|emailed|message|messages|reply|replies)\b/i,
   quo: /\b(?:quo|call|calls|called|calling|text|texts|texted|voicemail|voicemails)\b/i
 });
+const JOBNIMBUS_HISTORY_PATTERN =
+  /\b(?:job\s*nimbus\s+)?(?:notes?|tasks?|activities|activity\s+history|file\s+history)\b/i;
 
 /**
  * Enforce a final employee-visible trust boundary on model wording.
@@ -38,14 +40,24 @@ export function guardHcnAssistantResponse({ message, sources = [] } = {}) {
       .filter((source) => source && typeof source === "object")
       .map((source) => [
         String(source.key || "").toLowerCase(),
-        String(source.status || "").toLowerCase()
+        {
+          status: String(source.status || "").toLowerCase()
+        }
       ])
   );
   const unsupportedChannels = Object.keys(CHANNEL_PATTERNS).filter((key) =>
     sourceMap.has(key)
-    && !["fresh", "complete"].includes(sourceMap.get(key))
+    && !["fresh", "complete"].includes(sourceMap.get(key).status)
     && containsUnsupportedAbsenceClaim(message, CHANNEL_PATTERNS[key])
   );
+  const jobNimbusHistory = sourceMap.get("jobnimbus");
+  if (
+    jobNimbusHistory
+    && !["fresh", "complete"].includes(jobNimbusHistory.status)
+    && containsUnsupportedAbsenceClaim(message, JOBNIMBUS_HISTORY_PATTERN)
+  ) {
+    return "The bounded JobNimbus history check cannot verify that no older notes, activities, or tasks exist. Current file facts and documents were evaluated separately. Retry or review a complete history before treating an absence as verified. Nothing was changed.";
+  }
 
   if (unsupportedChannels.length > 0) {
     const labels = unsupportedChannels.map((key) =>

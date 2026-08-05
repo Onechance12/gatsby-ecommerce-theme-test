@@ -65,6 +65,8 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
   }
 
   const authority = sourceState(fileState, "jobnimbus");
+  const activityHistoryComplete =
+    sourceFacetComplete(fileState, "activityHistory", authority);
   const baseline =
     fileState.lastMeaningfulActivity ??
     (fileState.activeSince
@@ -85,7 +87,11 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
     ),
     syntheticFact(
       "last_meaningful_activity",
-      fileState.lastMeaningfulActivity ? "confirmed" : "absent",
+      fileState.lastMeaningfulActivity
+        ? "confirmed"
+        : activityHistoryComplete
+          ? "absent"
+          : "unknown",
       fileState.lastMeaningfulActivity
         ? [fileState.lastMeaningfulActivity.evidenceRef]
         : []
@@ -94,8 +100,13 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
   const blockers = [];
   if (authority.status !== "fresh") {
     blockers.push(blocker("authoritative_source_unavailable", "jobnimbus"));
-  } else if (authority.completeness !== "complete") {
-    blockers.push(blocker("authoritative_source_incomplete", "jobnimbus"));
+  } else if (!activityHistoryComplete) {
+    blockers.push(
+      blocker(
+        "authoritative_source_incomplete",
+        "jobnimbus_activity_history"
+      )
+    );
   }
   if (!baseline) {
     blockers.push(blocker("activity_baseline_missing", "activity"));
@@ -110,7 +121,7 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
     );
   }
 
-  const activityGapDays = baseline
+  const activityGapDays = activityHistoryComplete && baseline
     ? elapsedDays(fileState.generatedAt, baseline.occurredAt)
     : null;
   const contactBaseline =
@@ -137,7 +148,11 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
         ]
       : [];
   const escalationFlags = [];
-  if (activityGapDays !== null && activityGapDays >= 30) {
+  if (
+    activityHistoryComplete
+    && activityGapDays !== null
+    && activityGapDays >= 30
+  ) {
     escalationFlags.push("severely_neglected");
   }
   if (fileState.lastMeaningfulContact === null) {
@@ -149,11 +164,13 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
 
   return result(fileState, "neglected_files", {
     eligibility:
-      authority.status === "fresh" && baseline ? "eligible" : "indeterminate",
+      authority.status === "fresh" && activityHistoryComplete && baseline
+        ? "eligible"
+        : "indeterminate",
     readiness:
       authority.status !== "fresh" || !baseline
         ? "blocked"
-        : authority.completeness !== "complete" || communicationIncomplete
+        : !activityHistoryComplete || communicationIncomplete
           ? "partially_ready"
           : "ready",
     requiredFacts,
@@ -164,12 +181,16 @@ export function evaluateNeglectedFilesWorkflow(fileState) {
     metrics: {
       activityGapDays,
       contactGapDays,
-      baselineKind: baseline
-        ? fileState.lastMeaningfulActivity
-          ? "verified_activity"
-          : "file_activation"
-        : "unknown",
-      baselineAt: baseline?.occurredAt ?? null
+      baselineKind: !activityHistoryComplete
+        ? "unknown"
+        : baseline
+          ? fileState.lastMeaningfulActivity
+            ? "verified_activity"
+            : "file_activation"
+          : "unknown",
+      baselineAt: activityHistoryComplete
+        ? baseline?.occurredAt ?? null
+        : null
     }
   });
 }
@@ -339,7 +360,8 @@ export function evaluateClaimFilingWorkflow(fileState) {
   const claim = readFact(fileState, "claim_identifier");
   const authority = sourceState(fileState, "jobnimbus");
   const authorityReady =
-    authority.status === "fresh" && authority.completeness === "complete";
+    authority.status === "fresh"
+    && sourceFacetComplete(fileState, "currentFacts", authority);
 
   if (fileState.fileStatus !== "active") {
     return result(fileState, "claim_filing", {
@@ -506,7 +528,8 @@ export function evaluateInspectionSchedulingWorkflow(fileState) {
 
   const authority = sourceState(fileState, "jobnimbus");
   const authorityReady =
-    authority.status === "fresh" && authority.completeness === "complete";
+    authority.status === "fresh"
+    && sourceFacetComplete(fileState, "currentFacts", authority);
   const contactAvailable =
     carrierContact.state === "confirmed" ||
     adjusterContact.state === "confirmed";
@@ -659,7 +682,12 @@ export function evaluateFollowUpWorkflow(fileState) {
 
   const authority = sourceState(fileState, "jobnimbus");
   const authorityReady =
-    authority.status === "fresh" && authority.completeness === "complete";
+    authority.status === "fresh"
+    && sourceFacetComplete(fileState, "currentFacts", authority);
+  const activityHistoryComplete =
+    sourceFacetComplete(fileState, "activityHistory", authority);
+  const taskHistoryComplete =
+    sourceFacetComplete(fileState, "taskHistory", authority);
   const overduePromises = fileState.openPromises.filter(
     ({ overdue }) => overdue
   );
@@ -668,7 +696,7 @@ export function evaluateFollowUpWorkflow(fileState) {
     fileState.communicationHealth.incompleteDelivery;
   const gapBaseline =
     fileState.lastMeaningfulActivity?.occurredAt ?? fileState.activeSince;
-  const gapDays = gapBaseline
+  const gapDays = activityHistoryComplete && gapBaseline
     ? elapsedDays(fileState.generatedAt, gapBaseline)
     : null;
   const gapTrigger = gapDays !== null && gapDays >= 7;
@@ -686,7 +714,9 @@ export function evaluateFollowUpWorkflow(fileState) {
         incompleteDelivery.length > 0 ||
         gapTrigger
         ? "confirmed"
-        : "absent",
+        : activityHistoryComplete && taskHistoryComplete
+          ? "absent"
+          : "unknown",
       [
         ...fileState.overdueTasks.map(({ evidenceRef }) => evidenceRef),
         ...overduePromises.map(({ evidenceRef }) => evidenceRef),
@@ -708,6 +738,22 @@ export function evaluateFollowUpWorkflow(fileState) {
           ? "authoritative_source_incomplete"
           : "authoritative_source_unavailable",
         "jobnimbus"
+      )
+    );
+  }
+  if (authority.status === "fresh" && !activityHistoryComplete) {
+    blockers.push(
+      blocker(
+        "authoritative_source_incomplete",
+        "jobnimbus_activity_history"
+      )
+    );
+  }
+  if (authority.status === "fresh" && !taskHistoryComplete) {
+    blockers.push(
+      blocker(
+        "authoritative_source_incomplete",
+        "jobnimbus_task_history"
       )
     );
   }
@@ -793,7 +839,7 @@ export function evaluateFollowUpWorkflow(fileState) {
   if (incompleteDelivery.length > 0) {
     escalationFlags.push("unresolved_delivery_state");
   }
-  if (gapDays !== null && gapDays >= 30) {
+  if (activityHistoryComplete && gapDays !== null && gapDays >= 30) {
     escalationFlags.push("severely_neglected");
   }
   if (communicationIncomplete) {
@@ -806,7 +852,8 @@ export function evaluateFollowUpWorkflow(fileState) {
     eligibility: authority.status === "fresh" ? "eligible" : "indeterminate",
     readiness: hardBlocked
       ? "blocked"
-      : authority.completeness !== "complete" ||
+      : !activityHistoryComplete ||
+          !taskHistoryComplete ||
           communicationIncomplete ||
           incompleteDelivery.length > 0
         ? "partially_ready"
@@ -932,6 +979,14 @@ function sourceState(fileState, source) {
       completeness: "none"
     }
   );
+}
+
+function sourceFacetComplete(fileState, facet, fallbackSource) {
+  const value = fileState?.historyCoverage?.[facet];
+  if (["complete", "partial", "none"].includes(value)) {
+    return value === "complete";
+  }
+  return fallbackSource.completeness === "complete";
 }
 
 function elapsedDays(later, earlier) {

@@ -115,9 +115,12 @@ test("file review projection preserves operational truth within provider replay 
     projected.intelligence.workflows.follow_up.readiness,
     "partially_ready"
   );
-  assert.equal(projected.recent.activities.returnedCount, 1);
-  assert.equal(projected.recent.gmail.returnedCount, 1);
-  assert.equal(projected.recent.gmail.omittedCount, 19);
+  assert.equal(projected.recent.activities.returnedCount, 4);
+  assert.equal(projected.recent.gmail.returnedCount, 4);
+  assert.equal(projected.recent.gmail.omittedCount, 16);
+  assert.equal(projected.projection.recentDetailLimitPerSource, 5);
+  assert.equal(projected.projection.effectiveRecentDetailLimitPerSource, 4);
+  assert.equal(projected.projection.recentDetailReducedForBudget, true);
   assert.equal(
     projected.recent.gmail.items.some(
       (item) => item.reference === actionableLaterReference
@@ -149,6 +152,186 @@ test("file review projection preserves operational truth within provider replay 
   assert.equal(Object.isFrozen(projected.recent.activities), true);
 });
 
+test("file review projection returns five bounded details per collection", () => {
+  const recent = {
+    activities: Array.from({ length: 7 }, (_, index) => ({
+      reference: evidenceRef(index),
+      kind: "note",
+      state: "complete",
+      occurredAt: instant(index),
+      actorRole: "employee",
+      label: `Activity ${index}`,
+      providerRecordId: `private-activity-provider-${index}`,
+      providerActivityId: `private-activity-${index}`,
+      body: `private activity body ${index}`
+    })),
+    tasks: Array.from({ length: 7 }, (_, index) => ({
+      reference: evidenceRef(index + 10),
+      kind: "follow_up",
+      status: "open",
+      priority: "normal",
+      dueAt: instant(index),
+      assignedRole: "employee",
+      label: `Task ${index}`,
+      providerRecordId: `private-task-provider-${index}`,
+      providerTaskId: `private-task-${index}`,
+      description: `private task description ${index}`
+    })),
+    documents: Array.from({ length: 7 }, (_, index) => ({
+      reference: evidenceRef(index + 20),
+      kind: "estimate",
+      reviewState: "reviewed",
+      createdAt: instant(index),
+      fileName: `Document ${index}.pdf`,
+      providerRecordId: `private-document-provider-${index}`,
+      providerDocumentId: `private-document-${index}`,
+      contents: `private document contents ${index}`
+    })),
+    gmail: Array.from({ length: 7 }, (_, index) => ({
+      reference: evidenceRef(index + 30),
+      direction: "inbound",
+      occurredAt: instant(index),
+      hasAttachment: false,
+      deliveryState: "received",
+      actionState: "complete",
+      subject: `Email ${index}`,
+      snippet: `Allowed bounded snippet ${index}`,
+      providerRecordId: `private-message-provider-${index}`,
+      messageId: `private-message-${index}`,
+      threadId: `private-thread-${index}`,
+      conversationKey: `private-thread-key-${index}`,
+      body: `private full email body ${index}`
+    })),
+    quo: Array.from({ length: 7 }, (_, index) => ({
+      reference: evidenceRef(index + 40),
+      channel: "text",
+      direction: "inbound",
+      occurredAt: instant(index),
+      disposition: "delivered",
+      actionState: "complete",
+      preview: `Allowed bounded preview ${index}`,
+      providerRecordId: `private-call-provider-${index}`,
+      callId: `private-call-${index}`,
+      conversationKey: `private-call-key-${index}`,
+      transcript: `private full transcript ${index}`
+    }))
+  };
+
+  const projected = projectHcnAssistantFileReview(minimalReview({ recent }));
+  const serialized = JSON.stringify(projected);
+
+  for (const name of Object.keys(recent)) {
+    assert.equal(projected.recent[name].availableCount, 7);
+    assert.equal(projected.recent[name].returnedCount, 5);
+    assert.equal(projected.recent[name].omittedCount, 2);
+    assert.equal(projected.recent[name].items.length, 5);
+  }
+  assert.equal(projected.projection.effectiveRecentDetailLimitPerSource, 5);
+  assert.equal(projected.projection.recentDetailReducedForBudget, false);
+  assert.ok(
+    Buffer.byteLength(serialized, "utf8")
+      <= hcnAssistantFileReviewProjectionLimitBytes()
+  );
+  assert.doesNotMatch(
+    serialized,
+    /private-(?:activity|task|document|message|thread|call)|private full|private document|private task/
+  );
+});
+
+test("file review projection prioritizes meaningful, lane, actionable, then recent evidence stably", () => {
+  const meaningfulReference = evidenceRef(101);
+  const laneReference = evidenceRef(102);
+  const actionableReference = evidenceRef(103);
+  const newestReference = evidenceRef(104);
+  const nextNewestReference = evidenceRef(105);
+  const recent = {
+    gmail: [
+      gmailItem(evidenceRef(106), "2026-08-04T15:01:00.000Z", "complete"),
+      gmailItem(laneReference, "2026-08-01T15:00:00.000Z", "complete"),
+      gmailItem(newestReference, "2026-08-04T15:06:00.000Z", "complete"),
+      gmailItem(meaningfulReference, "2026-07-31T15:00:00.000Z", "complete"),
+      gmailItem(actionableReference, "2026-08-02T15:00:00.000Z", "needs_reply"),
+      gmailItem(nextNewestReference, "2026-08-04T15:05:00.000Z", "complete"),
+      gmailItem(evidenceRef(107), "2026-08-04T15:02:00.000Z", "complete")
+    ]
+  };
+  const review = minimalReview({
+    recent,
+    lanes: {
+      priority: [{
+        reasonCode: "reply_required",
+        source: "gmail",
+        reference: laneReference,
+        at: "2026-08-01T15:00:00.000Z"
+      }]
+    },
+    intelligence: {
+      schemaVersion: "hcn.file-intelligence.v1",
+      fileStatus: "active",
+      lastMeaningfulContact: {
+        eventCode: "email_received",
+        occurredAt: "2026-07-31T15:00:00.000Z",
+        source: "gmail",
+        evidenceRef: meaningfulReference
+      }
+    }
+  });
+
+  const first = projectHcnAssistantFileReview(review);
+  const second = projectHcnAssistantFileReview(review);
+  const selected = first.recent.gmail.items.map((item) => item.reference);
+
+  assert.deepEqual(selected, [
+    meaningfulReference,
+    laneReference,
+    actionableReference,
+    newestReference,
+    nextNewestReference
+  ]);
+  assert.deepEqual(first, second);
+  assert.equal(first.recent.gmail.omittedCount, 2);
+});
+
+test("file review projection keeps an open task ahead of completed high-priority tasks", () => {
+  const openReference = evidenceRef(200);
+  const tasks = [
+    {
+      reference: openReference,
+      kind: "follow_up",
+      status: "open",
+      priority: "low",
+      dueAt: "2026-08-10T15:00:00.000Z",
+      assignedRole: "employee",
+      label: "Only live task"
+    },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      reference: evidenceRef(201 + index),
+      kind: "follow_up",
+      status: "completed",
+      priority: "critical",
+      dueAt: instant(index),
+      assignedRole: "employee",
+      label: `Completed task ${index}`
+    }))
+  ];
+
+  const projected = projectHcnAssistantFileReview(
+    minimalReview({ recent: { tasks } })
+  );
+
+  assert.equal(projected.recent.tasks.returnedCount, 5);
+  assert.equal(
+    projected.recent.tasks.items.some(
+      (item) => item.reference === openReference
+    ),
+    true
+  );
+  assert.equal(
+    projected.recent.tasks.items[0].reference,
+    openReference
+  );
+});
+
 function source(name, completeness) {
   return {
     source: name,
@@ -178,6 +361,42 @@ function instant(index) {
 
 function evidenceRef(index) {
   return `ref_${index.toString(16).padStart(32, "0")}`;
+}
+
+function gmailItem(reference, occurredAt, actionState) {
+  return {
+    reference,
+    direction: "inbound",
+    occurredAt,
+    hasAttachment: false,
+    deliveryState: "received",
+    actionState,
+    subject: reference,
+    snippet: `Bounded ${reference}`
+  };
+}
+
+function minimalReview({ recent = {}, lanes = {}, intelligence = null } = {}) {
+  return {
+    schema: "hcn.console.file.v1",
+    generatedAt: "2026-08-04T16:00:00.000Z",
+    evidenceStatus: "complete",
+    file: {
+      fileRef: FILE_REF,
+      jobNumber: "2672",
+      displayName: "Assigned file",
+      statusCode: "active",
+      stageCode: "estimate"
+    },
+    sources: {
+      jobnimbus: source("jobnimbus", "complete"),
+      gmail: source("gmail", "complete"),
+      quo: source("quo", "complete")
+    },
+    lanes,
+    recent,
+    intelligence
+  };
 }
 
 function oversizedIntelligence(repeated) {

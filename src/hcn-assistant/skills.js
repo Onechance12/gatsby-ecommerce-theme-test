@@ -77,7 +77,8 @@ export function hcnAssistantSkillInstructions() {
     "Thresher AI HCN skill model:",
     ...HCN_ASSISTANT_SKILLS.map(
       (skill) => `- ${skill.code}: ${skill.purpose}`
-    )
+    ),
+    "Bounded JobNimbus activity or task history is not proof that older records do not exist. Keep current file facts and documents separate from history-gap conclusions."
   ].join("\n");
 }
 

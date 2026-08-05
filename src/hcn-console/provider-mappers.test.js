@@ -357,7 +357,7 @@ test('exact JobNimbus file maps aliases, bounds presentation text, and excludes 
   }
 });
 
-test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete collections, and duplicate IDs', () => {
+test('exact JobNimbus file preserves bounded activity/task history but fails closed on document pagination and conflicting IDs', () => {
   const base = {
     ...FRESHNESS,
     activitiesComplete: true,
@@ -430,6 +430,53 @@ test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete
       ),
     mappingError('incomplete_pagination'),
   );
+
+  const boundedHistory = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activitiesComplete: false,
+      tasksComplete: false,
+      activities: [
+        scoped({ jnid: 'bounded-activity', date_created: 1785261000 }),
+      ],
+      tasks: [
+        scoped({
+          jnid: 'bounded-task',
+          date_created: 1785261000,
+          status_name: 'Open',
+        }),
+      ],
+    },
+    options,
+  );
+  assert.equal(boundedHistory.data.file.providerFileId, FILE_ID);
+  assert.deepEqual(boundedHistory.data.collectionCoverage.activities, {
+    completeness: 'partial',
+    returnedItems: 1,
+    duplicateItemsRemoved: 0,
+    limitationCode: 'incomplete_pagination',
+  });
+  assert.equal(
+    boundedHistory.data.collectionCoverage.tasks.completeness,
+    'partial',
+  );
+
+  const duplicateActivities = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activities: [
+        scoped({ jnid: 'same-id', date_created: 1785261000 }),
+        scoped({ jnid: 'same-id', date_created: 1785261000 }),
+      ],
+    },
+    options,
+  );
+  assert.equal(duplicateActivities.data.activities.length, 1);
+  assert.equal(
+    duplicateActivities.data.collectionCoverage.activities
+      .duplicateItemsRemoved,
+    1,
+  );
   assert.throws(
     () =>
       mapJobNimbusFileEnvelope(
@@ -444,9 +491,31 @@ test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete
       ),
     mappingError('duplicate_provider_record'),
   );
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          activities: [
+            scoped({
+              jnid: 'same-normalized-id',
+              date_created: 1785261000,
+              rawBody: 'first provider body',
+            }),
+            scoped({
+              jnid: 'same-normalized-id',
+              date_created: 1785261000,
+              rawBody: 'different provider body',
+            }),
+          ],
+        },
+        options,
+      ),
+    mappingError('duplicate_provider_record'),
+  );
 });
 
-test('exact JobNimbus file permits non-contact task references but rejects cross-client references', () => {
+test('exact JobNimbus activities accept primary or related exact-file references but reject cross-client references', () => {
   const base = {
     ...FRESHNESS,
     activitiesComplete: true,
@@ -468,16 +537,22 @@ test('exact JobNimbus file permits non-contact task references but rejects cross
       ...base,
       activities: [
         {
-          jnid: 'task-related-activity',
+          jnid: 'related-file-activity',
           primary: { id: 'jobnimbus-task-id' },
           related: [{ id: FILE_ID }],
           date_created: 1785261000,
+        },
+        {
+          jnid: 'primary-file-activity',
+          primary: { id: FILE_ID },
+          related: [{ id: 'jobnimbus-task-id' }],
+          date_created: 1785261001,
         },
       ],
     },
     options,
   );
-  assert.equal(result.data.activities.length, 1);
+  assert.equal(result.data.activities.length, 2);
 
   assert.throws(
     () =>
@@ -498,24 +573,6 @@ test('exact JobNimbus file permits non-contact task references but rejects cross
     mappingError('scope_mismatch'),
   );
 
-  assert.throws(
-    () =>
-      mapJobNimbusFileEnvelope(
-        {
-          ...base,
-          activities: [
-            {
-              jnid: 'missing-exact-related-file',
-              primary: { id: FILE_ID },
-              related: [{ id: 'jobnimbus-task-id' }],
-              date_created: 1785261000,
-            },
-          ],
-        },
-        options,
-      ),
-    mappingError('scope_mismatch'),
-  );
 });
 
 test('JobNimbus zero date sentinels remain missing instead of becoming 1970 dates', () => {

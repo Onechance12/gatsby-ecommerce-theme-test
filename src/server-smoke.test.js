@@ -2361,6 +2361,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   let ambiguousManagementReferenceId = "";
   let managementActivityOverride = null;
   let serveWrongManagementReferenceField = false;
+  let hcnBoundedHistoryMode = false;
+  let hcnDisjointActivityOverflowMode = false;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-console-memory-canary-"));
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   const legacyCanaryPath = path.join(
@@ -2650,6 +2652,64 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         referenceField,
         referencedFileId
       });
+      if (
+        hcnDisjointActivityOverflowMode
+        && referencedFileId === exactFileId
+      ) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const relatedOnly = referenceField === "related.id";
+        const activities = Array.from({ length: 51 }, (_, index) => ({
+          jnid: `jn-disjoint-${relatedOnly ? "related" : "primary"}-${
+            index + 1
+          }`,
+          primary: {
+            id: relatedOnly ? "non-contact-primary-ref" : exactFileId
+          },
+          related: {
+            id: relatedOnly ? exactFileId : "non-contact-related-ref"
+          },
+          record_type_name: "Note",
+          status_name: "Recorded",
+          date_created: new Date(
+            Date.parse(
+              relatedOnly
+                ? "2026-07-27T15:00:00.000Z"
+                : "2026-07-20T15:00:00.000Z"
+            ) - index * 60_000
+          ).toISOString(),
+          actor_role: "adjuster",
+          note: `${relatedOnly ? "Newer related-only" : "Older primary-only"} activity ${
+            index + 1
+          }`
+        }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          activities: activities.slice(offset, offset + size)
+        }));
+        return;
+      }
+      if (hcnBoundedHistoryMode && referencedFileId === exactFileId) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const activities = Array.from({ length: 51 }, (_, index) => ({
+          jnid: `jn-bounded-activity-${index + 1}`,
+          primary: { id: exactFileId },
+          related: { id: exactFileId },
+          record_type_name: "Note",
+          status_name: "Recorded",
+          date_created: new Date(
+            Date.parse("2026-07-27T14:00:00.000Z") - index * 60_000
+          ).toISOString(),
+          actor_role: "adjuster",
+          note: `Bounded synthetic activity ${index + 1}`
+        }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          activities: activities.slice(offset, offset + size)
+        }));
+        return;
+      }
       const activityNumber = new Map([
         [exactFileId, "1"],
         [otherOwnerContact.jnid, "2"],
@@ -2701,6 +2761,27 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/tasks" && req.method === "GET") {
       assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      if (hcnBoundedHistoryMode) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const tasks = Array.from({ length: 51 }, (_, index) => ({
+          jnid: `jn-bounded-task-${index + 1}`,
+          related: { id: exactFileId },
+          record_type_name: "Follow Up",
+          status_name: "Open",
+          priority_name: "High",
+          date_start: new Date(
+            Date.parse("2026-07-27T16:00:00.000Z") - index * 60_000
+          ).toISOString(),
+          assigned_role: "coordinator",
+          title: `Bounded synthetic task ${index + 1}`
+        }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          tasks: tasks.slice(offset, offset + size)
+        }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         tasks: [{
@@ -3964,6 +4045,120 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         request === `jobnimbus:/contacts/${exactFileId}`
     ).length,
     1
+  );
+
+  hcnBoundedHistoryMode = true;
+  const boundedHistoryResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    }
+  );
+  hcnBoundedHistoryMode = false;
+  assert.equal(boundedHistoryResponse.status, 200);
+  const boundedHistory = await boundedHistoryResponse.json();
+  assert.equal(boundedHistory.file.jobNumber, "HCN-1001");
+  assert.equal(
+    boundedHistory.file.displayName,
+    "Fixture Active Homeowner"
+  );
+  assert.equal(boundedHistory.evidenceStatus, "complete");
+  assert.equal(
+    boundedHistory.sources.jobnimbus.failureCode,
+    null
+  );
+  assert.equal(
+    boundedHistory.sources.jobnimbus.completeness,
+    "complete"
+  );
+  assert.deepEqual(
+    boundedHistory.sources.jobnimbus.collections,
+    {
+      activities: {
+        completeness: "partial",
+        returnedItems: 50,
+        duplicateItemsRemoved: 0,
+        readLimit: 50,
+        limitationCode: "bounded_history_window"
+      },
+      tasks: {
+        completeness: "partial",
+        returnedItems: 50,
+        duplicateItemsRemoved: 0,
+        readLimit: 50,
+        limitationCode: "bounded_history_window"
+      },
+      documents: {
+        completeness: "complete",
+        returnedItems: 1,
+        duplicateItemsRemoved: 0,
+        readLimit: 500,
+        limitationCode: null
+      }
+    }
+  );
+  assert.equal(boundedHistory.recent.activities.length, 10);
+  assert.equal(boundedHistory.recent.tasks.length, 10);
+  assert.deepEqual(boundedHistory.intelligence.historyCoverage, {
+    currentFacts: "complete",
+    documents: "complete",
+    activityHistory: "partial",
+    taskHistory: "partial"
+  });
+  assert.equal(
+    boundedHistory.intelligence.workflows.neglected_files.metrics
+      .activityGapDays,
+    null
+  );
+  assert.equal(
+    boundedHistory.intelligence.workflows.neglected_files.nextActions.some(
+      ({ actionCode }) => actionCode === "review_neglected_file"
+    ),
+    false
+  );
+  assert.equal(
+    boundedHistory.intelligence.workflows.follow_up.metrics
+      .verifiedActivityGapDays,
+    null
+  );
+  assert.equal(
+    boundedHistory.intelligence.workflows.follow_up.nextActions.some(
+      ({ actionCode }) => actionCode === "review_activity_gap"
+    ),
+    false
+  );
+  assert.equal(
+    new Set(
+      boundedHistory.recent.activities.map((activity) => activity.reference)
+    ).size,
+    boundedHistory.recent.activities.length
+  );
+
+  hcnDisjointActivityOverflowMode = true;
+  const disjointActivityResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    }
+  );
+  hcnDisjointActivityOverflowMode = false;
+  assert.equal(disjointActivityResponse.status, 200);
+  const disjointActivityReview = await disjointActivityResponse.json();
+  assert.equal(disjointActivityReview.recent.activities.length, 10);
+  assert.equal(
+    disjointActivityReview.recent.activities.every(({ label }) =>
+      label.startsWith("Newer related-only activity")
+    ),
+    true
+  );
+  assert.equal(
+    disjointActivityReview.sources.jobnimbus.collections.activities
+      .completeness,
+    "partial"
   );
 
   const hpManagementRequestsBefore = hcnProviderRequests.length;

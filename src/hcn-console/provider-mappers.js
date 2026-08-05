@@ -280,8 +280,16 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     expectedProviderFileId,
   );
   const freshness = normalizeFreshness(input);
-  for (const collection of ['activities', 'tasks', 'documents']) {
-    requireCompletePagination(input, collection);
+  const collectionCompleteness = {
+    activities: readCollectionPaginationState(input, 'activities'),
+    tasks: readCollectionPaginationState(input, 'tasks'),
+    documents: readCollectionPaginationState(input, 'documents'),
+  };
+  if (!collectionCompleteness.documents) {
+    fail(
+      'incomplete_pagination',
+      'documents pagination is not verified complete.',
+    );
   }
 
   const contact = requirePlainObject(input?.contact, 'contact');
@@ -296,15 +304,17 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     );
   }
 
-  const activities = mapScopedCollection({
+  const activityResult = mapScopedCollection({
     value: input.activities,
     label: 'activities',
     expectedProviderFileId,
     knownProviderFileIds,
     mapper: (record) =>
       mapActivity(record, assignedOwnerId, legacyChanceField),
+    allowedExactReferenceFields: ['primary', 'related'],
+    dedupeIdenticalProviderIds: true,
   });
-  const tasks = mapScopedCollection({
+  const taskResult = mapScopedCollection({
     value: input.tasks,
     label: 'tasks',
     expectedProviderFileId,
@@ -312,7 +322,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     mapper: (record) =>
       mapTask(record, assignedOwnerId, legacyChanceField),
   });
-  const documents = mapScopedCollection({
+  const documentResult = mapScopedCollection({
     value: input.documents,
     label: 'documents',
     expectedProviderFileId,
@@ -320,6 +330,9 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     mapper: mapDocument,
     filter: (record) => !isPhotoLikeDocument(record),
   });
+  const activities = activityResult.items;
+  const tasks = taskResult.items;
+  const documents = documentResult.items;
 
   assertUniqueRecordIds([...activities, ...tasks, ...documents], 'jobnimbus');
 
@@ -331,6 +344,23 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
       activities,
       tasks,
       documents,
+      collectionCoverage: {
+        activities: collectionCoverage(
+          collectionCompleteness.activities,
+          activities.length,
+          activityResult.duplicateItemsRemoved,
+        ),
+        tasks: collectionCoverage(
+          collectionCompleteness.tasks,
+          tasks.length,
+          taskResult.duplicateItemsRemoved,
+        ),
+        documents: collectionCoverage(
+          collectionCompleteness.documents,
+          documents.length,
+          documentResult.duplicateItemsRemoved,
+        ),
+      },
     },
   });
 }
@@ -593,17 +623,22 @@ function mapScopedCollection({
   knownProviderFileIds,
   mapper,
   filter = () => true,
+  allowedExactReferenceFields = ['related'],
+  dedupeIdenticalProviderIds = false,
 }) {
   const rows = requireArray(value, label);
   if (rows.length > HCN_PROVIDER_MAPPER_LIMITS.maximumCollectionItems) {
     fail('provider_bounds_exceeded', `JobNimbus ${label} exceed their bound.`);
   }
   const mapped = [];
+  const byProviderRecordId = new Map();
+  let duplicateItemsRemoved = 0;
   for (const row of rows) {
     if (!recordReferencesFile(
       row,
       expectedProviderFileId,
       knownProviderFileIds,
+      allowedExactReferenceFields,
     )) {
       fail(
         'scope_mismatch',
@@ -618,9 +653,27 @@ function mapScopedCollection({
         `JobNimbus ${label} contain an invalid record.`,
       );
     }
+    if (dedupeIdenticalProviderIds) {
+      const existing = byProviderRecordId.get(item.providerRecordId);
+      const fingerprint = stableProviderRecord(row);
+      if (existing) {
+        if (
+          existing.fingerprint !== fingerprint
+          || JSON.stringify(existing.item) !== JSON.stringify(item)
+        ) {
+          fail(
+            'duplicate_provider_record',
+            `JobNimbus ${label} contain conflicting duplicate ids.`,
+          );
+        }
+        duplicateItemsRemoved += 1;
+        continue;
+      }
+      byProviderRecordId.set(item.providerRecordId, { item, fingerprint });
+    }
     mapped.push(item);
   }
-  return mapped;
+  return { items: mapped, duplicateItemsRemoved };
 }
 
 function normalizeKnownProviderFileIds(value, expectedProviderFileId) {
@@ -648,12 +701,16 @@ function recordReferencesFile(
   record,
   expectedProviderFileId,
   knownProviderFileIds,
+  allowedExactReferenceFields = ['related'],
 ) {
   if (!isPlainObject(record)) return false;
   if (knownProviderFileIds) {
-    const relatedIds = [];
-    collectReferenceIds(record.related, relatedIds);
-    if (!relatedIds.includes(expectedProviderFileId)) return false;
+    const exactReferenceIds = [];
+    for (const fieldName of allowedExactReferenceFields) {
+      if (!['primary', 'related'].includes(fieldName)) return false;
+      collectReferenceIds(record[fieldName], exactReferenceIds);
+    }
+    if (!exactReferenceIds.includes(expectedProviderFileId)) return false;
 
     const allIds = [];
     for (const value of [
@@ -683,6 +740,31 @@ function recordReferencesFile(
   return (
     ids.length > 0
     && ids.every((id) => id === expectedProviderFileId)
+  );
+}
+
+function collectionCoverage(complete, returnedItems, duplicateItemsRemoved) {
+  return {
+    completeness: complete ? 'complete' : 'partial',
+    returnedItems,
+    duplicateItemsRemoved,
+    limitationCode: complete ? null : 'incomplete_pagination',
+  };
+}
+
+function stableProviderRecord(value) {
+  if (Array.isArray(value)) {
+    return JSON.stringify(
+      value.map(stableProviderRecord).sort((left, right) =>
+        left.localeCompare(right)
+      ),
+    );
+  }
+  if (!isPlainObject(value)) return JSON.stringify(value);
+  return JSON.stringify(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stableProviderRecord(entry)]),
   );
 }
 
@@ -1076,6 +1158,15 @@ function normalizeFreshness(input) {
 }
 
 function requireCompletePagination(input, collection) {
+  if (!readCollectionPaginationState(input, collection)) {
+    fail(
+      'incomplete_pagination',
+      `${collection} pagination is not verified complete.`,
+    );
+  }
+}
+
+function readCollectionPaginationState(input, collection) {
   const pagination = isPlainObject(input?.pagination) ? input.pagination : {};
   const singular = collection.endsWith('ies')
     ? `${collection.slice(0, -3)}y`
@@ -1083,22 +1174,30 @@ function requireCompletePagination(input, collection) {
       ? collection.slice(0, -1)
       : collection;
   const pascal = singular[0].toUpperCase() + singular.slice(1);
-  const explicit =
-    input?.[`${collection}Complete`] === true ||
-    input?.[`${singular}Complete`] === true ||
-    pagination[`${collection}Complete`] === true ||
-    pagination[`${singular}Complete`] === true ||
-    pagination[collection] === true ||
-    (pagination.collection === collection && pagination.complete === true) ||
-    (collection === 'contacts' && pagination.complete === true) ||
-    (collection === 'items' && pagination.complete === true) ||
-    input?.[`is${pascal}Complete`] === true;
-  if (!explicit) {
+  const candidates = [
+    input?.[`${collection}Complete`],
+    input?.[`${singular}Complete`],
+    pagination[`${collection}Complete`],
+    pagination[`${singular}Complete`],
+    pagination[collection],
+    pagination.collection === collection ? pagination.complete : undefined,
+    collection === 'contacts' ? pagination.complete : undefined,
+    collection === 'items' ? pagination.complete : undefined,
+    input?.[`is${pascal}Complete`],
+  ].filter((value) => typeof value === 'boolean');
+  if (candidates.length === 0) {
     fail(
       'incomplete_pagination',
-      `${collection} pagination is not verified complete.`,
+      `${collection} pagination state is not verified.`,
     );
   }
+  if (candidates.some((value) => value !== candidates[0])) {
+    fail(
+      'incomplete_pagination',
+      `${collection} pagination state is inconsistent.`,
+    );
+  }
+  return candidates[0];
 }
 
 function readCommunicationPaginationState(input) {

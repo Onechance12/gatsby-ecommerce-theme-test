@@ -612,6 +612,98 @@ test("recent projections omit older valid items without marking complete evidenc
   assert.equal(result.evidenceStatus, "complete");
 });
 
+test("task projection retains the oldest overdue work beyond the display limit", async () => {
+  const details = jobNimbusDetail();
+  details.data.tasks = [
+    ...Array.from({ length: 25 }, (_, index) => ({
+      providerRecordId: `future-task-${index}`,
+      kind: "file_review",
+      status: "pending",
+      priority: "normal",
+      dueAt: new Date(
+        Date.parse("2026-08-01T12:00:00.000Z") + index * 86_400_000
+      ).toISOString(),
+      assignedRole: "employee",
+      label: `Future task ${index}`
+    })),
+    {
+      providerRecordId: "oldest-overdue-task",
+      kind: "carrier_follow_up",
+      status: "pending",
+      priority: "high",
+      dueAt: "2026-05-01T12:00:00.000Z",
+      assignedRole: "employee",
+      label: "Oldest overdue task"
+    }
+  ];
+  const result = await createService({
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 20 });
+
+  assert.equal(result.recent.tasks.length, 20);
+  assert.equal(
+    result.recent.tasks.some(({ label }) => label === "Oldest overdue task"),
+    true
+  );
+  assert.equal(
+    result.lanes.priority.some(
+      ({ reasonCode, reference }) =>
+        reasonCode === "overdue_task"
+        && reference === result.recent.tasks[0].reference
+    ),
+    true
+  );
+  assert.equal(result.sources.jobnimbus.completeness, "complete");
+});
+
+test("document projection retains operational categories beyond the display limit", async () => {
+  const details = jobNimbusDetail();
+  details.data.documents = [
+    ...Array.from({ length: 25 }, (_, index) => ({
+      providerRecordId: `generic-document-${index}`,
+      kind: "document",
+      reviewState: "reviewed",
+      createdAt: new Date(
+        Date.parse("2026-07-28T17:00:00.000Z") - index * 60_000
+      ).toISOString(),
+      fileName: `Generic ${index}.pdf`
+    })),
+    {
+      providerRecordId: "older-policy",
+      kind: "declaration_page",
+      reviewState: "reviewed",
+      createdAt: "2026-04-01T12:00:00.000Z",
+      fileName: "Policy declaration.pdf"
+    },
+    {
+      providerRecordId: "older-lor",
+      kind: "authorization_lor",
+      reviewState: "reviewed",
+      createdAt: "2026-04-02T12:00:00.000Z",
+      fileName: "Letter of representation.pdf"
+    },
+    {
+      providerRecordId: "older-estimate",
+      kind: "estimate",
+      reviewState: "reviewed",
+      createdAt: "2026-04-03T12:00:00.000Z",
+      fileName: "Estimate.pdf"
+    }
+  ];
+  const result = await createService({
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 20 });
+
+  assert.equal(result.recent.documents.length, 20);
+  assert.deepEqual(
+    ["declaration_page", "authorization_lor", "estimate"].map((kind) =>
+      result.recent.documents.some((document) => document.kind === kind)
+    ),
+    [true, true, true]
+  );
+  assert.equal(result.sources.jobnimbus.completeness, "complete");
+});
+
 test("invalid recent items remain dropped evidence and mark the source partial", async () => {
   const details = jobNimbusDetail();
   details.data.activities.push({

@@ -611,7 +611,9 @@ function normalizeJobNimbusDetail({
     references,
     recentLimit,
     normalizeItem: normalizeTask,
-    timestampField: "dueAt"
+    timestampField: "dueAt",
+    selectionKind: "tasks",
+    generatedAt
   });
   const documents = normalizeItems({
     source: "jobnimbus",
@@ -619,7 +621,9 @@ function normalizeJobNimbusDetail({
     references,
     recentLimit,
     normalizeItem: normalizeDocument,
-    timestampField: "createdAt"
+    timestampField: "createdAt",
+    selectionKind: "documents",
+    generatedAt
   });
   const droppedItems =
     activities.droppedItems + tasks.droppedItems + documents.droppedItems;
@@ -706,7 +710,7 @@ function buildOperationalLanes({
 
   const currentCentralDate = centralDateKey(generatedAt);
   for (const task of recent.tasks) {
-    if (!["open", "in_progress", "blocked"].includes(task.status)) {
+    if (!["open", "in_progress", "blocked", "pending"].includes(task.status)) {
       continue;
     }
     if (!task.dueAt) continue;
@@ -908,7 +912,9 @@ function normalizeItems({
   references,
   recentLimit,
   normalizeItem,
-  timestampField
+  timestampField,
+  selectionKind = "recent",
+  generatedAt = null
 }) {
   if (!Array.isArray(value)) {
     return { items: [], droppedItems: 1, omittedItems: 0 };
@@ -942,10 +948,123 @@ function normalizeItems({
   // must not make an otherwise complete provider read look partial.
   const omittedItems = Math.max(0, items.length - recentLimit);
   return {
-    items: items.slice(0, recentLimit),
+    items: selectOperationalItems(items, {
+      selectionKind,
+      recentLimit,
+      generatedAt
+    }),
     droppedItems,
     omittedItems
   };
+}
+
+function selectOperationalItems(
+  items,
+  { selectionKind, recentLimit, generatedAt }
+) {
+  if (selectionKind === "tasks") {
+    const generatedAtMs = Date.parse(generatedAt || "");
+    const activeStatuses = new Set([
+      "open",
+      "in_progress",
+      "blocked",
+      "pending"
+    ]);
+    return [...items]
+      .sort((left, right) => {
+        const leftActive = activeStatuses.has(left.status);
+        const rightActive = activeStatuses.has(right.status);
+        const leftDue = left.dueAt ? Date.parse(left.dueAt) : null;
+        const rightDue = right.dueAt ? Date.parse(right.dueAt) : null;
+        const leftOverdue =
+          leftActive
+          && leftDue !== null
+          && Number.isFinite(generatedAtMs)
+          && leftDue < generatedAtMs;
+        const rightOverdue =
+          rightActive
+          && rightDue !== null
+          && Number.isFinite(generatedAtMs)
+          && rightDue < generatedAtMs;
+        if (leftOverdue !== rightOverdue) return leftOverdue ? -1 : 1;
+        if (leftOverdue && rightOverdue && leftDue !== rightDue) {
+          return leftDue - rightDue;
+        }
+        if (leftActive !== rightActive) return leftActive ? -1 : 1;
+        if (leftActive && rightActive) {
+          if (leftDue === null && rightDue !== null) return 1;
+          if (leftDue !== null && rightDue === null) return -1;
+          if (leftDue !== rightDue) return leftDue - rightDue;
+        }
+        if (leftDue !== rightDue) {
+          if (leftDue === null) return 1;
+          if (rightDue === null) return -1;
+          return rightDue - leftDue;
+        }
+        return left.reference.localeCompare(right.reference);
+      })
+      .slice(0, recentLimit);
+  }
+  if (selectionKind === "documents") {
+    return selectOperationalDocuments(items, recentLimit);
+  }
+  return items.slice(0, recentLimit);
+}
+
+function selectOperationalDocuments(items, recentLimit) {
+  const selected = [];
+  const selectedReferences = new Set();
+  const add = (item) => {
+    if (!item || selectedReferences.has(item.reference)) return;
+    selected.push(item);
+    selectedReferences.add(item.reference);
+  };
+  const recognizedCategory = (kind) => {
+    if (["declaration_page", "policy"].includes(kind)) return "policy";
+    if (
+      [
+        "authorization_lor",
+        "authorization",
+        "letter_of_representation",
+        "lor"
+      ].includes(kind)
+    ) {
+      return "authorization";
+    }
+    if (["damage_evidence", "proof_of_loss"].includes(kind)) {
+      return "damage_evidence";
+    }
+    if (["estimate", "settlement_estimate"].includes(kind)) {
+      return "estimate";
+    }
+    if (["scope", "carrier_scope"].includes(kind)) return "carrier_scope";
+    if (["settlement", "payment", "payment_record"].includes(kind)) {
+      return "settlement_payment";
+    }
+    return null;
+  };
+  const reviewRequired = new Set([
+    "needs_review",
+    "in_review",
+    "unreviewed",
+    "rejected"
+  ]);
+  const categories = new Set();
+  for (const item of items) {
+    const category = recognizedCategory(item.kind);
+    if (!category || categories.has(category)) continue;
+    add(item);
+    categories.add(category);
+  }
+  for (const item of items) {
+    if (selected.length >= recentLimit) break;
+    if (reviewRequired.has(item.reviewState)) add(item);
+  }
+  for (const item of items) {
+    if (selected.length >= recentLimit) break;
+    add(item);
+  }
+  return selected.slice(0, recentLimit);
 }
 
 function normalizeActivity(value, reference) {

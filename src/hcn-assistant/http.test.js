@@ -129,6 +129,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   const providerObservations = [];
   const externalMutations = [];
   let assignedFileActive = true;
+  let boundedHistoryActive = false;
   const provider = createServer(async (req, res) => {
     const origin = `http://127.0.0.1:${provider.address().port}`;
     const url = new URL(req.url || "/", origin);
@@ -256,9 +257,45 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       });
     }
     if (url.pathname === "/activities" && req.method === "GET") {
+      if (boundedHistoryActive) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const activities = Array.from({ length: 101 }, (_, index) => ({
+          jnid: `bounded-activity-${index}`,
+          primary: { id: "assigned-file-provider-id" },
+          related: { id: "assigned-file-provider-id" },
+          record_type_name: "Note",
+          status_name: "Recorded",
+          date_created: new Date(
+            Date.parse("2026-07-28T12:00:00.000Z") - index * 60_000
+          ).toISOString(),
+          actor_role: "employee",
+          note: `Bounded activity ${index}`
+        }));
+        return json(res, 200, {
+          activities: activities.slice(offset, offset + size)
+        });
+      }
       return json(res, 200, { activities: [] });
     }
     if (url.pathname === "/tasks" && req.method === "GET") {
+      if (boundedHistoryActive) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const tasks = Array.from({ length: 101 }, (_, index) => ({
+          jnid: `bounded-task-${index}`,
+          related: { id: "assigned-file-provider-id" },
+          record_type_name: "Follow Up",
+          status_name: "Open",
+          priority_name: "High",
+          date_start: "2026-07-01T12:00:00.000Z",
+          assigned_role: "employee",
+          title: `Bounded task ${index}`
+        }));
+        return json(res, 200, {
+          tasks: tasks.slice(offset, offset + size)
+        });
+      }
       return json(res, 200, { tasks: [] });
     }
 
@@ -318,6 +355,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
           "fixture-calendar-day",
         HCN_TEST_THRESHER_NO_TOOL_PROMPT_MARKER:
           "fixture-skip-required-review",
+        HCN_TEST_THRESHER_HISTORY_NEGATIVE_PROMPT_MARKER:
+          "fixture-bounded-history-negative",
         HCN_TENANT_ID,
         HCN_REFERENCE_KEY,
         HCN_GOOGLE_GRANT_KEY:
@@ -1140,6 +1179,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     /choose the exact assigned client/i
   );
 
+  boundedHistoryActive = true;
   const catalogResponse = await fetch(
     `${bridgeOrigin}/hcn/api/v1/assistant/turns`,
     {
@@ -1154,11 +1194,12 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
         conversationRef: fileConversationRef,
         expectedRevision: fileExpectedRevision,
         prompt:
-          `fixture-document-catalog: review documents for ${fileRef}`,
+          `fixture-document-catalog fixture-bounded-history-negative: review documents for ${fileRef}`,
         mode: "auto"
       })
     }
   );
+  boundedHistoryActive = false;
   const catalogBody = await catalogResponse.text();
   assert.equal(
     catalogResponse.status,
@@ -1167,7 +1208,8 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
   );
   const catalog = JSON.parse(catalogBody);
   fileExpectedRevision = catalog.revision;
-  assert.equal(catalog.message, ASSISTANT_RESPONSE);
+  assert.match(catalog.message, /bounded JobNimbus history check/i);
+  assert.match(catalog.message, /cannot verify that no older notes/i);
   assert.equal(catalog.plan, null);
   const catalogJobNimbusSource = catalog.sources.find(
     (source) => source.key === "jobnimbus"
@@ -1181,7 +1223,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
     {
       key: "jobnimbus",
       label: "JobNimbus document catalog",
-      status: "fresh"
+      status: "partial"
     }
   );
 

@@ -1358,25 +1358,164 @@ test("responsive console contains long text and separates compact chat navigatio
   );
 });
 
-test("a fresh selected Work Center summary can start an exact-file chat", async () => {
-  const scriptAsset = await readHcnConsoleAsset("/hcn/app.js");
+test("file selection completes a fresh exact review before an explicit blank chat", async () => {
+  const [htmlAsset, scriptAsset, styleAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js"),
+    readHcnConsoleAsset("/hcn/app.css")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
   const script = scriptAsset.body.toString("utf8");
+  const style = styleAsset.body.toString("utf8");
   const start = extractConsoleFunction(script, "startSelectedFileConversation");
   const controls = extractConsoleFunction(script, "syncAssistantConversationControls");
   const selected = extractConsoleFunction(script, "selectedFreshWorkCenterFile");
+  const open = extractConsoleFunction(script, "openExactWorkFile");
+  const next = extractConsoleFunction(script, "openNextWorkFile");
+  const fileButton = extractConsoleFunction(script, "createWorkFileButton");
+  const fileLoader = extractConsoleFunction(script, "loadFileReview");
+  const completeFileLoad = extractConsoleFunction(
+    script,
+    "completeFileReviewLoad"
+  );
+  const primaryAction = extractConsoleFunction(script, "doPrimaryFileAction");
+  const sourceChip = extractConsoleFunction(script, "fileSourceChipText");
+  const sourceDetail = extractConsoleFunction(script, "fileSourceHealthDetail");
+  const sourceNormalizer = extractConsoleFunction(
+    script,
+    "normalizeSourceSummary"
+  );
+  const boundedHistory = extractConsoleFunction(
+    script,
+    "jobNimbusHistoryIsBounded"
+  );
+  const fileRenderer = extractConsoleFunction(script, "renderFileReview");
+  const renderFileNow = extractConsoleFunction(script, "renderFileNow");
+  const renderSourceHealth = extractConsoleFunction(script, "renderSourceHealth");
 
   assert.match(start, /const selected = selectedFreshWorkCenterFile\(\)/);
   assert.match(start, /record\(state\.fileReview\)\.file/);
-  assert.match(start, /reviewed\?\.fileRef === selected\.fileRef \? reviewed : selected/);
-  assert.doesNotMatch(start, /!state\.fileReview/);
+  assert.match(start, /reviewed\?\.fileRef !== selected\.fileRef/);
+  assert.match(start, /state\.fileLoading/);
+  assert.match(start, /const file = reviewed/);
   assert.match(start, /kind: "file"[\s\S]*fileRef: state\.selectedFileRef/);
+  assert.doesNotMatch(start, /options\?\.starter|assistant-prompt|requestSubmit/);
   assert.match(selected, /record\(state\.workCenter\)\.files/);
   assert.match(selected, /file\.fileRef === fileRef/);
-  assert.match(controls, /navigator\.onLine[\s\S]*selectedFreshWorkCenterFile\(\)/);
-  assert.doesNotMatch(
+  assert.match(
     controls,
-    /elements\["file-start-chat"\]\.disabled = !\([\s\S]*&& state\.fileReview/
+    /matchingFreshFileReview[\s\S]*reviewedFile\.fileRef === selectedFile\.fileRef[\s\S]*!state\.fileLoading/
   );
+  assert.match(
+    controls,
+    /elements\["file-start-chat"\]\.disabled = !\([\s\S]*&& matchingFreshFileReview/
+  );
+  assert.match(
+    open,
+    /window\.location\.hash = "#work-center";[\s\S]*syncActiveNavigation\(\);[\s\S]*return loadFileReview\(fileRef\)/
+  );
+  assert.match(next, /openExactWorkFile\(next\.fileRef\)/);
+  assert.match(fileButton, /openExactWorkFile\(file\.fileRef\)/);
+  assert.match(
+    fileLoader,
+    /ENDPOINTS\.fileReview,[\s\S]*recentLimit: 20[\s\S]*normalizeFileResponse\(response, fileRef\)[\s\S]*renderFileReview\(state\.fileReview\)/
+  );
+  assert.match(fileLoader, /finally \{\s*completeFileReviewLoad\(controller\);\s*\}/);
+  const activeController = {};
+  const stateForCompletion = {
+    fileController: activeController,
+    fileLoading: true
+  };
+  const refreshControl = { disabled: true };
+  let composerRenders = 0;
+  let conversationSyncs = 0;
+  const evaluatedCompletion = runInNewContext(
+    `(${completeFileLoad.replace(
+      "function completeFileReviewLoad",
+      "function"
+    )})`,
+    {
+      state: stateForCompletion,
+      elements: { "file-refresh": refreshControl },
+      renderActionComposerState() { composerRenders += 1; },
+      syncAssistantConversationControls() { conversationSyncs += 1; }
+    }
+  );
+  assert.equal(evaluatedCompletion(activeController), true);
+  assert.equal(stateForCompletion.fileController, null);
+  assert.equal(stateForCompletion.fileLoading, false);
+  assert.equal(refreshControl.disabled, false);
+  assert.equal(composerRenders, 1);
+  assert.equal(conversationSyncs, 1);
+  assert.equal(evaluatedCompletion({}), false);
+  assert.equal(composerRenders, 1);
+  assert.equal(conversationSyncs, 1);
+  assert.doesNotMatch(fileLoader, /startSelectedFileConversation|assistant-prompt/);
+  assert.match(
+    primaryAction,
+    /primaryFileComposerType\(action\)[\s\S]*openFileActionComposer\(actionType\)[\s\S]*openFileNextStepDetails\(\)/
+  );
+  assert.doesNotMatch(primaryAction, /startSelectedFileConversation|assistant-prompt/);
+  assert.doesNotMatch(script, /function primaryFileActionPrompt\(/);
+  assert.match(html, /id="file-now-title">Thresher&rsquo;s next move<\/h4>/);
+  assert.match(
+    extractCssRule(style, ".work-center-workspace"),
+    /grid-template-columns: minmax\(0, 1fr\) minmax\(270px, 0\.32fr\)/
+  );
+  assert.match(style, /\.work-center-workspace\[data-file-open="true"\] \.queue-panel\s*\{[^}]*display: none/);
+  assert.match(renderFileNow, /fileSourceChipText\(name, source\)/);
+  assert.match(renderSourceHealth, /fileSourceHealthDetail\(name, source\)/);
+  assert.match(sourceNormalizer, /collections\.activities/);
+  assert.match(sourceNormalizer, /collections\.tasks/);
+  assert.match(sourceNormalizer, /collections\.documents/);
+  assert.match(boundedHistory, /bounded_history_window/);
+  assert.match(boundedHistory, /incomplete_pagination/);
+  assert.match(sourceChip, /jobNimbusHistoryIsBounded\(source\)/);
+  assert.match(
+    sourceChip,
+    /JobNimbus facts checked · recent history only/
+  );
+  assert.match(fileRenderer, /Current facts checked/);
+  assert.match(
+    fileRenderer,
+    /JobNimbus activity and task results are recent history only/
+  );
+  assert.doesNotMatch(renderSourceHealth, /humanize\([^)]*failureCode|setText\([^)]*failureCode/);
+  for (const [failureCode, label] of [
+    ["bounded_history_window", "recent history only"],
+    ["file_phone_missing", "file phone missing"],
+    ["google_not_linked", "not linked"],
+    ["phone_match_unverified", "phone match unverified"],
+    ["provider_check_failed", "provider check failed"],
+    ["scope_check_failed", "file scope check failed"],
+    ["work_line_not_linked", "work line not linked"]
+  ]) {
+    assert.match(
+      script,
+      new RegExp(`${failureCode}: "${label}"`),
+      `${failureCode} must have a short source-health label`
+    );
+  }
+  for (const expectedCopy of [
+    "Google access is not linked; Gmail was not checked.",
+    "The Quo work line is not linked; texts were not checked.",
+    "This file has no phone number for the ",
+    "The file phone could not be matched safely; ",
+    "Current JobNimbus file facts were checked; older activity or task history is outside this review window.",
+    "provider check failed; source records were not evaluated.",
+    "could not be verified; source records were not evaluated."
+  ]) {
+    assert.ok(
+      sourceDetail.includes(expectedCopy),
+      `source-health detail must explain: ${expectedCopy}`
+    );
+  }
+  assert.doesNotMatch(
+    sourceDetail,
+    /\bno (?:email|emails|text|texts|message|messages|communication|communications)\b/i,
+    "source-health copy must not imply that communications do not exist"
+  );
+  assert.doesNotMatch(sourceChip, /humanize\([^)]*failureCode/);
 });
 
 test("exact-file claim filing is pilot-hidden, approval-gated, and provider-opaque", async () => {
@@ -2375,7 +2514,7 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   assert.match(html, /id="quo-text-to"[\s\S]*placeholder="\+15551234567"/);
   assert.match(
     html,
-    /id="file-do-next"[\s\S]*>Do this<\/button>[\s\S]*id="file-start-chat"[\s\S]*>Ask Thresher<\/button>[\s\S]*id="file-actions"[\s\S]*>More<\/button>/
+    /id="file-do-next"[\s\S]*>Review next step<\/button>[\s\S]*id="file-start-chat"[\s\S]*>Ask Thresher<\/button>[\s\S]*id="file-actions"[\s\S]*>More<\/button>/
   );
   assert.match(
     html,
@@ -2423,7 +2562,15 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   const fileLoader = extractConsoleFunction(script, "loadFileReview");
   assert.match(
     fileLoader,
-    /finally \{[\s\S]*state\.fileLoading = false;[\s\S]*renderActionComposerState\(\);/
+    /finally \{\s*completeFileReviewLoad\(controller\);\s*\}/
+  );
+  const completeFileLoad = extractConsoleFunction(
+    script,
+    "completeFileReviewLoad"
+  );
+  assert.match(
+    completeFileLoad,
+    /state\.fileLoading = false;[\s\S]*renderActionComposerState\(\);[\s\S]*syncAssistantConversationControls\(\);/
   );
   assert.match(html, /Central time/);
   assert.match(html, /id="approval-acknowledge" type="checkbox" disabled/);
@@ -2517,6 +2664,438 @@ test("action plans require immutable review, acknowledgment, capability, and bot
   );
   assert.doesNotMatch(script, /approvalChallenge/);
   assert.doesNotMatch(script, /setInterval\(/);
+});
+
+test("Thresher selects one evidence-backed next step across ready workflows", async () => {
+  const script = (await readHcnConsoleAsset("/hcn/app.js")).body.toString("utf8");
+  const source = extractConsoleFunction(script, "selectRecommendedFileActions");
+  const select = runInNewContext(
+    `(${source.replace(
+      "function selectRecommendedFileActions",
+      "function"
+    )})`
+  );
+  const action = (actionCode, targetCode, additional = {}) => ({
+    actionCode,
+    targetCode,
+    urgency: "",
+    dueAt: "",
+    requiresApproval: false,
+    ...additional
+  });
+  const workflow = (nextActions, additional = {}) => ({
+    eligibility: "eligible",
+    readiness: "ready",
+    escalationFlags: [],
+    nextActions,
+    ...additional
+  });
+
+  const ranked = select({
+    currentStage: "claim_readiness",
+    nextRequiredActions: [
+      action("refresh_source", "gmail", { urgency: "high" }),
+      action("review_overdue_task", "client_follow_up", {
+        urgency: "urgent",
+        dueAt: "2026-08-01T12:00:00.000Z"
+      })
+    ],
+    workflows: {
+      follow_up: workflow([
+        action("review_overdue_task", "client_follow_up", {
+          dueAt: "2026-08-01T12:00:00.000Z"
+        })
+      ]),
+      communications: workflow([
+        action("review_and_prepare_response", "email_received", {
+          requiresApproval: true
+        })
+      ]),
+      claim_filing: workflow([
+        action("prepare_claim_filing_review", "claim_filing", {
+          requiresApproval: true
+        })
+      ]),
+      neglected_files: workflow([
+        action("review_neglected_file", "verified_activity_gap")
+      ])
+    }
+  });
+  assert.deepEqual(
+    Array.from(ranked, ({ actionCode }) => actionCode),
+    [
+      "review_overdue_task",
+      "review_and_prepare_response",
+      "prepare_claim_filing_review",
+      "review_neglected_file",
+      "refresh_source"
+    ]
+  );
+  assert.equal(
+    ranked.filter(({ actionCode }) => actionCode === "review_overdue_task").length,
+    1,
+    "the global and workflow copies of the same task must be deduplicated"
+  );
+  assert.equal(ranked[0].workflowId, "follow_up");
+  assert.equal(ranked[1].workflowId, "communications");
+  assert.equal(ranked[2].workflowId, "claim_filing");
+  assert.equal(ranked.at(-1).actionCode, "refresh_source");
+
+  const schedule = select({
+    currentStage: "inspection_scheduling",
+    nextRequiredActions: [],
+    workflows: {
+      inspection_scheduling: workflow([
+        action("prepare_inspection_scheduling_request", "inspection_appointment")
+      ])
+    }
+  });
+  assert.equal(schedule[0].actionCode, "prepare_inspection_scheduling_request");
+  assert.equal(schedule[0].workflowId, "inspection_scheduling");
+
+  const confirmation = select({
+    currentStage: "inspection_scheduled",
+    nextRequiredActions: [],
+    workflows: {
+      inspection_scheduling: workflow([
+        action("request_homeowner_confirmation", "inspection_appointment")
+      ])
+    }
+  });
+  assert.equal(confirmation[0].actionCode, "request_homeowner_confirmation");
+
+  const blocked = select({
+    currentStage: "claim_readiness",
+    nextRequiredActions: [
+      action("manual_conflict_review", "claim_identifier", {
+        urgency: "high"
+      }),
+      action("refresh_source", "jobnimbus", { urgency: "high" })
+    ],
+    workflows: {
+      claim_filing: workflow(
+        [action("prepare_claim_filing_review", "claim_filing")],
+        { readiness: "partially_ready" }
+      ),
+      communications: workflow(
+        [action("review_and_prepare_response", "email_received")],
+        { readiness: "blocked" }
+      ),
+      inspection_scheduling: workflow(
+        [action("prepare_inspection_scheduling_request", "inspection_appointment")],
+        { escalationFlags: ["inspection_evidence_conflict"] }
+      )
+    }
+  });
+  assert.deepEqual(
+    Array.from(blocked, ({ actionCode }) => actionCode),
+    ["manual_conflict_review", "refresh_source"]
+  );
+
+  for (const code of [
+    "fulfill_open_promise",
+    "fulfill_overdue_promise",
+    "manual_conflict_review",
+    "manual_source_review",
+    "manually_reconcile_fact",
+    "obtain_required_document",
+    "obtain_required_fact",
+    "prepare_claim_filing_review",
+    "prepare_inspection_scheduling_request",
+    "reconcile_delivery_state",
+    "refresh_source",
+    "request_homeowner_confirmation",
+    "review_activity_gap",
+    "review_and_prepare_response",
+    "review_confirmed_inspection",
+    "review_document",
+    "review_missing_verified_contact",
+    "review_neglected_file",
+    "review_overdue_task"
+  ]) {
+    assert.match(
+      script,
+      new RegExp(`${code}: "[A-Z][^"]+"`),
+      `${code} must have plain employee-facing copy`
+    );
+  }
+});
+
+test("claim-filing next step opens the exact-file workflow without injecting a prompt", async () => {
+  const [htmlAsset, scriptAsset] = await Promise.all([
+    readHcnConsoleAsset("/hcn/"),
+    readHcnConsoleAsset("/hcn/app.js")
+  ]);
+  const html = htmlAsset.body.toString("utf8");
+  const script = scriptAsset.body.toString("utf8");
+  const routeSource = extractConsoleFunction(
+    script,
+    "openSelectedFileClaimWorkflow"
+  );
+  const primarySource = extractConsoleFunction(script, "doPrimaryFileAction");
+  const lookupSource = extractConsoleFunction(
+    script,
+    "findActiveAssistantFileConversation"
+  );
+
+  assert.match(
+    primarySource,
+    /action\.actionCode === "prepare_claim_filing_review"[\s\S]*await openSelectedFileClaimWorkflow\(\)/
+  );
+  assert.doesNotMatch(routeSource, /assistant-prompt|requestSubmit|starter|prompt:/);
+  assert.match(
+    routeSource,
+    /deferNavigation: true[\s\S]*await loadAssistantClaimStatus\(\)[\s\S]*assistant-claim-workflow/
+  );
+  assert.match(
+    lookupSource,
+    /state: "active", offset, limit: 100[\s\S]*conversation\.fileRef === fileRef/
+  );
+  assert.match(
+    lookupSource,
+    /throw new Error\([\s\S]*active client-chat lookup exceeded its safe bound/
+  );
+  assert.match(routeSource, /\.join\(" - "\)/);
+  assert.doesNotMatch(routeSource, /\u00b7/);
+  assert.match(
+    html,
+    /id="assistant-claim-workflow"[\s\S]*tabindex="-1"[\s\S]*hidden/
+  );
+
+  async function runScenario({ existing, changeTargetDuringLoad = false }) {
+    const state = {
+      selectedFileRef: "file:alpha",
+      fileReview: {
+        file: {
+          fileRef: "file:alpha",
+          displayName: "Alpha client",
+          jobNumber: "1001"
+        }
+      },
+      fileLoading: false,
+      assistantConversationFilter: "active"
+    };
+    let current = {};
+    let loadedRef = "";
+    let createdInput = null;
+    let claimStatusLoads = 0;
+    let focused = 0;
+    let scrolled = 0;
+    let resolveLoad;
+    const deferredLoad = new Promise((resolve) => { resolveLoad = resolve; });
+    const panel = {
+      hidden: false,
+      focus() { focused += 1; },
+      scrollIntoView() { scrolled += 1; }
+    };
+    const window = {
+      location: { hash: "#work-center" },
+      matchMedia() { return { matches: true }; }
+    };
+    const context = {
+      FILE_REF: /^file:[a-z]+$/,
+      assistantClaimScope() {
+        return current.fileRef ? { fileRef: current.fileRef } : null;
+      },
+      assistantConversationTargetIsCurrent(input) {
+        return input.kind !== "file" || (
+          state.selectedFileRef === input.fileRef
+          && state.fileReview.file.fileRef === input.fileRef
+          && !state.fileLoading
+        );
+      },
+      boundedString(value, maximum) {
+        return String(value || "").slice(0, maximum);
+      },
+      async createAssistantConversation(input) {
+        createdInput = input;
+        current = {
+          conversationRef: "conversation:new",
+          kind: "file",
+          state: "active",
+          fileRef: input.fileRef
+        };
+        return current;
+      },
+      currentAssistantConversation() { return current; },
+      elements: {
+        "assistant-claim-workflow": panel,
+        "work-center-alert": {}
+      },
+      async findActiveAssistantFileConversation() {
+        return existing
+          ? {
+              conversationRef: "conversation:existing",
+              kind: "file",
+              state: "active",
+              fileRef: "file:alpha"
+            }
+          : null;
+      },
+      hasAssistantConversationManageAuthority() { return true; },
+      hasAssistantConversationReadAuthority() { return true; },
+      async loadAssistantClaimStatus() { claimStatusLoads += 1; },
+      async loadAssistantConversation(conversationRef) {
+        loadedRef = conversationRef;
+        if (changeTargetDuringLoad) await deferredLoad;
+        current = {
+          conversationRef,
+          kind: "file",
+          state: "active",
+          fileRef: "file:alpha"
+        };
+      },
+      navigator: { onLine: true },
+      notice() {},
+      record(value) {
+        return value && typeof value === "object" ? value : {};
+      },
+      renderAssistantConversationList() {},
+      selectedFreshWorkCenterFile() { return { fileRef: "file:alpha" }; },
+      state,
+      syncActiveNavigation() {},
+      syncAssistantFilterButtons() {},
+      syncAssistantMobileWorkspace() {},
+      window
+    };
+    const route = runInNewContext(
+      `(${routeSource.replace(
+        "function openSelectedFileClaimWorkflow",
+        "function"
+      )})`,
+      context
+    );
+    const pending = route();
+    if (changeTargetDuringLoad) {
+      state.selectedFileRef = "file:beta";
+      state.fileReview = { file: { fileRef: "file:beta" } };
+      resolveLoad();
+    }
+    const result = await pending;
+    return {
+      claimStatusLoads,
+      createdInput,
+      focused,
+      loadedRef,
+      result,
+      scrolled,
+      state,
+      window
+    };
+  }
+
+  const existing = await runScenario({ existing: true });
+  assert.equal(existing.loadedRef, "conversation:existing");
+  assert.equal(existing.createdInput, null);
+  assert.equal(existing.claimStatusLoads, 1);
+  assert.equal(existing.window.location.hash, "#overview");
+  assert.equal(existing.focused, 1);
+  assert.equal(existing.scrolled, 1);
+
+  const created = await runScenario({ existing: false });
+  assert.equal(created.loadedRef, "");
+  assert.equal(created.createdInput.kind, "file");
+  assert.equal(created.createdInput.fileRef, "file:alpha");
+  assert.equal(created.createdInput.deferNavigation, true);
+  assert.equal(Object.hasOwn(created.createdInput, "prompt"), false);
+  assert.equal(Object.hasOwn(created.createdInput, "starter"), false);
+  assert.equal(created.claimStatusLoads, 1);
+  assert.equal(created.window.location.hash, "#overview");
+  assert.equal(created.focused, 1);
+
+  const changed = await runScenario({
+    existing: true,
+    changeTargetDuringLoad: true
+  });
+  assert.equal(changed.claimStatusLoads, 0);
+  assert.equal(changed.window.location.hash, "#work-center");
+  assert.equal(changed.focused, 0);
+  assert.equal(changed.scrolled, 0);
+  assert.equal(changed.result, null);
+});
+
+test("a late file-chat create cannot pull the user away from the next file", async () => {
+  const script = (await readHcnConsoleAsset("/hcn/app.js")).body.toString("utf8");
+  const createSource = extractConsoleFunction(script, "createAssistantConversation");
+  const targetSource = extractConsoleFunction(
+    script,
+    "assistantConversationTargetIsCurrent"
+  );
+  let resolveCreate;
+  const deferredCreate = new Promise((resolve) => { resolveCreate = resolve; });
+  let loaded = 0;
+  let upserted = 0;
+  let workCenterNotice = "";
+  const state = {
+    assistantConversationMutationLoading: false,
+    assistantConversationMutationController: null,
+    assistantConversationOlderController: null,
+    assistantConversations: [],
+    assistantConversationFilter: "general",
+    selectedFileRef: "file:alpha",
+    fileReview: { file: { fileRef: "file:alpha" } },
+    fileLoading: false
+  };
+  const window = { location: { hash: "#work-center" } };
+  const context = {
+    AbortController,
+    ASSISTANT_CONVERSATION_MANAGE_CAPABILITY: "manage",
+    ENDPOINTS: { assistantConversationCreate: "/create" },
+    FILE_REF: /^file:[a-z]+$/,
+    closeAssistantDialogs() {},
+    elements: {
+      "assistant-alert": {},
+      "assistant-prompt": { focus() {} },
+      "work-center-alert": {}
+    },
+    handleOperationalAuthLoss() {},
+    hasAssistantConversationManageAuthority() { return true; },
+    isAuthorizationStatus() { return false; },
+    async loadAssistantConversation() { loaded += 1; },
+    normalizeAssistantConversationEnvelope() {
+      return {
+        conversationRef: "conversation:alpha",
+        kind: "file",
+        state: "active"
+      };
+    },
+    notice(target, message) {
+      if (target === context.elements["work-center-alert"]) {
+        workCenterNotice = message;
+      }
+    },
+    postOperationalJson() { return deferredCreate; },
+    record(value) {
+      return value && typeof value === "object" ? value : {};
+    },
+    renderAssistantConversationList() {},
+    state,
+    syncAssistantConversationControls() {},
+    syncAssistantFilterButtons() {},
+    upsertAssistantConversation() { upserted += 1; },
+    window
+  };
+  const create = runInNewContext(
+    `(function () {${targetSource}\n${createSource}\nreturn createAssistantConversation;})()`,
+    context
+  );
+  const pending = create({
+    kind: "file",
+    title: "Alpha file",
+    fileRef: "file:alpha"
+  });
+  state.selectedFileRef = "file:beta";
+  state.fileReview = { file: { fileRef: "file:beta" } };
+  resolveCreate({});
+  const conversation = await pending;
+
+  assert.equal(conversation.conversationRef, "conversation:alpha");
+  assert.equal(upserted, 1, "the successfully created chat remains saved");
+  assert.equal(loaded, 0, "the old file chat is not selected after context changed");
+  assert.equal(state.assistantConversationFilter, "general");
+  assert.equal(window.location.hash, "#work-center");
+  assert.match(workCenterNotice, /stayed on the file you opened next/i);
+  assert.equal(state.assistantConversationMutationLoading, false);
 });
 
 test("action and receipt data are memory-only, purge on operational loss, and bypass the shell cache", async () => {
