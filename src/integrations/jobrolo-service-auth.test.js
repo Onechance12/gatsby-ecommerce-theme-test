@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   createJobroloHcnAuthenticator,
   createJobroloHcnNonceGuard,
+  deriveJobroloAssistantScopedBindingRef,
+  deriveJobroloAssistantSessionBindingRef,
   loadJobroloHcnIntegrationConfiguration,
   signJobroloHcnRequest,
   stableCanonicalJson
@@ -51,6 +53,64 @@ test("canonical JSON sorts object keys recursively but preserves arrays", () => 
     stableCanonicalJson({ z: [{ b: 2, a: 1 }], a: true }),
     '{"a":true,"z":[{"a":1,"b":2}]}'
   );
+});
+
+test("assistant continuity isolates sessions and exact general/file scopes", () => {
+  const common = {
+    tenantId: "tenant_0123456789abcdef",
+    clientId: "jobrolo-production",
+    principalRef: `principal_${"a".repeat(32)}`
+  };
+  const sessionA = deriveJobroloAssistantSessionBindingRef({
+    ...common,
+    sessionRef: `session_${"1".repeat(32)}`
+  });
+  const sameSessionA = deriveJobroloAssistantSessionBindingRef({
+    ...common,
+    sessionRef: `session_${"1".repeat(32)}`
+  });
+  const sessionB = deriveJobroloAssistantSessionBindingRef({
+    ...common,
+    sessionRef: `session_${"2".repeat(32)}`
+  });
+  assert.equal(sessionA, sameSessionA);
+  assert.notEqual(sessionA, sessionB);
+
+  const general = deriveJobroloAssistantScopedBindingRef({
+    sessionBindingRef: sessionA,
+    kind: "general",
+    fileRef: ""
+  });
+  const fileA = deriveJobroloAssistantScopedBindingRef({
+    sessionBindingRef: sessionA,
+    kind: "file",
+    fileRef: `subject_${"a".repeat(32)}`
+  });
+  const sameFileA = deriveJobroloAssistantScopedBindingRef({
+    sessionBindingRef: sessionA,
+    kind: "file",
+    fileRef: `subject_${"a".repeat(32)}`
+  });
+  const fileB = deriveJobroloAssistantScopedBindingRef({
+    sessionBindingRef: sessionA,
+    kind: "file",
+    fileRef: `subject_${"b".repeat(32)}`
+  });
+  assert.equal(fileA, sameFileA);
+  assert.equal(new Set([general, fileA, fileB]).size, 3);
+  assert.notEqual(
+    fileA,
+    deriveJobroloAssistantScopedBindingRef({
+      sessionBindingRef: sessionB,
+      kind: "file",
+      fileRef: `subject_${"a".repeat(32)}`
+    })
+  );
+  assert.throws(() => deriveJobroloAssistantScopedBindingRef({
+    sessionBindingRef: sessionA,
+    kind: "general",
+    fileRef: `subject_${"a".repeat(32)}`
+  }), /invalid/);
 });
 
 test("cross-repository signature fixture is byte-for-byte stable", () => {

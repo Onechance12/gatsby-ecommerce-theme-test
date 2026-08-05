@@ -16,7 +16,8 @@ import {
 import path from "node:path";
 
 const STORE_SCHEMA = "hcn.assistant.conversation-store";
-const STORE_VERSION = "1.0.0";
+const STORE_VERSION = "1.1.0";
+const LEGACY_STORE_VERSION = "1.0.0";
 const ENVELOPE_SCHEMA = "hcn.assistant.conversation-store.encrypted";
 const ENVELOPE_VERSION = "1.0.0";
 const ENVELOPE_ALGORITHM = "A256GCM";
@@ -39,6 +40,7 @@ const PRINCIPAL_REF = /^principal_[a-f0-9]{32}$/;
 const CONVERSATION_REF = /^conversation_[a-f0-9]{32}$/;
 const MESSAGE_REF = /^message_[a-f0-9]{32}$/;
 const FILE_REF = /^subject_[a-f0-9]{32}$/;
+const EXTERNAL_BINDING_REF = /^binding_[a-f0-9]{64}$/;
 const ISO_INSTANT =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
@@ -84,6 +86,13 @@ const DEFAULT_MAX_CONVERSATIONS = 512;
 const HARD_MAX_CONVERSATIONS = 4096;
 const DEFAULT_MAX_CONVERSATIONS_PER_PRINCIPAL = 200;
 const HARD_MAX_CONVERSATIONS_PER_PRINCIPAL = 1000;
+const DEFAULT_MAX_BOUND_CONVERSATIONS = 128;
+const HARD_MAX_BOUND_CONVERSATIONS = 1024;
+const DEFAULT_MAX_BOUND_CONVERSATIONS_PER_PRINCIPAL = 128;
+const HARD_MAX_BOUND_CONVERSATIONS_PER_PRINCIPAL = 512;
+const DEFAULT_BOUND_CONVERSATION_IDLE_TTL_MS = 30 * 24 * 60 * 60_000;
+const MIN_BOUND_CONVERSATION_IDLE_TTL_MS = 1_000;
+const MAX_BOUND_CONVERSATION_IDLE_TTL_MS = 90 * 24 * 60 * 60_000;
 const DEFAULT_MAX_MESSAGES_PER_CONVERSATION = 1000;
 const HARD_MAX_MESSAGES_PER_CONVERSATION = 4000;
 const DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024;
@@ -114,6 +123,17 @@ export function createHcnAssistantConversationStore({
   maxConversations = DEFAULT_MAX_CONVERSATIONS,
   maxConversationsPerPrincipal =
     DEFAULT_MAX_CONVERSATIONS_PER_PRINCIPAL,
+  maxBoundConversations = Math.min(
+    DEFAULT_MAX_BOUND_CONVERSATIONS,
+    maxConversations
+  ),
+  maxBoundConversationsPerPrincipal = Math.min(
+    DEFAULT_MAX_BOUND_CONVERSATIONS_PER_PRINCIPAL,
+    maxConversationsPerPrincipal,
+    maxBoundConversations
+  ),
+  boundConversationIdleTtlMs =
+    DEFAULT_BOUND_CONVERSATION_IDLE_TTL_MS,
   maxMessagesPerConversation =
     DEFAULT_MAX_MESSAGES_PER_CONVERSATION,
   maxFileBytes = DEFAULT_MAX_FILE_BYTES
@@ -140,6 +160,35 @@ export function createHcnAssistantConversationStore({
     );
   }
   boundedInteger(
+    maxBoundConversations,
+    1,
+    HARD_MAX_BOUND_CONVERSATIONS,
+    "maxBoundConversations"
+  );
+  if (maxBoundConversations > maxConversations) {
+    invalidInput("maxBoundConversations cannot exceed maxConversations.");
+  }
+  boundedInteger(
+    maxBoundConversationsPerPrincipal,
+    1,
+    HARD_MAX_BOUND_CONVERSATIONS_PER_PRINCIPAL,
+    "maxBoundConversationsPerPrincipal"
+  );
+  if (
+    maxBoundConversationsPerPrincipal > maxBoundConversations
+    || maxBoundConversationsPerPrincipal > maxConversationsPerPrincipal
+  ) {
+    invalidInput(
+      "maxBoundConversationsPerPrincipal exceeds a parent capacity."
+    );
+  }
+  boundedInteger(
+    boundConversationIdleTtlMs,
+    MIN_BOUND_CONVERSATION_IDLE_TTL_MS,
+    MAX_BOUND_CONVERSATION_IDLE_TTL_MS,
+    "boundConversationIdleTtlMs"
+  );
+  boundedInteger(
     maxMessagesPerConversation,
     2,
     HARD_MAX_MESSAGES_PER_CONVERSATION,
@@ -163,6 +212,7 @@ export function createHcnAssistantConversationStore({
     const matches = document.conversations
       .filter((item) =>
         item.principalRef === query.principalRef
+        && !item.externalBindingRef
         && item.state === query.state
       )
       .sort(compareConversationRecency);
@@ -244,6 +294,106 @@ export function createHcnAssistantConversationStore({
         createdAt: instant,
         updatedAt: instant,
         archivedAt: "",
+        externalBindingRef: "",
+        externalBindingExpiresAt: "",
+        messages: []
+      };
+      document.conversations.push(conversation);
+      sortDocument(document);
+      await saveDocument(document);
+      return projectConversation(conversation);
+    });
+  }
+
+  /**
+   * Atomically resolves an HCN-owned conversation for a pre-authenticated
+   * external session binding. The caller supplies only an internal opaque
+   * binding derived by HCN from authenticated context; no public route accepts
+   * or returns the underlying conversation reference.
+   */
+  async function getOrCreateBound(input = {}) {
+    const request = normalizeBoundCreateInput(input);
+    return enqueueMutation(async () => {
+      const timestamp = readNow(now);
+      const document = await loadDocument();
+      pruneExpiredBoundConversations(document, timestamp);
+      const existing = findBoundConversation(
+        document,
+        request.principalRef,
+        request.externalBindingRef
+      );
+      const expiresAt = iso(timestamp + boundConversationIdleTtlMs);
+      if (existing) {
+        if (
+          existing.state !== "active"
+          || existing.scope !== request.scope
+          || existing.kind !== request.kind
+          || existing.fileRef !== request.fileRef
+        ) {
+          conflict(
+            "conversation_binding_scope_changed",
+            "The authenticated assistant session is already bound to a different HCN conversation scope."
+          );
+        }
+        existing.externalBindingExpiresAt = expiresAt;
+        sortDocument(document);
+        await saveDocument(document);
+        return projectConversation(existing);
+      }
+
+      const ownedCount = document.conversations.filter(
+        (item) => item.principalRef === request.principalRef
+      ).length;
+      const bound = document.conversations.filter(
+        (item) => Boolean(item.externalBindingRef)
+      );
+      const ownedBoundCount = bound.filter(
+        (item) => item.principalRef === request.principalRef
+      ).length;
+      if (document.conversations.length >= maxConversations) {
+        conflict(
+          "store_capacity_reached",
+          "The HCN assistant conversation store is at capacity."
+        );
+      }
+      if (ownedCount >= maxConversationsPerPrincipal) {
+        conflict(
+          "principal_capacity_reached",
+          "This HCN employee has reached the conversation limit."
+        );
+      }
+      if (bound.length >= maxBoundConversations) {
+        conflict(
+          "bound_conversation_capacity_reached",
+          "The authenticated assistant session store is at capacity."
+        );
+      }
+      if (ownedBoundCount >= maxBoundConversationsPerPrincipal) {
+        conflict(
+          "principal_bound_conversation_capacity_reached",
+          "This HCN employee has reached the authenticated assistant session limit."
+        );
+      }
+
+      const instant = iso(timestamp);
+      const conversation = {
+        conversationRef: uniqueReference(
+          "conversation",
+          randomBytes,
+          document.conversations.map((item) => item.conversationRef)
+        ),
+        principalRef: request.principalRef,
+        scope: request.scope,
+        kind: request.kind,
+        fileRef: request.fileRef,
+        title: request.title,
+        state: "active",
+        revision: 0,
+        createdAt: instant,
+        updatedAt: instant,
+        archivedAt: "",
+        externalBindingRef: request.externalBindingRef,
+        externalBindingExpiresAt: expiresAt,
         messages: []
       };
       document.conversations.push(conversation);
@@ -391,6 +541,8 @@ export function createHcnAssistantConversationStore({
       filePath: configuredPath,
       key,
       maxConversations,
+      maxBoundConversations,
+      maxBoundConversationsPerPrincipal,
       maxMessagesPerConversation,
       maxFileBytes
     });
@@ -403,6 +555,8 @@ export function createHcnAssistantConversationStore({
       document,
       randomBytes,
       maxConversations,
+      maxBoundConversations,
+      maxBoundConversationsPerPrincipal,
       maxMessagesPerConversation,
       maxFileBytes
     });
@@ -422,6 +576,7 @@ export function createHcnAssistantConversationStore({
     list,
     get,
     create,
+    getOrCreateBound,
     rename: renameConversation,
     archive,
     restore,
@@ -483,6 +638,40 @@ function normalizeCreateInput(value) {
     kind,
     fileRef,
     title: title(value.title)
+  };
+}
+
+function normalizeBoundCreateInput(value) {
+  exactRecord(
+    value,
+    [
+      "principalRef",
+      "scope",
+      "kind",
+      "fileRef",
+      "title",
+      "externalBindingRef"
+    ],
+    "bound conversation create"
+  );
+  const scope = enumValue(value.scope, SCOPES, "scope");
+  const kind = enumValue(value.kind, KINDS, "kind");
+  const fileRef = optionalFileReference(value.fileRef);
+  assertScopeKind(scope, kind, fileRef);
+  if (scope !== "assigned" || !["general", "file"].includes(kind)) {
+    invalidInput(
+      "Bound external conversations support assigned general or file scope only."
+    );
+  }
+  return {
+    principalRef: principalReference(value.principalRef),
+    scope,
+    kind,
+    fileRef,
+    title: title(value.title),
+    externalBindingRef: externalBindingReference(
+      value.externalBindingRef
+    )
   };
 }
 
@@ -559,14 +748,28 @@ function validateDocument(value, limits) {
   );
   if (
     value.schema !== STORE_SCHEMA
-    || value.schemaVersion !== STORE_VERSION
+    || ![STORE_VERSION, LEGACY_STORE_VERSION].includes(value.schemaVersion)
     || !Array.isArray(value.conversations)
     || value.conversations.length > limits.maxConversations
   ) {
     corruptStore("The HCN assistant conversation store schema is invalid.");
   }
+  if (value.schemaVersion === LEGACY_STORE_VERSION) {
+    value = {
+      ...value,
+      schemaVersion: STORE_VERSION,
+      conversations: value.conversations.map((conversation) => ({
+        ...conversation,
+        externalBindingRef: "",
+        externalBindingExpiresAt: ""
+      }))
+    };
+  }
   const conversationRefs = new Set();
-  const activeFileConversationKeys = new Set();
+  const activeUnboundFileConversationKeys = new Set();
+  const externalBindingKeys = new Set();
+  let boundConversationCount = 0;
+  const boundConversationsByPrincipal = new Map();
   for (const item of value.conversations) {
     validateConversation(item, limits.maxMessagesPerConversation, true);
     if (conversationRefs.has(item.conversationRef)) {
@@ -575,15 +778,43 @@ function validateDocument(value, limits) {
       );
     }
     conversationRefs.add(item.conversationRef);
-    if (item.kind === "file" && item.state === "active") {
+    if (item.externalBindingRef) {
+      boundConversationCount += 1;
+      boundConversationsByPrincipal.set(
+        item.principalRef,
+        (boundConversationsByPrincipal.get(item.principalRef) || 0) + 1
+      );
+      const key = `${item.principalRef}\0${item.externalBindingRef}`;
+      if (externalBindingKeys.has(key)) {
+        corruptStore(
+          "The HCN assistant conversation store contains duplicate external bindings."
+        );
+      }
+      externalBindingKeys.add(key);
+    }
+    if (
+      item.kind === "file"
+      && item.state === "active"
+      && !item.externalBindingRef
+    ) {
       const key = `${item.principalRef}\0${item.fileRef}`;
-      if (activeFileConversationKeys.has(key)) {
+      if (activeUnboundFileConversationKeys.has(key)) {
         corruptStore(
           "The HCN assistant conversation store contains duplicate active client chats."
         );
       }
-      activeFileConversationKeys.add(key);
+      activeUnboundFileConversationKeys.add(key);
     }
+  }
+  if (
+    boundConversationCount > limits.maxBoundConversations
+    || [...boundConversationsByPrincipal.values()].some(
+      (count) => count > limits.maxBoundConversationsPerPrincipal
+    )
+  ) {
+    corruptStore(
+      "The HCN assistant conversation store exceeds external binding capacity."
+    );
   }
   return value;
 }
@@ -601,6 +832,8 @@ function validateConversation(value, maxMessages, persisted) {
     "createdAt",
     "updatedAt",
     "archivedAt",
+    "externalBindingRef",
+    "externalBindingExpiresAt",
     "messages"
   ], "conversation", persisted);
   conversationReference(value.conversationRef, persisted);
@@ -630,6 +863,34 @@ function validateConversation(value, maxMessages, persisted) {
     persisted
       ? corruptStore("An active stored conversation has archive metadata.")
       : invalidInput("An active conversation cannot have archivedAt.");
+  }
+  const externalBindingRef = optionalExternalBindingReference(
+    value.externalBindingRef,
+    persisted
+  );
+  if (externalBindingRef) {
+    if (scope !== "assigned" || !["general", "file"].includes(kind)) {
+      persisted
+        ? corruptStore("A stored external conversation binding has invalid scope.")
+        : invalidInput("External conversation bindings require assigned scope.");
+    }
+    instant(
+      value.externalBindingExpiresAt,
+      "externalBindingExpiresAt",
+      persisted
+    );
+    if (
+      Date.parse(value.externalBindingExpiresAt)
+      < Date.parse(value.createdAt)
+    ) {
+      persisted
+        ? corruptStore("A stored external conversation binding timestamp is invalid.")
+        : invalidInput("externalBindingExpiresAt cannot precede createdAt.");
+    }
+  } else if (value.externalBindingExpiresAt !== "") {
+    persisted
+      ? corruptStore("An unbound stored conversation has binding metadata.")
+      : invalidInput("An unbound conversation cannot have binding expiry metadata.");
   }
   if (
     !Array.isArray(value.messages)
@@ -812,6 +1073,7 @@ function findActiveFileConversation(
 ) {
   return document.conversations.find((item) =>
     item.principalRef === principalRef
+    && !item.externalBindingRef
     && item.kind === "file"
     && item.fileRef === fileRef
     && item.state === "active"
@@ -823,10 +1085,26 @@ function findActiveConversationKind(document, principalRef, kind) {
   return document.conversations
     .filter((item) =>
       item.principalRef === principalRef
+      && !item.externalBindingRef
       && item.kind === kind
       && item.state === "active"
     )
     .sort(compareConversationRecency)[0] || null;
+}
+
+function findBoundConversation(document, principalRef, externalBindingRef) {
+  return document.conversations.find((item) =>
+    item.principalRef === principalRef
+    && item.externalBindingRef === externalBindingRef
+  ) || null;
+}
+
+function pruneExpiredBoundConversations(document, timestamp) {
+  document.conversations = document.conversations.filter((item) => {
+    if (!item.externalBindingRef) return true;
+    const expiresAt = Date.parse(item.externalBindingExpiresAt);
+    return Number.isFinite(expiresAt) && expiresAt > timestamp;
+  });
 }
 
 function assertRevision(conversation, expected) {
@@ -870,6 +1148,8 @@ async function readEncryptedDocument({
   filePath,
   key,
   maxConversations,
+  maxBoundConversations,
+  maxBoundConversationsPerPrincipal,
   maxMessagesPerConversation,
   maxFileBytes
 }) {
@@ -893,6 +1173,8 @@ async function readEncryptedDocument({
     }
     return decryptDocument(bytes, key, {
       maxConversations,
+      maxBoundConversations,
+      maxBoundConversationsPerPrincipal,
       maxMessagesPerConversation
     });
   } catch (error) {
@@ -913,11 +1195,15 @@ async function writeEncryptedDocument({
   document,
   randomBytes,
   maxConversations,
+  maxBoundConversations,
+  maxBoundConversationsPerPrincipal,
   maxMessagesPerConversation,
   maxFileBytes
 }) {
   validateDocument(document, {
     maxConversations,
+    maxBoundConversations,
+    maxBoundConversationsPerPrincipal,
     maxMessagesPerConversation
   });
   const parent = path.dirname(filePath);
@@ -1267,6 +1553,20 @@ function optionalFileReference(value, persisted = false) {
       : invalidInput("fileRef must be an opaque HCN file reference or empty.");
   }
   return value;
+}
+
+function externalBindingReference(value, persisted = false) {
+  if (typeof value !== "string" || !EXTERNAL_BINDING_REF.test(value)) {
+    persisted
+      ? corruptStore("A stored external conversation binding is invalid.")
+      : invalidInput("externalBindingRef must be an opaque internal binding.");
+  }
+  return value;
+}
+
+function optionalExternalBindingReference(value, persisted = false) {
+  if (value === "") return "";
+  return externalBindingReference(value, persisted);
 }
 
 function title(value, persisted = false) {

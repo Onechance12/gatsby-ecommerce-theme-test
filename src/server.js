@@ -268,11 +268,14 @@ import {
 import { fetchBoundedJson } from "./http/bounded-json.js";
 import {
   createJobroloHcnAuthenticator,
+  deriveJobroloAssistantScopedBindingRef,
+  deriveJobroloAssistantSessionBindingRef,
   isJobroloHcnRoute,
   loadJobroloHcnIntegrationConfiguration
 } from "./integrations/jobrolo-service-auth.js";
 import {
   jobroloHcnResponse,
+  projectJobroloAssistantTurnResult,
   validateJobroloActionExecuteInput,
   validateJobroloAssistantTurnInput,
   validateJobroloReceiptDetailInput
@@ -675,6 +678,8 @@ const HCN_ASSISTANT_GLOBAL_BINDING = createHash("sha256")
 const HCN_ASSISTANT_MAX_HISTORY_MESSAGES = 8;
 const HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES = 8 * 1024;
 const HCN_ASSISTANT_TURN_OPERATIONS =
+  createKeyedOperationQueue({ maxKeys: 512 });
+const HCN_JOBROLO_ASSISTANT_BINDING_OPERATIONS =
   createKeyedOperationQueue({ maxKeys: 512 });
 const HCN_PENDING_ACTION_PLANS = createHcnPendingActionPlanStore();
 const HCN_PENDING_CLAIM_CALL_PLANS =
@@ -5679,18 +5684,68 @@ async function hcnAssistantTurn(input = {}) {
 
 async function jobroloHcnAssistantTurn(input = {}) {
   const request = validateJobroloAssistantTurnInput(input);
-  const created = await hcnCreateAssistantConversation({
+  const principal = assertHcnAssignedReadSession();
+  const externalBindingRef = currentJobroloAssistantBindingRef({
     kind: request.kind,
-    title: request.kind === "general"
-      ? HCN_GENERAL_CONVERSATION_TITLE
-      : "Jobrolo exact-file conversation",
     fileRef: request.fileRef
   });
-  return hcnAssistantTurn({
-    conversationRef: created.conversation.conversationRef,
-    expectedRevision: created.conversation.revision,
-    prompt: request.prompt,
-    mode: request.mode
+  return HCN_JOBROLO_ASSISTANT_BINDING_OPERATIONS.run(
+    externalBindingRef,
+    async () => {
+      if (request.kind === "file") {
+        await withHcnReadAdmission(
+          () => resolveHcnAssistantAssignedFile({
+            fileRef: request.fileRef,
+            principal
+          })
+        );
+      }
+      const conversation = await requireHcnAssistantConversationStore()
+        .getOrCreateBound({
+          principalRef: hcnGooglePrincipalRef(principal.googleSubject),
+          scope: "assigned",
+          kind: request.kind,
+          fileRef: request.fileRef,
+          title: request.kind === "general"
+            ? HCN_GENERAL_CONVERSATION_TITLE
+            : "Jobrolo exact-file conversation",
+          externalBindingRef
+        });
+      const result = await hcnAssistantTurn({
+        conversationRef: conversation.conversationRef,
+        expectedRevision: conversation.revision,
+        prompt: request.prompt,
+        mode: request.mode
+      });
+      return projectJobroloAssistantTurnResult(result);
+    }
+  );
+}
+
+function currentJobroloAssistantBindingRef({ kind, fileRef }) {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  const sessionBindingRef = String(
+    context?.jobroloAssistantSessionBindingRef || ""
+  );
+  if (
+    context?.authenticationMethod !== "jobrolo_hmac"
+    || identity?.type !== "hcn_jobrolo_service"
+    || !/^binding_[a-f0-9]{64}$/.test(sessionBindingRef)
+    || !["general", "file"].includes(kind)
+    || (kind === "general" && fileRef !== "")
+    || (kind === "file" && !/^subject_[a-f0-9]{32}$/.test(fileRef))
+  ) {
+    const error = new Error(
+      "Authenticated Jobrolo assistant continuity is unavailable."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  return deriveJobroloAssistantScopedBindingRef({
+    sessionBindingRef,
+    kind,
+    fileRef
   });
 }
 
@@ -18625,6 +18680,15 @@ async function authenticateJobroloHcnPrincipal(verified) {
     .update("\0", "utf8")
     .update(verified.sessionRef, "utf8")
     .digest("base64url");
+  const principalRef = hcnGooglePrincipalRef(principal.googleSubject);
+  const tenantId = HCN_REFERENCE_CONFIGURATION.requireFactory().tenantId;
+  const jobroloAssistantSessionBindingRef =
+    deriveJobroloAssistantSessionBindingRef({
+      tenantId,
+      clientId: verified.clientId,
+      principalRef,
+      sessionRef: verified.sessionRef
+    });
   return {
     identity: {
       type: "hcn_jobrolo_service",
@@ -18650,6 +18714,7 @@ async function authenticateJobroloHcnPrincipal(verified) {
       googleSubject: principal.googleSubject
     },
     hcnSessionId: sessionId,
+    jobroloAssistantSessionBindingRef,
     jobroloRequestId: verified.requestId,
     operatorScope: "assigned"
   };

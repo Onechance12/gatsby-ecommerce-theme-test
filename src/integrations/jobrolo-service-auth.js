@@ -20,6 +20,9 @@ const ROUTES = new Set(JOBROLO_HCN_ROUTES);
 const CLIENT_ID = /^[A-Za-z0-9._-]{3,64}$/;
 const REQUEST_ID = /^request_[a-f0-9]{32}$/;
 const SESSION_REF = /^session_[a-f0-9]{32}$/;
+const PRINCIPAL_REF = /^principal_[a-f0-9]{32}$/;
+const FILE_REF = /^subject_[a-f0-9]{32}$/;
+const BINDING_REF = /^binding_[a-f0-9]{64}$/;
 const NONCE = /^nonce_[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -30,6 +33,61 @@ const MAX_CANONICAL_NODES = 30_000;
 
 export function isJobroloHcnRoute(pathname) {
   return ROUTES.has(String(pathname || ""));
+}
+
+export function deriveJobroloAssistantSessionBindingRef({
+  tenantId,
+  clientId,
+  principalRef,
+  sessionRef
+} = {}) {
+  const tenant = String(tenantId || "");
+  if (
+    !tenant
+    || tenant.length > 256
+    || /[\u0000-\u001f\u007f]/.test(tenant)
+    || !CLIENT_ID.test(String(clientId || ""))
+    || !PRINCIPAL_REF.test(String(principalRef || ""))
+    || !SESSION_REF.test(String(sessionRef || ""))
+  ) {
+    throw new TypeError("Jobrolo assistant session binding input is invalid.");
+  }
+  return `binding_${createHash("sha256")
+    .update("hcn-jobrolo:assistant-session-binding:v1", "utf8")
+    .update("\0", "utf8")
+    .update(tenant, "utf8")
+    .update("\0", "utf8")
+    .update(clientId, "utf8")
+    .update("\0", "utf8")
+    .update(principalRef, "utf8")
+    .update("\0", "utf8")
+    .update(sessionRef, "utf8")
+    .digest("hex")}`;
+}
+
+export function deriveJobroloAssistantScopedBindingRef({
+  sessionBindingRef,
+  kind,
+  fileRef
+} = {}) {
+  const normalizedFileRef = String(fileRef || "");
+  if (
+    !BINDING_REF.test(String(sessionBindingRef || ""))
+    || !["general", "file"].includes(kind)
+    || (kind === "general" && normalizedFileRef !== "")
+    || (kind === "file" && !FILE_REF.test(normalizedFileRef))
+  ) {
+    throw new TypeError("Jobrolo assistant scope binding input is invalid.");
+  }
+  return `binding_${createHash("sha256")
+    .update("hcn-jobrolo:assistant-conversation-scope:v1", "utf8")
+    .update("\0", "utf8")
+    .update(sessionBindingRef, "utf8")
+    .update("\0", "utf8")
+    .update(kind, "utf8")
+    .update("\0", "utf8")
+    .update(normalizedFileRef, "utf8")
+    .digest("hex")}`;
 }
 
 export function loadJobroloHcnIntegrationConfiguration(

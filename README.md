@@ -236,6 +236,28 @@ action plans, approvals, or HCN Operations Brain state. Full transcripts are
 available to the owning employee in the UI; each model call replays only a
 bounded recent window.
 
+The signed Jobrolo adapter does not create a throwaway Thresher chat for every
+turn. HCN derives a private binding from the authenticated Jobrolo session and
+then from the exact general-or-file scope. The same session and scope resumes
+the same encrypted transcript after a process restart; general chat, each
+opaque assigned-file reference, and different Jobrolo sessions remain isolated.
+These bound conversations never appear in ordinary HCN chat lists, and public
+adapter responses omit HCN conversation and message references recursively.
+The binding's idle lifetime slides for 30 days. Expired bindings are pruned
+atomically during resolution. The owner pilot is bounded to 128 live bound
+contexts globally and 128 for one principal, subject to the parent store's
+overall limits; exhaustion fails closed instead of evicting live context.
+Concurrent turns for one bound context are serialized around lookup and append.
+
+The Render blueprint declares the dedicated 1 GB `hcn-operations-data` disk at
+`/var/data/hcn-operations`, so the configured assistant-history path is designed
+to survive deploys and restarts. Before claiming production continuity, attest
+that the live service actually has that disk attached and run a restart/readback
+smoke. Server readiness authenticates the encrypted store and fails closed on a
+wrong key or tampering, but it cannot prove that an OS path is physically backed
+by persistent storage. Legacy v1.0 encrypted history remains readable and is
+migrated to v1.1 on the next write.
+
 The reasoning router is fixed in server code, not selected by the browser or
 environment variables. In Auto mode, narrow Work Center, exact-file status,
 and authorized activity-gap reports use deterministic fresh reads with no

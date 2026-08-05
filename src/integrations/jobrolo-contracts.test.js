@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  projectJobroloAssistantTurnResult,
   validateJobroloActionExecuteInput,
   validateJobroloAssistantTurnInput
 } from "./jobrolo-contracts.js";
@@ -59,5 +60,53 @@ test("execution attestation must match the exact pending plan digest", () => {
       }
     }, { plan, now: () => now }),
     /not current/
+  );
+});
+
+test("assistant projection strips private store identifiers and fails closed on nested references", () => {
+  const projected = projectJobroloAssistantTurnResult({
+    schema: "hcn.console.assistant-turn.v4",
+    generatedAt: "2026-08-05T10:00:00.000Z",
+    persisted: true,
+    cachePolicy: "no_store",
+    conversationRef: `conversation_${"a".repeat(32)}`,
+    revision: 2,
+    messageRef: `message_${"b".repeat(32)}`,
+    authority: { canRead: true },
+    routing: { route: "deterministic" },
+    message: "Safe user-visible response.",
+    plan: null,
+    sources: [],
+    uiDirective: "open_work_center"
+  });
+  assert.deepEqual(Object.keys(projected).sort(), [
+    "authority",
+    "cachePolicy",
+    "generatedAt",
+    "message",
+    "persisted",
+    "plan",
+    "routing",
+    "schema",
+    "sources",
+    "uiDirective"
+  ]);
+  assert.doesNotMatch(JSON.stringify(projected), /conversation_|message_/);
+
+  assert.throws(
+    () => projectJobroloAssistantTurnResult({
+      schema: "hcn.console.assistant-turn.v4",
+      message: "Unsafe result.",
+      sources: [{ messageRef: `message_${"c".repeat(32)}` }]
+    }),
+    /internal HCN references/
+  );
+  assert.throws(
+    () => projectJobroloAssistantTurnResult({
+      schema: "hcn.console.assistant-turn.v4",
+      message: "Unsafe result.",
+      sources: [{ value: `conversation_${"d".repeat(32)}` }]
+    }),
+    /internal HCN references/
   );
 });
