@@ -711,6 +711,15 @@ test("Ask Thresher is the simple authenticated employee home and fails closed", 
   );
   assert.match(script, /ASSISTANT_TURN_CAPABILITY/);
   assert.match(script, /postOperationalJson\(/);
+  const assistantSubmit = extractConsoleFunction(script, "submitAssistantTurn");
+  assert.match(
+    assistantSubmit,
+    /if \(statusOf\(error\) === 401\) \{[\s\S]*handleOperationalAuthLoss\(\)/
+  );
+  assert.doesNotMatch(
+    assistantSubmit,
+    /if \(isAuthorizationStatus\(error\)\) \{[\s\S]*handleOperationalAuthLoss\(\)/
+  );
   assert.match(script, /"hcn\.console\.assistant-turn\.v4"/);
   assert.match(script, /function normalizeAssistantTurnResponse\(value\)/);
   assert.match(script, /function normalizeAssistantRouting\(value\)/);

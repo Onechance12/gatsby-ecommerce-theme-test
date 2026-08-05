@@ -3518,7 +3518,7 @@
     } catch (error) {
       if (controller.signal.aborted) return;
       pending.remove();
-      if (isAuthorizationStatus(error)) {
+      if (statusOf(error) === 401) {
         handleOperationalAuthLoss();
         return;
       }

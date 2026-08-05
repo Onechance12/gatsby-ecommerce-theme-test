@@ -642,7 +642,7 @@ test("enabled assistant route uses fixed routed reasoning without external mutat
       body: JSON.stringify({
         conversationRef,
         expectedRevision,
-        prompt: "Show my assigned Work Center.",
+        prompt: "Review my workload.",
         mode: "auto"
       })
     }
