@@ -192,6 +192,7 @@ import {
   loadHcnManagementAdjusterConfiguration
 } from "./hcn-console/management-config.js";
 import {
+  HCN_MANAGEMENT_ESTIMATING_STATUS_CODES,
   mapManagementJobNimbusEnvelope
 } from "./hcn-console/management-provider.js";
 import {
@@ -4256,7 +4257,14 @@ async function readHcnManagementSweep(input = {}) {
     ephemeral: true,
     cachePolicy: "no_store",
     authority: sweep.authority,
-    criteria: sweep.criteria,
+    criteria: {
+      ...sweep.criteria,
+      workflowScope: "estimating_board",
+      includedStatusCodes: [
+        ...HCN_MANAGEMENT_ESTIMATING_STATUS_CODES
+      ],
+      filterOrder: "workflow_status_before_activity_ranking"
+    },
     summary: {
       ...sweep.summary,
       unsupportedActivityRecordCount,
@@ -4480,6 +4488,11 @@ function hcnManagementSweepExclusions(providerExclusions, coreExclusions) {
       "Ambiguous configured ownership",
       providerExclusions.ambiguousOwner,
       "Matched more than one configured adjuster and was excluded rather than guessed."
+    ],
+    [
+      "Outside the Estimating board",
+      providerExclusions.outsideWorkflowStatus,
+      "The current JobNimbus status is not one of the six Estimating-board workflow statuses."
     ]
   ];
   const results = definitions
@@ -14684,7 +14697,8 @@ async function loadHcnManagementJobNimbusSnapshot({
       tasksComplete: true,
       ...freshness
     }, {
-      adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters
+      adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters,
+      workflowScope: "estimating_board"
     });
   } catch {
     throw hcnManagementSourceUnavailable(
@@ -14767,7 +14781,8 @@ async function loadHcnManagementJobNimbusSnapshot({
           tasksComplete: true,
           ...freshness
         }, {
-          adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters
+          adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters,
+          workflowScope: "estimating_board"
         });
         const accepted = mapped.data.events.filter((event) =>
           HCN_MANAGEMENT_VERIFIED_ACTIVITY_CLASSES.has(
@@ -21910,7 +21925,7 @@ const OPENAPI = {
       post: {
         operationId: "readHcnManagementSweep",
         security: [{ hcnBrowserSession: [] }],
-        description: "Management-authorized fresh, read-only ranking of the longest verified JobNimbus activity gaps for exactly three configured adjusters. The report uses complete per-file JobNimbus activity reads, exposes explicit exclusions, and does not claim company-wide Gmail, Quo, or calendar coverage.",
+        description: "Management-authorized fresh, read-only ranking of the longest verified JobNimbus activity gaps for exactly three configured adjusters. The fixed server-side scope is the six-status JobNimbus Estimating board; appraisal, legal, production, refile, and other workflows are excluded before ranking. The report uses complete per-file JobNimbus activity reads, exposes explicit exclusions, and does not claim company-wide Gmail, Quo, or calendar coverage.",
         requestBody: {
           required: true,
           content: {
@@ -21932,7 +21947,7 @@ const OPENAPI = {
         },
         responses: {
           "200": {
-            description: "Fresh ephemeral JobNimbus activity-gap report with three adjuster groups and a company-wide ranking."
+            description: "Fresh ephemeral six-status Estimating-board activity-gap report with three adjuster groups and a company-wide ranking."
           },
           "400": { description: "Strict request validation failed." },
           "401": { description: "HCN browser session required." },

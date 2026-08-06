@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapManagementJobNimbusEnvelope } from "./management-provider.js";
+import {
+  HCN_MANAGEMENT_ESTIMATING_STATUS_CODES,
+  mapManagementJobNimbusEnvelope
+} from "./management-provider.js";
 
 const NOW = "2026-07-29T12:00:00.000Z";
 const VALID_UNTIL = "2026-07-29T12:02:00.000Z";
@@ -74,8 +77,66 @@ test("management provider emits only active files owned by one configured adjust
     inactive: 1,
     nonInsurance: 1,
     unconfiguredOwner: 1,
-    ambiguousOwner: 1
+    ambiguousOwner: 1,
+    outsideWorkflowStatus: 0
   });
+});
+
+test("estimating-board scope filters the fixed six statuses before ranking evidence", () => {
+  const estimatingLabels = [
+    "Photo File / Estimate Needed",
+    "Ready for PA Review",
+    "Submitted Awaiting Confirmation",
+    "Submitted",
+    "HOT/Final Negotiation",
+    "Estimating Finalized (Awaiting ACV)"
+  ];
+  const contacts = estimatingLabels.map((statusName, index) =>
+    contact(`estimating_${index}`, "owner_a", {
+      number: `EST-${index + 1}`,
+      status_name: statusName
+    })
+  );
+  contacts.push(
+    contact("appraisal_file", "owner_a", {
+      number: "APP-1",
+      status_name: "Appraisal Interest"
+    }),
+    contact("production_file", "owner_b", {
+      number: "PROD-1",
+      status_name: "Ready for Production"
+    }),
+    contact("legal_file", "owner_c", {
+      number: "LEGAL-1",
+      status_name: "Legal"
+    })
+  );
+
+  const result = mapManagementJobNimbusEnvelope(envelope({ contacts }), {
+    adjusters: ADJUSTERS,
+    workflowScope: "estimating_board"
+  });
+
+  assert.deepEqual(
+    result.data.files.map(({ statusCode }) => statusCode),
+    [...HCN_MANAGEMENT_ESTIMATING_STATUS_CODES]
+  );
+  assert.equal(result.data.excluded.outsideWorkflowStatus, 3);
+  assert.equal(Object.isFrozen(HCN_MANAGEMENT_ESTIMATING_STATUS_CODES), true);
+  assert.throws(
+    () => HCN_MANAGEMENT_ESTIMATING_STATUS_CODES.push("appraisal_interest"),
+    TypeError
+  );
+});
+
+test("management provider rejects caller-defined workflow scopes", () => {
+  assert.throws(
+    () => mapManagementJobNimbusEnvelope(envelope(), {
+      adjusters: ADJUSTERS,
+      workflowScope: "appraisal"
+    }),
+    /invalid management workflow scope/
+  );
 });
 
 test("management provider classifies communication, attempts, operations, and noise", () => {
