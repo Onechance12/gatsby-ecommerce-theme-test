@@ -12,6 +12,15 @@ export const HCN_MANAGEMENT_PROVIDER_LIMITS = Object.freeze({
   maximumTasks: 5000
 });
 
+export const HCN_MANAGEMENT_ESTIMATING_STATUS_CODES = Object.freeze([
+  "photo_file_estimate_needed",
+  "ready_for_pa_review",
+  "submitted_awaiting_confirmation",
+  "submitted",
+  "hot_final_negotiation",
+  "estimating_finalized_awaiting_acv"
+]);
+
 const PROVIDER_ID = /^[^\s\x00-\x1f\x7f]{1,512}$/;
 const SAFE_JOB_NUMBER = /^[a-z0-9][a-z0-9._/-]{0,63}$/i;
 const SAFE_CODE = /^[a-z][a-z0-9_.-]{0,63}$/;
@@ -111,11 +120,17 @@ const UNSUPPORTED_ACTIVITY_STATES = new Set([
   "scheduled",
   "viewed"
 ]);
+const ESTIMATING_STATUS_CODES = new Set(
+  HCN_MANAGEMENT_ESTIMATING_STATUS_CODES
+);
+const WORKFLOW_SCOPES = new Set(["all_active", "estimating_board"]);
 
 export function mapManagementJobNimbusEnvelope(input, {
-  adjusters
+  adjusters,
+  workflowScope = "all_active"
 } = {}) {
   const configured = normalizeAdjusters(adjusters);
+  const normalizedWorkflowScope = normalizeWorkflowScope(workflowScope);
   const freshness = normalizeFreshness(input);
   requireComplete(input, "contacts");
   requireComplete(input, "activities");
@@ -143,7 +158,8 @@ export function mapManagementJobNimbusEnvelope(input, {
     inactive: 0,
     nonInsurance: 0,
     unconfiguredOwner: 0,
-    ambiguousOwner: 0
+    ambiguousOwner: 0,
+    outsideWorkflowStatus: 0
   };
 
   for (const contact of contacts) {
@@ -165,6 +181,17 @@ export function mapManagementJobNimbusEnvelope(input, {
     }
     if (matchingOwners.length !== 1) {
       excluded.ambiguousOwner += 1;
+      continue;
+    }
+
+    const statusCode =
+      code(field(contact, ["status_name", "statusName", "status"]))
+      ?? "unknown";
+    if (
+      normalizedWorkflowScope === "estimating_board"
+      && !ESTIMATING_STATUS_CODES.has(statusCode)
+    ) {
+      excluded.outsideWorkflowStatus += 1;
       continue;
     }
 
@@ -202,9 +229,7 @@ export function mapManagementJobNimbusEnvelope(input, {
       providerFileId,
       jobNumber,
       displayName: contactDisplayName(contact),
-      statusCode:
-        code(field(contact, ["status_name", "statusName", "status"]))
-        ?? "unknown",
+      statusCode,
       stageCode:
         code(
           field(contact, [
@@ -279,6 +304,13 @@ export function mapManagementJobNimbusEnvelope(input, {
       }
     }
   });
+}
+
+function normalizeWorkflowScope(value) {
+  if (!WORKFLOW_SCOPES.has(value)) {
+    fail("invalid management workflow scope");
+  }
+  return value;
 }
 
 function mapActivity(activity, providerFileId, adjusters) {

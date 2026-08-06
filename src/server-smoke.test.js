@@ -2281,8 +2281,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     record_type_name: "Insurance",
     owners: [{ id: chanceOwnerId }],
     display_name: "Fixture Active Homeowner",
-    status_name: "Claim Filed",
-    stage_name: "Carrier Review",
+    status_name: "Ready for PA Review",
+    stage_name: "Estimating",
     is_active: true,
     date_created: "2026-07-20T15:00:00.000Z",
     date_updated: "2026-07-27T15:00:00.000Z",
@@ -2316,6 +2316,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     number: "HCN-1003",
     display_name: "Fixture Other Owner",
     owners: [{ id: otherOwnerId }],
+    status_name: "Photo File / Estimate Needed",
     email: "other.owner@example.test",
     mobile_phone: "2145551214",
     "Claim #": "HCN-CLAIM-1003",
@@ -2327,6 +2328,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     number: "HCN-1005",
     display_name: "Fixture Third Owner",
     owners: [{ id: thirdOwnerId }],
+    status_name: "Submitted",
     email: "third.owner@example.test",
     mobile_phone: "2145551216",
     "Claim #": "HCN-CLAIM-1005",
@@ -4285,6 +4287,25 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     true
   );
   assert.equal(managementSweep.criteria.rankingMode, "activity_only");
+  assert.equal(
+    managementSweep.criteria.workflowScope,
+    "estimating_board"
+  );
+  assert.equal(
+    managementSweep.criteria.filterOrder,
+    "workflow_status_before_activity_ranking"
+  );
+  assert.deepEqual(
+    managementSweep.criteria.includedStatusCodes,
+    [
+      "photo_file_estimate_needed",
+      "ready_for_pa_review",
+      "submitted_awaiting_confirmation",
+      "submitted",
+      "hot_final_negotiation",
+      "estimating_finalized_awaiting_acv"
+    ]
+  );
   assert.equal(managementSweep.adjusters.length, 3);
   assert.deepEqual(
     managementSweep.adjusters.map((adjuster) => adjuster.name),
@@ -4301,6 +4322,16 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.deepEqual(
     managementSweep.adjusters.map((adjuster) => adjuster.items.length),
     [1, 1, 1]
+  );
+  assert.deepEqual(
+    managementSweep.adjusters.flatMap((adjuster) =>
+      adjuster.items.map((item) => item.status.code)
+    ),
+    [
+      "ready_for_pa_review",
+      "photo_file_estimate_needed",
+      "submitted"
+    ]
   );
   assert.equal(managementSweep.companyWorst.length, 3);
   assert.deepEqual(
