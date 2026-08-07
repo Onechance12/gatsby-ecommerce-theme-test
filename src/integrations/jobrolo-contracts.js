@@ -106,16 +106,21 @@ export function validateJobroloReceiptDetailInput(value) {
 }
 
 export function jobroloHcnResponse(requestId, result) {
+  const isManagementSweep =
+    result?.schema === "hcn.console.management-sweep.v1"
+    || result?.schemaVersion === "hcn.console.management-sweep.v1";
   return Object.freeze({
     schema: "hcn.jobrolo.response.v1",
     requestId,
     generatedAt: new Date().toISOString(),
     authority: Object.freeze({
       principalMode: "fixed_server_side",
-      fileScope: "assigned_only",
+      fileScope: isManagementSweep
+        ? "configured_management_adjusters"
+        : "assigned_only",
       liveSourcesWin: true,
       automaticExecution: false,
-      exactApprovalRequired: true,
+      exactApprovalRequired: !isManagementSweep,
       providerCredentialsExposed: false
     }),
     result

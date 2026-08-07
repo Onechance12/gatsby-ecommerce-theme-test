@@ -1060,6 +1060,7 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/status", jobroloHcnStatus],
   ["POST /integrations/jobrolo/v1/work-center", hcnReadWorkCenter],
   ["POST /integrations/jobrolo/v1/file-review", hcnReadFile],
+  ["POST /integrations/jobrolo/v1/management-sweep", hcnReadManagementSweep],
   ["POST /integrations/jobrolo/v1/assistant/turn", jobroloHcnAssistantTurn],
   ["POST /integrations/jobrolo/v1/action-plans/prepare", hcnPrepareActionPlan],
   ["POST /integrations/jobrolo/v1/action-plans/execute", jobroloHcnExecuteActionPlan],
