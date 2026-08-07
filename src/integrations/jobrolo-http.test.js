@@ -11,6 +11,8 @@ import { signJobroloHcnRequest } from "./jobrolo-service-auth.js";
 const EMAIL = "chance@wavepa.com";
 const SUBJECT = "chance-google-subject-fixture";
 const OWNER_ID = "chance-jobnimbus-owner-fixture";
+const SECOND_OWNER_ID = "second-jobnimbus-owner-fixture";
+const THIRD_OWNER_ID = "third-jobnimbus-owner-fixture";
 const CLIENT_ID = "jobrolo-http-fixture";
 const SHARED_SECRET = "jobrolo-http-fixture-shared-secret-123456789";
 
@@ -46,11 +48,21 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     providerCalls.push(url.pathname);
     if (req.method === "GET" && url.pathname === "/account/users") {
       return json(res, 200, {
-        total: 1,
+        total: 3,
         users: [{
           jnid: OWNER_ID,
           email: EMAIL,
           display_name: "Chance Pearson",
+          is_active: true
+        }, {
+          jnid: SECOND_OWNER_ID,
+          email: "second@wavepa.com",
+          display_name: "Second Adjuster",
+          is_active: true
+        }, {
+          jnid: THIRD_OWNER_ID,
+          email: "third@wavepa.com",
+          display_name: "Third Adjuster",
           is_active: true
         }]
       });
@@ -121,6 +133,16 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       HCN_JOBROLO_CLIENT_ID: CLIENT_ID,
       HCN_JOBROLO_SHARED_SECRET: SHARED_SECRET,
       HCN_JOBROLO_PRINCIPAL_EMAIL: EMAIL,
+      HCN_MANAGEMENT_ADJUSTERS_JSON: JSON.stringify([{
+        ownerId: OWNER_ID,
+        displayName: "Chance Pearson"
+      }, {
+        ownerId: SECOND_OWNER_ID,
+        displayName: "Second Adjuster"
+      }, {
+        ownerId: THIRD_OWNER_ID,
+        displayName: "Third Adjuster"
+      }]),
       JOBNIMBUS_BRIDGE_TOKEN: "",
       CODEX_OPERATOR_TOKEN: "",
       CODEX_MAC_OPERATOR_TOKEN: "",
@@ -193,6 +215,29 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   );
   assert.equal(providerCalls.includes("/account/users"), true);
   assert.equal(providerCalls.includes("/contacts"), true);
+
+  const managementSweep = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/management-sweep",
+    {
+      requestId: "request_99999999999999999999999999999999",
+      sessionRef,
+      nonce: "nonce_99999999999999999999999999999999",
+      input: { limitPerAdjuster: 10 }
+    }
+  );
+  assert.equal(managementSweep.response.status, 200, managementSweep.text);
+  assert.equal(
+    managementSweep.body.result.schema,
+    "hcn.console.management-sweep.v1"
+  );
+  assert.equal(managementSweep.body.result.adjusters.length, 3);
+  assert.equal(
+    managementSweep.body.authority.fileScope,
+    "configured_management_adjusters"
+  );
+  assert.equal(managementSweep.body.authority.exactApprovalRequired, false);
+  assert.equal(providerWrites.length, 0);
 
   const concurrentTurns = await Promise.all([
     signedPost(origin, "/integrations/jobrolo/v1/assistant/turn", {
