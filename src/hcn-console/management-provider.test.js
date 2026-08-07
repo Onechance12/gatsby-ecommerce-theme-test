@@ -187,6 +187,24 @@ test("management provider classifies communication, attempts, operations, and no
   assert.equal(result.data.events[2].occurredAt, "2026-07-26T10:00:00.000Z");
 });
 
+test("management provider counts JobNimbus Status Changed records as operational activity", () => {
+  const result = mapManagementJobNimbusEnvelope(envelope({
+    activities: [{
+      jnid: "event_status_changed",
+      related: [{ id: "file_a" }],
+      owners: [{ id: "owner_a" }],
+      record_type_name: "Status Changed",
+      date_created: NOW
+    }]
+  }), { adjusters: ADJUSTERS });
+
+  assert.equal(result.data.events.length, 1);
+  assert.equal(result.data.events[0].kind, "status_changed");
+  assert.equal(result.data.events[0].state, "recorded");
+  assert.equal(result.data.events[0].classification, "operational");
+  assert.equal(result.data.events[0].actorAdjusterId, "owner_a");
+});
+
 test("management provider never promotes drafts, task creation, file views, automation, or unknown records", () => {
   const result = mapManagementJobNimbusEnvelope(envelope({
     activities: [

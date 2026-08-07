@@ -75,6 +75,7 @@ const VERIFIED_OPERATIONAL_KINDS = new Set([
   "payment_follow_up",
   "settlement_received",
   "status_change",
+  "status_changed",
   "status_update",
   "supplement_submitted",
   "workflow_status_change"
