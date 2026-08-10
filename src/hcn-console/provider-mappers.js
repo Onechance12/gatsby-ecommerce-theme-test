@@ -1341,17 +1341,24 @@ function normalizeNullableProviderTimestamp(value) {
 }
 
 function normalizeProviderDate(value) {
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime())
-      ? null
-      : value.toISOString().slice(0, 10);
+  if (value === undefined || value === null || value === '') return null;
+  // JobNimbus historically emits numeric zero as a missing-date sentinel. It
+  // is not interpreted as an epoch date. Other numeric values and Date
+  // objects have no authoritative source-zone contract, so converting them
+  // could shift the civil loss date and must fail closed.
+  if (value === 0) return null;
+  if (value instanceof Date || typeof value === 'number') {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be a calendar date without a time or timezone.',
+    );
   }
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    if (value <= 0) return null;
-    const timestamp = normalizeProviderTimestamp(value);
-    return timestamp ? timestamp.slice(0, 10) : null;
+  if (typeof value !== 'string') {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be a calendar date without a time or timezone.',
+    );
   }
-  if (typeof value !== 'string') return null;
   const text = value.trim();
   if (!text) return null;
   if (/^0+(?:\.0+)?$/.test(text)) return null;
@@ -1367,15 +1374,23 @@ function normalizeProviderDate(value) {
     month = month.padStart(2, '0');
     day = day.padStart(2, '0');
   } else {
-    const timestamp = normalizeProviderTimestamp(text);
-    return timestamp ? timestamp.slice(0, 10) : null;
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be YYYY-MM-DD or M/D/YYYY without a time or timezone.',
+    );
   }
   const candidate = `${year}-${month}-${day}`;
   const parsed = new Date(`${candidate}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.getTime())
-    && parsed.toISOString().slice(0, 10) === candidate
-    ? candidate
-    : null;
+  if (
+    Number.isNaN(parsed.getTime())
+    || parsed.toISOString().slice(0, 10) !== candidate
+  ) {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be a real calendar date.',
+    );
+  }
+  return candidate;
 }
 
 function normalizeEmail(value) {
