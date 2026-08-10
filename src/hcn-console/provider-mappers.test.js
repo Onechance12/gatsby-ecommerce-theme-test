@@ -597,6 +597,66 @@ test('JobNimbus zero date sentinels remain missing instead of becoming 1970 date
   }
 });
 
+test('JobNimbus date of loss preserves supported civil calendar forms', () => {
+  for (const [dateOfLoss, expected] of [
+    ['2026-05-17', '2026-05-17'],
+    ['5/7/2026', '2026-05-07'],
+    ['05/07/2026', '2026-05-07'],
+    ['2/29/2024', '2024-02-29'],
+  ]) {
+    const result = mapJobNimbusFileEnvelope(
+      {
+        ...FRESHNESS,
+        activitiesComplete: true,
+        tasksComplete: true,
+        documentsComplete: true,
+        contact: contact({ 'Date of Loss': dateOfLoss }),
+        activities: [],
+        tasks: [],
+        documents: [],
+      },
+      {
+        chanceOwnerId: CHANCE_ID,
+        expectedProviderFileId: FILE_ID,
+      },
+    );
+    assert.equal(result.data.file.dateOfLoss, expected);
+  }
+});
+
+test('JobNimbus date of loss rejects timestamps, Date objects, epochs, and impossible dates', () => {
+  for (const dateOfLoss of [
+    '2026-05-17T23:00:00-05:00',
+    '2026-05-17T00:00:00.000Z',
+    new Date('2026-05-17T00:00:00.000Z'),
+    1785261000,
+    '1785261000',
+    '2026-02-30',
+    '2/29/2026',
+    '13/1/2026',
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        {
+          ...FRESHNESS,
+          activitiesComplete: true,
+          tasksComplete: true,
+          documentsComplete: true,
+          contact: contact({ 'Date of Loss': dateOfLoss }),
+          activities: [],
+          tasks: [],
+          documents: [],
+        },
+        {
+          chanceOwnerId: CHANCE_ID,
+          expectedProviderFileId: FILE_ID,
+        },
+      ),
+      mappingError('invalid_provider_record'),
+    );
+  }
+});
+
 test('Gmail mapper requires an exact complete scope and emits only bounded fresh-read fields', () => {
   const result = mapScopedGmailEnvelope(
     {
