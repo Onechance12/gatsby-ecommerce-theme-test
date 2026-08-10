@@ -1532,11 +1532,18 @@ function normalizeNullableProviderTimestamp(value) {
 
 function normalizeProviderDate(value) {
   if (value === undefined || value === null || value === '') return null;
-  // JobNimbus historically emits numeric zero as a missing-date sentinel. It
-  // is not interpreted as an epoch date. Other numeric values and Date
-  // objects have no authoritative source-zone contract, so converting them
-  // could shift the civil loss date and must fail closed.
+  // JobNimbus emits both zero and positive epoch-like numbers for this civil
+  // field. No source-zone contract exists, so those numeric values are
+  // unavailable rather than instants that may be shifted into a date.
   if (value === 0) return null;
+  if (
+    typeof value === 'number'
+    && Number.isFinite(value)
+    && value > 0
+  ) return null;
+  // Date objects, negative numbers, and non-finite numbers are malformed
+  // provider values. Date objects must never be UTC-converted into an
+  // apparent civil loss date.
   if (value instanceof Date || typeof value === 'number') {
     fail(
       'invalid_provider_record',

@@ -31,6 +31,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   const state = {
     mode: "normal",
     detailAssigned: true,
+    dateOfLoss: "2026-05-17",
     calls: [],
     writes: 0
   };
@@ -61,7 +62,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
             number: `JN-${index}`,
             display_name: `Assigned ${index}`
           }))
-        : [contact()];
+        : [contact({ "Date of Loss": state.dateOfLoss })];
       return paged(res, url, "contacts", contacts);
     }
     if (
@@ -69,7 +70,8 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
       && url.pathname === `/contacts/${RAW_FILE_ID}`
     ) {
       return json(res, 200, contact({
-        owners: [{ id: state.detailAssigned ? OWNER_ID : "other-owner" }]
+        owners: [{ id: state.detailAssigned ? OWNER_ID : "other-owner" }],
+        "Date of Loss": state.dateOfLoss
       }));
     }
     if (req.method === "GET" && url.pathname === "/activities") {
@@ -210,6 +212,64 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     }
   }
   assert.equal(state.writes, 0);
+
+  state.dateOfLoss = 1785261000;
+  const numericCatalog = await signedPost(
+    origin,
+    JOBROLO_IMPORT_CATALOG_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA,
+      requestId: `request_${"e".repeat(32)}`
+    },
+    `nonce_${"e".repeat(32)}`
+  );
+  assert.equal(numericCatalog.response.status, 200, numericCatalog.text);
+  assert.equal(numericCatalog.body.payload.returnedItems, 1);
+  assert.equal(numericCatalog.text.includes(String(state.dateOfLoss)), false);
+  verifyResponse(numericCatalog, JOBROLO_IMPORT_CATALOG_ROUTE);
+
+  const numericSourceFileRef =
+    numericCatalog.body.payload.items[0].sourceFileRef;
+  const numericSnapshot = await signedPost(
+    origin,
+    JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA,
+      requestId: `request_${"0".repeat(32)}`,
+      sourceFileRef: numericSourceFileRef
+    },
+    `nonce_${"0".repeat(32)}`
+  );
+  assert.equal(numericSnapshot.response.status, 200, numericSnapshot.text);
+  assert.equal(numericSnapshot.body.payload.file.dateOfLoss, null);
+  assert.equal(
+    numericSnapshot.body.payload.file.missingFacts.dateOfLoss,
+    true
+  );
+  assert.equal(numericSnapshot.text.includes(String(state.dateOfLoss)), false);
+  assert.equal(
+    numericSnapshot.text.includes(
+      new Date(state.dateOfLoss * 1000).toISOString().slice(0, 10)
+    ),
+    false
+  );
+  verifyResponse(numericSnapshot, JOBROLO_IMPORT_SNAPSHOT_ROUTE);
+  assertNoPrivateMaterial(numericSnapshot.text);
+
+  state.dateOfLoss = "2026-05-17T23:00:00-05:00";
+  const timestampCatalog = await signedPost(
+    origin,
+    JOBROLO_IMPORT_CATALOG_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA,
+      requestId: `request_${"f".repeat(32)}`
+    },
+    `nonce_${"f".repeat(32)}`
+  );
+  assert.equal(timestampCatalog.response.status, 503, timestampCatalog.text);
+  assert.equal(timestampCatalog.body.error.code, "jobrolo_import_unavailable");
+  assert.doesNotMatch(timestampCatalog.text, /2026-05-17T23:00:00-05:00/);
+  state.dateOfLoss = "2026-05-17";
 
   const callsBeforeUnknown = state.calls.length;
   const unknown = await signedPost(origin, JOBROLO_IMPORT_SNAPSHOT_ROUTE, {

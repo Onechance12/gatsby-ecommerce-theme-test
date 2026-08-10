@@ -61,7 +61,7 @@ function indexEnvelope(overrides = {}) {
   };
 }
 
-function rawFileEnvelope() {
+function rawFileEnvelope(dateOfLoss = "2026-05-17") {
   const primaryScoped = (record) => ({
     ...record,
     primary: { id: RAW_FILE_ID }
@@ -97,7 +97,7 @@ function rawFileEnvelope() {
       "Insurance Company": "Example Carrier",
       "Claim #": "CLAIM-100",
       "Policy #": "POLICY-100",
-      "Date of Loss": "2026-05-17",
+      "Date of Loss": dateOfLoss,
       "Damage Summary": "Roof and interior damage documented",
       "Carrier DA": "Taylor Adjuster",
       "Carrier DA Contact #": "(555) 555-0130",
@@ -214,6 +214,39 @@ test("selected opaque ref resolves only through a complete assigned catalog", as
     RAW_DOCUMENT_ID,
     "providerFileId"
   ]) assert.equal(JSON.stringify(snapshot).includes(forbidden), false);
+});
+
+test("positive numeric loss dates keep the catalog and snapshot usable without inventing a civil date", async () => {
+  const numericDateOfLoss = 1785261000;
+  const base = indexEnvelope().data.files[0];
+  const { readService } = service({
+    index: indexEnvelope({
+      data: {
+        files: [{
+          ...base,
+          missingFacts: {
+            ...base.missingFacts,
+            dateOfLoss: true
+          }
+        }]
+      }
+    }),
+    file: rawFileEnvelope(numericDateOfLoss)
+  });
+
+  const catalog = await readService.readCatalog();
+  assert.equal(catalog.returnedItems, 1);
+  assert.equal(catalog.items[0].sourceFileRef, FILE_REF);
+
+  const snapshot = await readService.readSnapshot({ sourceFileRef: FILE_REF });
+  assert.equal(snapshot.file.dateOfLoss, null);
+  assert.equal(snapshot.file.missingFacts.dateOfLoss, true);
+  assert.equal(canonicalJson(catalog).includes(String(numericDateOfLoss)), false);
+  assert.equal(canonicalJson(snapshot).includes(String(numericDateOfLoss)), false);
+  const shiftedUtcDate = new Date(numericDateOfLoss * 1000)
+    .toISOString()
+    .slice(0, 10);
+  assert.equal(canonicalJson(snapshot).includes(shiftedUtcDate), false);
 });
 
 test("unknown or malformed refs never trigger an exact-file read", async () => {
