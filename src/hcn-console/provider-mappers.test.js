@@ -169,6 +169,20 @@ test('index maps field aliases and keeps only active exact-owner insurance files
   assert.equal(Object.isFrozen(result.data.files), true);
 });
 
+test('assigned index preserves the shared 120-character import display name bound', () => {
+  const displayName = 'A'.repeat(120);
+  const result = mapJobNimbusIndexEnvelope({
+    ...FRESHNESS,
+    contactsComplete: true,
+    contacts: [contact({ display_name: displayName })],
+  }, {
+    assignedOwnerId: CHANCE_ID,
+  });
+  assert.equal(result.data.files[0].displayName, displayName);
+  assert.equal(Array.from(result.data.files[0].displayName).length, 120);
+  assert.equal(result.data.files[0].assignedToCurrentUser, true);
+});
+
 test('index fails closed on incomplete pagination, bad freshness, and malformed eligible records', () => {
   assert.throws(
     () =>
@@ -515,7 +529,7 @@ test('exact JobNimbus file preserves bounded activity/task history but fails clo
   );
 });
 
-test('exact JobNimbus activities accept primary or related exact-file references but reject cross-client references', () => {
+test('exact JobNimbus import activities require typed references and reject every foreign contact', () => {
   const base = {
     ...FRESHNESS,
     activitiesComplete: true,
@@ -530,6 +544,7 @@ test('exact JobNimbus activities accept primary or related exact-file references
     chanceOwnerId: CHANCE_ID,
     expectedProviderFileId: FILE_ID,
     knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+    requireExactContactReferences: true,
   };
 
   const result = mapJobNimbusFileEnvelope(
@@ -538,14 +553,14 @@ test('exact JobNimbus activities accept primary or related exact-file references
       activities: [
         {
           jnid: 'related-file-activity',
-          primary: { id: 'jobnimbus-task-id' },
+          primary: { id: 'jobnimbus-task-id', record_type_name: 'Task' },
           related: [{ id: FILE_ID }],
           date_created: 1785261000,
         },
         {
           jnid: 'primary-file-activity',
           primary: { id: FILE_ID },
-          related: [{ id: 'jobnimbus-task-id' }],
+          related: [{ id: 'jobnimbus-task-id', record_type_name: 'Task' }],
           date_created: 1785261001,
         },
       ],
@@ -573,6 +588,112 @@ test('exact JobNimbus activities accept primary or related exact-file references
     mappingError('scope_mismatch'),
   );
 
+  let overDeepReference = { id: FILE_ID };
+  for (let depth = 0; depth < 8; depth += 1) {
+    overDeepReference = { parent: overDeepReference };
+  }
+  for (const reference of [
+    { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+    { id: 'unassigned-foreign-client' },
+    {
+      id: 'unassigned-foreign-client',
+      record_type_name: 'Task',
+      type: 'Contact',
+    },
+    {
+      id: 'jobnimbus-task-id',
+      contact_id: 'unassigned-foreign-client',
+      record_type_name: 'Task',
+    },
+    {
+      id: 'jobnimbus-task-id',
+      jnid: 'different-jobnimbus-task-id',
+      record_type_name: 'Task',
+    },
+    {
+      id: 'jobnimbus-task-id',
+      record_type_name: 'Task',
+      contact: {
+        id: 'unassigned-foreign-client',
+        record_type_name: 'Contact',
+      },
+    },
+    {
+      wrapper: {
+        id: 'unassigned-foreign-client',
+        record_type_name: 'Contact',
+      },
+    },
+    overDeepReference,
+    Array.from({ length: 129 }, () => ({ id: FILE_ID })),
+  ]) {
+    assert.throws(
+      () =>
+        mapJobNimbusFileEnvelope(
+          {
+            ...base,
+            activities: [
+              {
+                jnid: 'private-cross-client-activity',
+                primary: reference,
+                related: [{ id: FILE_ID }],
+                date_created: 1785261000,
+                label: 'Private foreign client label',
+              },
+            ],
+          },
+          options,
+        ),
+      mappingError('scope_mismatch'),
+    );
+  }
+
+});
+
+test('exact JobNimbus import reference enforcement also covers tasks and documents', () => {
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  };
+  for (const [collectionName, record] of [
+    ['tasks', {
+      jnid: 'private-cross-client-task',
+      related: [
+        { id: FILE_ID },
+        { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+      ],
+      label: 'Private foreign task label',
+    }],
+    ['documents', {
+      jnid: 'private-cross-client-document',
+      related: [
+        { id: FILE_ID },
+        { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+      ],
+      filename: 'Private foreign document.pdf',
+      created_at: 1785261000,
+    }],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        { ...base, [collectionName]: [record] },
+        options,
+      ),
+      mappingError('scope_mismatch'),
+    );
+  }
 });
 
 test('JobNimbus zero date sentinels remain missing instead of becoming 1970 dates', () => {

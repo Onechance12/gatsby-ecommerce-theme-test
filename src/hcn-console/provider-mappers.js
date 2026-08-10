@@ -279,6 +279,8 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     options.knownProviderFileIds,
     expectedProviderFileId,
   );
+  const requireExactContactReferences =
+    options.requireExactContactReferences === true;
   const freshness = normalizeFreshness(input);
   const collectionCompleteness = {
     activities: readCollectionPaginationState(input, 'activities'),
@@ -313,6 +315,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
       mapActivity(record, assignedOwnerId, legacyChanceField),
     allowedExactReferenceFields: ['primary', 'related'],
     dedupeIdenticalProviderIds: true,
+    requireExactContactReferences,
   });
   const taskResult = mapScopedCollection({
     value: input.tasks,
@@ -321,6 +324,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     knownProviderFileIds,
     mapper: (record) =>
       mapTask(record, assignedOwnerId, legacyChanceField),
+    requireExactContactReferences,
   });
   const documentResult = mapScopedCollection({
     value: input.documents,
@@ -329,6 +333,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     knownProviderFileIds,
     mapper: mapDocument,
     filter: (record) => !isPhotoLikeDocument(record),
+    requireExactContactReferences,
   });
   const activities = activityResult.items;
   const tasks = taskResult.items;
@@ -508,7 +513,10 @@ function mapEligibleContact(
   const base = {
     providerFileId,
     jobNumber,
-    displayName: contactDisplayName(contact, detail ? 120 : 80),
+    // The assigned import catalog and exact snapshot share the same v1 text
+    // language; index reads must not truncate otherwise valid 81-120 character
+    // display names before opaque catalog projection.
+    displayName: contactDisplayName(contact, 120),
     statusCode: toCode(field(contact, CONTACT_FIELDS.status)),
     stageCode: toCode(field(contact, CONTACT_FIELDS.stage)),
     fileTypeCode: 'insurance',
@@ -625,6 +633,7 @@ function mapScopedCollection({
   filter = () => true,
   allowedExactReferenceFields = ['related'],
   dedupeIdenticalProviderIds = false,
+  requireExactContactReferences = false,
 }) {
   const rows = requireArray(value, label);
   if (rows.length > HCN_PROVIDER_MAPPER_LIMITS.maximumCollectionItems) {
@@ -639,6 +648,7 @@ function mapScopedCollection({
       expectedProviderFileId,
       knownProviderFileIds,
       allowedExactReferenceFields,
+      requireExactContactReferences,
     )) {
       fail(
         'scope_mismatch',
@@ -702,8 +712,15 @@ function recordReferencesFile(
   expectedProviderFileId,
   knownProviderFileIds,
   allowedExactReferenceFields = ['related'],
+  requireExactContactReferences = false,
 ) {
   if (!isPlainObject(record)) return false;
+  if (
+    requireExactContactReferences
+    && !hasExactTypedContactReferenceScope(record, expectedProviderFileId)
+  ) {
+    return false;
+  }
   if (knownProviderFileIds) {
     const exactReferenceIds = [];
     for (const fieldName of allowedExactReferenceFields) {
@@ -741,6 +758,179 @@ function recordReferencesFile(
     ids.length > 0
     && ids.every((id) => id === expectedProviderFileId)
   );
+}
+
+const EXPLICIT_NON_CONTACT_REFERENCE_TYPES = new Set([
+  'activity',
+  'document',
+  'file',
+  'note',
+  'photo',
+  'stage',
+  'status',
+  'task',
+  'team_member',
+  'user',
+  'workflow',
+]);
+const EXACT_REFERENCE_MAXIMUM_DEPTH = 6;
+const EXACT_REFERENCE_MAXIMUM_NODES = 128;
+const GENERIC_REFERENCE_ID_FIELDS = ['id', 'jnid'];
+const CONTACT_REFERENCE_ID_FIELDS = ['contact_id', 'contactId'];
+const REFERENCE_TYPE_FIELDS = [
+  'record_type_name',
+  'recordTypeName',
+  'record_type',
+  'recordType',
+  'type_name',
+  'typeName',
+  'type',
+];
+const NESTED_REFERENCE_FIELDS = new Map([
+  ['primary', 'generic'],
+  ['related', 'generic'],
+  ['parent', 'generic'],
+  ['customer', 'contact'],
+  ['contact', 'contact'],
+]);
+
+/**
+ * Import-only scope hardening. An unknown id is never assumed harmless merely
+ * because it is absent from the eligible assigned catalog. Every reference in
+ * a contact-bearing provider container must either be the selected contact or
+ * carry one unambiguous, explicitly allowlisted non-contact record type.
+ */
+function hasExactTypedContactReferenceScope(record, expectedProviderFileId) {
+  const state = { nodes: 0, seen: new WeakSet() };
+  for (const [container, role] of NESTED_REFERENCE_FIELDS) {
+    const value = record[container];
+    if (value === undefined || value === null) continue;
+    if (!validateExactReferenceValue(
+      value,
+      role,
+      expectedProviderFileId,
+      state,
+      0,
+    )) return false;
+  }
+  return true;
+}
+
+function validateExactReferenceValue(
+  value,
+  role,
+  expectedProviderFileId,
+  state,
+  depth,
+) {
+  state.nodes += 1;
+  if (
+    state.nodes > EXACT_REFERENCE_MAXIMUM_NODES
+    || depth > EXACT_REFERENCE_MAXIMUM_DEPTH
+  ) return false;
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value) === expectedProviderFileId;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 && value.every((item) =>
+      validateExactReferenceValue(
+        item,
+        role,
+        expectedProviderFileId,
+        state,
+        depth + 1,
+      )
+    );
+  }
+  if (!isPlainObject(value) || state.seen.has(value)) return false;
+  state.seen.add(value);
+
+  const genericIds = distinctReferenceFields(
+    value,
+    GENERIC_REFERENCE_ID_FIELDS,
+    (entry) => referenceId(entry),
+  );
+  const contactIds = distinctReferenceFields(
+    value,
+    CONTACT_REFERENCE_ID_FIELDS,
+    (entry) => referenceId(entry),
+  );
+  const declaredTypes = distinctReferenceFields(
+    value,
+    REFERENCE_TYPE_FIELDS,
+    (entry) => toCode(entry),
+  );
+  if (
+    genericIds === null
+    || contactIds === null
+    || declaredTypes === null
+    || genericIds.length > 1
+    || contactIds.length > 1
+    || declaredTypes.length > 1
+  ) return false;
+  if (
+    genericIds.length === 1
+    && contactIds.length === 1
+    && genericIds[0] !== contactIds[0]
+  ) return false;
+
+  const declaredType = declaredTypes[0] ?? null;
+  let foundReference = false;
+  if (contactIds.length === 1) {
+    foundReference = true;
+    if (contactIds[0] !== expectedProviderFileId) return false;
+  }
+  if (genericIds.length === 1) {
+    foundReference = true;
+    const id = genericIds[0];
+    if (id !== expectedProviderFileId) {
+      if (
+        role === 'contact'
+        || !declaredType
+        || !EXPLICIT_NON_CONTACT_REFERENCE_TYPES.has(declaredType)
+      ) return false;
+    }
+  }
+
+  for (const [key, nestedRole] of NESTED_REFERENCE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const nested = value[key];
+    if (nested === undefined || nested === null) return false;
+    foundReference = true;
+    if (!validateExactReferenceValue(
+      nested,
+      nestedRole,
+      expectedProviderFileId,
+      state,
+      depth + 1,
+    )) return false;
+  }
+
+  // A provider relation wrapper is part of the authorization evidence. Do not
+  // silently ignore an unknown nested object/array shape: it may contain a
+  // second contact reference even when its outer relation names this file.
+  for (const [key, entry] of Object.entries(value)) {
+    if (NESTED_REFERENCE_FIELDS.has(key)) continue;
+    if (entry !== null && typeof entry === 'object') return false;
+  }
+  return foundReference;
+}
+
+function distinctReferenceFields(value, keys, normalize) {
+  const distinct = new Set();
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const raw = value[key];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const normalized = normalize(raw);
+    if (!normalized) return null;
+    distinct.add(normalized);
+  }
+  return [...distinct];
+}
+
+function referenceId(value) {
+  return normalizeProviderId(value);
 }
 
 function collectionCoverage(complete, returnedItems, duplicateItemsRemoved) {
