@@ -696,8 +696,25 @@ test('exact JobNimbus import reference enforcement also covers tasks and documen
   }
 });
 
-test('JobNimbus zero date sentinels remain missing instead of becoming 1970 dates', () => {
-  for (const dateOfLoss of [0, '0', '0000']) {
+test('JobNimbus zero and positive finite numeric dates remain missing without UTC shifts', () => {
+  for (const dateOfLoss of [
+    0,
+    1785261000,
+    1785261000000,
+    1,
+    1.5,
+    Number.MAX_VALUE,
+  ]) {
+    const index = mapJobNimbusIndexEnvelope(
+      {
+        ...FRESHNESS,
+        contactsComplete: true,
+        contacts: [contact({ 'Date of Loss': dateOfLoss })],
+      },
+      { chanceOwnerId: CHANCE_ID },
+    );
+    assert.equal(index.data.files[0].missingFacts.dateOfLoss, true);
+
     const result = mapJobNimbusFileEnvelope(
       {
         ...FRESHNESS,
@@ -715,6 +732,30 @@ test('JobNimbus zero date sentinels remain missing instead of becoming 1970 date
       },
     );
     assert.equal(result.data.file.dateOfLoss, null);
+    assert.equal(result.data.file.missingFacts.dateOfLoss, true);
+  }
+});
+
+test('JobNimbus textual zero date sentinels remain missing', () => {
+  for (const dateOfLoss of ['0', '0000']) {
+    const result = mapJobNimbusFileEnvelope(
+      {
+        ...FRESHNESS,
+        activitiesComplete: true,
+        tasksComplete: true,
+        documentsComplete: true,
+        contact: contact({ 'Date of Loss': dateOfLoss }),
+        activities: [],
+        tasks: [],
+        documents: [],
+      },
+      {
+        chanceOwnerId: CHANCE_ID,
+        expectedProviderFileId: FILE_ID,
+      },
+    );
+    assert.equal(result.data.file.dateOfLoss, null);
+    assert.equal(result.data.file.missingFacts.dateOfLoss, true);
   }
 });
 
@@ -745,13 +786,18 @@ test('JobNimbus date of loss preserves supported civil calendar forms', () => {
   }
 });
 
-test('JobNimbus date of loss rejects timestamps, Date objects, epochs, and impossible dates', () => {
+test('JobNimbus date of loss rejects timestamp strings, Date objects, non-finite numbers, and impossible dates', () => {
   for (const dateOfLoss of [
     '2026-05-17T23:00:00-05:00',
     '2026-05-17T00:00:00.000Z',
     new Date('2026-05-17T00:00:00.000Z'),
-    1785261000,
     '1785261000',
+    '1785261000000',
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    -1,
+    -1785261000,
     '2026-02-30',
     '2/29/2026',
     '13/1/2026',
