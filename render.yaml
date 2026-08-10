@@ -55,6 +55,20 @@ services:
         sync: false
       - key: HCN_JOBROLO_PRINCIPAL_EMAIL
         value: cpearson@wavepa.com
+      # Separate dormant HCN -> Jobrolo read-only JobNimbus import transport.
+      # Enabling is fail-closed until every synced value is present and
+      # distinct from the general Jobrolo/Thresher seam. Durable replay
+      # receipts use the isolated HCN_OPERATIONS_ROOT below.
+      - key: HCN_JOBROLO_IMPORT_TRANSPORT_ENABLED
+        value: "false"
+      - key: HCN_JOBROLO_IMPORT_CLIENT_ID
+        sync: false
+      - key: HCN_JOBROLO_IMPORT_SHARED_SECRET
+        sync: false
+      - key: HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL
+        sync: false
+      - key: HCN_JOBROLO_IMPORT_CONNECTION_REF
+        sync: false
       - key: HCN_OPERATIONS_ROOT
         value: /var/data/hcn-operations
       - key: HCN_THRESHER_ENABLED

@@ -281,6 +281,21 @@ import {
   validateJobroloAssistantTurnInput,
   validateJobroloReceiptDetailInput
 } from "./integrations/jobrolo-contracts.js";
+import {
+  canonicalJson,
+  createJobroloImportAuthenticator,
+  createJobroloImportDurableNonceGuard,
+  createJobroloImportTransportResponse,
+  HCN_JOBROLO_IMPORT_CATALOG_ROUTE,
+  HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+  HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS,
+  isJobroloImportRoute,
+  loadJobroloImportTransportConfiguration,
+  projectJobroloImportError
+} from "./integrations/jobrolo-import-service-auth.js";
+import {
+  createJobroloImportReadService
+} from "./integrations/jobrolo-import-transport.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -419,6 +434,16 @@ const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 12 * 1024 
 const HCN_CONSOLE_API_BODY_BYTES = 4 * 1024;
 const HCN_ACTION_PREPARE_BODY_BYTES = 64 * 1024;
 const HCN_ASSISTANT_BODY_BYTES = 16 * 1024;
+const HCN_JOBROLO_IMPORT_ROUTE_BOUNDS = Object.freeze({
+  [HCN_JOBROLO_IMPORT_CATALOG_ROUTE]: Object.freeze({
+    deadlineMs: 45_000,
+    maximumProviderRequests: 3
+  }),
+  [HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE]: Object.freeze({
+    deadlineMs: 90_000,
+    maximumProviderRequests: 12
+  })
+});
 const HCN_ASSISTANT_HISTORY_KEY =
   process.env.HCN_ASSISTANT_HISTORY_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
@@ -582,6 +607,55 @@ if (
     "The owner-pilot Jobrolo adapter principal must exactly match CHANCE_GOOGLE_EMAIL."
   );
 }
+const HCN_JOBROLO_IMPORT_CONFIGURATION =
+  loadJobroloImportTransportConfiguration(process.env, {
+    disallowedClientIds: [HCN_JOBROLO_CONFIGURATION.clientId],
+    disallowedSecrets: [
+      ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
+      ["JOBNIMBUS_API_KEY", API_KEY],
+      ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+      ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+      ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+      ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+      ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
+      ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
+      ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
+      ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
+      ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
+      ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
+      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
+      ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
+      ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
+      ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
+      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY],
+      ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+      ["QUO_API_KEY", QUO_API_KEY],
+      ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
+      ["RETELL_API_KEY", RETELL_API_KEY],
+      ["RETELL_INBOUND_WEBHOOK_TOKEN", process.env.RETELL_INBOUND_WEBHOOK_TOKEN || ""],
+      ["VOICE_STREAM_TOKEN", process.env.VOICE_STREAM_TOKEN || ""],
+      ["OPENAI_API_KEY", OPENAI_API_KEY]
+    ].map(([name, value]) => ({ name, value }))
+  });
+if (HCN_JOBROLO_IMPORT_CONFIGURATION.ready && !HCN_OPERATIONS_ROOT) {
+  throw new Error(
+    "The Jobrolo import transport requires durable isolated replay storage."
+  );
+}
+const HCN_JOBROLO_IMPORT_AUTHENTICATOR = createJobroloImportAuthenticator({
+  configuration: HCN_JOBROLO_IMPORT_CONFIGURATION,
+  ...(HCN_JOBROLO_IMPORT_CONFIGURATION.ready
+    ? {
+        nonceGuard: createJobroloImportDurableNonceGuard({
+          directory: path.join(
+            HCN_OPERATIONS_ROOT,
+            "jobrolo-import",
+            "request-nonces"
+          )
+        })
+      }
+    : {})
+});
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
@@ -1154,6 +1228,18 @@ const server = createServer(async (req, res) => {
             : {})
         });
         return res.end(consoleAsset.body);
+      }
+    }
+    if (isJobroloImportRoute(url.pathname)) {
+      try {
+        return await handleJobroloImportHttpRequest(req, res, url);
+      } catch (error) {
+        const projected = projectJobroloImportError(error);
+        return sendJobroloImportJson(
+          res,
+          projected.status,
+          projected.body
+        );
       }
     }
     if (isJobroloHcnRoute(url.pathname)) {
@@ -18643,6 +18729,545 @@ function assertJobroloHcnContentType(req) {
     error.statusCode = 415;
     throw error;
   }
+}
+
+async function handleJobroloImportHttpRequest(req, res, url) {
+  const startedAt = Date.now();
+  const routeBounds = HCN_JOBROLO_IMPORT_ROUTE_BOUNDS[url.pathname];
+  if (!routeBounds) {
+    const error = new Error("Jobrolo import route is unavailable.");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (req.method !== "POST") {
+    const error = new Error("Jobrolo import authentication failed.");
+    error.statusCode = 401;
+    throw error;
+  }
+  assertJobroloImportContentType(req);
+  const { body, rawBody } = await readJobroloImportJson(req);
+  const verified = await HCN_JOBROLO_IMPORT_AUTHENTICATOR.authenticate({
+    method: req.method,
+    pathname: url.pathname,
+    search: url.search,
+    headers: req.headers,
+    body,
+    rawBody
+  });
+  const providerReadBudget = {
+    maximum: routeBounds.maximumProviderRequests,
+    used: 0,
+    deadlineAt: startedAt + routeBounds.deadlineMs
+  };
+  const principal = await authenticateJobroloImportPrincipal(
+    verified,
+    providerReadBudget
+  );
+  const readService = createJobroloImportReadService({
+    connectionRef: HCN_JOBROLO_IMPORT_CONFIGURATION.connectionRef,
+    referenceFactory: HCN_REFERENCE_CONFIGURATION.requireFactory(),
+    loadAssignedIndex: ({ requestedAt }) =>
+      loadJobroloImportAssignedIndex({
+        requestedAt,
+        assignedOwnerId: principal.jobNimbusOwnerId,
+        requestBudget: providerReadBudget
+      }),
+    loadExactFile: (input) =>
+      loadJobroloImportExactFile({
+        ...input,
+        assignedOwnerId: principal.jobNimbusOwnerId,
+        requestBudget: providerReadBudget
+      })
+  });
+  const kind = url.pathname === HCN_JOBROLO_IMPORT_CATALOG_ROUTE
+    ? "catalog"
+    : "snapshot";
+  const payload = kind === "catalog"
+    ? await readService.readCatalog()
+    : await readService.readSnapshot({
+        sourceFileRef: verified.sourceFileRef
+      });
+  assertJobroloImportRouteDeadline(providerReadBudget);
+  const signed = createJobroloImportTransportResponse({
+    configuration: HCN_JOBROLO_IMPORT_CONFIGURATION,
+    verifiedRequest: verified,
+    pathname: url.pathname,
+    kind,
+    payload
+  });
+  return sendJobroloImportJson(
+    res,
+    200,
+    signed.body,
+    signed.headers,
+    signed.bodyText
+  );
+}
+
+function assertJobroloImportContentType(req) {
+  if (String(req.headers.cookie || "").trim()) {
+    const error = new Error("Jobrolo import request is invalid.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const contentType = String(req.headers["content-type"] || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  const contentEncoding = String(
+    req.headers["content-encoding"] || "identity"
+  ).trim().toLowerCase();
+  if (contentType !== "application/json" || contentEncoding !== "identity") {
+    const error = new Error("Jobrolo import request is invalid.");
+    error.statusCode = 415;
+    throw error;
+  }
+  const contentLength = String(req.headers["content-length"] || "").trim();
+  if (
+    contentLength
+    && (
+      !/^\d+$/.test(contentLength)
+      || Number(contentLength)
+        > HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumRequestUtf8Bytes
+    )
+  ) {
+    const error = new Error("Jobrolo import request is invalid.");
+    error.statusCode = 413;
+    throw error;
+  }
+}
+
+async function readJobroloImportJson(req) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += bytes.byteLength;
+    if (
+      total > HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumRequestUtf8Bytes
+    ) {
+      const error = new Error("Jobrolo import request is invalid.");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(bytes);
+  }
+  const rawBody = Buffer.concat(chunks, total);
+  if (rawBody.byteLength === 0) {
+    const error = new Error("Jobrolo import request is invalid.");
+    error.statusCode = 400;
+    throw error;
+  }
+  let text;
+  let body;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
+    body = JSON.parse(text);
+  } catch {
+    const error = new Error("Jobrolo import request is invalid.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { body, rawBody };
+}
+
+function sendJobroloImportJson(
+  res,
+  status,
+  body,
+  headers = {},
+  serialized = canonicalJson(body)
+) {
+  const bytes = Buffer.from(serialized, "utf8");
+  if (
+    bytes.byteLength
+    > HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumResponseCanonicalUtf8Bytes
+  ) {
+    throw new Error("Jobrolo import response is unavailable.");
+  }
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(bytes.byteLength),
+    "cache-control": "no-store, max-age=0",
+    "x-content-type-options": "nosniff",
+    vary: "Authorization",
+    ...headers
+  });
+  res.end(bytes);
+}
+
+async function authenticateJobroloImportPrincipal(verified, requestBudget) {
+  const email = HCN_JOBROLO_IMPORT_CONFIGURATION.principalEmail;
+  if (
+    !verified
+    || verified.clientId !== HCN_JOBROLO_IMPORT_CONFIGURATION.clientId
+    || verified.principalEmail !== email
+    || verified.connectionRef
+      !== HCN_JOBROLO_IMPORT_CONFIGURATION.connectionRef
+  ) {
+    jobroloImportAuthorizationFailure();
+  }
+  let approvedUser = WAVE_AUTH_USERS.get(email);
+  if (
+    approvedUser?.invitationManaged === true
+    && !await hcnInvitationAuthorizationMatchesUser(approvedUser)
+  ) {
+    WAVE_AUTH_USERS.delete(email);
+    approvedUser = null;
+  }
+  let principal = null;
+  try {
+    principal = approvedUser && approvedUser.enabled !== false
+      ? hcnPrincipalForWaveUser(approvedUser)
+      : null;
+  } catch {
+    principal = null;
+  }
+  let activeJobNimbusUser = null;
+  if (principal) {
+    try {
+      activeJobNimbusUser = resolveUniqueActiveJobNimbusUser(
+        validateCompleteJobNimbusUserSnapshot(
+          await jobroloImportJobNimbus("/account/users", {
+            requestBudget
+          })
+        ),
+        email
+      );
+    } catch {
+      jobroloImportAuthorizationFailure();
+    }
+  }
+  if (
+    !principal
+    || principal.jobNimbusScope !== "assigned"
+    || !activeJobNimbusUser
+    || String(activeJobNimbusUser.id || "").trim()
+      !== String(principal.jobNimbusOwnerId || "").trim()
+  ) {
+    jobroloImportAuthorizationFailure();
+  }
+  return Object.freeze({
+    // Deliberately not a REQUEST_CONTEXT identity. Import reads never inherit
+    // employee-session, Thresher, approval-plan, or provider-effect authority.
+    authenticationMethod: "jobrolo_jobnimbus_import_hmac",
+    identityType: "hcn_jobrolo_jobnimbus_import_service",
+    jobNimbusOwnerId: String(principal.jobNimbusOwnerId)
+  });
+}
+
+function jobroloImportAuthorizationFailure() {
+  const error = new Error("Jobrolo import authentication failed.");
+  error.statusCode = 403;
+  throw error;
+}
+
+async function loadJobroloImportAssignedIndex({
+  requestedAt,
+  assignedOwnerId,
+  requestBudget
+} = {}) {
+  const ownerId = hcnProviderFileId(assignedOwnerId);
+  const page = await listJobroloImportResourceComplete("/contacts", {
+    maxRecords: 500,
+    exactFilter: {
+      must: [{ term: { "owners.id": ownerId } }]
+    },
+    requestBudget
+  });
+  return mapJobNimbusIndexEnvelope({
+    contacts: page.rows,
+    contactsComplete: page.complete,
+    ...hcnFreshnessWindow(requestedAt)
+  }, {
+    assignedOwnerId: ownerId
+  });
+}
+
+async function loadJobroloImportExactFile({
+  providerFileId,
+  knownProviderFileIds,
+  requestedAt,
+  assignedOwnerId,
+  requestBudget
+} = {}) {
+  const id = hcnProviderFileId(providerFileId);
+  const [contact, activities, tasks, documents] = await Promise.all([
+    jobroloImportJobNimbus(
+      `/contacts/${encodeURIComponent(id)}`,
+      { requestBudget }
+    ),
+    listJobroloImportExactActivities(id, { requestBudget }),
+    listJobroloImportResourceComplete("/tasks", {
+      maxRecords: 500,
+      relatedContactId: id,
+      contactReferenceField: "related.id",
+      requestBudget
+    }),
+    listJobroloImportResourceComplete("/files", {
+      maxRecords: 500,
+      relatedContactId: id,
+      contactReferenceField: "related.id",
+      requestBudget
+    })
+  ]);
+  if (
+    activities.complete !== true
+    || tasks.complete !== true
+    || documents.complete !== true
+  ) {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  return mapJobNimbusFileEnvelope({
+    contact,
+    activities: activities.rows,
+    tasks: tasks.rows,
+    documents: documents.rows,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    ...hcnFreshnessWindow(requestedAt)
+  }, {
+    assignedOwnerId,
+    expectedProviderFileId: id,
+    knownProviderFileIds,
+    // This import-only boundary may disclose mapped activity/task/document
+    // labels. Require every provider contact-typed reference to identify the
+    // selected assigned file; an unknown id is never presumed non-contact.
+    requireExactContactReferences: true
+  });
+}
+
+async function listJobroloImportExactActivities(
+  providerFileId,
+  { requestBudget } = {}
+) {
+  const id = hcnProviderFileId(providerFileId);
+  const [primary, related] = await Promise.all([
+    listJobroloImportResourceComplete("/activities", {
+      maxRecords: 500,
+      relatedContactId: id,
+      contactReferenceField: "primary.id",
+      requestBudget
+    }),
+    listJobroloImportResourceComplete("/activities", {
+      maxRecords: 500,
+      relatedContactId: id,
+      contactReferenceField: "related.id",
+      requestBudget
+    })
+  ]);
+  const unique = new Map();
+  for (const [referenceField, rows] of [
+    ["primary.id", primary.rows],
+    ["related.id", related.rows]
+  ]) {
+    for (const activity of rows) {
+      if (!referencesContactField(activity, referenceField, id)) {
+        throw new Error("Jobrolo import source is unavailable.");
+      }
+      const activityId = hcnProviderFileId(
+        String(activity?.jnid || activity?.id || "")
+      );
+      const fingerprint = hcnProviderRecordFingerprint(activity);
+      const existing = unique.get(activityId);
+      if (existing && existing.fingerprint !== fingerprint) {
+        throw new Error("Jobrolo import source is unavailable.");
+      }
+      if (!existing) unique.set(activityId, { activity, fingerprint });
+    }
+  }
+  if (
+    primary.complete !== true
+    || related.complete !== true
+    || unique.size > 500
+  ) {
+    return { rows: [], complete: false };
+  }
+  return {
+    rows: [...unique.entries()]
+      .sort(([leftId, left], [rightId, right]) => {
+        const leftAt = hcnActivityTimestampMilliseconds(left.activity);
+        const rightAt = hcnActivityTimestampMilliseconds(right.activity);
+        if (leftAt !== rightAt) return rightAt - leftAt;
+        return leftId.localeCompare(rightId);
+      })
+      .map(([, entry]) => entry.activity),
+    complete: true
+  };
+}
+
+async function listJobroloImportResourceComplete(
+  endpoint,
+  {
+    maxRecords,
+    relatedContactId = "",
+    contactReferenceField = "related.id",
+    exactFilter = null,
+    requestBudget
+  } = {}
+) {
+  if (!["/contacts", "/activities", "/tasks", "/files"].includes(endpoint)) {
+    throw new Error("Jobrolo import source is unavailable.");
+  }
+  const maximum = Number(maxRecords);
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 500) {
+    throw new Error("Jobrolo import source is unavailable.");
+  }
+  const relatedId = relatedContactId
+    ? hcnProviderFileId(relatedContactId)
+    : "";
+  if (
+    relatedId
+    && !["related.id", "primary.id"].includes(contactReferenceField)
+  ) {
+    throw new Error("Jobrolo import source is unavailable.");
+  }
+  if (relatedId && exactFilter) {
+    throw new Error("Jobrolo import source is unavailable.");
+  }
+  const filter = relatedId
+    ? canonicalJson({
+        must: [{ term: { [contactReferenceField]: relatedId } }]
+      })
+    : exactFilter
+      ? canonicalJson(exactFilter)
+      : "";
+  const rows = [];
+  let offset = 0;
+  while (offset < maximum) {
+    const size = Math.min(500, maximum - offset);
+    const payload = await jobroloImportJobNimbus(
+      hcnPagedEndpoint(endpoint, { size, offset, filter }),
+      { requestBudget }
+    );
+    const batch = unwrapHcnList(payload, endpoint.slice(1));
+    assertJobroloImportProviderBatch(
+      batch,
+      size,
+      relatedId,
+      contactReferenceField
+    );
+    rows.push(...batch);
+    offset += batch.length;
+    if (batch.length < size) break;
+  }
+  // A short page is not treated as the sole completeness signal. Always
+  // issue the frozen zero-row probe at the exact next offset so catalog/ref
+  // resolution and every imported collection have an explicit end proof.
+  const probe = unwrapHcnList(
+    await jobroloImportJobNimbus(
+      hcnPagedEndpoint(endpoint, {
+        size: 1,
+        offset,
+        filter
+      }),
+      { requestBudget }
+    ),
+    endpoint.slice(1)
+  );
+  assertJobroloImportProviderBatch(
+    probe,
+    1,
+    relatedId,
+    contactReferenceField
+  );
+  return { rows, complete: probe.length === 0 };
+}
+
+function assertJobroloImportProviderBatch(
+  batch,
+  maximum,
+  relatedId,
+  contactReferenceField
+) {
+  if (
+    !Array.isArray(batch)
+    || batch.length > maximum
+    || batch.some(
+      (item) => !item || typeof item !== "object" || Array.isArray(item)
+    )
+    || (
+      relatedId
+      && batch.some(
+        (item) => !referencesContactField(
+          item,
+          contactReferenceField,
+          relatedId
+        )
+      )
+    )
+  ) {
+    throw new Error("Jobrolo import source is unavailable.");
+  }
+}
+
+async function jobroloImportJobNimbus(endpoint, { requestBudget } = {}) {
+  if (
+    !API_KEY
+    || typeof endpoint !== "string"
+    || !endpoint.startsWith("/")
+    || endpoint.startsWith("//")
+    || endpoint.length > 8_192
+    || /[\x00-\x1f\x7f]/.test(endpoint)
+  ) {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  consumeJobroloImportProviderReadBudget(requestBudget);
+  const remaining = assertJobroloImportRouteDeadline(requestBudget);
+  try {
+    return await fetchBoundedJson(
+      fetch,
+      `${API_BASE}${endpoint}`,
+      {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${API_KEY}`,
+          accept: "application/json"
+        }
+      },
+      {
+        timeoutMs: Math.max(1, Math.min(15_000, remaining)),
+        maxBytes: 4 * 1024 * 1024,
+        errorCode: "HCN_JOBROLO_IMPORT_READ_FAILED"
+      }
+    );
+  } catch {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+}
+
+function consumeJobroloImportProviderReadBudget(budget) {
+  if (
+    !budget
+    || typeof budget !== "object"
+    || !Number.isSafeInteger(budget.maximum)
+    || budget.maximum < 1
+    || !Number.isSafeInteger(budget.used)
+    || budget.used < 0
+    || budget.used >= budget.maximum
+  ) {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  budget.used += 1;
+}
+
+function assertJobroloImportRouteDeadline(budget) {
+  const remaining = Number(budget?.deadlineAt) - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  return remaining;
 }
 
 async function authenticateJobroloHcnPrincipal(verified) {
