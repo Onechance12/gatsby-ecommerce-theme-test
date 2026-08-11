@@ -15,12 +15,16 @@ const SECOND_OWNER_ID = "second-jobnimbus-owner-fixture";
 const THIRD_OWNER_ID = "third-jobnimbus-owner-fixture";
 const CLIENT_ID = "jobrolo-http-fixture";
 const SHARED_SECRET = "jobrolo-http-fixture-shared-secret-123456789";
+const NOTE_CLIENT_ID = "jobrolo-note-writeback-http-fixture";
+const NOTE_SHARED_SECRET =
+  "jobrolo-note-writeback-http-fixture-secret-123456789";
 
 test("signed adapter fixes principal scope and requires both approval gates for one synthetic action", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hcn-jobrolo-http-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const providerCalls = [];
   const providerWrites = [];
+  let createdNote = null;
   const assignedContact = {
     jnid: "assigned-file-provider-id",
     number: 2739,
@@ -87,6 +91,13 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     if (req.method === "GET" && url.pathname === "/activities") {
       return json(res, 200, { activities: [] });
     }
+    if (
+      req.method === "GET"
+      && url.pathname === "/activities/synthetic-note-provider-id"
+      && createdNote
+    ) {
+      return json(res, 200, createdNote);
+    }
     if (req.method === "GET" && url.pathname === "/tasks") {
       return json(res, 200, { tasks: [] });
     }
@@ -98,7 +109,16 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       req.setEncoding("utf8");
       req.on("data", (chunk) => { raw += chunk; });
       req.on("end", () => {
-        providerWrites.push(raw ? JSON.parse(raw) : {});
+        const body = raw ? JSON.parse(raw) : {};
+        providerWrites.push(body);
+        createdNote = {
+          jnid: "synthetic-note-provider-id",
+          record_type_name: "Note",
+          note: body.note === "Synthetic unconfirmed readback fixture."
+            ? "Provider returned different note material."
+            : body.note,
+          primary: body.primary
+        };
         json(res, 200, { jnid: "synthetic-note-provider-id" });
       });
       return;
@@ -133,6 +153,10 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       HCN_JOBROLO_CLIENT_ID: CLIENT_ID,
       HCN_JOBROLO_SHARED_SECRET: SHARED_SECRET,
       HCN_JOBROLO_PRINCIPAL_EMAIL: EMAIL,
+      HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
+      HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: NOTE_CLIENT_ID,
+      HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET: NOTE_SHARED_SECRET,
+      HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL: EMAIL,
       HCN_MANAGEMENT_ADJUSTERS_JSON: JSON.stringify([{
         ownerId: OWNER_ID,
         displayName: "Chance Pearson"
@@ -415,7 +439,26 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(providerWrites[0].primary.id, "assigned-file-provider-id");
   assert.equal(
     executed.body.result.receipt.status,
-    "completed_pending_verification"
+    "executed"
+  );
+  assert.equal(executed.body.result.plan.status, "executed");
+  assert.equal(executed.body.result.plan.result.mode, "executed");
+  assert.equal(
+    executed.body.result.plan.result.batch.status,
+    "completed"
+  );
+  const completedReceipt =
+    executed.body.result.plan.result.batch.completed[0].receipt;
+  assert.deepEqual(
+    Object.keys(completedReceipt).sort(),
+    ["createdRecordRef", "verifiedByReadback"]
+  );
+  assert.equal(completedReceipt.verifiedByReadback, true);
+  assert.match(completedReceipt.createdRecordRef, /^ref_[a-f0-9]{32}$/);
+  assert.equal(executed.text.includes("synthetic-note-provider-id"), false);
+  assert.equal(
+    providerCalls.includes("/activities/synthetic-note-provider-id"),
+    true
   );
 
   const replayedApproval = await signedPost(
@@ -430,6 +473,294 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   );
   assert.equal(replayedApproval.response.status, 409);
   assert.equal(providerWrites.length, 1);
+
+  const uncertainPrepared = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/prepare",
+    {
+      requestId: `request_${"a1".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"b2".repeat(16)}`,
+      input: {
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: "Synthetic unconfirmed readback fixture." }
+        }]
+      }
+    }
+  );
+  assert.equal(
+    uncertainPrepared.response.status,
+    200,
+    uncertainPrepared.text
+  );
+  const uncertainPlan = uncertainPrepared.body.result.plan;
+  const uncertainApproval = {
+    schema: "jobrolo.approval-attestation.v1",
+    approvalRequestId: "approval_deadbeefcafefeed",
+    planDigest: uncertainPlan.approvalDigest,
+    approvedAt: new Date().toISOString(),
+    approvedByUserId: "user_0123456789abcdef"
+  };
+  const uncertainExecution = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/execute",
+    {
+      requestId: `request_${"c3".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"d4".repeat(16)}`,
+      input: {
+        planId: uncertainPlan.planId,
+        approval: uncertainApproval
+      }
+    }
+  );
+  assert.equal(
+    uncertainExecution.response.status,
+    200,
+    uncertainExecution.text
+  );
+  assert.equal(
+    uncertainExecution.body.result.receipt.status,
+    "reconciliation_required"
+  );
+  assert.equal(
+    uncertainExecution.body.result.plan.status,
+    "reconciliation_required"
+  );
+  assert.equal(
+    uncertainExecution.body.result.plan.result.mode,
+    "reconciliation_required"
+  );
+  assert.equal(providerWrites.length, 2);
+  assert.equal(
+    uncertainExecution.text.includes("synthetic-note-provider-id"),
+    false
+  );
+
+  const uncertainReplay = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/execute",
+    {
+      requestId: `request_${"e5".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"f6".repeat(16)}`,
+      input: {
+        planId: uncertainPlan.planId,
+        approval: uncertainApproval
+      }
+    }
+  );
+  assert.equal(uncertainReplay.response.status, 409);
+  assert.equal(providerWrites.length, 2);
+
+  const profileSessionRef = `session_${"7".repeat(32)}`;
+  const genericTask = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/prepare",
+    {
+      requestId: `request_${"70".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"71".repeat(16)}`,
+      input: {
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_task",
+          input: { title: "Generic adapter remains unchanged" }
+        }]
+      }
+    }
+  );
+  assert.equal(genericTask.response.status, 200, genericTask.text);
+  assert.equal(
+    genericTask.body.result.plan.operations[0].type,
+    "jobnimbus.create_task"
+  );
+  assert.equal(providerWrites.length, 2);
+
+  const crossProfileExecution = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/execute",
+    {
+      requestId: `request_${"72".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"73".repeat(16)}`,
+      input: {
+        planId: genericTask.body.result.plan.planId,
+        approval: {
+          schema: "jobrolo.approval-attestation.v1",
+          approvalRequestId: "approval_cross_profile_fixture",
+          planDigest: genericTask.body.result.plan.approvalDigest,
+          approvedAt: new Date().toISOString(),
+          approvedByUserId: "user_0123456789abcdef"
+        }
+      },
+      clientId: NOTE_CLIENT_ID,
+      secret: NOTE_SHARED_SECRET
+    }
+  );
+  assert.notEqual(crossProfileExecution.response.status, 200);
+  assert.equal(providerWrites.length, 2);
+
+  for (let index = 0; index < 5; index += 1) {
+    const pathname = [
+      "/integrations/jobrolo/v1/status",
+      "/integrations/jobrolo/v1/work-center",
+      "/integrations/jobrolo/v1/file-review",
+      "/integrations/jobrolo/v1/management-sweep",
+      "/integrations/jobrolo/v1/assistant/turn"
+    ][index];
+    const token = (0x20 + index).toString(16).padStart(2, "0");
+    const rejected = await signedPost(origin, pathname, {
+      requestId: `request_${token.repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${(0x30 + index).toString(16).repeat(16)}`,
+      input: {},
+      clientId: NOTE_CLIENT_ID,
+      secret: NOTE_SHARED_SECRET
+    });
+    assert.equal(rejected.response.status, 401, rejected.text);
+  }
+
+  const rejectedTypes = [
+    "jobnimbus.create_task",
+    "jobnimbus.update_task",
+    "jobnimbus.update_status",
+    "jobnimbus.update_contact",
+    "jobnimbus.create_calendar_event",
+    "jobnimbus.update_calendar_event",
+    "gmail.create_draft",
+    "gmail.send",
+    "quo.send_text"
+  ];
+  for (let index = 0; index < rejectedTypes.length; index += 1) {
+    const requestToken = (0x40 + index).toString(16);
+    const nonceToken = (0x50 + index).toString(16);
+    const rejected = await signedPost(
+      origin,
+      "/integrations/jobrolo/v1/action-plans/prepare",
+      {
+        requestId: `request_${requestToken.repeat(16)}`,
+        sessionRef: profileSessionRef,
+        nonce: `nonce_${nonceToken.repeat(16)}`,
+        input: {
+          fileRef,
+          operations: [{ type: rejectedTypes[index], input: {} }]
+        },
+        clientId: NOTE_CLIENT_ID,
+        secret: NOTE_SHARED_SECRET
+      }
+    );
+    assert.equal(rejected.response.status, 403, rejected.text);
+    assert.equal(providerWrites.length, 2);
+  }
+
+  const rejectedBatch = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/prepare",
+    {
+      requestId: `request_${"60".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"61".repeat(16)}`,
+      input: {
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: "First note must not be batched." }
+        }, {
+          type: "jobnimbus.create_note",
+          input: { note: "Second note must not be batched." }
+        }]
+      },
+      clientId: NOTE_CLIENT_ID,
+      secret: NOTE_SHARED_SECRET
+    }
+  );
+  assert.equal(rejectedBatch.response.status, 403, rejectedBatch.text);
+  assert.equal(providerWrites.length, 2);
+
+  const noteOnlyPrepared = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/prepare",
+    {
+      requestId: `request_${"62".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"63".repeat(16)}`,
+      input: {
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: "Exact note-only credential fixture." }
+        }]
+      },
+      clientId: NOTE_CLIENT_ID,
+      secret: NOTE_SHARED_SECRET
+    }
+  );
+  assert.equal(noteOnlyPrepared.response.status, 200, noteOnlyPrepared.text);
+  const noteOnlyPlan = noteOnlyPrepared.body.result.plan;
+  const noteOnlyExecution = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-plans/execute",
+    {
+      requestId: `request_${"64".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"65".repeat(16)}`,
+      input: {
+        planId: noteOnlyPlan.planId,
+        approval: {
+          schema: "jobrolo.approval-attestation.v1",
+          approvalRequestId: "approval_note_profile_fixture",
+          planDigest: noteOnlyPlan.approvalDigest,
+          approvedAt: new Date().toISOString(),
+          approvedByUserId: "user_0123456789abcdef"
+        }
+      },
+      clientId: NOTE_CLIENT_ID,
+      secret: NOTE_SHARED_SECRET
+    }
+  );
+  assert.equal(noteOnlyExecution.response.status, 200, noteOnlyExecution.text);
+  assert.equal(noteOnlyExecution.body.result.receipt.status, "executed");
+  assert.equal(providerWrites.length, 3);
+  assert.equal(
+    providerWrites[2].note,
+    "Exact note-only credential fixture."
+  );
+  assert.equal(
+    noteOnlyExecution.text.includes("synthetic-note-provider-id"),
+    false
+  );
+  const noteOnlyReceipt = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-receipts/detail",
+    {
+      requestId: `request_${"66".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"67".repeat(16)}`,
+      input: { planId: noteOnlyPlan.planId },
+      clientId: NOTE_CLIENT_ID,
+      secret: NOTE_SHARED_SECRET
+    }
+  );
+  assert.equal(noteOnlyReceipt.response.status, 200, noteOnlyReceipt.text);
+  assert.equal(noteOnlyReceipt.body.result.receipt.status, "executed");
+  assert.equal(
+    noteOnlyReceipt.text.includes("synthetic-note-provider-id"),
+    false
+  );
+  const genericCannotReadNoteReceipt = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/action-receipts/detail",
+    {
+      requestId: `request_${"68".repeat(16)}`,
+      sessionRef: profileSessionRef,
+      nonce: `nonce_${"69".repeat(16)}`,
+      input: { planId: noteOnlyPlan.planId }
+    }
+  );
+  assert.equal(genericCannotReadNoteReceipt.response.status, 404);
 
   const callerSelectedIdentity = await signedPost(
     origin,
@@ -449,7 +780,15 @@ test("signed adapter fixes principal scope and requires both approval gates for 
 async function signedPost(
   origin,
   pathname,
-  { requestId, sessionRef, nonce, input, actorExtra = {} }
+  {
+    requestId,
+    sessionRef,
+    nonce,
+    input,
+    actorExtra = {},
+    clientId = CLIENT_ID,
+    secret = SHARED_SECRET
+  }
 ) {
   const body = {
     schema: "jobrolo.hcn.request.v1",
@@ -458,8 +797,8 @@ async function signedPost(
     input
   };
   const headers = signJobroloHcnRequest({
-    clientId: CLIENT_ID,
-    secret: SHARED_SECRET,
+    clientId,
+    secret,
     pathname,
     timestamp: Date.now(),
     nonce,

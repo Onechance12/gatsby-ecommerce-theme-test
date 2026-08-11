@@ -55,6 +55,7 @@ import {
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
+import { verifyCreatedJobNimbusNote } from "./jobnimbus/note-create-readback.js";
 import {
   resolveUniqueActiveJobNimbusUser,
   validateCompleteJobNimbusUserSnapshot
@@ -274,7 +275,9 @@ import {
   deriveJobroloAssistantScopedBindingRef,
   deriveJobroloAssistantSessionBindingRef,
   isJobroloHcnRoute,
-  loadJobroloHcnIntegrationConfiguration
+  HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
+  loadJobroloHcnIntegrationConfiguration,
+  loadJobroloHcnNoteWritebackConfiguration
 } from "./integrations/jobrolo-service-auth.js";
 import {
   jobroloHcnResponse,
@@ -583,6 +586,10 @@ const ALLOW_QUO_SEND = RELEASE_GATES.ALLOW_QUO_SEND;
 const HCN_JOBROLO_CONFIGURATION =
   loadJobroloHcnIntegrationConfiguration(process.env, {
     disallowedSecrets: [
+      [
+        "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
+        process.env.HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET || ""
+      ],
       ["JOBNIMBUS_API_KEY", API_KEY],
       ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
       ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
@@ -619,11 +626,76 @@ if (
     "The owner-pilot Jobrolo adapter principal must exactly match CHANCE_GOOGLE_EMAIL."
   );
 }
-const HCN_JOBROLO_IMPORT_CONFIGURATION =
-  loadJobroloImportTransportConfiguration(process.env, {
-    disallowedClientIds: [HCN_JOBROLO_CONFIGURATION.clientId],
+const HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION =
+  loadJobroloHcnNoteWritebackConfiguration(process.env, {
+    disallowedClientIds: [{
+      name: "HCN_JOBROLO_CLIENT_ID",
+      value: HCN_JOBROLO_CONFIGURATION.clientId
+    }, {
+      name: "HCN_JOBROLO_IMPORT_CLIENT_ID",
+      value: process.env.HCN_JOBROLO_IMPORT_CLIENT_ID || ""
+    }],
     disallowedSecrets: [
       ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
+      [
+        "HCN_JOBROLO_IMPORT_SHARED_SECRET",
+        process.env.HCN_JOBROLO_IMPORT_SHARED_SECRET || ""
+      ],
+      ["JOBNIMBUS_API_KEY", API_KEY],
+      ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+      ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+      ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+      ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+      ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
+      ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
+      ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
+      ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
+      ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
+      ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
+      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
+      ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
+      ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
+      ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
+      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY],
+      ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+      ["QUO_API_KEY", QUO_API_KEY],
+      ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
+      ["RETELL_API_KEY", RETELL_API_KEY],
+      ["RETELL_INBOUND_WEBHOOK_TOKEN", process.env.RETELL_INBOUND_WEBHOOK_TOKEN || ""],
+      ["VOICE_STREAM_TOKEN", process.env.VOICE_STREAM_TOKEN || ""],
+      ["OPENAI_API_KEY", OPENAI_API_KEY]
+    ].map(([name, value]) => ({ name, value }))
+  });
+const HCN_JOBROLO_NOTE_WRITEBACK_AUTHENTICATOR =
+  createJobroloHcnAuthenticator({
+    configuration: HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION,
+    allowedRoutes: HCN_JOBROLO_NOTE_WRITEBACK_ROUTES
+  });
+const HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE =
+  "jobrolo_general_thresher_v1";
+const HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE =
+  "jobnimbus_note_writeback_v1";
+if (
+  HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.ready
+  && HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.principalEmail
+    !== CHANCE_GOOGLE_EMAIL
+) {
+  throw new Error(
+    "The owner-pilot Jobrolo note-writeback principal must exactly match CHANCE_GOOGLE_EMAIL."
+  );
+}
+const HCN_JOBROLO_IMPORT_CONFIGURATION =
+  loadJobroloImportTransportConfiguration(process.env, {
+    disallowedClientIds: [
+      HCN_JOBROLO_CONFIGURATION.clientId,
+      HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId
+    ],
+    disallowedSecrets: [
+      ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
+      [
+        "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
+        HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.secret
+      ],
       ["JOBNIMBUS_API_KEY", API_KEY],
       ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
       ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
@@ -1148,7 +1220,7 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/file-review", hcnReadFile],
   ["POST /integrations/jobrolo/v1/management-sweep", hcnReadManagementSweep],
   ["POST /integrations/jobrolo/v1/assistant/turn", jobroloHcnAssistantTurn],
-  ["POST /integrations/jobrolo/v1/action-plans/prepare", hcnPrepareActionPlan],
+  ["POST /integrations/jobrolo/v1/action-plans/prepare", jobroloHcnPrepareActionPlan],
   ["POST /integrations/jobrolo/v1/action-plans/execute", jobroloHcnExecuteActionPlan],
   ["POST /integrations/jobrolo/v1/action-receipts/detail", jobroloHcnReadActionReceipt]
 ]);
@@ -1263,14 +1335,15 @@ const server = createServer(async (req, res) => {
       }
       assertJobroloHcnContentType(req);
       const body = await readJson(req, HCN_ACTION_PREPARE_BODY_BYTES);
-      const verified = HCN_JOBROLO_AUTHENTICATOR.authenticate({
+      const capability = selectJobroloHcnCapability(req.headers);
+      const verified = capability.authenticator.authenticate({
         method: req.method,
         pathname: url.pathname,
         headers: req.headers,
         body
       });
       const authentication =
-        await authenticateJobroloHcnPrincipal(verified);
+        await authenticateJobroloHcnPrincipal(verified, capability);
       const result = await REQUEST_CONTEXT.run(
         authentication,
         () => integrationHandler(verified.input)
@@ -8006,6 +8079,35 @@ function hcnClaimFilingEnvelope(value) {
   };
 }
 
+function jobroloNoteWritebackProfileActive() {
+  return currentRequestAuthentication()?.jobroloCapabilityProfile
+    === HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE;
+}
+
+function assertExactJobroloNoteWritebackOperations(operations) {
+  if (
+    !Array.isArray(operations)
+    || operations.length !== 1
+    || !operations[0]
+    || typeof operations[0] !== "object"
+    || Array.isArray(operations[0])
+    || operations[0].type !== "jobnimbus.create_note"
+  ) {
+    const error = new Error(
+      "The note-writeback credential permits exactly one JobNimbus note operation."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+async function jobroloHcnPrepareActionPlan(input = {}) {
+  if (jobroloNoteWritebackProfileActive()) {
+    assertExactJobroloNoteWritebackOperations(input?.operations);
+  }
+  return hcnPrepareActionPlan(input);
+}
+
 async function hcnPrepareActionPlan(input = {}) {
   const principal = assertHcnActionSession();
   const prepareInput = validateHcnBrowserActionPrepareInput(input);
@@ -8372,6 +8474,9 @@ async function jobroloHcnExecuteActionPlan(input = {}) {
     sessionBinding: hcnActionSessionBinding(),
     planId: planRequest.planId
   });
+  if (jobroloNoteWritebackProfileActive()) {
+    assertExactJobroloNoteWritebackOperations(pending.operations);
+  }
   const approved = validateJobroloActionExecuteInput(input, {
     plan: pending
   });
@@ -8448,13 +8553,27 @@ function hcnActionReceiptPrincipalRef() {
     "hcn_operator",
     googleSubject
   );
-  return `principal_${createHash("sha256")
-    .update("hcn-console:durable-receipt-principal:v2", "utf8")
+  const noteWritebackProfile = jobroloNoteWritebackProfileActive();
+  const digest = createHash("sha256")
+    .update(
+      noteWritebackProfile
+        ? "hcn-jobrolo:note-writeback-receipt-principal:v1"
+        : "hcn-console:durable-receipt-principal:v2",
+      "utf8"
+    )
     .update("\0", "utf8")
     .update(references.tenantId, "utf8")
     .update("\0", "utf8")
-    .update(stableOperatorRef, "utf8")
-    .digest("hex")}`;
+    .update(stableOperatorRef, "utf8");
+  if (noteWritebackProfile) {
+    digest
+      .update("\0", "utf8")
+      .update(
+        HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId,
+        "utf8"
+      );
+  }
+  return `principal_${digest.digest("hex")}`;
 }
 
 function hcnSessionDerivedHash(domain) {
@@ -9166,6 +9285,23 @@ function hcnPublicCompletedActions(result, operations, scope) {
       }
       if (item.receipt?.manualVerificationRequired === true) {
         receipt.manualVerificationRequired = true;
+      }
+      if (item.type === "jobnimbus.create_note") {
+        const providerActivityId = String(
+          item.receipt?.externalId || ""
+        ).trim();
+        if (
+          item.receipt?.verifiedByReadback !== true
+          || !providerActivityId
+          || String(item.receipt?.fileId || "")
+            !== String(scope.providerJobId)
+        ) {
+          throw new Error("HCN created note receipt scope mismatch");
+        }
+        receipt.createdRecordRef = references.sourceRecordRef(
+          "jobnimbus",
+          providerActivityId
+        );
       }
       if (item.type === "gmail.create_draft") {
         const providerDraftId = String(
@@ -12523,10 +12659,29 @@ async function createNote(input) {
     primary: { id: contact.jnid }
   };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan: { endpoint: "/activities", body } };
-  const result = await jobNimbus("/activities", { method: "POST", body });
+  let result = await jobNimbus("/activities", { method: "POST", body });
+  let verifiedByReadback = false;
+  if (isHcnRestrictedEffectRequest()) {
+    const verified = await verifyCreatedJobNimbusNote({
+      createResult: result,
+      expectedFileId: String(contact.jnid || contact.id || ""),
+      expectedNote: note,
+      readActivity: (providerRecordId) => jobNimbus(
+        `/activities/${encodeURIComponent(providerRecordId)}`
+      )
+    });
+    result = verified.record;
+    verifiedByReadback = true;
+  }
   const file = compactContact(contact);
   const memoryCloseout = await closeoutJobNimbusAction(file, "create_note", result, "Created approved JobNimbus internal note.");
-  return { mode: "executed", file, result, memoryCloseout };
+  return {
+    mode: "executed",
+    file,
+    result,
+    ...(isHcnRestrictedEffectRequest() ? { verifiedByReadback } : {}),
+    memoryCloseout
+  };
 }
 
 async function createTask(input) {
@@ -18658,6 +18813,7 @@ function redactSensitiveText(value) {
     HCN_QUO_LINK_KEY,
     HCN_ASSISTANT_HISTORY_KEY,
     HCN_JOBROLO_CONFIGURATION.secret,
+    HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.secret,
     process.env.HCN_REFERENCE_KEY,
     process.env.HCN_THRESHER_STORE_KEY,
     process.env.HCN_THRESHER_REFERENCE_KEY,
@@ -19424,10 +19580,40 @@ function assertJobroloImportRouteDeadline(budget) {
   return remaining;
 }
 
-async function authenticateJobroloHcnPrincipal(verified) {
-  const email = HCN_JOBROLO_CONFIGURATION.principalEmail;
+function selectJobroloHcnCapability(headers) {
+  const authorization = headers?.authorization;
+  if (
+    HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.ready
+    && typeof authorization === "string"
+    && authorization
+      === `Jobrolo-HMAC ${HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId}`
+  ) {
+    return Object.freeze({
+      authenticator: HCN_JOBROLO_NOTE_WRITEBACK_AUTHENTICATOR,
+      configuration: HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION,
+      capabilityProfile: HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE
+    });
+  }
+  return Object.freeze({
+    authenticator: HCN_JOBROLO_AUTHENTICATOR,
+    configuration: HCN_JOBROLO_CONFIGURATION,
+    capabilityProfile: HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+  });
+}
+
+async function authenticateJobroloHcnPrincipal(verified, capability) {
+  const configuration = capability?.configuration;
+  const capabilityProfile = String(capability?.capabilityProfile || "");
+  const supportedProfile = [
+    HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE,
+    HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE
+  ].includes(capabilityProfile);
+  const email = String(configuration?.principalEmail || "");
   if (
     !verified
+    || !configuration?.ready
+    || !supportedProfile
+    || verified.clientId !== configuration.clientId
     || verified.principalEmail !== email
     || !/^session_[a-f0-9]{32}$/.test(verified.sessionRef)
   ) {
@@ -19468,13 +19654,25 @@ async function authenticateJobroloHcnPrincipal(verified) {
     error.statusCode = 403;
     throw error;
   }
-  const sessionId = createHash("sha256")
-    .update("hcn-jobrolo:service-session:v1", "utf8")
+  const noteWritebackProfile = capabilityProfile
+    === HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE;
+  const sessionDigest = createHash("sha256")
+    .update(
+      noteWritebackProfile
+        ? "hcn-jobrolo:note-writeback-service-session:v1"
+        : "hcn-jobrolo:service-session:v1",
+      "utf8"
+    )
     .update("\0", "utf8")
     .update(email, "utf8")
     .update("\0", "utf8")
-    .update(verified.sessionRef, "utf8")
-    .digest("base64url");
+    .update(verified.sessionRef, "utf8");
+  if (noteWritebackProfile) {
+    sessionDigest
+      .update("\0", "utf8")
+      .update(verified.clientId, "utf8");
+  }
+  const sessionId = sessionDigest.digest("base64url");
   const principalRef = hcnGooglePrincipalRef(principal.googleSubject);
   const tenantId = HCN_REFERENCE_CONFIGURATION.requireFactory().tenantId;
   const jobroloAssistantSessionBindingRef =
@@ -19511,6 +19709,7 @@ async function authenticateJobroloHcnPrincipal(verified) {
     hcnSessionId: sessionId,
     jobroloAssistantSessionBindingRef,
     jobroloRequestId: verified.requestId,
+    jobroloCapabilityProfile: capabilityProfile,
     operatorScope: "assigned"
   };
 }

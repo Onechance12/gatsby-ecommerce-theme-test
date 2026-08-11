@@ -17,6 +17,12 @@ export const JOBROLO_HCN_ROUTES = Object.freeze([
   "/integrations/jobrolo/v1/action-receipts/detail"
 ]);
 
+export const HCN_JOBROLO_NOTE_WRITEBACK_ROUTES = Object.freeze([
+  "/integrations/jobrolo/v1/action-plans/prepare",
+  "/integrations/jobrolo/v1/action-plans/execute",
+  "/integrations/jobrolo/v1/action-receipts/detail"
+]);
+
 const ROUTES = new Set(JOBROLO_HCN_ROUTES);
 const CLIENT_ID = /^[A-Za-z0-9._-]{3,64}$/;
 const REQUEST_ID = /^request_[a-f0-9]{32}$/;
@@ -151,6 +157,86 @@ export function loadJobroloHcnIntegrationConfiguration(
   });
 }
 
+/**
+ * A separate credential for the ordinary-chat JobNimbus note pilot. It shares
+ * the reviewed HCN request envelope and action engine, but its server-owned
+ * capability profile is intentionally narrower than the existing general
+ * Jobrolo/Thresher adapter.
+ */
+export function loadJobroloHcnNoteWritebackConfiguration(
+  env = {},
+  { disallowedClientIds = [], disallowedSecrets = [] } = {}
+) {
+  const enabled = String(
+    env.HCN_JOBROLO_NOTE_WRITEBACK_ENABLED || ""
+  ).trim() === "true";
+  const clientId = String(
+    env.HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID || ""
+  ).trim();
+  const secret = String(
+    env.HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET || ""
+  );
+  const principalEmail = String(
+    env.HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL || ""
+  ).trim().toLowerCase();
+  const anyConfigured = Boolean(clientId || secret || principalEmail);
+
+  if (!enabled && !anyConfigured) {
+    return Object.freeze({
+      enabled: false,
+      ready: false,
+      clientId: "",
+      secret: "",
+      principalEmail: ""
+    });
+  }
+  if (!enabled) {
+    configurationError(
+      "HCN_JOBROLO_NOTE_WRITEBACK_ENABLED must be true when note-writeback credentials are configured."
+    );
+  }
+  if (!CLIENT_ID.test(clientId)) {
+    configurationError(
+      "HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID must contain 3-64 safe identifier characters."
+    );
+  }
+  if (!/^[\x21-\x7e]{32,512}$/.test(secret)) {
+    configurationError(
+      "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET must contain 32-512 printable non-space ASCII characters."
+    );
+  }
+  if (!EMAIL.test(principalEmail) || principalEmail.length > 254) {
+    configurationError(
+      "HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL must be one fixed valid HCN employee email."
+    );
+  }
+  for (const item of disallowedClientIds) {
+    const name = String(item?.name || "another client id");
+    const value = String(item?.value || "");
+    if (value && secureTextEqual(clientId, value)) {
+      configurationError(
+        `HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID must be different from ${name}.`
+      );
+    }
+  }
+  for (const item of disallowedSecrets) {
+    const name = String(item?.name || "another secret");
+    const value = String(item?.value || "");
+    if (value && secureTextEqual(secret, value)) {
+      configurationError(
+        `HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET must be different from ${name}.`
+      );
+    }
+  }
+  return Object.freeze({
+    enabled: true,
+    ready: true,
+    clientId,
+    secret,
+    principalEmail
+  });
+}
+
 export function createJobroloHcnNonceGuard({
   now = Date.now,
   ttlMs = DEFAULT_SKEW_MS,
@@ -206,7 +292,8 @@ export function createJobroloHcnAuthenticator({
   configuration,
   now = Date.now,
   maximumSkewMs = DEFAULT_SKEW_MS,
-  nonceGuard = createJobroloHcnNonceGuard({ now, ttlMs: maximumSkewMs })
+  nonceGuard = createJobroloHcnNonceGuard({ now, ttlMs: maximumSkewMs }),
+  allowedRoutes = JOBROLO_HCN_ROUTES
 } = {}) {
   if (!configuration?.ready || !configuration?.enabled) {
     return Object.freeze({
@@ -223,12 +310,16 @@ export function createJobroloHcnAuthenticator({
   ) {
     throw new TypeError("maximumSkewMs is outside the supported range");
   }
+  const allowedRouteSet = validateAllowedRoutes(allowedRoutes);
 
   return Object.freeze({
     authenticate({ method, pathname, headers, body } = {}) {
       const normalizedMethod = String(method || "").toUpperCase();
       const normalizedPath = String(pathname || "");
-      if (normalizedMethod !== "POST" || !isJobroloHcnRoute(normalizedPath)) {
+      if (
+        normalizedMethod !== "POST"
+        || !allowedRouteSet.has(normalizedPath)
+      ) {
         throw authenticationError("Jobrolo integration route is not allowed.");
       }
       const authorization = exactHeader(headers, "authorization");
@@ -299,6 +390,26 @@ export function createJobroloHcnAuthenticator({
       });
     }
   });
+}
+
+function validateAllowedRoutes(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError("allowedRoutes must be a non-empty route array");
+  }
+  const routes = new Set();
+  for (const route of value) {
+    if (
+      typeof route !== "string"
+      || !ROUTES.has(route)
+      || routes.has(route)
+    ) {
+      throw new TypeError(
+        "allowedRoutes must contain unique allowlisted Jobrolo HCN routes"
+      );
+    }
+    routes.add(route);
+  }
+  return routes;
 }
 
 export function signJobroloHcnRequest({

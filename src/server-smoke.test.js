@@ -5541,6 +5541,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   let receiptFirstObservation = null;
   const jobNimbusMutations = [];
   const fakeProviderRequests = [];
+  let createdNoteReadback = null;
   const fakeProvider = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeProviderPort}`);
     fakeProviderRequests.push(`${req.method} ${url.pathname}${url.search}`);
@@ -5634,6 +5635,16 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       res.end(JSON.stringify({ [collection]: [] }));
       return;
     }
+    if (
+      url.pathname
+        === `/activities/${encodeURIComponent(providerCreatedNoteId)}`
+      && req.method === "GET"
+      && createdNoteReadback
+    ) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(createdNoteReadback));
+      return;
+    }
     if (url.pathname === "/activities" && req.method === "POST") {
       assert.equal(
         req.headers.authorization,
@@ -5650,6 +5661,12 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
         pathname: url.pathname,
         body
       });
+      createdNoteReadback = {
+        jnid: providerCreatedNoteId,
+        record_type_name: "Note",
+        note: body.note,
+        primary: body.primary
+      };
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         jnid: providerCreatedNoteId,
@@ -5858,14 +5875,31 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     "no-store, max-age=0"
   );
   const execution = await executeResponse.json();
-  assert.equal(execution.plan.status, "completed_pending_verification");
-  assert.equal(execution.receipt.status, "completed_pending_verification");
+  assert.equal(execution.plan.status, "executed");
+  assert.equal(execution.receipt.status, "executed");
   assert.equal(execution.receipt.operationCount, 1);
   assert.equal(execution.receipt.succeededCount, 1);
   assert.equal(execution.receipt.unknownCount, 0);
   assert.equal(
     Object.hasOwn(execution.receipt, "sessionPrincipalRef"),
     false
+  );
+  const publicCompletedReceipt =
+    execution.plan.result.batch.completed[0].receipt;
+  assert.deepEqual(
+    Object.keys(publicCompletedReceipt).sort(),
+    ["createdRecordRef", "verifiedByReadback"]
+  );
+  assert.equal(publicCompletedReceipt.verifiedByReadback, true);
+  assert.match(
+    publicCompletedReceipt.createdRecordRef,
+    /^ref_[a-f0-9]{32}$/
+  );
+  assert.equal(
+    fakeProviderRequests.includes(
+      `GET /activities/${encodeURIComponent(providerCreatedNoteId)}`
+    ),
+    true
   );
   assert.equal(jobNimbusMutations.length, 1);
   assert.deepEqual(jobNimbusMutations[0], {
@@ -5897,7 +5931,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   assert.equal(durableReceiptDocument.records.length, 1);
   assert.equal(
     durableReceiptDocument.records[0].status,
-    "completed_pending_verification"
+    "executed"
   );
   const thresherInspector = createActiveThresherRuntime({
     store: createThresherStore({
@@ -5920,7 +5954,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   assert.equal(thresherState.snapshot.receipts.length, 1);
   assert.equal(
     thresherState.snapshot.receipts[0].outcomeCode,
-    "uncertain"
+    "succeeded"
   );
   const encryptedThresherState = await readFile(
     thresherStorePath,
@@ -6080,9 +6114,10 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   );
   assert.equal(
     duplicateVerification.receipt.status,
-    "completed_pending_verification"
+    "blocked_duplicate"
   );
-  assert.equal(duplicateVerification.receipt.succeededCount, 1);
+  assert.equal(duplicateVerification.receipt.succeededCount, 0);
+  assert.equal(duplicateVerification.receipt.blockedCount, 1);
   assert.equal(duplicateVerification.receipt.unknownCount, 0);
   assert.equal(jobNimbusMutations.length, 1);
 

@@ -11230,6 +11230,7 @@
       const allowedReceipt = [
         "verifiedByReadback",
         "manualVerificationRequired",
+        "createdRecordRef",
         "createdDraftRef",
         "sourceDraftRef",
         "sourceDraftRetention",
@@ -11250,6 +11251,16 @@
           throw new Error("Invalid action result");
         }
         refs.push(reference);
+      }
+      if (Object.hasOwn(receipt, "createdRecordRef")) {
+        const reference = boundedString(receipt.createdRecordRef, 80);
+        if (
+          completed.type !== "jobnimbus.create_note"
+          || !EVIDENCE_REF.test(reference)
+          || receipt.verifiedByReadback !== true
+        ) {
+          throw new Error("Invalid action result");
+        }
       }
     });
     return [...new Set(refs)];

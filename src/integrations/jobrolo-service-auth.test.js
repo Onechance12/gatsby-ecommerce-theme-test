@@ -6,7 +6,9 @@ import {
   createJobroloHcnNonceGuard,
   deriveJobroloAssistantScopedBindingRef,
   deriveJobroloAssistantSessionBindingRef,
+  HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
   loadJobroloHcnIntegrationConfiguration,
+  loadJobroloHcnNoteWritebackConfiguration,
   signJobroloHcnRequest,
   stableCanonicalJson
 } from "./jobrolo-service-auth.js";
@@ -14,6 +16,9 @@ import {
 const NOW = 1_800_000_000_000;
 const SECRET = "jobrolo-hcn-test-secret-that-is-unique-123456";
 const PATH = "/integrations/jobrolo/v1/status";
+const NOTE_PATH = "/integrations/jobrolo/v1/action-plans/prepare";
+const NOTE_SECRET =
+  "jobrolo-note-writeback-test-secret-unique-123456";
 
 function fixture(overrides = {}) {
   const configuration = loadJobroloHcnIntegrationConfiguration({
@@ -274,5 +279,117 @@ test("integration secret cannot reuse another platform credential", () => {
       disallowedSecrets: [{ name: "JOBNIMBUS_BRIDGE_TOKEN", value: SECRET }]
     }),
     /different from JOBNIMBUS_BRIDGE_TOKEN/
+  );
+});
+
+test("note-writeback credential is default-off and all-or-nothing", () => {
+  assert.deepEqual(
+    loadJobroloHcnNoteWritebackConfiguration({}),
+    {
+      enabled: false,
+      ready: false,
+      clientId: "",
+      secret: "",
+      principalEmail: ""
+    }
+  );
+  assert.throws(
+    () => loadJobroloHcnNoteWritebackConfiguration({
+      HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "false",
+      HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: "jobrolo-note-writeback"
+    }),
+    /must be true/i
+  );
+  assert.throws(
+    () => loadJobroloHcnNoteWritebackConfiguration({
+      HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
+      HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: "jobrolo-note-writeback",
+      HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET: NOTE_SECRET
+    }),
+    /principal/i
+  );
+});
+
+test("note-writeback credential cannot reuse a client id or secret", () => {
+  const env = {
+    HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
+    HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: "jobrolo-note-writeback",
+    HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET: NOTE_SECRET,
+    HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL: "chance@wavepa.com"
+  };
+  assert.throws(
+    () => loadJobroloHcnNoteWritebackConfiguration(env, {
+      disallowedClientIds: [{
+        name: "HCN_JOBROLO_CLIENT_ID",
+        value: "jobrolo-note-writeback"
+      }]
+    }),
+    /different from HCN_JOBROLO_CLIENT_ID/
+  );
+  assert.throws(
+    () => loadJobroloHcnNoteWritebackConfiguration(env, {
+      disallowedSecrets: [{
+        name: "HCN_JOBROLO_SHARED_SECRET",
+        value: NOTE_SECRET
+      }]
+    }),
+    /different from HCN_JOBROLO_SHARED_SECRET/
+  );
+});
+
+test("note-writeback authenticator accepts only its three action routes", () => {
+  const configuration = loadJobroloHcnNoteWritebackConfiguration({
+    HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
+    HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: "jobrolo-note-writeback",
+    HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET: NOTE_SECRET,
+    HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL: "chance@wavepa.com"
+  });
+  const body = {
+    schema: "jobrolo.hcn.request.v1",
+    requestId: "request_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    actor: {
+      sessionRef: "session_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    input: {}
+  };
+  const authenticator = createJobroloHcnAuthenticator({
+    configuration,
+    now: () => NOW,
+    allowedRoutes: HCN_JOBROLO_NOTE_WRITEBACK_ROUTES
+  });
+  const noteHeaders = signJobroloHcnRequest({
+    clientId: configuration.clientId,
+    secret: configuration.secret,
+    pathname: NOTE_PATH,
+    timestamp: NOW,
+    nonce: "nonce_cccccccccccccccccccccccccccccccc",
+    body
+  });
+  assert.equal(
+    authenticator.authenticate({
+      method: "POST",
+      pathname: NOTE_PATH,
+      headers: noteHeaders,
+      body
+    }).clientId,
+    configuration.clientId
+  );
+
+  const readHeaders = signJobroloHcnRequest({
+    clientId: configuration.clientId,
+    secret: configuration.secret,
+    pathname: PATH,
+    timestamp: NOW,
+    nonce: "nonce_dddddddddddddddddddddddddddddddd",
+    body
+  });
+  assert.throws(
+    () => authenticator.authenticate({
+      method: "POST",
+      pathname: PATH,
+      headers: readHeaders,
+      body
+    }),
+    /route is not allowed/i
   );
 });

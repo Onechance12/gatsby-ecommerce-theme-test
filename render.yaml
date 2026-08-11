@@ -55,6 +55,17 @@ services:
         sync: false
       - key: HCN_JOBROLO_PRINCIPAL_EMAIL
         value: cpearson@wavepa.com
+      # Independent dormant credential for the ordinary-chat, one-note-only
+      # writeback pilot. Keep disabled until Jobrolo has the matching dedicated
+      # client credential; never reuse the general adapter or import secret.
+      - key: HCN_JOBROLO_NOTE_WRITEBACK_ENABLED
+        value: "false"
+      - key: HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID
+        sync: false
+      - key: HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET
+        sync: false
+      - key: HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL
+        sync: false
       # Separate dormant HCN -> Jobrolo read-only JobNimbus import transport.
       # Enabling is fail-closed until every synced value is present and
       # distinct from the general Jobrolo/Thresher seam. Durable replay
