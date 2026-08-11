@@ -138,6 +138,36 @@ Changed, stale, replayed, superseded, or mismatched material fails closed.
 There is no automatic action, automatic retry, or model approval. Jobrolo
 approval is an additional gate; it does not replace HCN's existing controls.
 
+### Ordinary-chat one-note capability profile
+
+The existing general Jobrolo/Thresher credential intentionally retains the
+full reviewed action contract above. Ordinary Jobrolo chat does not receive
+that credential for its initial JobNimbus writeback capability. It uses a
+second, default-off HMAC client on the same action-plan and receipt paths.
+
+The server assigns that client the immutable
+`jobnimbus_note_writeback_v1` capability profile after authentication. The
+profile can call only action-plan prepare, action-plan execute, and receipt
+detail. Preparation requires exactly one `jobnimbus.create_note` operation.
+Execution independently rechecks the stored pending plan contains exactly that
+one operation before evaluating the approval attestation or entering the HCN
+execution engine. A separate service-session hash domain, including the note
+client id, prevents a caller-chosen session reference from colliding with a
+general-adapter pending plan. The existing browser and general-adapter action
+surfaces are unchanged.
+
+The note profile requires four independent variables:
+
+- `HCN_JOBROLO_NOTE_WRITEBACK_ENABLED=true`
+- `HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID`
+- `HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET`
+- `HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL`
+
+Partial configuration fails startup. For the owner pilot, the principal must
+equal `CHANCE_GOOGLE_EMAIL`; the client id and secret must differ from the
+general Jobrolo adapter, the import transport, and every provider, OAuth,
+model, storage, and encryption credential.
+
 ## Configuration
 
 HCN requires four dedicated variables:

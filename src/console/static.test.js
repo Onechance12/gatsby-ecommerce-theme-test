@@ -2589,6 +2589,10 @@ test("approval composer exposes every bounded HCN browser action and no unsuppor
   assert.match(script, /timeZone: "America\/Chicago"/);
   assert.match(script, /function normalizeAttachmentDescriptors\(value\)/);
   assert.match(script, /createdDraftRefs: createdDraftRefs/);
+  assert.match(
+    script,
+    /completed\.type !== "jobnimbus\.create_note"[\s\S]*receipt\.verifiedByReadback !== true/
+  );
   assert.doesNotMatch(
     composer,
     /google_calendar|attachment[^<]*input|upload|delete|payment|financial|live call|voice call/i
