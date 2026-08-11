@@ -23,15 +23,22 @@ export const JOBROLO_IMPORT_CATALOG_ROUTE =
   "/integrations/jobrolo-import/v1/catalog";
 export const JOBROLO_IMPORT_SNAPSHOT_ROUTE =
   "/integrations/jobrolo-import/v1/snapshot";
+export const JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE =
+  "/integrations/jobrolo-import/v1/document-content";
 export const JOBROLO_IMPORT_ROUTES = Object.freeze([
   JOBROLO_IMPORT_CATALOG_ROUTE,
-  JOBROLO_IMPORT_SNAPSHOT_ROUTE
+  JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+  JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE
 ]);
 
 export const JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA =
   "jobrolo.jobnimbus-import.catalog-request.v1";
 export const JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA =
   "jobrolo.jobnimbus-import.snapshot-request.v1";
+export const JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA =
+  "jobrolo.jobnimbus-import.document-content-request.v1";
+export const JOBROLO_IMPORT_DOCUMENT_MANIFEST_SCHEMA =
+  "jobrolo.jobnimbus-import.document-manifest.v1";
 export const JOBROLO_IMPORT_TRANSPORT_RESPONSE_SCHEMA =
   "jobrolo.jobnimbus-import.transport-response.v1";
 export const JOBROLO_IMPORT_TRANSPORT_ERROR_SCHEMA =
@@ -42,6 +49,8 @@ export const JOBROLO_IMPORT_TRANSPORT_LIMITS = Object.freeze({
   maximumCatalogCanonicalUtf8Bytes: 256 * 1024,
   maximumSnapshotCanonicalUtf8Bytes: 512 * 1024,
   maximumResponseCanonicalUtf8Bytes: 544 * 1024,
+  maximumDocumentContentBytes: 25 * 1024 * 1024,
+  maximumDocumentRouteDurationMs: 70_000,
   maximumClockSkewMs: 5 * 60_000,
   maximumNonceEntries: 8_192,
   maximumCanonicalDepth: 24,
@@ -58,6 +67,14 @@ export const JOBROLO_IMPORT_RESPONSE_HEADERS = Object.freeze({
   digest: "x-jobrolo-import-response-digest",
   signature: "x-jobrolo-import-response-signature"
 });
+export const JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS = Object.freeze({
+  requestId: "x-jobrolo-request-id",
+  requestNonce: "x-jobrolo-request-nonce",
+  responseTimestamp: "x-jobrolo-response-timestamp",
+  contentSha256: "x-jobrolo-content-sha256",
+  manifestDigest: "x-jobrolo-manifest-digest",
+  signature: "x-jobrolo-response-signature"
+});
 
 // Server-facing aliases preserve the HCN isolation rule that deployable
 // server.js never introduces a bare legacy JOBROLO_* environment namespace.
@@ -65,6 +82,8 @@ export const HCN_JOBROLO_IMPORT_CATALOG_ROUTE =
   JOBROLO_IMPORT_CATALOG_ROUTE;
 export const HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE =
   JOBROLO_IMPORT_SNAPSHOT_ROUTE;
+export const HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE =
+  JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE;
 export const HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS =
   JOBROLO_IMPORT_TRANSPORT_LIMITS;
 
@@ -72,6 +91,8 @@ const REQUEST_SIGNATURE_DOMAIN =
   "jobrolo.jobnimbus-import.request-signature.v1";
 const RESPONSE_SIGNATURE_DOMAIN =
   "jobrolo.jobnimbus-import.response-signature.v1";
+const DOCUMENT_RESPONSE_SIGNATURE_DOMAIN =
+  "jobrolo.jobnimbus-import.document-content-response-signature.v1";
 const NONCE_STORAGE_DOMAIN =
   "hcn.jobrolo.jobnimbus-import.nonce.v1";
 const ROUTES = new Set(JOBROLO_IMPORT_ROUTES);
@@ -79,6 +100,7 @@ const CLIENT_ID = /^[A-Za-z0-9._-]{3,64}$/;
 const REQUEST_ID = /^request_[a-f0-9]{32}$/;
 const NONCE = /^nonce_[a-f0-9]{32}$/;
 const SOURCE_FILE_REF = /^subject_[a-f0-9]{32}$/;
+const SOURCE_RECORD_REF = /^ref_[a-f0-9]{32}$/;
 const CONNECTION_REF = /^connection_[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -332,7 +354,9 @@ export function createJobroloImportAuthenticator({
         requestNonce: nonce,
         requestTimestamp: timestamp,
         requestBodyHash: bodyHash,
-        sourceFileRef: request.sourceFileRef || null
+        sourceFileRef: request.sourceFileRef || null,
+        sourceRecordRef: request.sourceRecordRef || null,
+        manifestDigest: request.manifestDigest || null
       });
     }
   });
@@ -534,6 +558,102 @@ export function jobroloImportResponseSigningMaterial({
   ].join("\n");
 }
 
+export function createJobroloImportDocumentResponseHeaders({
+  configuration,
+  verifiedRequest,
+  pathname = JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+  responseTimestamp,
+  contentType = "application/octet-stream",
+  contentLength,
+  contentSha256
+} = {}) {
+  if (!configuration?.ready || !configuration?.secret) serviceFailure();
+  if (pathname !== JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE) serviceFailure();
+  if (
+    !verifiedRequest
+    || !REQUEST_ID.test(verifiedRequest.requestId)
+    || !NONCE.test(verifiedRequest.requestNonce)
+    || parseIsoUtc(verifiedRequest.requestTimestamp) === null
+    || !SHA256.test(verifiedRequest.requestBodyHash)
+    || !SOURCE_FILE_REF.test(verifiedRequest.sourceFileRef)
+    || !SOURCE_RECORD_REF.test(verifiedRequest.sourceRecordRef)
+    || !SHA256.test(verifiedRequest.manifestDigest)
+    || parseIsoUtc(responseTimestamp) === null
+    || contentType !== "application/octet-stream"
+    || !Number.isSafeInteger(contentLength)
+    || contentLength < 1
+    || contentLength
+      > JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentContentBytes
+    || !SHA256.test(contentSha256)
+  ) {
+    serviceFailure();
+  }
+  const signature = hmac(
+    configuration.secret,
+    jobroloImportDocumentResponseSigningMaterial({
+      pathname,
+      requestTimestamp: verifiedRequest.requestTimestamp,
+      requestNonce: verifiedRequest.requestNonce,
+      requestBodyHash: verifiedRequest.requestBodyHash,
+      requestId: verifiedRequest.requestId,
+      sourceFileRef: verifiedRequest.sourceFileRef,
+      sourceRecordRef: verifiedRequest.sourceRecordRef,
+      manifestDigest: verifiedRequest.manifestDigest,
+      responseTimestamp,
+      contentType,
+      contentLength,
+      contentSha256
+    })
+  );
+  return Object.freeze({
+    "content-type": contentType,
+    "content-length": String(contentLength),
+    "content-disposition": "attachment; filename=\"jobnimbus-document\"",
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.requestId]:
+      verifiedRequest.requestId,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.requestNonce]:
+      verifiedRequest.requestNonce,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.responseTimestamp]:
+      responseTimestamp,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.contentSha256]: contentSha256,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.manifestDigest]:
+      verifiedRequest.manifestDigest,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.signature]: signature
+  });
+}
+
+export function jobroloImportDocumentResponseSigningMaterial({
+  pathname,
+  requestTimestamp,
+  requestNonce,
+  requestBodyHash,
+  requestId,
+  sourceFileRef,
+  sourceRecordRef,
+  manifestDigest,
+  responseTimestamp,
+  contentType,
+  contentLength,
+  contentSha256
+}) {
+  return [
+    DOCUMENT_RESPONSE_SIGNATURE_DOMAIN,
+    "POST",
+    pathname,
+    requestTimestamp,
+    requestNonce,
+    requestBodyHash,
+    requestId,
+    sourceFileRef,
+    sourceRecordRef,
+    manifestDigest,
+    responseTimestamp,
+    contentType,
+    String(contentLength),
+    contentSha256
+  ].join("\n");
+}
+
 export function canonicalJson(value) {
   return canonicalValue(value, 0, { nodes: 0 });
 }
@@ -564,6 +684,23 @@ function validateImportRequest(pathname, value) {
     if (
       value.schema !== JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA
       || !REQUEST_ID.test(value.requestId)
+    ) requestFailure();
+    return value;
+  }
+  if (pathname === JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE) {
+    exactRecord(value, [
+      "schema",
+      "requestId",
+      "sourceFileRef",
+      "sourceRecordRef",
+      "manifestDigest"
+    ]);
+    if (
+      value.schema !== JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA
+      || !REQUEST_ID.test(value.requestId)
+      || !SOURCE_FILE_REF.test(value.sourceFileRef)
+      || !SOURCE_RECORD_REF.test(value.sourceRecordRef)
+      || !SHA256.test(value.manifestDigest)
     ) requestFailure();
     return value;
   }

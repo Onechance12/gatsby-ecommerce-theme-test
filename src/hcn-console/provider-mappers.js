@@ -371,6 +371,67 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
 }
 
 /**
+ * Map the complete non-photo document manifest for one exact assigned file.
+ * This is the only provider-record shape accepted by the binary transfer
+ * boundary; raw provider ids remain server-local.
+ */
+export function mapJobNimbusDocumentCollection(input, options = {}) {
+  const expectedProviderFileId = requireProviderId(
+    options.expectedProviderFileId,
+    'expectedProviderFileId',
+  );
+  const knownProviderFileIds = normalizeKnownProviderFileIds(
+    options.knownProviderFileIds,
+    expectedProviderFileId,
+  );
+  if (!readCollectionPaginationState(input, 'documents')) {
+    fail(
+      'incomplete_pagination',
+      'documents pagination is not verified complete.',
+    );
+  }
+  const documents = requireArray(input.documents, 'documents');
+  assertUniqueDocumentProviderIds(documents);
+  const result = mapScopedCollection({
+    value: documents,
+    label: 'documents',
+    expectedProviderFileId,
+    knownProviderFileIds,
+    mapper: mapDocument,
+    filter: (record) => !isPhotoLikeDocument(record),
+    requireExactContactReferences:
+      options.requireExactContactReferences === true,
+  });
+  assertUniqueRecordIds(result.items, 'jobnimbus');
+  return immutableCopy({
+    documents: result.items,
+    collectionCoverage: collectionCoverage(
+      true,
+      result.items.length,
+      result.duplicateItemsRemoved,
+    ),
+  });
+}
+
+function assertUniqueDocumentProviderIds(documents) {
+  const seen = new Set();
+  for (const document of documents) {
+    if (!isPlainObject(document)) continue;
+    const providerRecordId = normalizeProviderId(
+      field(document, DOCUMENT_FIELDS.id),
+    );
+    if (!providerRecordId) continue;
+    if (seen.has(providerRecordId)) {
+      fail(
+        'duplicate_provider_record',
+        'jobnimbus evidence contains a duplicate provider record.',
+      );
+    }
+    seen.add(providerRecordId);
+  }
+}
+
+/**
  * Map Gmail messages that were already correlated to one exact HCN file.
  */
 export function mapScopedGmailEnvelope(input, options = {}) {

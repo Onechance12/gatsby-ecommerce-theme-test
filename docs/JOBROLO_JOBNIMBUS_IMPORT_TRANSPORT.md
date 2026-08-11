@@ -1,10 +1,11 @@
 # Jobrolo JobNimbus import transport
 
 This is a dormant, read-only HCN-to-Jobrolo transport for previewing exact
-JobNimbus files assigned to one fixed HCN principal. It is a separate service
-authentication domain from the existing Jobrolo/Thresher adapter and confers no
-assistant, approval-plan, execution, provider-write, document-byte, database,
-or credential access.
+JobNimbus files assigned to one fixed HCN principal and, after a separate
+Jobrolo owner approval, transferring one exact non-photo document. It is a
+separate service authentication domain from the existing Jobrolo/Thresher
+adapter and confers no assistant, approval-plan, execution, provider-write,
+database, or credential access.
 
 ## Exact HTTP contract
 
@@ -14,6 +15,11 @@ or credential access.
 - `POST /integrations/jobrolo-import/v1/snapshot`
   - request schema: `jobrolo.jobnimbus-import.snapshot-request.v1`
   - payload schema: `jobrolo.jobnimbus-import.snapshot.v1`
+- `POST /integrations/jobrolo-import/v1/document-content`
+  - request schema: `jobrolo.jobnimbus-import.document-content-request.v1`
+  - exact body: `schema`, `requestId`, `sourceFileRef`, `sourceRecordRef`,
+    `manifestDigest`
+  - successful body: raw `application/octet-stream` bytes
 - successful response schema:
   `jobrolo.jobnimbus-import.transport-response.v1`
 - error schema: `jobrolo.jobnimbus-import.transport-error.v1`
@@ -68,6 +74,25 @@ POST
 The client must verify both canonical digests and the response HMAC before
 using a payload.
 
+The document-content response uses a distinct binary signature. It returns
+fixed `application/octet-stream`, exact content length, a generic disposition,
+and these headers:
+
+- `x-jobrolo-request-id`
+- `x-jobrolo-request-nonce`
+- `x-jobrolo-response-timestamp`
+- `x-jobrolo-content-sha256`
+- `x-jobrolo-manifest-digest`
+- `x-jobrolo-response-signature`
+
+Its signature binds the original request timestamp, nonce and body hash; the
+request id; both opaque source refs; the canonical manifest digest; response
+timestamp; content type; exact length; and SHA-256 of the raw bytes. The route
+rebuilds the complete assigned catalog and complete exact-file document list,
+requires one opaque-ref match, and recomputes the same manifest before any byte
+request. It constructs the provider URL server-side from the fixed base and
+the transient provider id. Redirects and compressed bodies are rejected.
+
 ## Bounds
 
 - request body: 8 KiB; no query string, cookie, compression, or non-JSON body
@@ -79,6 +104,8 @@ using a payload.
 - provider response: 4 MiB and at most 15 seconds per call
 - catalog: 3 provider calls and a 45-second total route deadline
 - snapshot: 12 provider calls and a 90-second total route deadline
+- one document: 6 provider calls including the byte GET, a 70-second total
+  route deadline, and a 25 MiB advertised plus streaming ceiling
 - canonical catalog payload: 256 KiB
 - canonical snapshot payload: 512 KiB
 - canonical response body: 544 KiB
@@ -86,8 +113,10 @@ using a payload.
   current at completion; HCN normally issues a 2-minute live window
 - canonical complexity: depth 24 and 20,000 nodes
 
-The Jobrolo client timeout is 50 seconds for catalog and 95 seconds for
-snapshot, leaving a five-second transport margin beyond the HCN deadlines.
+The Jobrolo client timeout is 50 seconds for catalog, 95 seconds for snapshot,
+and uses a reviewed 75-second document deadline while retaining its own
+streaming cap and cancellation boundary. The shorter HCN route preserves the
+rest of Jobrolo's 120-second execution lease for malware scanning and storage.
 
 ## Configuration and rollout
 
@@ -120,12 +149,13 @@ and requires the other four settings. This permits emergency disable/rollback
 without crashing unrelated HCN service surfaces; no dormant value grants route
 authority.
 
-The Jobrolo counterpart now mirrors the literal request/response vectors and
-verifies signed transport before parsing payloads. Rollout remains on hold
-until a durable metadata-only access audit is present, distinct live values are
-provisioned outside source, durable nonce storage is proven in the deployed
-topology, and synthetic catalog plus snapshot canaries pass without raw
-provider identifiers. No live value or deployment is part of this slice.
+The Jobrolo counterpart verifies signed transport before parsing payloads or
+bytes. Document activation additionally remains on hold until Jobrolo has a
+default-deny malware scanner and proves that unclean/unavailable scans stay in
+inaccessible quarantine rather than becoming canonical Documents. Rollout
+also requires distinct live values, durable nonce proof, and synthetic
+catalog, snapshot, direct-byte, redirect-rejection, size, hash, signature, and
+malware canaries. No live value or deployment is part of this slice.
 
 ## Frozen vectors
 

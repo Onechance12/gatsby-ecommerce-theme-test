@@ -13,15 +13,20 @@ import test from "node:test";
 import {
   canonicalJson,
   createJobroloImportAuthenticator,
+  createJobroloImportDocumentResponseHeaders,
   createJobroloImportDurableNonceGuard,
   createJobroloImportMemoryNonceGuard,
   createJobroloImportTransportResponse,
   JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA,
   JOBROLO_IMPORT_CATALOG_ROUTE,
+  JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+  JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+  JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS,
   JOBROLO_IMPORT_REQUEST_HEADERS,
   JOBROLO_IMPORT_RESPONSE_HEADERS,
   JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA,
   JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+  JOBROLO_IMPORT_TRANSPORT_LIMITS,
   JOBROLO_IMPORT_TRANSPORT_RESPONSE_SCHEMA,
   loadJobroloImportTransportConfiguration,
   projectJobroloImportError,
@@ -37,6 +42,15 @@ const CONNECTION_REF = "connection_cccccccccccccccccccccccccccccccc";
 const REQUEST_ID = "request_0123456789abcdef0123456789abcdef";
 const NONCE = "nonce_0123456789abcdef0123456789abcdef";
 const SOURCE_FILE_REF = "subject_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SOURCE_RECORD_REF = "ref_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const MANIFEST_DIGEST = "d".repeat(64);
+
+test("document transport reserves execution-lease time for scan and storage", () => {
+  assert.equal(
+    JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentRouteDurationMs,
+    70_000
+  );
+});
 
 function configuration(overrides = {}) {
   return loadJobroloImportTransportConfiguration({
@@ -223,6 +237,108 @@ test("snapshot request accepts only an opaque source ref and no caller scope", a
   assert.equal(verified.sourceFileRef, SOURCE_FILE_REF);
   assert.equal(Object.hasOwn(body, "connectionRef"), false);
   assert.equal(Object.hasOwn(body, "principal"), false);
+});
+
+test("document request binds exact file, record, and manifest proof", async () => {
+  const body = {
+    schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+    requestId: REQUEST_ID,
+    sourceFileRef: SOURCE_FILE_REF,
+    sourceRecordRef: SOURCE_RECORD_REF,
+    manifestDigest: MANIFEST_DIGEST
+  };
+  const signed = signedFixture({
+    pathname: JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+    body
+  });
+  const verified = await authenticator().authenticate({
+    method: "POST",
+    pathname: signed.pathname,
+    headers: signed.headers,
+    body,
+    rawBody: signed.bodyText
+  });
+  assert.equal(verified.sourceFileRef, SOURCE_FILE_REF);
+  assert.equal(verified.sourceRecordRef, SOURCE_RECORD_REF);
+  assert.equal(verified.manifestDigest, MANIFEST_DIGEST);
+  for (const malformed of [
+    { ...body, sourceRecordRef: "provider-id" },
+    { ...body, manifestDigest: "0".repeat(63) },
+    { ...body, connectionRef: CONNECTION_REF }
+  ]) {
+    const invalid = signedFixture({
+      pathname: JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+      body: malformed,
+      nonce: `nonce_${"e".repeat(32)}`
+    });
+    await assert.rejects(authenticator().authenticate({
+      method: "POST",
+      pathname: invalid.pathname,
+      headers: invalid.headers,
+      body: malformed,
+      rawBody: invalid.bodyText
+    }), (error) => error.code === "invalid_jobrolo_import_request");
+  }
+});
+
+test("document response signature binds exact request, proof, bytes, and length", () => {
+  const body = {
+    schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+    requestId: REQUEST_ID,
+    sourceFileRef: SOURCE_FILE_REF,
+    sourceRecordRef: SOURCE_RECORD_REF,
+    manifestDigest: MANIFEST_DIGEST
+  };
+  const signed = signedFixture({
+    pathname: JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+    body
+  });
+  const headers = createJobroloImportDocumentResponseHeaders({
+    configuration: configuration(),
+    verifiedRequest: {
+      requestId: REQUEST_ID,
+      requestNonce: NONCE,
+      requestTimestamp: TIMESTAMP,
+      requestBodyHash:
+        signed.headers[JOBROLO_IMPORT_REQUEST_HEADERS.contentSha256],
+      sourceFileRef: SOURCE_FILE_REF,
+      sourceRecordRef: SOURCE_RECORD_REF,
+      manifestDigest: MANIFEST_DIGEST
+    },
+    responseTimestamp: "2026-08-08T15:02:01.000Z",
+    contentLength: 19,
+    contentSha256: "a".repeat(64)
+  });
+  assert.deepEqual(headers, {
+    "content-type": "application/octet-stream",
+    "content-length": "19",
+    "content-disposition": "attachment; filename=\"jobnimbus-document\"",
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.requestId]: REQUEST_ID,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.requestNonce]: NONCE,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.responseTimestamp]:
+      "2026-08-08T15:02:01.000Z",
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.contentSha256]: "a".repeat(64),
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.manifestDigest]:
+      MANIFEST_DIGEST,
+    [JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.signature]:
+      "fe5ababbba271c020d7837e54b12dbac40b013f8a8f8b577394790110f6342a5"
+  });
+  assert.throws(() => createJobroloImportDocumentResponseHeaders({
+    configuration: configuration(),
+    verifiedRequest: {
+      requestId: REQUEST_ID,
+      requestNonce: NONCE,
+      requestTimestamp: TIMESTAMP,
+      requestBodyHash:
+        signed.headers[JOBROLO_IMPORT_REQUEST_HEADERS.contentSha256],
+      sourceFileRef: SOURCE_FILE_REF,
+      sourceRecordRef: SOURCE_RECORD_REF,
+      manifestDigest: MANIFEST_DIGEST
+    },
+    responseTimestamp: "2026-08-08T15:02:01.000Z",
+    contentLength: 25 * 1024 * 1024 + 1,
+    contentSha256: "a".repeat(64)
+  }), /transport is unavailable/);
 });
 
 test("durable replay guard survives new instances and stores only a nonce hash", async (t) => {

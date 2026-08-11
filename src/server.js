@@ -183,6 +183,7 @@ import {
   projectHcnClaimResult
 } from "./hcn-claim-filing/contracts.js";
 import {
+  mapJobNimbusDocumentCollection,
   mapJobNimbusFileEnvelope,
   mapJobNimbusIndexEnvelope,
   mapScopedGmailEnvelope,
@@ -266,6 +267,7 @@ import {
   loadThresherRuntimeConfiguration,
   projectThresherRuntimeConfiguration
 } from "./hcn-ops/thresher/runtime-config.js";
+import { fetchBoundedBinary } from "./http/bounded-binary.js";
 import { fetchBoundedJson } from "./http/bounded-json.js";
 import {
   createJobroloHcnAuthenticator,
@@ -284,9 +286,11 @@ import {
 import {
   canonicalJson,
   createJobroloImportAuthenticator,
+  createJobroloImportDocumentResponseHeaders,
   createJobroloImportDurableNonceGuard,
   createJobroloImportTransportResponse,
   HCN_JOBROLO_IMPORT_CATALOG_ROUTE,
+  HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
   HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE,
   HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS,
   isJobroloImportRoute,
@@ -296,6 +300,9 @@ import {
 import {
   createJobroloImportReadService
 } from "./integrations/jobrolo-import-transport.js";
+import {
+  projectJobNimbusDocumentManifest
+} from "./integrations/jobrolo-import-snapshot.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.RENDER ? "0.0.0.0" : "127.0.0.1";
@@ -442,6 +449,11 @@ const HCN_JOBROLO_IMPORT_ROUTE_BOUNDS = Object.freeze({
   [HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE]: Object.freeze({
     deadlineMs: 90_000,
     maximumProviderRequests: 12
+  }),
+  [HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE]: Object.freeze({
+    deadlineMs:
+      HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentRouteDurationMs,
+    maximumProviderRequests: 6
   })
 });
 const HCN_ASSISTANT_HISTORY_KEY =
@@ -18763,6 +18775,15 @@ async function handleJobroloImportHttpRequest(req, res, url) {
     verified,
     providerReadBudget
   );
+  if (url.pathname === HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE) {
+    return handleJobroloImportDocumentContent({
+      res,
+      verified,
+      principal,
+      providerReadBudget,
+      requestedAt: new Date(startedAt).toISOString()
+    });
+  }
   const readService = createJobroloImportReadService({
     connectionRef: HCN_JOBROLO_IMPORT_CONFIGURATION.connectionRef,
     referenceFactory: HCN_REFERENCE_CONFIGURATION.requireFactory(),
@@ -18802,6 +18823,139 @@ async function handleJobroloImportHttpRequest(req, res, url) {
     signed.headers,
     signed.bodyText
   );
+}
+
+async function handleJobroloImportDocumentContent({
+  res,
+  verified,
+  principal,
+  providerReadBudget,
+  requestedAt
+}) {
+  const proof = await resolveJobroloImportDocumentContent({
+    verified,
+    assignedOwnerId: principal.jobNimbusOwnerId,
+    requestBudget: providerReadBudget,
+    requestedAt
+  });
+  consumeJobroloImportProviderReadBudget(providerReadBudget);
+  const remaining = assertJobroloImportRouteDeadline(providerReadBudget);
+  if (remaining < 100) {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  let downloaded;
+  try {
+    downloaded = await fetchBoundedBinary(
+      fetch,
+      `${JOBNIMBUS_FILE_BASE_URL}/${encodeURIComponent(
+        proof.providerRecordId
+      )}`,
+      { headers: { authorization: `Bearer ${API_KEY}` } },
+      {
+        timeoutMs: Math.min(60_000, remaining),
+        maxBytes:
+          HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentContentBytes,
+        errorCode: "HCN_JOBROLO_IMPORT_DOCUMENT_DOWNLOAD_FAILED"
+      }
+    );
+  } catch {
+    const error = new Error("Jobrolo import source is unavailable.");
+    error.statusCode = 503;
+    throw error;
+  }
+  assertJobroloImportRouteDeadline(providerReadBudget);
+  const responseTimestamp = new Date().toISOString();
+  const headers = createJobroloImportDocumentResponseHeaders({
+    configuration: HCN_JOBROLO_IMPORT_CONFIGURATION,
+    verifiedRequest: verified,
+    responseTimestamp,
+    contentLength: downloaded.contentLength,
+    contentSha256: downloaded.contentSha256
+  });
+  res.writeHead(200, {
+    ...headers,
+    "cache-control": "private, no-store, max-age=0",
+    "x-content-type-options": "nosniff",
+    vary: "Authorization"
+  });
+  res.end(downloaded.bytes);
+}
+
+async function resolveJobroloImportDocumentContent({
+  verified,
+  assignedOwnerId,
+  requestBudget,
+  requestedAt
+}) {
+  const referenceFactory = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const assignedIndex = await loadJobroloImportAssignedIndex({
+    requestedAt,
+    assignedOwnerId,
+    requestBudget
+  });
+  const files = assignedIndex?.status === "ok"
+    && assignedIndex?.data?.complete === true
+    && Array.isArray(assignedIndex.data.files)
+    ? assignedIndex.data.files
+    : [];
+  const scoped = files.filter((file) => {
+    try {
+      return referenceFactory.subjectId(
+        "jobnimbus",
+        file.providerFileId
+      ) === verified.sourceFileRef;
+    } catch {
+      return false;
+    }
+  });
+  if (scoped.length !== 1) {
+    const error = new Error("Jobrolo import source was not found.");
+    error.statusCode = scoped.length === 0 ? 404 : 409;
+    throw error;
+  }
+  const providerFileId = hcnProviderFileId(scoped[0].providerFileId);
+  const documentsPage = await listJobroloImportResourceComplete("/files", {
+    maxRecords: 500,
+    relatedContactId: providerFileId,
+    contactReferenceField: "related.id",
+    requestBudget
+  });
+  const mapped = mapJobNimbusDocumentCollection({
+    documents: documentsPage.rows,
+    documentsComplete: documentsPage.complete
+  }, {
+    expectedProviderFileId: providerFileId,
+    knownProviderFileIds: files.map((file) => file.providerFileId),
+    requireExactContactReferences: true
+  });
+  const matches = mapped.documents.map((document) => ({
+    providerRecordId: document.providerRecordId,
+    manifest: projectJobNimbusDocumentManifest(document, {
+      sourceFileRef: verified.sourceFileRef,
+      referenceFactory
+    })
+  })).filter(
+    (entry) =>
+      entry.manifest.document.sourceRecordRef === verified.sourceRecordRef
+  );
+  if (matches.length !== 1) {
+    const error = new Error("Jobrolo import document was not found.");
+    error.statusCode = matches.length === 0 ? 404 : 409;
+    throw error;
+  }
+  const manifestDigest = createHash("sha256")
+    .update(canonicalJson(matches[0].manifest), "utf8")
+    .digest("hex");
+  if (manifestDigest !== verified.manifestDigest) {
+    const error = new Error("Jobrolo import source changed.");
+    error.statusCode = 409;
+    throw error;
+  }
+  return Object.freeze({
+    providerRecordId: hcnProviderFileId(matches[0].providerRecordId)
+  });
 }
 
 function assertJobroloImportContentType(req) {

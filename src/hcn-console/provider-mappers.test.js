@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   HCN_PROVIDER_MAPPER_LIMITS,
   HcnProviderMappingError,
+  mapJobNimbusDocumentCollection,
   mapJobNimbusFileEnvelope,
   mapJobNimbusIndexEnvelope,
   mapScopedGmailEnvelope,
@@ -181,6 +182,79 @@ test('assigned index preserves the shared 120-character import display name boun
   assert.equal(result.data.files[0].displayName, displayName);
   assert.equal(Array.from(result.data.files[0].displayName).length, 120);
   assert.equal(result.data.files[0].assignedToCurrentUser, true);
+});
+
+test('document transfer mapper requires a complete exact-file non-photo collection', () => {
+  const result = mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'document-one',
+      filename: 'Carrier estimate.pdf',
+      content_type: 'application/pdf',
+      status_name: 'New',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: FILE_ID },
+    }, {
+      jnid: 'photo-one',
+      filename: 'Roof photo.jpg',
+      content_type: 'image/jpeg',
+      status_name: 'New',
+      created_at: '2026-07-28T17:51:00.000Z',
+      related: { id: FILE_ID },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  });
+  assert.deepEqual(result.documents, [{
+    providerRecordId: 'document-one',
+    kind: 'estimate',
+    reviewState: 'needs_review',
+    createdAt: '2026-07-28T17:50:00.000Z',
+    fileName: 'Carrier estimate.pdf',
+  }]);
+  assert.equal(result.collectionCoverage.completeness, 'complete');
+  assert.throws(() => mapJobNimbusDocumentCollection({
+    documentsComplete: false,
+    documents: [],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+  }), mappingError('incomplete_pagination'));
+  assert.throws(() => mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'foreign-document',
+      filename: 'Foreign.pdf',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: 'unassigned-foreign-contact' },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  }), mappingError('scope_mismatch'));
+  assert.throws(() => mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'ambiguous-document',
+      filename: 'Carrier estimate.pdf',
+      content_type: 'application/pdf',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: FILE_ID },
+    }, {
+      jnid: 'ambiguous-document',
+      filename: 'Roof photo.jpg',
+      content_type: 'image/jpeg',
+      created_at: '2026-07-28T17:51:00.000Z',
+      related: { id: FILE_ID },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  }), mappingError('duplicate_provider_record'));
 });
 
 test('index fails closed on incomplete pagination, bad freshness, and malformed eligible records', () => {
