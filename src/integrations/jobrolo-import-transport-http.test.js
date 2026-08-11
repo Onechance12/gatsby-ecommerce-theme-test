@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash, createHmac } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -8,11 +9,16 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  canonicalJson,
+  JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+  JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+  JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS,
   JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA,
   JOBROLO_IMPORT_CATALOG_ROUTE,
   JOBROLO_IMPORT_REQUEST_HEADERS,
   JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA,
   JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+  jobroloImportDocumentResponseSigningMaterial,
   signJobroloImportRequest,
   verifyJobroloImportTransportResponse
 } from "./jobrolo-import-service-auth.js";
@@ -24,6 +30,7 @@ const CLIENT_ID = "jobrolo-import-http-fixture";
 const SECRET = "jobrolo-import-http-fixture-secret-0123456789";
 const CONNECTION_REF = "connection_cccccccccccccccccccccccccccccccc";
 const RAW_FILE_ID = "private-provider-file-id";
+const DOCUMENT_BYTES = Buffer.from("%PDF-1.7\nfixture document bytes\n", "utf8");
 
 test("dedicated import routes are signed, exact, bounded, and provider-read-only", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hcn-import-http-"));
@@ -105,6 +112,21 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     if (req.method === "GET" && url.pathname === "/files") {
       return paged(res, url, "files", collection("files", state.mode));
     }
+    if (
+      req.method === "GET"
+      && url.pathname === "/download/private-document-0"
+    ) {
+      if (state.mode === "binary_redirect") {
+        res.writeHead(302, { location: "https://private.invalid/secret" });
+        return res.end();
+      }
+      res.writeHead(200, {
+        "content-type": "application/pdf",
+        "content-length": String(DOCUMENT_BYTES.byteLength),
+        "content-encoding": "identity"
+      });
+      return res.end(DOCUMENT_BYTES);
+    }
     return json(res, 404, { error: "not found" });
   });
   await listen(provider);
@@ -121,6 +143,8 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
       JOBNIMBUS_API_KEY: "jobnimbus-import-provider-key",
       JOBNIMBUS_API_BASE_URL:
         `http://127.0.0.1:${provider.address().port}`,
+      JOBNIMBUS_FILE_BASE_URL:
+        `http://127.0.0.1:${provider.address().port}/download`,
       CHANCE_GOOGLE_EMAIL: EMAIL,
       CHANCE_GOOGLE_SUBJECT: SUBJECT,
       CHANCE_JOBNIMBUS_OWNER_ID: OWNER_ID,
@@ -212,6 +236,104 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     }
   }
   assert.equal(state.writes, 0);
+
+  const manifest = {
+    schema: "jobrolo.jobnimbus-import.document-manifest.v1",
+    sourceFileRef,
+    document: snapshot.body.payload.documents.items[0]
+  };
+  const manifestDigest = createHash("sha256")
+    .update(canonicalJson(manifest), "utf8")
+    .digest("hex");
+  const callsBeforeDocument = state.calls.length;
+  const documentResult = await signedBinaryPost(
+    origin,
+    JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+      requestId: `request_${"ab".repeat(16)}`,
+      sourceFileRef,
+      sourceRecordRef: manifest.document.sourceRecordRef,
+      manifestDigest
+    },
+    `nonce_${"ab".repeat(16)}`
+  );
+  assert.equal(documentResult.response.status, 200);
+  assert.deepEqual(documentResult.bytes, DOCUMENT_BYTES);
+  assert.equal(
+    documentResult.response.headers.get("content-type"),
+    "application/octet-stream"
+  );
+  assert.equal(
+    documentResult.response.headers.get("content-length"),
+    String(DOCUMENT_BYTES.byteLength)
+  );
+  assert.equal(
+    documentResult.response.headers.get(
+      JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.contentSha256
+    ),
+    createHash("sha256").update(DOCUMENT_BYTES).digest("hex")
+  );
+  assert.equal(
+    documentResult.response.headers.get(
+      JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.manifestDigest
+    ),
+    manifestDigest
+  );
+  verifyDocumentResponse(documentResult, {
+    sourceFileRef,
+    sourceRecordRef: manifest.document.sourceRecordRef,
+    manifestDigest
+  });
+  assert.equal(
+    state.calls.length - callsBeforeDocument,
+    6,
+    "document provider-call budget"
+  );
+  assert.equal(state.writes, 0);
+
+  const callsBeforeStale = state.calls.length;
+  const staleManifest = await signedPost(
+    origin,
+    JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+      requestId: `request_${"cd".repeat(16)}`,
+      sourceFileRef,
+      sourceRecordRef: manifest.document.sourceRecordRef,
+      manifestDigest: "0".repeat(64)
+    },
+    `nonce_${"cd".repeat(16)}`
+  );
+  assert.equal(staleManifest.response.status, 409, staleManifest.text);
+  assert.equal(staleManifest.body.error.code, "jobrolo_import_source_changed");
+  assert.equal(
+    state.calls.slice(callsBeforeStale)
+      .some((call) => call.includes("/download/")),
+    false,
+    "stale metadata must block before the byte fetch"
+  );
+
+  state.mode = "binary_redirect";
+  const redirectedDocument = await signedPost(
+    origin,
+    JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+      requestId: `request_${"ef".repeat(16)}`,
+      sourceFileRef,
+      sourceRecordRef: manifest.document.sourceRecordRef,
+      manifestDigest
+    },
+    `nonce_${"ef".repeat(16)}`
+  );
+  assert.equal(redirectedDocument.response.status, 503, redirectedDocument.text);
+  assert.equal(
+    redirectedDocument.body.error.code,
+    "jobrolo_import_unavailable"
+  );
+  assert.doesNotMatch(redirectedDocument.text, /private\.invalid|secret/);
+  state.mode = "normal";
 
   state.dateOfLoss = 1785261000;
   const numericCatalog = await signedPost(
@@ -486,7 +608,7 @@ function collection(kind, mode) {
       primary: { id: RAW_FILE_ID },
       activity_type: "Status Change",
       status_name: "Complete",
-      occurred_at: new Date(Date.now() - 120_000).toISOString(),
+      occurred_at: "2026-08-08T14:30:00.000Z",
       actor_role: "Employee",
       label: mode === "oversize" ? "😀".repeat(160) : "Carrier review opened"
     };
@@ -496,7 +618,7 @@ function collection(kind, mode) {
       task_type: "Task",
       status_name: "Open",
       priority_name: "Urgent",
-      due_at: new Date(Date.now() + 86_400_000).toISOString(),
+      due_at: "2026-08-12T14:00:00.000Z",
       assigned_role: "Employee",
       label: mode === "oversize" ? "😀".repeat(160) : "Review settlement"
     };
@@ -508,7 +630,7 @@ function collection(kind, mode) {
         : "Carrier settlement estimate.pdf",
       content_type: "application/pdf",
       status_name: "New",
-      created_at: new Date(Date.now() - 90_000).toISOString(),
+      created_at: "2026-08-08T14:45:00.000Z",
       download_url: "https://private.invalid/document"
     };
   });
@@ -574,6 +696,35 @@ async function signedPost(
   };
 }
 
+async function signedBinaryPost(origin, route, body, nonce) {
+  const pathname = new URL(route, origin).pathname;
+  const timestamp = new Date().toISOString();
+  const signed = signJobroloImportRequest({
+    clientId: CLIENT_ID,
+    secret: SECRET,
+    pathname,
+    timestamp,
+    nonce,
+    body
+  });
+  const response = await fetch(`${origin}${route}`, {
+    method: "POST",
+    headers: signed.headers,
+    body: signed.bodyText
+  });
+  return {
+    response,
+    bytes: Buffer.from(await response.arrayBuffer()),
+    verifiedRequest: {
+      requestId: body.requestId,
+      requestNonce: nonce,
+      requestTimestamp: timestamp,
+      requestBodyHash:
+        signed.headers[JOBROLO_IMPORT_REQUEST_HEADERS.contentSha256]
+    }
+  };
+}
+
 function verifyResponse(result, pathname) {
   assert.equal(verifyJobroloImportTransportResponse({
     secret: SECRET,
@@ -582,6 +733,52 @@ function verifyResponse(result, pathname) {
     body: result.body,
     headers: Object.fromEntries(result.response.headers.entries())
   }), true);
+}
+
+function verifyDocumentResponse(result, {
+  sourceFileRef,
+  sourceRecordRef,
+  manifestDigest
+}) {
+  const responseTimestamp = result.response.headers.get(
+    JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.responseTimestamp
+  );
+  const contentSha256 = result.response.headers.get(
+    JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.contentSha256
+  );
+  const contentLength = Number(result.response.headers.get("content-length"));
+  const material = jobroloImportDocumentResponseSigningMaterial({
+    pathname: JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+    requestTimestamp: result.verifiedRequest.requestTimestamp,
+    requestNonce: result.verifiedRequest.requestNonce,
+    requestBodyHash: result.verifiedRequest.requestBodyHash,
+    requestId: result.verifiedRequest.requestId,
+    sourceFileRef,
+    sourceRecordRef,
+    manifestDigest,
+    responseTimestamp,
+    contentType: result.response.headers.get("content-type"),
+    contentLength,
+    contentSha256
+  });
+  assert.equal(
+    result.response.headers.get(
+      JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.requestId
+    ),
+    result.verifiedRequest.requestId
+  );
+  assert.equal(
+    result.response.headers.get(
+      JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.requestNonce
+    ),
+    result.verifiedRequest.requestNonce
+  );
+  assert.equal(
+    result.response.headers.get(
+      JOBROLO_IMPORT_DOCUMENT_RESPONSE_HEADERS.signature
+    ),
+    createHmac("sha256", SECRET).update(material, "utf8").digest("hex")
+  );
 }
 
 function assertNoPrivateMaterial(text) {

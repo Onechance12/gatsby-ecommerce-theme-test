@@ -12,6 +12,8 @@ import { HCN_PROVIDER_MAPPER_LIMITS } from "../hcn-console/provider-mappers.js";
 
 export const JOBROLO_JOBNIMBUS_IMPORT_SNAPSHOT_SCHEMA =
   "jobrolo.jobnimbus-import.snapshot.v1";
+export const JOBROLO_JOBNIMBUS_DOCUMENT_MANIFEST_SCHEMA =
+  "jobrolo.jobnimbus-import.document-manifest.v1";
 export const JOBROLO_JOBNIMBUS_NORMALIZED_EMAIL_SCHEMA =
   "jobrolo.jobnimbus-import.normalized-email.v1";
 
@@ -247,6 +249,58 @@ export function adaptJobNimbusFileEnvelopeToImportSnapshot(
     providerEnvelope,
     issueJobNimbusImportReferences(providerEnvelope, options)
   );
+}
+
+/** Project one normalized non-photo document into its stable transfer proof. */
+export function projectJobNimbusDocumentManifest(
+  providerDocument,
+  { sourceFileRef, referenceFactory } = {}
+) {
+  requirePattern(
+    sourceFileRef,
+    SOURCE_FILE_REF,
+    "invalid_opaque_references",
+    "JobNimbus source file reference is invalid."
+  );
+  if (
+    !isPlainRecord(referenceFactory)
+    || typeof referenceFactory.sourceRecordRef !== "function"
+  ) {
+    fail(
+      "invalid_reference_factory",
+      "A tenant-scoped HCN reference factory is required."
+    );
+  }
+  const normalized = normalizeDocuments([providerDocument])[0];
+  let sourceRecordRef;
+  try {
+    sourceRecordRef = referenceFactory.sourceRecordRef(
+      "jobnimbus",
+      normalized.providerRecordId
+    );
+  } catch {
+    fail(
+      "reference_issue_failed",
+      "Opaque JobNimbus import references could not be issued."
+    );
+  }
+  requirePattern(
+    sourceRecordRef,
+    SOURCE_RECORD_REF,
+    "invalid_opaque_references",
+    "JobNimbus source record reference is invalid."
+  );
+  return deepFreeze({
+    schema: JOBROLO_JOBNIMBUS_DOCUMENT_MANIFEST_SCHEMA,
+    sourceFileRef,
+    document: {
+      sourceRecordRef,
+      kind: normalized.kind,
+      reviewState: normalized.reviewState,
+      createdAt: normalized.createdAt,
+      fileName: normalized.fileName
+    }
+  });
 }
 
 function normalizeProviderEnvelope(value) {

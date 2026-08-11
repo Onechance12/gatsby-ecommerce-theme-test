@@ -11,6 +11,7 @@ import {
   JobNimbusImportSnapshotAdapterError,
   adaptJobNimbusFileEnvelopeToImportSnapshot,
   issueJobNimbusImportReferences,
+  projectJobNimbusDocumentManifest,
   projectJobNimbusFileEnvelopeToImportSnapshot
 } from "./jobrolo-import-snapshot.js";
 import { stableCanonicalJson } from "./jobrolo-service-auth.js";
@@ -272,6 +273,36 @@ test("existing HCN reference factory issues tenant-scoped refs without leaking r
     JSON.stringify({ issued, first }).includes(RAW_FILE_ID),
     false
   );
+});
+
+test("document manifest projection freezes exact metadata and opaque authority", () => {
+  const providerEnvelope = normalizedProviderEnvelope();
+  const referenceFactory = createHcnReferenceFactory({
+    hmacKey: Buffer.alloc(32, 0x4a),
+    tenantId: "tenant_0123456789abcdef"
+  });
+  const manifest = projectJobNimbusDocumentManifest(
+    providerEnvelope.data.documents[0],
+    { sourceFileRef: FILE_REF, referenceFactory }
+  );
+  assert.deepEqual(Object.keys(manifest), [
+    "schema",
+    "sourceFileRef",
+    "document"
+  ]);
+  assert.equal(
+    manifest.schema,
+    "jobrolo.jobnimbus-import.document-manifest.v1"
+  );
+  assert.equal(manifest.sourceFileRef, FILE_REF);
+  assert.match(manifest.document.sourceRecordRef, /^ref_[a-f0-9]{32}$/);
+  assert.deepEqual(
+    Object.keys(manifest.document),
+    ["sourceRecordRef", "kind", "reviewState", "createdAt", "fileName"]
+  );
+  assert.equal(Object.isFrozen(manifest.document), true);
+  const serialized = stableCanonicalJson(manifest);
+  assert.doesNotMatch(serialized, /raw-jobnimbus|providerRecordId|downloadUrl/);
 });
 
 test("adapter rejects raw or unsupported fields at every normalized boundary", () => {
