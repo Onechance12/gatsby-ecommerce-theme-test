@@ -1780,7 +1780,10 @@ function boundedText(value, maximumCharacters) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!normalized) return null;
-  return Array.from(normalized).slice(0, maximumCharacters).join('');
+  return Array.from(normalized)
+    .slice(0, maximumCharacters)
+    .join('')
+    .trim();
 }
 
 function hasValue(value) {
