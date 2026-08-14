@@ -7013,25 +7013,39 @@ async function hcnClaimFilingStatus(input = {}) {
     fileRef: input.fileRef
   });
   const principalEligible = hcnClaimFilingPrincipalEligible(principal);
-  const existingClaim = Boolean(String(context.file.claimNumber || "").trim());
-  const eligible = principalEligible && !existingClaim;
-  const recovery = eligible
+  const blockers = hcnClaimPreparationMissingFacts({
+    file: context.file,
+    property: context.property,
+    confirmations: {}
+  })
+    .filter((item) => item.source === "jobnimbus")
+    .map((item) => item.code === "existing_claim"
+      ? {
+          code: "existing_claim",
+          label: "This file already has a claim number. Use status follow-up instead of opening a new claim.",
+          source: "jobnimbus"
+        }
+      : item);
+  const existingClaim = blockers.some((item) => item.code === "existing_claim");
+  const fileFactsReady = blockers.length === 0;
+  const eligible = principalEligible && fileFactsReady;
+  const recovery = principalEligible && !existingClaim
     ? await hcnRecoverableClaimCall({ context, principal })
     : Object.freeze({ state: "none" });
   return hcnClaimFilingEnvelope({
     eligible,
     principalEligible,
     filingState: principalEligible
-      ? (existingClaim ? "existing_claim" : "new_claim_candidate")
+      ? (
+          existingClaim
+            ? "existing_claim"
+            : (fileFactsReady ? "new_claim_candidate" : "file_facts_incomplete")
+        )
       : "not_authorized",
     existingClaim,
-    blockers: existingClaim
-      ? [{
-          code: "existing_claim",
-          label: "This file already has a claim number. Use status follow-up instead of opening a new claim.",
-          source: "jobnimbus"
-        }]
-      : [],
+    fileFactsReady,
+    confirmationRequired: principalEligible && !existingClaim,
+    blockers,
     fileRef: context.fileRef,
     callsEnabled: eligible && ALLOW_RETELL_CALLS,
     writebackConfigured:

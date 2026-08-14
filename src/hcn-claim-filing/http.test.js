@@ -646,6 +646,8 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
   assert.equal(status.body.result.principalEligible, true);
   assert.equal(status.body.result.filingState, "new_claim_candidate");
   assert.equal(status.body.result.existingClaim, false);
+  assert.equal(status.body.result.fileFactsReady, true);
+  assert.equal(status.body.result.confirmationRequired, true);
   assert.deepEqual(status.body.result.blockers, []);
   assert.equal(status.body.result.callsEnabled, true);
 
@@ -661,6 +663,8 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
   assert.equal(existingClaimStatus.body.result.principalEligible, true);
   assert.equal(existingClaimStatus.body.result.filingState, "existing_claim");
   assert.equal(existingClaimStatus.body.result.existingClaim, true);
+  assert.equal(existingClaimStatus.body.result.fileFactsReady, false);
+  assert.equal(existingClaimStatus.body.result.confirmationRequired, false);
   assert.equal(existingClaimStatus.body.result.callsEnabled, false);
   assert.equal(existingClaimStatus.body.result.writebackConfigured, true);
   assert.deepEqual(existingClaimStatus.body.result.blockers, [{
@@ -669,6 +673,33 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
     source: "jobnimbus"
   }]);
   fixture.contact.cf_string_10 = "";
+
+  fixture.contact.cf_string_1 = "";
+  fixture.contact.cf_string_3 = "";
+  fixture.contact.cf_date_1 = "";
+  fixture.contact.cf_string_5 = "";
+  const incompleteStatus = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "9"
+  );
+  assert.equal(incompleteStatus.response.status, 200, incompleteStatus.text);
+  assert.equal(incompleteStatus.body.result.eligible, false);
+  assert.equal(incompleteStatus.body.result.principalEligible, true);
+  assert.equal(incompleteStatus.body.result.filingState, "file_facts_incomplete");
+  assert.equal(incompleteStatus.body.result.existingClaim, false);
+  assert.equal(incompleteStatus.body.result.fileFactsReady, false);
+  assert.equal(incompleteStatus.body.result.confirmationRequired, true);
+  assert.equal(incompleteStatus.body.result.callsEnabled, false);
+  assert.deepEqual(
+    incompleteStatus.body.result.blockers.map((item) => item.code),
+    ["carrier", "policy_number", "date_of_loss", "cause_of_loss"]
+  );
+  fixture.contact.cf_string_1 = "State Farm";
+  fixture.contact.cf_string_3 = "POLICY-100";
+  fixture.contact.cf_date_1 = "2026-05-01";
+  fixture.contact.cf_string_5 = "Hail";
 
   const prepared = await signedJobroloClaimPost(
     fixture,
