@@ -643,6 +643,74 @@ test('exact JobNimbus import activities require typed references and reject ever
   );
   assert.equal(result.data.activities.length, 2);
 
+  const tenantBound = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      contact: contact({ customer: 'jobnimbus-tenant-account' }),
+      activities: [
+        {
+          jnid: 'tenant-bound-activity',
+          primary: { id: FILE_ID },
+          related: [{ id: FILE_ID }],
+          customer: 'jobnimbus-tenant-account',
+          date_created: 1785261000,
+        },
+      ],
+    },
+    options,
+  );
+  assert.equal(tenantBound.data.activities.length, 1);
+  assert.equal(
+    JSON.stringify(tenantBound).includes('jobnimbus-tenant-account'),
+    false,
+  );
+
+  for (const customer of [
+    'another-jobnimbus-tenant',
+    'unassigned-foreign-client',
+    { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+    [{ id: 'unassigned-foreign-client', record_type_name: 'Contact' }],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          contact: contact({ customer: 'jobnimbus-tenant-account' }),
+          activities: [
+            {
+              jnid: 'tenant-mismatch-activity',
+              primary: { id: FILE_ID },
+              related: [{ id: FILE_ID }],
+              customer,
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+      mappingError('scope_mismatch'),
+    );
+  }
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        activities: [
+          {
+            jnid: 'unbound-tenant-activity',
+            primary: { id: FILE_ID },
+            related: [{ id: FILE_ID }],
+            customer: 'jobnimbus-tenant-account',
+            date_created: 1785261000,
+          },
+        ],
+      },
+      options,
+    ),
+    mappingError('scope_mismatch'),
+  );
+
   assert.throws(
     () =>
       mapJobNimbusFileEnvelope(

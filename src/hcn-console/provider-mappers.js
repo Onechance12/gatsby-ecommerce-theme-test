@@ -295,6 +295,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
   }
 
   const contact = requirePlainObject(input?.contact, 'contact');
+  const expectedProviderCustomerId = normalizeProviderId(contact.customer);
   const file = mapEligibleContact(contact, assignedOwnerId, {
     detail: true,
     legacyChanceField,
@@ -316,6 +317,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     allowedExactReferenceFields: ['primary', 'related'],
     dedupeIdenticalProviderIds: true,
     requireExactContactReferences,
+    expectedProviderCustomerId,
   });
   const taskResult = mapScopedCollection({
     value: input.tasks,
@@ -325,6 +327,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     mapper: (record) =>
       mapTask(record, assignedOwnerId, legacyChanceField),
     requireExactContactReferences,
+    expectedProviderCustomerId,
   });
   const documentResult = mapScopedCollection({
     value: input.documents,
@@ -334,6 +337,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     mapper: mapDocument,
     filter: (record) => !isPhotoLikeDocument(record),
     requireExactContactReferences,
+    expectedProviderCustomerId,
   });
   const activities = activityResult.items;
   const tasks = taskResult.items;
@@ -695,6 +699,7 @@ function mapScopedCollection({
   allowedExactReferenceFields = ['related'],
   dedupeIdenticalProviderIds = false,
   requireExactContactReferences = false,
+  expectedProviderCustomerId = null,
 }) {
   const rows = requireArray(value, label);
   if (rows.length > HCN_PROVIDER_MAPPER_LIMITS.maximumCollectionItems) {
@@ -710,6 +715,7 @@ function mapScopedCollection({
       knownProviderFileIds,
       allowedExactReferenceFields,
       requireExactContactReferences,
+      expectedProviderCustomerId,
     )) {
       fail(
         'scope_mismatch',
@@ -774,11 +780,16 @@ function recordReferencesFile(
   knownProviderFileIds,
   allowedExactReferenceFields = ['related'],
   requireExactContactReferences = false,
+  expectedProviderCustomerId = null,
 ) {
   if (!isPlainObject(record)) return false;
   if (
     requireExactContactReferences
-    && !hasExactTypedContactReferenceScope(record, expectedProviderFileId)
+    && !hasExactTypedContactReferenceScope(
+      record,
+      expectedProviderFileId,
+      expectedProviderCustomerId,
+    )
   ) {
     return false;
   }
@@ -861,11 +872,28 @@ const NESTED_REFERENCE_FIELDS = new Map([
  * a contact-bearing provider container must either be the selected contact or
  * carry one unambiguous, explicitly allowlisted non-contact record type.
  */
-function hasExactTypedContactReferenceScope(record, expectedProviderFileId) {
+function hasExactTypedContactReferenceScope(
+  record,
+  expectedProviderFileId,
+  expectedProviderCustomerId,
+) {
   const state = { nodes: 0, seen: new WeakSet() };
   for (const [container, role] of NESTED_REFERENCE_FIELDS) {
     const value = record[container];
     if (value === undefined || value === null) continue;
+    // JobNimbus uses a primitive top-level `customer` value for the tenant
+    // account id, not for the related contact. Bind it to the exact contact
+    // detail's tenant id instead of treating it as a second contact ref.
+    if (
+      container === 'customer'
+      && (typeof value === 'string' || typeof value === 'number')
+    ) {
+      if (
+        !expectedProviderCustomerId
+        || normalizeProviderId(value) !== expectedProviderCustomerId
+      ) return false;
+      continue;
+    }
     if (!validateExactReferenceValue(
       value,
       role,
