@@ -23,7 +23,19 @@ export const HCN_JOBROLO_NOTE_WRITEBACK_ROUTES = Object.freeze([
   "/integrations/jobrolo/v1/action-receipts/detail"
 ]);
 
-const ROUTES = new Set(JOBROLO_HCN_ROUTES);
+export const HCN_JOBROLO_CLAIM_FILING_ROUTES = Object.freeze([
+  "/integrations/jobrolo/v1/claim-filings/status",
+  "/integrations/jobrolo/v1/claim-filings/prepare",
+  "/integrations/jobrolo/v1/claim-filings/execute",
+  "/integrations/jobrolo/v1/claim-filings/result",
+  "/integrations/jobrolo/v1/claim-filings/writeback/prepare",
+  "/integrations/jobrolo/v1/claim-filings/writeback/execute"
+]);
+
+const ROUTES = new Set([
+  ...JOBROLO_HCN_ROUTES,
+  ...HCN_JOBROLO_CLAIM_FILING_ROUTES
+]);
 const CLIENT_ID = /^[A-Za-z0-9._-]{3,64}$/;
 const REQUEST_ID = /^request_[a-f0-9]{32}$/;
 const SESSION_REF = /^session_[a-f0-9]{32}$/;
@@ -225,6 +237,84 @@ export function loadJobroloHcnNoteWritebackConfiguration(
     if (value && secureTextEqual(secret, value)) {
       configurationError(
         `HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET must be different from ${name}.`
+      );
+    }
+  }
+  return Object.freeze({
+    enabled: true,
+    ready: true,
+    clientId,
+    secret,
+    principalEmail
+  });
+}
+
+/**
+ * Dedicated owner-only credential for the existing HCN claim-filing engine.
+ * It cannot call the general Thresher or note-writeback routes.
+ */
+export function loadJobroloHcnClaimFilingConfiguration(
+  env = {},
+  { disallowedClientIds = [], disallowedSecrets = [] } = {}
+) {
+  const enabled = String(
+    env.HCN_JOBROLO_CLAIM_FILING_ENABLED || ""
+  ).trim() === "true";
+  const clientId = String(
+    env.HCN_JOBROLO_CLAIM_FILING_CLIENT_ID || ""
+  ).trim();
+  const secret = String(
+    env.HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET || ""
+  );
+  const principalEmail = String(
+    env.HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL || ""
+  ).trim().toLowerCase();
+  const anyConfigured = Boolean(clientId || secret || principalEmail);
+
+  if (!enabled && !anyConfigured) {
+    return Object.freeze({
+      enabled: false,
+      ready: false,
+      clientId: "",
+      secret: "",
+      principalEmail: ""
+    });
+  }
+  if (!enabled) {
+    configurationError(
+      "HCN_JOBROLO_CLAIM_FILING_ENABLED must be true when claim-filing credentials are configured."
+    );
+  }
+  if (!CLIENT_ID.test(clientId)) {
+    configurationError(
+      "HCN_JOBROLO_CLAIM_FILING_CLIENT_ID must contain 3-64 safe identifier characters."
+    );
+  }
+  if (!/^[\x21-\x7e]{32,512}$/.test(secret)) {
+    configurationError(
+      "HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET must contain 32-512 printable non-space ASCII characters."
+    );
+  }
+  if (!EMAIL.test(principalEmail) || principalEmail.length > 254) {
+    configurationError(
+      "HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL must be one fixed valid HCN employee email."
+    );
+  }
+  for (const item of disallowedClientIds) {
+    const name = String(item?.name || "another client id");
+    const value = String(item?.value || "");
+    if (value && secureTextEqual(clientId, value)) {
+      configurationError(
+        `HCN_JOBROLO_CLAIM_FILING_CLIENT_ID must be different from ${name}.`
+      );
+    }
+  }
+  for (const item of disallowedSecrets) {
+    const name = String(item?.name || "another secret");
+    const value = String(item?.value || "");
+    if (value && secureTextEqual(secret, value)) {
+      configurationError(
+        `HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET must be different from ${name}.`
       );
     }
   }

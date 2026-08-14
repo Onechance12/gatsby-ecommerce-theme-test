@@ -1,19 +1,26 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { createHcnInvitationStore } from "../auth/hcn-invitation-store.js";
+import { signJobroloHcnRequest } from "../integrations/jobrolo-service-auth.js";
 
 const EMAIL = "claim.pilot@wavepa.com";
 const SUBJECT = "claim-pilot-google-subject";
 const SECOND_PILOT_SUBJECT = "claim-pilot-second-google-subject";
 const OWNER_ID = "claim-pilot-jobnimbus-owner";
 const REFERENCE_KEY = Buffer.alloc(32, 0x61).toString("base64url");
+const JOBROLO_CLAIM_CLIENT_ID = "jobrolo-claim-filing-http-fixture";
+const JOBROLO_CLAIM_SHARED_SECRET =
+  "jobrolo-claim-filing-http-fixture-secret-123456789";
+const JOBROLO_GENERAL_CLIENT_ID = "jobrolo-general-http-fixture";
+const JOBROLO_GENERAL_SHARED_SECRET =
+  "jobrolo-general-http-fixture-secret-123456789";
 const CONFIRMATIONS = Object.freeze({
   damageOpening: "Hail damaged the roof and exterior soft metals.",
   damageDetails: ["roof hail damage", "gutter dents"],
@@ -612,6 +619,134 @@ test("an exact existing JobNimbus claim note is verified instead of duplicated",
   );
 });
 
+test("dedicated signed Jobrolo profile reuses the full two-approval claim workflow", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: false,
+    callsEnabled: true,
+    writesEnabled: true,
+    fieldMapping: true,
+    jobroloClaim: true
+  });
+  const workCenter = await signedJobroloGeneralPost(
+    fixture,
+    "/integrations/jobrolo/v1/work-center",
+    { offset: 0, limit: 1 },
+    "a"
+  );
+  assert.equal(workCenter.response.status, 200, workCenter.text);
+  const fileRef = workCenter.body.result.files[0].fileRef;
+  const status = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "1"
+  );
+  assert.equal(status.response.status, 200, status.text);
+  assert.equal(status.body.result.eligible, true);
+  assert.equal(status.body.result.callsEnabled, true);
+
+  const prepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "2"
+  );
+  assert.equal(prepared.response.status, 200, prepared.text);
+  assert.equal(prepared.body.result.review.ready, true);
+  assert.match(prepared.body.result.plan.planId, /^plan_[a-f0-9]{32}$/);
+
+  const executed = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        prepared.body.result.plan.planId,
+        prepared.body.result.review.planDigest,
+        "call"
+      )
+    },
+    "3"
+  );
+  assert.equal(executed.response.status, 200, executed.text);
+  assert.match(executed.body.result.callRef, /^claim_call_[a-f0-9]{32}$/);
+  assert.equal(fixture.retellCalls.length, 1);
+
+  fixture.retellCalls[0].call_status = "ended";
+  fixture.retellCalls[0].transcript =
+    "The carrier confirmed claim number JOBROLO-CLAIM-1 and the assigned adjuster.";
+  fixture.retellCalls[0].call_analysis = {
+    custom_analysis_data: {
+      filing_outcome: "claim_filed",
+      claim_number: "JOBROLO-CLAIM-1",
+      adjuster_name: "Jobrolo Reviewed Adjuster"
+    }
+  };
+  const result = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/result",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      callRef: executed.body.result.callRef
+    },
+    "4"
+  );
+  assert.equal(result.response.status, 200, result.text);
+  assert.equal(result.body.result.result.callStatus, "ended");
+  assert.equal(result.body.result.result.humanConfirmationRequired, true);
+
+  const writebackPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/writeback/prepare",
+    {
+      fileRef,
+      callPlanId: prepared.body.result.plan.planId,
+      callRef: executed.body.result.callRef,
+      humanConfirmation: {
+        evidenceDigest: result.body.result.result.evidenceDigest,
+        reviewBasis: "reviewed_call_transcript",
+        outcome: "claim_filed",
+        claimNumber: "JOBROLO-CLAIM-1",
+        adjusterName: "Jobrolo Reviewed Adjuster",
+        adjusterPhone: "",
+        adjusterEmail: ""
+      }
+    },
+    "5"
+  );
+  assert.equal(
+    writebackPrepared.response.status,
+    200,
+    writebackPrepared.text
+  );
+  assert.equal(writebackPrepared.body.result.review.ready, true);
+
+  const writebackExecuted = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/writeback/execute",
+    {
+      fileRef,
+      planId: writebackPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        writebackPrepared.body.result.plan.planId,
+        writebackPrepared.body.result.review.approvalDigest,
+        "writeback"
+      )
+    },
+    "6"
+  );
+  assert.equal(
+    writebackExecuted.response.status,
+    200,
+    writebackExecuted.text
+  );
+  assert.equal(writebackExecuted.body.result.verifiedByReadback, true);
+  assert.equal(fixture.contact.cf_string_10, "JOBROLO-CLAIM-1");
+  assert.equal(fixture.activities.length, 1);
+});
+
 async function prepareTerminalClaim(
   fixture,
   session,
@@ -670,11 +805,12 @@ async function startFixture(t, {
   pilot,
   callsEnabled = false,
   writesEnabled = false,
-  fieldMapping = false
+  fieldMapping = false,
+  jobroloClaim = false
 }) {
-  const temporaryRoot = await mkdtemp(
+  const temporaryRoot = await realpath(await mkdtemp(
     path.join(tmpdir(), "hcn-claim-filing-http-")
-  );
+  ));
   t.after(() => rm(temporaryRoot, { recursive: true, force: true }));
   const invitationTimestamp = Date.now();
   const invitationStore = createHcnInvitationStore({
@@ -710,6 +846,8 @@ async function startFixture(t, {
   const retellListRequests = [];
   const activities = [];
   const writebackState = { applyContactWrites: true };
+  const fixedJobroloEmail = "cpearson@wavepa.com";
+  const fixedJobroloSubject = "chance-jobrolo-google-subject";
   const contact = {
     jnid: "claim-file-provider-id",
     number: 3010,
@@ -763,8 +901,8 @@ async function startFixture(t, {
         total: 1,
         users: [{
           jnid: OWNER_ID,
-          email: EMAIL,
-          display_name: "Claim Pilot",
+          email: jobroloClaim ? fixedJobroloEmail : EMAIL,
+          display_name: jobroloClaim ? "Chance Pearson" : "Claim Pilot",
           is_active: true
         }]
       });
@@ -906,6 +1044,20 @@ async function startFixture(t, {
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${provider.address().port}`,
       JOBNIMBUS_BRIDGE_TOKEN: "",
       CODEX_OPERATOR_TOKEN: "",
+      ...(jobroloClaim ? {
+        CHANCE_GOOGLE_EMAIL: fixedJobroloEmail,
+        CHANCE_GOOGLE_SUBJECT: fixedJobroloSubject,
+        CHANCE_JOBNIMBUS_OWNER_ID: OWNER_ID,
+        HCN_JOBROLO_ADAPTER_ENABLED: "true",
+        HCN_JOBROLO_CLIENT_ID: JOBROLO_GENERAL_CLIENT_ID,
+        HCN_JOBROLO_SHARED_SECRET: JOBROLO_GENERAL_SHARED_SECRET,
+        HCN_JOBROLO_PRINCIPAL_EMAIL: fixedJobroloEmail,
+        HCN_JOBROLO_CLAIM_FILING_ENABLED: "true",
+        HCN_JOBROLO_CLAIM_FILING_CLIENT_ID: JOBROLO_CLAIM_CLIENT_ID,
+        HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET:
+          JOBROLO_CLAIM_SHARED_SECRET,
+        HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL: fixedJobroloEmail
+      } : {}),
       RETELL_AGENT_ID: "agent_claim_pilot_fixture",
       RETELL_FROM_NUMBER: "+19725550100",
       RETELL_API_BASE_URL:
@@ -1022,6 +1174,94 @@ function postHcn(fixture, session, pathname, body) {
     },
     body: JSON.stringify(body)
   });
+}
+
+function jobroloApproval(planId, planDigest, suffix) {
+  return {
+    schema: "jobrolo.approval-attestation.v1",
+    approvalRequestId: `approval_${suffix}_fixture`,
+    planDigest,
+    approvedAt: new Date().toISOString(),
+    approvedByUserId: `actor_${suffix}_fixture_user`
+  };
+}
+
+async function signedJobroloClaimPost(
+  fixture,
+  pathname,
+  input,
+  nonceDigit
+) {
+  const body = {
+    schema: "jobrolo.hcn.request.v1",
+    requestId: `request_${nonceDigit.repeat(32)}`,
+    actor: {
+      sessionRef: "session_abcdefabcdefabcdefabcdefabcdefab"
+    },
+    input
+  };
+  const headers = signJobroloHcnRequest({
+    clientId: JOBROLO_CLAIM_CLIENT_ID,
+    secret: JOBROLO_CLAIM_SHARED_SECRET,
+    pathname,
+    timestamp: Date.now(),
+    nonce: `nonce_${nonceDigit.repeat(32)}`,
+    body
+  });
+  const response = await fetch(`${fixture.bridgeOrigin}${pathname}`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  let decoded = null;
+  try {
+    decoded = JSON.parse(text);
+  } catch {
+    // Keep raw response text in the assertion helper for useful failures.
+  }
+  return { response, text, body: decoded };
+}
+
+async function signedJobroloGeneralPost(
+  fixture,
+  pathname,
+  input,
+  nonceDigit
+) {
+  const body = {
+    schema: "jobrolo.hcn.request.v1",
+    requestId: `request_${nonceDigit.repeat(32)}`,
+    actor: {
+      sessionRef: "session_0123456789abcdef0123456789abcdef"
+    },
+    input
+  };
+  const headers = signJobroloHcnRequest({
+    clientId: JOBROLO_GENERAL_CLIENT_ID,
+    secret: JOBROLO_GENERAL_SHARED_SECRET,
+    pathname,
+    timestamp: Date.now(),
+    nonce: `nonce_${nonceDigit.repeat(32)}`,
+    body
+  });
+  const response = await fetch(`${fixture.bridgeOrigin}${pathname}`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  return {
+    response,
+    text,
+    body: JSON.parse(text)
+  };
 }
 
 function json(res, status, body) {

@@ -6,7 +6,9 @@ import {
   createJobroloHcnNonceGuard,
   deriveJobroloAssistantScopedBindingRef,
   deriveJobroloAssistantSessionBindingRef,
+  HCN_JOBROLO_CLAIM_FILING_ROUTES,
   HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
+  loadJobroloHcnClaimFilingConfiguration,
   loadJobroloHcnIntegrationConfiguration,
   loadJobroloHcnNoteWritebackConfiguration,
   signJobroloHcnRequest,
@@ -19,6 +21,9 @@ const PATH = "/integrations/jobrolo/v1/status";
 const NOTE_PATH = "/integrations/jobrolo/v1/action-plans/prepare";
 const NOTE_SECRET =
   "jobrolo-note-writeback-test-secret-unique-123456";
+const CLAIM_PATH = "/integrations/jobrolo/v1/claim-filings/prepare";
+const CLAIM_SECRET =
+  "jobrolo-claim-filing-test-secret-unique-123456";
 
 function fixture(overrides = {}) {
   const configuration = loadJobroloHcnIntegrationConfiguration({
@@ -388,6 +393,100 @@ test("note-writeback authenticator accepts only its three action routes", () => 
       method: "POST",
       pathname: PATH,
       headers: readHeaders,
+      body
+    }),
+    /route is not allowed/i
+  );
+});
+
+test("claim-filing credential is default-off, distinct, and route-limited", () => {
+  assert.deepEqual(
+    loadJobroloHcnClaimFilingConfiguration({}),
+    {
+      enabled: false,
+      ready: false,
+      clientId: "",
+      secret: "",
+      principalEmail: ""
+    }
+  );
+  assert.throws(
+    () => loadJobroloHcnClaimFilingConfiguration({
+      HCN_JOBROLO_CLAIM_FILING_ENABLED: "false",
+      HCN_JOBROLO_CLAIM_FILING_CLIENT_ID: "jobrolo-claim-filing"
+    }),
+    /must be true/i
+  );
+  const environment = {
+    HCN_JOBROLO_CLAIM_FILING_ENABLED: "true",
+    HCN_JOBROLO_CLAIM_FILING_CLIENT_ID: "jobrolo-claim-filing",
+    HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET: CLAIM_SECRET,
+    HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL: "chance@wavepa.com"
+  };
+  assert.throws(
+    () => loadJobroloHcnClaimFilingConfiguration(environment, {
+      disallowedClientIds: [{
+        name: "HCN_JOBROLO_CLIENT_ID",
+        value: "jobrolo-claim-filing"
+      }]
+    }),
+    /different from HCN_JOBROLO_CLIENT_ID/
+  );
+  assert.throws(
+    () => loadJobroloHcnClaimFilingConfiguration(environment, {
+      disallowedSecrets: [{
+        name: "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
+        value: CLAIM_SECRET
+      }]
+    }),
+    /different from HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET/
+  );
+
+  const configuration = loadJobroloHcnClaimFilingConfiguration(environment);
+  const body = {
+    schema: "jobrolo.hcn.request.v1",
+    requestId: "request_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    actor: {
+      sessionRef: "session_ffffffffffffffffffffffffffffffff"
+    },
+    input: {}
+  };
+  const authenticator = createJobroloHcnAuthenticator({
+    configuration,
+    now: () => NOW,
+    allowedRoutes: HCN_JOBROLO_CLAIM_FILING_ROUTES
+  });
+  const claimHeaders = signJobroloHcnRequest({
+    clientId: configuration.clientId,
+    secret: configuration.secret,
+    pathname: CLAIM_PATH,
+    timestamp: NOW,
+    nonce: "nonce_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    body
+  });
+  assert.equal(
+    authenticator.authenticate({
+      method: "POST",
+      pathname: CLAIM_PATH,
+      headers: claimHeaders,
+      body
+    }).clientId,
+    configuration.clientId
+  );
+
+  const genericHeaders = signJobroloHcnRequest({
+    clientId: configuration.clientId,
+    secret: configuration.secret,
+    pathname: PATH,
+    timestamp: NOW,
+    nonce: "nonce_ffffffffffffffffffffffffffffffff",
+    body
+  });
+  assert.throws(
+    () => authenticator.authenticate({
+      method: "POST",
+      pathname: PATH,
+      headers: genericHeaders,
       body
     }),
     /route is not allowed/i
