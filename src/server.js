@@ -1288,6 +1288,7 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/status", jobroloHcnStatus],
   ["POST /integrations/jobrolo/v1/work-center", hcnReadWorkCenter],
   ["POST /integrations/jobrolo/v1/file-review", hcnReadFile],
+  ["POST /integrations/jobrolo/v1/communication-sweep", hcnReadCommunicationSweep],
   ["POST /integrations/jobrolo/v1/management-sweep", hcnReadManagementSweep],
   ["POST /integrations/jobrolo/v1/assistant/turn", jobroloHcnAssistantTurn],
   ["POST /integrations/jobrolo/v1/action-plans/prepare", jobroloHcnPrepareActionPlan],
@@ -1851,6 +1852,7 @@ function health() {
       durableHcnReceiptAndReadback: true,
       automaticExecution: false,
       providerCredentialsExposed: false,
+      communicationSweepExposed: true,
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       legacyTokensAccepted: false
@@ -3486,6 +3488,7 @@ async function jobroloHcnStatus(input = {}) {
       ) ? "approval_gated" : "unavailable",
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
+      communicationSweepExposed: true,
       providerCredentialsExposed: false
     })
   });
@@ -4165,6 +4168,158 @@ async function hcnReadWorkCenter(input = {}) {
   return withHcnReadAdmission(
     () => hcnConsoleFreshReadService(principal).readWorkCenter(input)
   );
+}
+
+async function hcnReadCommunicationSweep(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  if (principal.role !== "chance") {
+    const error = new Error(
+      "The all-line communication sweep requires Chance's fixed HCN principal."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const request = validateHcnCommunicationSweepInput(input);
+  return withHcnReadAdmission(async () => {
+    const result = await startCommunicationRecoveryReview(request, principal);
+    return projectHcnCommunicationSweep(result);
+  });
+}
+
+function validateHcnCommunicationSweepInput(input) {
+  const allowed = new Set([
+    "communicationDays",
+    "gmailLimit",
+    "quoLimit",
+    "quoTranscriptLimit",
+    "includeQuoTranscripts"
+  ]);
+  if (
+    !input
+    || typeof input !== "object"
+    || Array.isArray(input)
+    || Object.keys(input).some((key) => !allowed.has(key))
+  ) {
+    badRequest("Communication sweep input contains unsupported fields.");
+  }
+  const integer = (key, fallback, minimum, maximum) => {
+    const value = input[key] === undefined ? fallback : input[key];
+    if (
+      !Number.isSafeInteger(value)
+      || value < minimum
+      || value > maximum
+    ) {
+      badRequest(`${key} must be an integer from ${minimum} to ${maximum}.`);
+    }
+    return value;
+  };
+  if (
+    input.includeQuoTranscripts !== undefined
+    && typeof input.includeQuoTranscripts !== "boolean"
+  ) {
+    badRequest("includeQuoTranscripts must be a boolean.");
+  }
+  return {
+    communicationDays: integer("communicationDays", 30, 1, 90),
+    gmailLimit: integer("gmailLimit", 25, 1, 25),
+    quoLimit: integer("quoLimit", 50, 1, 50),
+    quoTranscriptLimit: integer("quoTranscriptLimit", 12, 0, 25),
+    includeQuoTranscripts: input.includeQuoTranscripts !== false
+  };
+}
+
+function projectHcnCommunicationSweep(result) {
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const itemRef = (item) => references.sourceRecordRef(
+    String(item.channel || "communication").slice(0, 32),
+    `${String(item.type || "item").slice(0, 32)}:${String(item.id || "unknown").slice(0, 512)}`
+  );
+  const file = (source = {}) => ({
+    fileRef: references.subjectId(
+      "jobnimbus",
+      hcnProviderFileId(String(source.id || ""))
+    ),
+    jobNumber: String(source.number || "").slice(0, 80),
+    displayName: String(source.name || "Assigned JobNimbus file").slice(0, 160),
+    status: String(source.status || "").slice(0, 120),
+    propertyAddress: String(source.address || "").slice(0, 240)
+  });
+  const candidate = (value) => ({
+    confidence: String(value.confidence || "candidate").slice(0, 32),
+    score: Number(value.score || 0),
+    reasons: (Array.isArray(value.reasons) ? value.reasons : [])
+      .map((reason) => String(reason).slice(0, 80))
+      .slice(0, 8),
+    file: file(value.file)
+  });
+  const items = result.recovery.queue.slice(0, 75).map((item) => ({
+    communicationRef: itemRef(item),
+    channel: String(item.channel || "unknown").slice(0, 32),
+    type: String(item.type || "unknown").slice(0, 32),
+    direction: String(item.direction || "incoming").slice(0, 32),
+    status: String(item.status || "").slice(0, 80),
+    atUtc: String(item.atUtc || "").slice(0, 40),
+    from: String(item.from || "").slice(0, 240),
+    to: String(item.to || "").slice(0, 240),
+    subject: String(item.subject || "").slice(0, 300),
+    participant: String(item.participant || "").slice(0, 80),
+    line: String(item.line || "").slice(0, 120),
+    preview: String(
+      item.text || item.transcript || item.voicemail || item.snippet || ""
+    ).replace(/\s+/g, " ").trim().slice(0, 800),
+    attachmentCount: Array.isArray(item.attachments)
+      ? item.attachments.length
+      : 0,
+    durationSec: Math.max(0, Number(item.durationSec || 0)),
+    transcriptAvailable: Boolean(item.transcript || item.voicemail),
+    classification: String(item.classification || "general_inbound").slice(0, 64),
+    priority: Number(item.priority || 0),
+    reviewRequired: item.reviewRequired === true,
+    match: item.match ? candidate(item.match) : null,
+    possibleMatches: (Array.isArray(item.possibleMatches)
+      ? item.possibleMatches
+      : []).map(candidate).slice(0, 3)
+  }));
+  const generatedAt = String(result.generatedAt || new Date().toISOString());
+  return {
+    schema: "hcn.console.communication-sweep.v1",
+    generatedAt,
+    checkedAt: generatedAt,
+    validUntil: new Date(Date.parse(generatedAt) + 5 * 60_000).toISOString(),
+    ephemeral: true,
+    cachePolicy: "no_store",
+    focus: "communications",
+    days: result.days,
+    activeFileCount: result.activeFileCount,
+    profile: {
+      displayName: String(result.identity?.displayName || "HCN employee").slice(0, 120)
+    },
+    scope: {
+      jobNimbus: "active_assigned_files_only",
+      gmail: "linked_principal_mailbox",
+      quo: "all_available_team_lines",
+      readOnly: true,
+      proposedMatchesAreProof: false
+    },
+    sources: result.sources,
+    summary: {
+      total: result.recovery.total,
+      matched: result.recovery.matched,
+      unmatched: result.recovery.unmatched,
+      appointmentCandidates: result.recovery.appointmentCandidates,
+      callbackCandidates: result.recovery.callbackCandidates,
+      returned: items.length
+    },
+    items,
+    safety: {
+      writesPossible: false,
+      messagesSent: 0,
+      callsPlaced: 0,
+      jobNimbusWrites: 0,
+      exactFileVerificationRequiredBeforeAction: true,
+      unmatchedCommunicationsPreserved: true
+    }
+  };
 }
 
 async function hcnReadManagementSweep(input = {}) {
@@ -14552,10 +14707,13 @@ async function startCommunicationRecoveryReview(input, identity) {
   const days = clamp(Number(input.communicationDays || 30), 1, 90);
   const contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
     .filter(isInsuranceFile)
-    .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
+    .filter((contact) => assignedTo(
+      contact,
+      String(identity?.jobNimbusOwnerId || CHANCE_OWNER_ID)
+    ))
     .filter(isOpenActive);
   const files = contacts.map(compactContact);
-  const gmailQuery = `newer_than:${days}d {appointment inspection schedule scheduling reschedule adjuster reinspection appraiser appraisal arrival}`;
+  const gmailQuery = `newer_than:${days}d -in:spam -in:trash`;
   const [gmailResult, quoResult] = await Promise.allSettled([
     loadGmailRecoveryItems(gmailQuery, clamp(Number(input.gmailLimit || 25), 1, 25)),
     readQuoInbox(quoConfig(), {
@@ -14565,7 +14723,9 @@ async function startCommunicationRecoveryReview(input, identity) {
     })
   ]);
   const gmailItems = gmailResult.status === "fulfilled" ? gmailResult.value : [];
-  const quoItems = quoResult.status === "fulfilled" ? quoResult.value.items : [];
+  const quoItems = quoResult.status === "fulfilled"
+    ? quoResult.value.items.slice(0, clamp(Number(input.quoLimit || 50), 1, 50))
+    : [];
   const recovery = buildCommunicationRecoveryQueue([...gmailItems, ...quoItems], files);
 
   return {
@@ -14580,7 +14740,7 @@ async function startCommunicationRecoveryReview(input, identity) {
     },
     recovery,
     assistantDirective: [
-      "This is an inbox-first, read-only communication recovery sweep. It scanned Gmail scheduling mail and incoming calls/texts across every available Quo team line before matching them to active Chance files.",
+      "This is an inbox-first, read-only communication recovery sweep. It scanned recent incoming Gmail and incoming calls/texts across every available Quo team line before matching them to active assigned JobNimbus files.",
       "Review appointment_scheduling and callback_required items first. Unknown numbers and unmatched messages must remain visible for manual identification; never silently discard them.",
       "A proposed match is evidence, not proof. Verify the exact file using claim number, insured, address, policy, or a fresh transcript before proposing a JobNimbus change.",
       "Report any source marked unavailable or partial. Do not claim the communication sweep is complete when Gmail or Quo failed.",
@@ -14596,6 +14756,7 @@ async function loadGmailRecoveryItems(query, limit) {
   for (const threadId of threadIds) {
     const thread = await gmailThread({ threadId });
     for (const message of thread.messages) {
+      if (items.length >= limit) break;
       if (!message.id || items.some((item) => item.id === message.id)) continue;
       const recovered = {
         id: message.id,
@@ -14615,6 +14776,7 @@ async function loadGmailRecoveryItems(query, limit) {
       };
       if (recovered.direction === "incoming") items.push(recovered);
     }
+    if (items.length >= limit) break;
   }
   return items.sort((a, b) => String(b.atUtc).localeCompare(String(a.atUtc)));
 }
@@ -14635,8 +14797,27 @@ function gmailTimestamp(message) {
 function communicationSourceStatus(result, count, detail = null) {
   return result.status === "fulfilled"
     ? detail?.partial
-      ? { status: "partial", count, failureCount: detail.failures?.length || 0 }
-      : { status: "fresh", count }
+      ? {
+          status: "partial",
+          count,
+          failureCount: detail.failures?.length || 0,
+          ...(Number.isSafeInteger(detail.lineCount)
+            ? { lineCount: detail.lineCount }
+            : {}),
+          ...(Number.isSafeInteger(detail.conversationCount)
+            ? { conversationCount: detail.conversationCount }
+            : {})
+        }
+      : {
+          status: "fresh",
+          count,
+          ...(Number.isSafeInteger(detail?.lineCount)
+            ? { lineCount: detail.lineCount }
+            : {}),
+          ...(Number.isSafeInteger(detail?.conversationCount)
+            ? { conversationCount: detail.conversationCount }
+            : {})
+        }
     : { status: "unavailable", count: 0, error: redactSensitiveText(result.reason?.message || "Unknown source error") };
 }
 

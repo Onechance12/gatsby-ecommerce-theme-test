@@ -240,6 +240,55 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(providerCalls.includes("/account/users"), true);
   assert.equal(providerCalls.includes("/contacts"), true);
 
+  const communicationSweep = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/communication-sweep",
+    {
+      requestId: "request_98989898989898989898989898989898",
+      sessionRef,
+      nonce: "nonce_98989898989898989898989898989898",
+      input: {
+        communicationDays: 14,
+        gmailLimit: 10,
+        quoLimit: 20,
+        quoTranscriptLimit: 4,
+        includeQuoTranscripts: true
+      }
+    }
+  );
+  assert.equal(communicationSweep.response.status, 200, communicationSweep.text);
+  assert.equal(
+    communicationSweep.body.result.schema,
+    "hcn.console.communication-sweep.v1"
+  );
+  assert.equal(
+    communicationSweep.body.authority.fileScope,
+    "assigned_only"
+  );
+  assert.equal(
+    communicationSweep.body.result.scope.jobNimbus,
+    "active_assigned_files_only"
+  );
+  assert.equal(communicationSweep.body.result.scope.readOnly, true);
+  assert.equal(communicationSweep.body.result.activeFileCount, 2);
+  assert.equal(communicationSweep.body.result.sources.gmail.status, "unavailable");
+  assert.equal(communicationSweep.body.result.sources.quo.status, "unavailable");
+  assert.equal(communicationSweep.body.result.safety.jobNimbusWrites, 0);
+  assert.equal(providerWrites.length, 0);
+
+  const rejectedCommunicationSweep = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/communication-sweep",
+    {
+      requestId: "request_97979797979797979797979797979797",
+      sessionRef,
+      nonce: "nonce_97979797979797979797979797979797",
+      input: { ownerId: SECOND_OWNER_ID }
+    }
+  );
+  assert.equal(rejectedCommunicationSweep.response.status, 400);
+  assert.equal(providerWrites.length, 0);
+
   const managementSweep = await signedPost(
     origin,
     "/integrations/jobrolo/v1/management-sweep",
@@ -603,11 +652,12 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.notEqual(crossProfileExecution.response.status, 200);
   assert.equal(providerWrites.length, 2);
 
-  for (let index = 0; index < 5; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     const pathname = [
       "/integrations/jobrolo/v1/status",
       "/integrations/jobrolo/v1/work-center",
       "/integrations/jobrolo/v1/file-review",
+      "/integrations/jobrolo/v1/communication-sweep",
       "/integrations/jobrolo/v1/management-sweep",
       "/integrations/jobrolo/v1/assistant/turn"
     ][index];
