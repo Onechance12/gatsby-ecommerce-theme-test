@@ -57,6 +57,7 @@ import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { verifyCreatedJobNimbusNote } from "./jobnimbus/note-create-readback.js";
 import {
+  projectCompleteJobNimbusUserIds,
   resolveUniqueActiveJobNimbusUser,
   validateCompleteJobNimbusUserSnapshot
 } from "./jobnimbus/user-directory.js";
@@ -184,7 +185,6 @@ import {
   projectHcnClaimResult
 } from "./hcn-claim-filing/contracts.js";
 import {
-  mapJobNimbusDocumentCollection,
   mapJobNimbusFileEnvelope,
   mapJobNimbusIndexEnvelope,
   mapScopedGmailEnvelope,
@@ -456,7 +456,7 @@ const HCN_JOBROLO_IMPORT_ROUTE_BOUNDS = Object.freeze({
   [HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE]: Object.freeze({
     deadlineMs:
       HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentRouteDurationMs,
-    maximumProviderRequests: 6
+    maximumProviderRequests: 7
   })
 });
 const HCN_ASSISTANT_HISTORY_KEY =
@@ -18953,6 +18953,7 @@ async function handleJobroloImportHttpRequest(req, res, url) {
       loadJobroloImportExactFile({
         ...input,
         assignedOwnerId: principal.jobNimbusOwnerId,
+        knownProviderUserIds: principal.jobNimbusUserIds,
         requestBudget: providerReadBudget
       })
   });
@@ -18991,6 +18992,7 @@ async function handleJobroloImportDocumentContent({
   const proof = await resolveJobroloImportDocumentContent({
     verified,
     assignedOwnerId: principal.jobNimbusOwnerId,
+    knownProviderUserIds: principal.jobNimbusUserIds,
     requestBudget: providerReadBudget,
     requestedAt
   });
@@ -19042,6 +19044,7 @@ async function handleJobroloImportDocumentContent({
 async function resolveJobroloImportDocumentContent({
   verified,
   assignedOwnerId,
+  knownProviderUserIds,
   requestBudget,
   requestedAt
 }) {
@@ -19072,21 +19075,35 @@ async function resolveJobroloImportDocumentContent({
     throw error;
   }
   const providerFileId = hcnProviderFileId(scoped[0].providerFileId);
-  const documentsPage = await listJobroloImportResourceComplete("/files", {
-    maxRecords: 500,
-    relatedContactId: providerFileId,
-    contactReferenceField: "related.id",
-    requestBudget
-  });
-  const mapped = mapJobNimbusDocumentCollection({
+  const [contact, documentsPage] = await Promise.all([
+    jobroloImportJobNimbus(
+      `/contacts/${encodeURIComponent(providerFileId)}`,
+      { requestBudget }
+    ),
+    listJobroloImportResourceComplete("/files", {
+      maxRecords: 500,
+      relatedContactId: providerFileId,
+      contactReferenceField: "related.id",
+      requestBudget
+    })
+  ]);
+  const mapped = mapJobNimbusFileEnvelope({
+    contact,
+    activities: [],
+    tasks: [],
     documents: documentsPage.rows,
-    documentsComplete: documentsPage.complete
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: documentsPage.complete,
+    ...hcnFreshnessWindow(requestedAt)
   }, {
+    assignedOwnerId,
     expectedProviderFileId: providerFileId,
     knownProviderFileIds: files.map((file) => file.providerFileId),
+    knownProviderUserIds,
     requireExactContactReferences: true
   });
-  const matches = mapped.documents.map((document) => ({
+  const matches = mapped.data.documents.map((document) => ({
     providerRecordId: document.providerRecordId,
     manifest: projectJobNimbusDocumentManifest(document, {
       sourceFileRef: verified.sourceFileRef,
@@ -19234,16 +19251,19 @@ async function authenticateJobroloImportPrincipal(verified, requestBudget) {
     principal = null;
   }
   let activeJobNimbusUser = null;
+  let jobNimbusUserIds = null;
   if (principal) {
     try {
+      const jobNimbusUsers = validateCompleteJobNimbusUserSnapshot(
+        await jobroloImportJobNimbus("/account/users", {
+          requestBudget
+        })
+      );
       activeJobNimbusUser = resolveUniqueActiveJobNimbusUser(
-        validateCompleteJobNimbusUserSnapshot(
-          await jobroloImportJobNimbus("/account/users", {
-            requestBudget
-          })
-        ),
+        jobNimbusUsers,
         email
       );
+      jobNimbusUserIds = projectCompleteJobNimbusUserIds(jobNimbusUsers);
     } catch {
       jobroloImportAuthorizationFailure();
     }
@@ -19252,6 +19272,8 @@ async function authenticateJobroloImportPrincipal(verified, requestBudget) {
     !principal
     || principal.jobNimbusScope !== "assigned"
     || !activeJobNimbusUser
+    || !Array.isArray(jobNimbusUserIds)
+    || jobNimbusUserIds.length === 0
     || String(activeJobNimbusUser.id || "").trim()
       !== String(principal.jobNimbusOwnerId || "").trim()
   ) {
@@ -19262,7 +19284,8 @@ async function authenticateJobroloImportPrincipal(verified, requestBudget) {
     // employee-session, Thresher, approval-plan, or provider-effect authority.
     authenticationMethod: "jobrolo_jobnimbus_import_hmac",
     identityType: "hcn_jobrolo_jobnimbus_import_service",
-    jobNimbusOwnerId: String(principal.jobNimbusOwnerId)
+    jobNimbusOwnerId: String(principal.jobNimbusOwnerId),
+    jobNimbusUserIds
   });
 }
 
@@ -19299,6 +19322,7 @@ async function loadJobroloImportExactFile({
   knownProviderFileIds,
   requestedAt,
   assignedOwnerId,
+  knownProviderUserIds,
   requestBudget
 } = {}) {
   const id = hcnProviderFileId(providerFileId);
@@ -19343,9 +19367,12 @@ async function loadJobroloImportExactFile({
     assignedOwnerId,
     expectedProviderFileId: id,
     knownProviderFileIds,
+    knownProviderUserIds,
     // This import-only boundary may disclose mapped activity/task/document
     // labels. Require every provider contact-typed reference to identify the
-    // selected assigned file; an unknown id is never presumed non-contact.
+    // selected assigned file. Only ids from the complete account-user
+    // directory may be treated as non-client when JobNimbus labels them as a
+    // contact; every unknown id still fails closed.
     requireExactContactReferences: true
   });
 }

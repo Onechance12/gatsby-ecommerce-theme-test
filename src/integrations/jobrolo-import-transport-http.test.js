@@ -30,6 +30,8 @@ const CLIENT_ID = "jobrolo-import-http-fixture";
 const SECRET = "jobrolo-import-http-fixture-secret-0123456789";
 const CONNECTION_REF = "connection_cccccccccccccccccccccccccccccccc";
 const RAW_FILE_ID = "private-provider-file-id";
+const ACCOUNT_USER_ID = "private-account-user-id";
+const CUSTOMER_ID = "private-customer-account-id";
 const DOCUMENT_BYTES = Buffer.from("%PDF-1.7\nfixture document bytes\n", "utf8");
 
 test("dedicated import routes are signed, exact, bounded, and provider-read-only", async (t) => {
@@ -48,13 +50,21 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     if (req.method !== "GET") state.writes += 1;
     if (req.method === "GET" && url.pathname === "/account/users") {
       return json(res, 200, {
-        total: 1,
-        users: [{
-          jnid: OWNER_ID,
-          email: EMAIL,
-          display_name: "Chance Pearson",
-          is_active: true
-        }]
+        total: 2,
+        users: [
+          {
+            jnid: OWNER_ID,
+            email: EMAIL,
+            display_name: "Chance Pearson",
+            is_active: true
+          },
+          {
+            jnid: ACCOUNT_USER_ID,
+            email: "verified-user@wavepa.com",
+            display_name: "Verified User",
+            is_active: true
+          }
+        ]
       });
     }
     if (req.method === "GET" && url.pathname === "/contacts") {
@@ -103,6 +113,23 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
           : []
         : field === "primary.id"
           ? collection("activities", state.mode)
+          : field === "related.id" && state.mode === "normal"
+            ? [{
+                jnid: "private-verified-user-activity",
+                primary: {
+                  id: ACCOUNT_USER_ID,
+                  type: "Contact",
+                  old_status: "Ready",
+                  new_status: "Review"
+                },
+                related: [
+                  { id: RAW_FILE_ID, type: "Contact" },
+                  { id: ACCOUNT_USER_ID, type: "Contact" }
+                ],
+                customer: CUSTOMER_ID,
+                occurred_at: "2026-08-08T14:31:00.000Z",
+                label: "Verified employee changed status"
+              }]
           : [];
       return paged(res, url, "activities", records);
     }
@@ -220,6 +247,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   assert.equal(snapshot.body.payload.sourceFileRef, sourceFileRef);
   assert.equal(snapshot.body.payload.source.connectionRef, CONNECTION_REF);
   assert.equal(snapshot.body.payload.activities.completeness, "complete");
+  assert.equal(snapshot.body.payload.activities.returnedItems, 2);
   assert.equal(snapshot.body.payload.tasks.completeness, "complete");
   assert.equal(snapshot.body.payload.documents.completeness, "complete");
   verifyResponse(snapshot, JOBROLO_IMPORT_SNAPSHOT_ROUTE);
@@ -287,7 +315,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   });
   assert.equal(
     state.calls.length - callsBeforeDocument,
-    6,
+    7,
     "document provider-call budget"
   );
   assert.equal(state.writes, 0);
@@ -592,6 +620,7 @@ function contact(overrides = {}) {
     "Carrier DA": "Taylor Adjuster",
     "Carrier DA Contact #": "(555) 555-0130",
     "Carrier DA Email": "adjuster@carrier.example",
+    customer: CUSTOMER_ID,
     ...overrides
   };
 }
@@ -606,6 +635,7 @@ function collection(kind, mode) {
     if (kind === "activities") return {
       jnid: `private-activity-${index}`,
       primary: { id: RAW_FILE_ID },
+      customer: CUSTOMER_ID,
       activity_type: "Status Change",
       status_name: "Complete",
       occurred_at: "2026-08-08T14:30:00.000Z",
@@ -615,6 +645,7 @@ function collection(kind, mode) {
     if (kind === "tasks") return {
       jnid: `private-task-${index}`,
       related: { id: RAW_FILE_ID },
+      customer: CUSTOMER_ID,
       task_type: "Task",
       status_name: "Open",
       priority_name: "Urgent",
@@ -625,6 +656,7 @@ function collection(kind, mode) {
     return {
       jnid: `private-document-${index}`,
       related: { id: RAW_FILE_ID },
+      customer: CUSTOMER_ID,
       filename: mode === "oversize"
         ? `${"😀".repeat(156)}.pdf`
         : "Carrier settlement estimate.pdf",
@@ -785,6 +817,8 @@ function assertNoPrivateMaterial(text) {
   for (const forbidden of [
     RAW_FILE_ID,
     OWNER_ID,
+    ACCOUNT_USER_ID,
+    CUSTOMER_ID,
     "jobnimbus-import-provider-key",
     "download_url",
     "private.invalid",
