@@ -176,6 +176,27 @@ test("literal Jobrolo snapshot wire and SHA-256 match the cross-repo v1 golden",
   }
 });
 
+test("provider label truncation cannot leave adapter-invalid edge whitespace", () => {
+  const input = rawProviderInput();
+  input.activities[0].label = `${"x".repeat(159)} trailing words`;
+
+  const providerEnvelope = mapJobNimbusFileEnvelope(input, {
+    assignedOwnerId: OWNER_ID,
+    expectedProviderFileId: RAW_FILE_ID
+  });
+  const mappedLabel = providerEnvelope.data.activities[0].label;
+
+  assert.equal(Array.from(mappedLabel).length <= 160, true);
+  assert.equal(mappedLabel, "x".repeat(159));
+  assert.equal(mappedLabel, mappedLabel.trim());
+
+  const snapshot = projectJobNimbusFileEnvelopeToImportSnapshot(
+    providerEnvelope,
+    goldenReferences()
+  );
+  assert.equal(snapshot.activities.items[0].label, mappedLabel);
+});
+
 test("adapter mirrors the Jobrolo normalized ASCII email v1 language", () => {
   assert.equal(
     JOBROLO_JOBNIMBUS_NORMALIZED_EMAIL_SCHEMA,
