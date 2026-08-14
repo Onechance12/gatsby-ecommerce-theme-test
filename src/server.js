@@ -7012,16 +7012,30 @@ async function hcnClaimFilingStatus(input = {}) {
     conversationRef: input.conversationRef,
     fileRef: input.fileRef
   });
-  const eligible = hcnClaimFilingPrincipalEligible(principal);
+  const principalEligible = hcnClaimFilingPrincipalEligible(principal);
+  const existingClaim = Boolean(String(context.file.claimNumber || "").trim());
+  const eligible = principalEligible && !existingClaim;
   const recovery = eligible
     ? await hcnRecoverableClaimCall({ context, principal })
     : Object.freeze({ state: "none" });
   return hcnClaimFilingEnvelope({
     eligible,
+    principalEligible,
+    filingState: principalEligible
+      ? (existingClaim ? "existing_claim" : "new_claim_candidate")
+      : "not_authorized",
+    existingClaim,
+    blockers: existingClaim
+      ? [{
+          code: "existing_claim",
+          label: "This file already has a claim number. Use status follow-up instead of opening a new claim.",
+          source: "jobnimbus"
+        }]
+      : [],
     fileRef: context.fileRef,
     callsEnabled: eligible && ALLOW_RETELL_CALLS,
     writebackConfigured:
-      eligible && HCN_CLAIM_WRITEBACK_FIELD_MAPPING.configured === true,
+      principalEligible && HCN_CLAIM_WRITEBACK_FIELD_MAPPING.configured === true,
     recovery
   });
 }

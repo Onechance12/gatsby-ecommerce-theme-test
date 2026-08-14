@@ -643,7 +643,32 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
   );
   assert.equal(status.response.status, 200, status.text);
   assert.equal(status.body.result.eligible, true);
+  assert.equal(status.body.result.principalEligible, true);
+  assert.equal(status.body.result.filingState, "new_claim_candidate");
+  assert.equal(status.body.result.existingClaim, false);
+  assert.deepEqual(status.body.result.blockers, []);
   assert.equal(status.body.result.callsEnabled, true);
+
+  fixture.contact.cf_string_10 = "EXISTING-JOBROLO-CLAIM-1";
+  const existingClaimStatus = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "0"
+  );
+  assert.equal(existingClaimStatus.response.status, 200, existingClaimStatus.text);
+  assert.equal(existingClaimStatus.body.result.eligible, false);
+  assert.equal(existingClaimStatus.body.result.principalEligible, true);
+  assert.equal(existingClaimStatus.body.result.filingState, "existing_claim");
+  assert.equal(existingClaimStatus.body.result.existingClaim, true);
+  assert.equal(existingClaimStatus.body.result.callsEnabled, false);
+  assert.equal(existingClaimStatus.body.result.writebackConfigured, true);
+  assert.deepEqual(existingClaimStatus.body.result.blockers, [{
+    code: "existing_claim",
+    label: "This file already has a claim number. Use status follow-up instead of opening a new claim.",
+    source: "jobnimbus"
+  }]);
+  fixture.contact.cf_string_10 = "";
 
   const prepared = await signedJobroloClaimPost(
     fixture,
