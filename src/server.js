@@ -274,8 +274,10 @@ import {
   createJobroloHcnAuthenticator,
   deriveJobroloAssistantScopedBindingRef,
   deriveJobroloAssistantSessionBindingRef,
+  HCN_JOBROLO_CLAIM_FILING_ROUTES,
   isJobroloHcnRoute,
   HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
+  loadJobroloHcnClaimFilingConfiguration,
   loadJobroloHcnIntegrationConfiguration,
   loadJobroloHcnNoteWritebackConfiguration
 } from "./integrations/jobrolo-service-auth.js";
@@ -684,17 +686,85 @@ if (
     "The owner-pilot Jobrolo note-writeback principal must exactly match CHANCE_GOOGLE_EMAIL."
   );
 }
+const HCN_JOBROLO_CLAIM_FILING_CONFIGURATION =
+  loadJobroloHcnClaimFilingConfiguration(process.env, {
+    disallowedClientIds: [{
+      name: "HCN_JOBROLO_CLIENT_ID",
+      value: HCN_JOBROLO_CONFIGURATION.clientId
+    }, {
+      name: "HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID",
+      value: HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId
+    }, {
+      name: "HCN_JOBROLO_IMPORT_CLIENT_ID",
+      value: process.env.HCN_JOBROLO_IMPORT_CLIENT_ID || ""
+    }],
+    disallowedSecrets: [
+      ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
+      [
+        "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
+        HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.secret
+      ],
+      [
+        "HCN_JOBROLO_IMPORT_SHARED_SECRET",
+        process.env.HCN_JOBROLO_IMPORT_SHARED_SECRET || ""
+      ],
+      ["JOBNIMBUS_API_KEY", API_KEY],
+      ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+      ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+      ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+      ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+      ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
+      ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
+      ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
+      ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
+      ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
+      ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
+      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
+      ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
+      ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
+      ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
+      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY],
+      ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+      ["QUO_API_KEY", QUO_API_KEY],
+      ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
+      ["RETELL_API_KEY", RETELL_API_KEY],
+      ["RETELL_INBOUND_WEBHOOK_TOKEN", process.env.RETELL_INBOUND_WEBHOOK_TOKEN || ""],
+      ["VOICE_STREAM_TOKEN", process.env.VOICE_STREAM_TOKEN || ""],
+      ["OPENAI_API_KEY", OPENAI_API_KEY]
+    ].map(([name, value]) => ({ name, value }))
+  });
+const HCN_JOBROLO_CLAIM_FILING_AUTHENTICATOR =
+  createJobroloHcnAuthenticator({
+    configuration: HCN_JOBROLO_CLAIM_FILING_CONFIGURATION,
+    allowedRoutes: HCN_JOBROLO_CLAIM_FILING_ROUTES
+  });
+const HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE =
+  "claim_filing_v1";
+if (
+  HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready
+  && HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.principalEmail
+    !== CHANCE_GOOGLE_EMAIL
+) {
+  throw new Error(
+    "The owner-pilot Jobrolo claim-filing principal must exactly match CHANCE_GOOGLE_EMAIL."
+  );
+}
 const HCN_JOBROLO_IMPORT_CONFIGURATION =
   loadJobroloImportTransportConfiguration(process.env, {
     disallowedClientIds: [
       HCN_JOBROLO_CONFIGURATION.clientId,
-      HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId
+      HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId,
+      HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId
     ],
     disallowedSecrets: [
       ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
       [
         "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
         HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.secret
+      ],
+      [
+        "HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET",
+        HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.secret
       ],
       ["JOBNIMBUS_API_KEY", API_KEY],
       ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
@@ -1222,7 +1292,13 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/assistant/turn", jobroloHcnAssistantTurn],
   ["POST /integrations/jobrolo/v1/action-plans/prepare", jobroloHcnPrepareActionPlan],
   ["POST /integrations/jobrolo/v1/action-plans/execute", jobroloHcnExecuteActionPlan],
-  ["POST /integrations/jobrolo/v1/action-receipts/detail", jobroloHcnReadActionReceipt]
+  ["POST /integrations/jobrolo/v1/action-receipts/detail", jobroloHcnReadActionReceipt],
+  ["POST /integrations/jobrolo/v1/claim-filings/status", jobroloHcnClaimFilingStatus],
+  ["POST /integrations/jobrolo/v1/claim-filings/prepare", jobroloHcnPrepareClaimFiling],
+  ["POST /integrations/jobrolo/v1/claim-filings/execute", jobroloHcnExecuteClaimFiling],
+  ["POST /integrations/jobrolo/v1/claim-filings/result", jobroloHcnReadClaimFilingResult],
+  ["POST /integrations/jobrolo/v1/claim-filings/writeback/prepare", jobroloHcnPrepareClaimWriteback],
+  ["POST /integrations/jobrolo/v1/claim-filings/writeback/execute", jobroloHcnExecuteClaimWriteback]
 ]);
 
 await hydrateHcnIdentityPins();
@@ -1775,7 +1851,8 @@ function health() {
       durableHcnReceiptAndReadback: true,
       automaticExecution: false,
       providerCredentialsExposed: false,
-      claimFilingExposed: false,
+      claimFilingExposed:
+        HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       legacyTokensAccepted: false
     },
     hcnAssistant: {
@@ -3407,7 +3484,8 @@ async function jobroloHcnStatus(input = {}) {
         && HCN_ACTION_EXECUTION_ENABLED
         && HCN_ACTION_RECEIPT_STORE_PATH
       ) ? "approval_gated" : "unavailable",
-      claimFilingExposed: false,
+      claimFilingExposed:
+        HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       providerCredentialsExposed: false
     })
   });
@@ -5934,6 +6012,180 @@ function currentJobroloAssistantBindingRef({ kind, fileRef }) {
   });
 }
 
+async function withJobroloClaimFilingConversation(fileRef, callback) {
+  if (!jobroloClaimFilingProfileActive()) {
+    const error = new Error(
+      "The dedicated Jobrolo claim-filing credential is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const principal = assertHcnAssignedReadSession();
+  const normalizedFileRef = hcnAssistantConversationFileRef(
+    fileRef,
+    "file"
+  );
+  const externalBindingRef = currentJobroloAssistantBindingRef({
+    kind: "file",
+    fileRef: normalizedFileRef
+  });
+  return HCN_JOBROLO_ASSISTANT_BINDING_OPERATIONS.run(
+    externalBindingRef,
+    async () => {
+      await withHcnReadAdmission(
+        () => resolveHcnAssistantAssignedFile({
+          fileRef: normalizedFileRef,
+          principal
+        })
+      );
+      const conversation = await requireHcnAssistantConversationStore()
+        .getOrCreateBound({
+          principalRef: hcnGooglePrincipalRef(principal.googleSubject),
+          scope: "assigned",
+          kind: "file",
+          fileRef: normalizedFileRef,
+          title: "Jobrolo claim-filing file",
+          externalBindingRef
+        });
+      return callback({
+        principal,
+        fileRef: normalizedFileRef,
+        conversationRef: conversation.conversationRef
+      });
+    }
+  );
+}
+
+async function jobroloHcnClaimFilingStatus(input = {}) {
+  assertExactHcnKeys(input, ["fileRef"], "Jobrolo claim filing status");
+  return withJobroloClaimFilingConversation(
+    input.fileRef,
+    ({ fileRef, conversationRef }) => hcnClaimFilingStatus({
+      conversationRef,
+      fileRef
+    })
+  );
+}
+
+async function jobroloHcnPrepareClaimFiling(input = {}) {
+  assertExactHcnKeys(
+    input,
+    ["fileRef", "confirmations"],
+    "Jobrolo claim filing prepare"
+  );
+  return withJobroloClaimFilingConversation(
+    input.fileRef,
+    ({ fileRef, conversationRef }) => hcnPrepareClaimFiling({
+      conversationRef,
+      fileRef,
+      confirmations: input.confirmations
+    })
+  );
+}
+
+async function jobroloHcnExecuteClaimFiling(input = {}) {
+  assertExactHcnKeys(
+    input,
+    ["fileRef", "planId", "approval"],
+    "Jobrolo claim filing execute"
+  );
+  return withJobroloClaimFilingConversation(
+    input.fileRef,
+    ({ fileRef, conversationRef }) => {
+      const pending = HCN_PENDING_CLAIM_CALL_PLANS.get({
+        sessionBinding: hcnClaimFilingSessionBinding(),
+        planId: String(input.planId || "")
+      });
+      if (pending.fileRef !== fileRef) {
+        const error = new Error(
+          "The Jobrolo approval does not match the exact claim file."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      const approved = validateJobroloActionExecuteInput({
+        planId: input.planId,
+        approval: input.approval
+      }, { plan: pending });
+      return hcnExecuteClaimFiling({
+        conversationRef,
+        fileRef,
+        planId: approved.planId,
+        approvalDigest: approved.approval.planDigest
+      });
+    }
+  );
+}
+
+async function jobroloHcnReadClaimFilingResult(input = {}) {
+  assertExactHcnKeys(
+    input,
+    ["fileRef", "planId", "callRef"],
+    "Jobrolo claim filing result"
+  );
+  return withJobroloClaimFilingConversation(
+    input.fileRef,
+    ({ fileRef, conversationRef }) => hcnReadClaimFilingResult({
+      conversationRef,
+      fileRef,
+      planId: input.planId,
+      callRef: input.callRef
+    })
+  );
+}
+
+async function jobroloHcnPrepareClaimWriteback(input = {}) {
+  assertExactHcnKeys(
+    input,
+    ["fileRef", "callPlanId", "callRef", "humanConfirmation"],
+    "Jobrolo claim writeback prepare"
+  );
+  return withJobroloClaimFilingConversation(
+    input.fileRef,
+    ({ fileRef, conversationRef }) => hcnPrepareClaimWriteback({
+      conversationRef,
+      fileRef,
+      callPlanId: input.callPlanId,
+      callRef: input.callRef,
+      humanConfirmation: input.humanConfirmation
+    })
+  );
+}
+
+async function jobroloHcnExecuteClaimWriteback(input = {}) {
+  assertExactHcnKeys(
+    input,
+    ["fileRef", "planId", "approval"],
+    "Jobrolo claim writeback execute"
+  );
+  return withJobroloClaimFilingConversation(
+    input.fileRef,
+    ({ fileRef, conversationRef }) => {
+      const pending = HCN_PENDING_CLAIM_WRITEBACK_PLANS.get({
+        sessionBinding: hcnClaimWritebackSessionBinding(),
+        planId: String(input.planId || "")
+      });
+      if (pending.fileRef !== fileRef) {
+        const error = new Error(
+          "The Jobrolo approval does not match the exact claim writeback file."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+      const approved = validateJobroloActionExecuteInput({
+        planId: input.planId,
+        approval: input.approval
+      }, { plan: pending });
+      return hcnExecuteClaimWriteback({
+        conversationRef,
+        fileRef,
+        planId: approved.planId,
+        approvalDigest: approved.approval.planDigest
+      });
+    }
+  );
+}
+
 function validateHcnAssistantTurnInput(input) {
   assertExactHcnKeys(
     input,
@@ -6760,10 +7012,7 @@ async function hcnClaimFilingStatus(input = {}) {
     conversationRef: input.conversationRef,
     fileRef: input.fileRef
   });
-  const eligible = hcnClaimFilingPilotEligible(
-    HCN_CLAIM_FILING_PILOT_SUBJECTS,
-    principal.googleSubject
-  );
+  const eligible = hcnClaimFilingPrincipalEligible(principal);
   const recovery = eligible
     ? await hcnRecoverableClaimCall({ context, principal })
     : Object.freeze({ state: "none" });
@@ -6779,10 +7028,7 @@ async function hcnClaimFilingStatus(input = {}) {
 
 async function hcnPrepareClaimFiling(input = {}) {
   const principal = assertHcnAssignedReadSession();
-  assertHcnClaimFilingPilot(
-    HCN_CLAIM_FILING_PILOT_SUBJECTS,
-    principal.googleSubject
-  );
+  assertHcnClaimFilingPrincipal(principal);
   assertExactHcnKeys(
     input,
     ["conversationRef", "fileRef", "confirmations"],
@@ -6906,10 +7152,7 @@ async function hcnPrepareClaimFiling(input = {}) {
 
 async function hcnExecuteClaimFiling(input = {}) {
   const principal = assertHcnAssignedReadSession();
-  assertHcnClaimFilingPilot(
-    HCN_CLAIM_FILING_PILOT_SUBJECTS,
-    principal.googleSubject
-  );
+  assertHcnClaimFilingPrincipal(principal);
   assertExactHcnKeys(
     input,
     ["conversationRef", "fileRef", "planId", "approvalDigest"],
@@ -7181,10 +7424,7 @@ function hcnFinalizeUncertainClaimCall({
 
 async function hcnReadClaimFilingResult(input = {}) {
   const principal = assertHcnAssignedReadSession();
-  assertHcnClaimFilingPilot(
-    HCN_CLAIM_FILING_PILOT_SUBJECTS,
-    principal.googleSubject
-  );
+  assertHcnClaimFilingPrincipal(principal);
   assertExactHcnKeys(
     input,
     ["conversationRef", "fileRef", "planId", "callRef"],
@@ -7254,10 +7494,7 @@ async function hcnReadClaimFilingResult(input = {}) {
 
 async function hcnPrepareClaimWriteback(input = {}) {
   const principal = assertHcnAssignedReadSession();
-  assertHcnClaimFilingPilot(
-    HCN_CLAIM_FILING_PILOT_SUBJECTS,
-    principal.googleSubject
-  );
+  assertHcnClaimFilingPrincipal(principal);
   assertExactHcnKeys(
     input,
     [
@@ -7382,10 +7619,7 @@ async function hcnPrepareClaimWriteback(input = {}) {
 
 async function hcnExecuteClaimWriteback(input = {}) {
   const principal = assertHcnAssignedReadSession();
-  assertHcnClaimFilingPilot(
-    HCN_CLAIM_FILING_PILOT_SUBJECTS,
-    principal.googleSubject
-  );
+  assertHcnClaimFilingPrincipal(principal);
   assertExactHcnKeys(
     input,
     ["conversationRef", "fileRef", "planId", "approvalDigest"],
@@ -8084,6 +8318,27 @@ function jobroloNoteWritebackProfileActive() {
     === HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE;
 }
 
+function jobroloClaimFilingProfileActive() {
+  return currentRequestAuthentication()?.jobroloCapabilityProfile
+    === HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE;
+}
+
+function hcnClaimFilingPrincipalEligible(principal) {
+  return jobroloClaimFilingProfileActive()
+    || hcnClaimFilingPilotEligible(
+      HCN_CLAIM_FILING_PILOT_SUBJECTS,
+      principal.googleSubject
+    );
+}
+
+function assertHcnClaimFilingPrincipal(principal) {
+  if (jobroloClaimFilingProfileActive()) return;
+  assertHcnClaimFilingPilot(
+    HCN_CLAIM_FILING_PILOT_SUBJECTS,
+    principal.googleSubject
+  );
+}
+
 function assertExactJobroloNoteWritebackOperations(operations) {
   if (
     !Array.isArray(operations)
@@ -8554,10 +8809,13 @@ function hcnActionReceiptPrincipalRef() {
     googleSubject
   );
   const noteWritebackProfile = jobroloNoteWritebackProfileActive();
+  const claimFilingProfile = jobroloClaimFilingProfileActive();
   const digest = createHash("sha256")
     .update(
       noteWritebackProfile
         ? "hcn-jobrolo:note-writeback-receipt-principal:v1"
+        : claimFilingProfile
+          ? "hcn-jobrolo:claim-filing-receipt-principal:v1"
         : "hcn-console:durable-receipt-principal:v2",
       "utf8"
     )
@@ -8565,11 +8823,13 @@ function hcnActionReceiptPrincipalRef() {
     .update(references.tenantId, "utf8")
     .update("\0", "utf8")
     .update(stableOperatorRef, "utf8");
-  if (noteWritebackProfile) {
+  if (noteWritebackProfile || claimFilingProfile) {
     digest
       .update("\0", "utf8")
       .update(
-        HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId,
+        noteWritebackProfile
+          ? HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId
+          : HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId,
         "utf8"
       );
   }
@@ -19610,6 +19870,18 @@ function assertJobroloImportRouteDeadline(budget) {
 function selectJobroloHcnCapability(headers) {
   const authorization = headers?.authorization;
   if (
+    HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready
+    && typeof authorization === "string"
+    && authorization
+      === `Jobrolo-HMAC ${HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId}`
+  ) {
+    return Object.freeze({
+      authenticator: HCN_JOBROLO_CLAIM_FILING_AUTHENTICATOR,
+      configuration: HCN_JOBROLO_CLAIM_FILING_CONFIGURATION,
+      capabilityProfile: HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE
+    });
+  }
+  if (
     HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.ready
     && typeof authorization === "string"
     && authorization
@@ -19633,7 +19905,8 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
   const capabilityProfile = String(capability?.capabilityProfile || "");
   const supportedProfile = [
     HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE,
-    HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE
+    HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE,
+    HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE
   ].includes(capabilityProfile);
   const email = String(configuration?.principalEmail || "");
   if (
@@ -19683,10 +19956,14 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
   }
   const noteWritebackProfile = capabilityProfile
     === HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE;
+  const claimFilingProfile = capabilityProfile
+    === HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE;
   const sessionDigest = createHash("sha256")
     .update(
       noteWritebackProfile
         ? "hcn-jobrolo:note-writeback-service-session:v1"
+        : claimFilingProfile
+          ? "hcn-jobrolo:claim-filing-service-session:v1"
         : "hcn-jobrolo:service-session:v1",
       "utf8"
     )
@@ -19694,7 +19971,7 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
     .update(email, "utf8")
     .update("\0", "utf8")
     .update(verified.sessionRef, "utf8");
-  if (noteWritebackProfile) {
+  if (noteWritebackProfile || claimFilingProfile) {
     sessionDigest
       .update("\0", "utf8")
       .update(verified.clientId, "utf8");
