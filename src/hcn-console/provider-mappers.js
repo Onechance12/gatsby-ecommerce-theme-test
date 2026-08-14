@@ -279,6 +279,11 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     options.knownProviderFileIds,
     expectedProviderFileId,
   );
+  const knownProviderUserIds = normalizeKnownProviderUserIds(
+    options.knownProviderUserIds,
+    knownProviderFileIds,
+    expectedProviderFileId,
+  );
   const requireExactContactReferences =
     options.requireExactContactReferences === true;
   const freshness = normalizeFreshness(input);
@@ -318,6 +323,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     dedupeIdenticalProviderIds: true,
     requireExactContactReferences,
     expectedProviderCustomerId,
+    knownProviderUserIds,
   });
   const taskResult = mapScopedCollection({
     value: input.tasks,
@@ -328,6 +334,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
       mapTask(record, assignedOwnerId, legacyChanceField),
     requireExactContactReferences,
     expectedProviderCustomerId,
+    knownProviderUserIds,
   });
   const documentResult = mapScopedCollection({
     value: input.documents,
@@ -338,6 +345,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     filter: (record) => !isPhotoLikeDocument(record),
     requireExactContactReferences,
     expectedProviderCustomerId,
+    knownProviderUserIds,
   });
   const activities = activityResult.items;
   const tasks = taskResult.items;
@@ -700,6 +708,7 @@ function mapScopedCollection({
   dedupeIdenticalProviderIds = false,
   requireExactContactReferences = false,
   expectedProviderCustomerId = null,
+  knownProviderUserIds = null,
 }) {
   const rows = requireArray(value, label);
   if (rows.length > HCN_PROVIDER_MAPPER_LIMITS.maximumCollectionItems) {
@@ -716,6 +725,7 @@ function mapScopedCollection({
       allowedExactReferenceFields,
       requireExactContactReferences,
       expectedProviderCustomerId,
+      knownProviderUserIds,
     )) {
       fail(
         'scope_mismatch',
@@ -774,6 +784,36 @@ function normalizeKnownProviderFileIds(value, expectedProviderFileId) {
   return ids;
 }
 
+function normalizeKnownProviderUserIds(
+  value,
+  knownProviderFileIds,
+  expectedProviderFileId,
+) {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 10_000) {
+    fail(
+      'invalid_configuration',
+      'Known JobNimbus user scope is unavailable.',
+    );
+  }
+  const ids = new Set();
+  for (const valueId of value) {
+    const id = requireProviderId(valueId, 'knownProviderUserIds');
+    if (
+      ids.has(id)
+      || id === expectedProviderFileId
+      || knownProviderFileIds?.has(id)
+    ) {
+      fail(
+        'invalid_configuration',
+        'Known JobNimbus user scope is ambiguous.',
+      );
+    }
+    ids.add(id);
+  }
+  return ids;
+}
+
 function recordReferencesFile(
   record,
   expectedProviderFileId,
@@ -781,6 +821,7 @@ function recordReferencesFile(
   allowedExactReferenceFields = ['related'],
   requireExactContactReferences = false,
   expectedProviderCustomerId = null,
+  knownProviderUserIds = null,
 ) {
   if (!isPlainObject(record)) return false;
   if (
@@ -789,6 +830,7 @@ function recordReferencesFile(
       record,
       expectedProviderFileId,
       expectedProviderCustomerId,
+      knownProviderUserIds,
     )
   ) {
     return false;
@@ -876,6 +918,7 @@ function hasExactTypedContactReferenceScope(
   record,
   expectedProviderFileId,
   expectedProviderCustomerId,
+  knownProviderUserIds,
 ) {
   const state = { nodes: 0, seen: new WeakSet() };
   for (const [container, role] of NESTED_REFERENCE_FIELDS) {
@@ -898,6 +941,7 @@ function hasExactTypedContactReferenceScope(
       value,
       role,
       expectedProviderFileId,
+      knownProviderUserIds,
       state,
       0,
     )) return false;
@@ -909,6 +953,7 @@ function validateExactReferenceValue(
   value,
   role,
   expectedProviderFileId,
+  knownProviderUserIds,
   state,
   depth,
 ) {
@@ -926,6 +971,7 @@ function validateExactReferenceValue(
         item,
         role,
         expectedProviderFileId,
+        knownProviderUserIds,
         state,
         depth + 1,
       )
@@ -973,10 +1019,15 @@ function validateExactReferenceValue(
     foundReference = true;
     const id = genericIds[0];
     if (id !== expectedProviderFileId) {
+      const verifiedUserReference =
+        role === 'generic' && knownProviderUserIds?.has(id);
       if (
-        role === 'contact'
-        || !declaredType
-        || !EXPLICIT_NON_CONTACT_REFERENCE_TYPES.has(declaredType)
+        !verifiedUserReference
+        && (
+          role === 'contact'
+          || !declaredType
+          || !EXPLICIT_NON_CONTACT_REFERENCE_TYPES.has(declaredType)
+        )
       ) return false;
     }
   }
@@ -990,6 +1041,7 @@ function validateExactReferenceValue(
       nested,
       nestedRole,
       expectedProviderFileId,
+      knownProviderUserIds,
       state,
       depth + 1,
     )) return false;

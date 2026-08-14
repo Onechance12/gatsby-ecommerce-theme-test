@@ -137,8 +137,28 @@ export function validateCompleteJobNimbusUserSnapshot(
     );
   }
 
+  projectCompleteJobNimbusUserIds(rows, { maxRecords });
+  return Object.freeze([...rows]);
+}
+
+/**
+ * Project only the stable provider ids from one already-complete directory.
+ * Callers can use this minimized set as non-client reference proof without
+ * retaining names, emails, roles, or any other employee-directory fields.
+ */
+export function projectCompleteJobNimbusUserIds(
+  users,
+  { maxRecords = DEFAULT_MAX_RECORDS } = {}
+) {
+  assertPositiveInteger(maxRecords, "maxRecords");
+  if (!Array.isArray(users) || users.length > maxRecords) {
+    throw directoryError(
+      "JobNimbus employee directory exceeds its reviewed bound."
+    );
+  }
+  const ids = [];
   const seenIds = new Set();
-  for (const row of rows) {
+  for (const row of users) {
     const id = userRecordId(row);
     if (!id || seenIds.has(id)) {
       throw directoryError(
@@ -146,8 +166,9 @@ export function validateCompleteJobNimbusUserSnapshot(
       );
     }
     seenIds.add(id);
+    ids.push(id);
   }
-  return Object.freeze([...rows]);
+  return Object.freeze(ids);
 }
 
 export function resolveUniqueActiveJobNimbusUser(

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   JobNimbusUserDirectoryError,
   loadCompleteJobNimbusUsers,
+  projectCompleteJobNimbusUserIds,
   resolveUniqueActiveJobNimbusUser,
   validateCompleteJobNimbusUserSnapshot
 } from "./user-directory.js";
@@ -154,6 +155,9 @@ test("the account users endpoint is validated as one complete snapshot", () => {
   ]);
   assert.equal(users.length, 2);
   assert.equal(Object.isFrozen(users), true);
+  const userIds = projectCompleteJobNimbusUserIds(users);
+  assert.deepEqual(userIds, ["user-1", "user-2"]);
+  assert.equal(Object.isFrozen(userIds), true);
 
   assert.throws(
     () => validateCompleteJobNimbusUserSnapshot({
@@ -184,6 +188,13 @@ test("the account users endpoint is validated as one complete snapshot", () => {
       { maxRecords: 1 }
     ),
     /reviewed bound/
+  );
+  assert.throws(
+    () => projectCompleteJobNimbusUserIds([
+      { jnid: "same-user" },
+      { id: "same-user" }
+    ]),
+    /repeated or omitted/
   );
 });
 
