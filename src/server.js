@@ -14801,6 +14801,7 @@ function communicationSourceStatus(result, count, detail = null) {
           status: "partial",
           count,
           failureCount: detail.failures?.length || 0,
+          ...communicationFailureDiagnostics(detail.failures),
           ...(Number.isSafeInteger(detail.lineCount)
             ? { lineCount: detail.lineCount }
             : {}),
@@ -14819,6 +14820,28 @@ function communicationSourceStatus(result, count, detail = null) {
             : {})
         }
     : { status: "unavailable", count: 0, error: redactSensitiveText(result.reason?.message || "Unknown source error") };
+}
+
+function communicationFailureDiagnostics(failures) {
+  const safeExamples = [...new Set(
+    (Array.isArray(failures) ? failures : [])
+      .map((failure) => redactSensitiveText(failure?.error || ""))
+      .map((message) => String(message || "")
+        .replace(/\+[1-9]\d{9,14}/g, "[PHONE]")
+        .replace(/[A-Z]{2}[A-Za-z0-9._~-]{6,}/g, "[PROVIDER_ID]")
+        .slice(0, 240))
+      .filter(Boolean)
+  )].slice(0, 3);
+  const statusCounts = {};
+  for (const failure of Array.isArray(failures) ? failures : []) {
+    const match = String(failure?.error || "").match(/Quo API (\d{3})/);
+    const key = match ? match[1] : "unknown";
+    statusCounts[key] = (statusCounts[key] || 0) + 1;
+  }
+  return {
+    ...(Object.keys(statusCounts).length ? { failureStatusCounts: statusCounts } : {}),
+    ...(safeExamples.length ? { failureExamples: safeExamples } : {})
+  };
 }
 
 async function startTodaysInspectionReview(input, identity) {
