@@ -289,6 +289,19 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(rejectedCommunicationSweep.response.status, 400);
   assert.equal(providerWrites.length, 0);
 
+  const rejectedQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: "request_96969696969696969696969696969696",
+      sessionRef,
+      nonce: "nonce_96969696969696969696969696969696",
+      input: { phone: "+19725731730", ownerId: SECOND_OWNER_ID }
+    }
+  );
+  assert.equal(rejectedQuoPhoneHistory.response.status, 400);
+  assert.equal(providerWrites.length, 0);
+
   const managementSweep = await signedPost(
     origin,
     "/integrations/jobrolo/v1/management-sweep",
@@ -652,12 +665,13 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.notEqual(crossProfileExecution.response.status, 200);
   assert.equal(providerWrites.length, 2);
 
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < 7; index += 1) {
     const pathname = [
       "/integrations/jobrolo/v1/status",
       "/integrations/jobrolo/v1/work-center",
       "/integrations/jobrolo/v1/file-review",
       "/integrations/jobrolo/v1/communication-sweep",
+      "/integrations/jobrolo/v1/quo-phone-history",
       "/integrations/jobrolo/v1/management-sweep",
       "/integrations/jobrolo/v1/assistant/turn"
     ][index];
