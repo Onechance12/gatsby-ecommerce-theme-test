@@ -342,7 +342,13 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     expectedProviderFileId,
     knownProviderFileIds,
     mapper: mapDocument,
-    filter: (record) => !isPhotoLikeDocument(record),
+    // Ordinary file reviews keep photo-heavy jobs compact. The separate,
+    // signed Jobrolo import transport opts in so it can issue opaque refs for
+    // exact images and let Jobrolo's own approval/scanner/photo pipeline
+    // decide whether bytes become canonical evidence.
+    filter: options.includePhotoDocuments === true
+      ? undefined
+      : (record) => !isPhotoLikeDocument(record),
     requireExactContactReferences,
     expectedProviderCustomerId,
     knownProviderUserIds,
@@ -383,7 +389,8 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
 }
 
 /**
- * Map the complete non-photo document manifest for one exact assigned file.
+ * Map the complete document manifest for one exact assigned file. Photo-like
+ * rows remain excluded unless the signed Jobrolo import transport opts in.
  * This is the only provider-record shape accepted by the binary transfer
  * boundary; raw provider ids remain server-local.
  */
@@ -410,7 +417,9 @@ export function mapJobNimbusDocumentCollection(input, options = {}) {
     expectedProviderFileId,
     knownProviderFileIds,
     mapper: mapDocument,
-    filter: (record) => !isPhotoLikeDocument(record),
+    filter: options.includePhotoDocuments === true
+      ? undefined
+      : (record) => !isPhotoLikeDocument(record),
     requireExactContactReferences:
       options.requireExactContactReferences === true,
   });
