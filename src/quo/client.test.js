@@ -639,8 +639,8 @@ test("Quo inbox discovers recent conversations before reading incoming calls and
     assert.equal(result.items[0].line, "Andrea Ramirez");
     assert.equal(result.items[0].participant, "+12145550199");
     assert.equal(result.partial, false);
-    assert.match(requests.find((url) => url.includes("/conversations?")), /phoneNumbers%5B%5D=PN_chance/);
-    assert.match(requests.find((url) => url.includes("/messages?")), /participants%5B%5D=%2B12145550199/);
+    assert.match(requests.find((url) => url.includes("/conversations?")), /phoneNumbers=PN_chance/);
+    assert.match(requests.find((url) => url.includes("/messages?")), /participants=%2B12145550199/);
   } finally {
     globalThis.fetch = originalFetch;
   }

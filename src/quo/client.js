@@ -100,7 +100,7 @@ export async function readQuoHistoryStrict(config, input = {}) {
           phoneNumberId: line.id,
           maxResults: String(maxResults)
         });
-        query.append("participants[]", phone);
+        query.append("participants", phone);
         if (pageToken) query.set("pageToken", pageToken);
 
         let payload;
@@ -337,7 +337,7 @@ async function listConversationActivity(config, { kind, phoneNumberId, participa
       createdAfter,
       maxResults: "100"
     });
-    query.append("participants[]", participant);
+    query.append("participants", participant);
     if (pageToken) query.set("pageToken", pageToken);
     const payload = await request(config, "GET", `/${kind}?${query}`);
     rows.push(...(Array.isArray(payload.data) ? payload.data : []));
@@ -355,7 +355,7 @@ async function listRecentConversations(config, numbers, updatedAfter, maxResults
       updatedAfter,
       maxResults: "100"
     });
-    for (const line of numbers) query.append("phoneNumbers[]", line.id);
+    for (const line of numbers) query.append("phoneNumbers", line.id);
     if (pageToken) query.set("pageToken", pageToken);
     const payload = await request(config, "GET", `/conversations?${query}`);
     for (const row of Array.isArray(payload.data) ? payload.data : []) {
@@ -409,7 +409,7 @@ async function collectAcrossLines(config, numbers, nameById, phone, kind, maxRes
   const byId = new Map();
   for (const line of numbers) {
     try {
-      const endpoint = `/${kind}?phoneNumberId=${encodeURIComponent(line.id)}&participants[]=${encodeURIComponent(phone)}&maxResults=${maxResults}`;
+      const endpoint = `/${kind}?phoneNumberId=${encodeURIComponent(line.id)}&participants=${encodeURIComponent(phone)}&maxResults=${maxResults}`;
       const payload = await request(config, "GET", endpoint);
       for (const row of Array.isArray(payload.data) ? payload.data : []) {
         const id = row.id || `${line.id}:${row.createdAt}:${kind}`;
