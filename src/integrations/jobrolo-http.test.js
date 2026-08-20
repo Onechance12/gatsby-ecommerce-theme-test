@@ -50,6 +50,67 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     is_active: true,
     date_updated: 1785260900
   };
+  const archivedDuplicateContact = {
+    ...assignedContact,
+    jnid: "archived-duplicate-provider-id",
+    number: 1701,
+    display_name: "Archived Duplicate Fixture",
+    owners: [{ id: "historical-owner-fixture" }],
+    is_active: false,
+    is_archived: true
+  };
+  const malformedUnrelatedContact = {
+    jnid: "malformed-unrelated-provider-id",
+    number: 1702,
+    record_type_name: "Insurance",
+    owners: [{ id: "unconfigured-owner-fixture" }],
+    display_name: "Malformed Unrelated Fixture",
+    mobile_phone: { legacy: "not-an-authoritative-phone" },
+    is_active: true,
+    is_archived: false
+  };
+  const inactiveMalformedTargetContact = {
+    ...malformedUnrelatedContact,
+    jnid: "inactive-malformed-target-provider-id",
+    display_name: "Inactive Malformed Target Fixture",
+    mobile_phone: { legacy: "214-555-0199" },
+    is_active: false,
+    is_archived: true
+  };
+  const nonInsuranceMalformedTargetContact = {
+    ...malformedUnrelatedContact,
+    jnid: "non-insurance-malformed-target-provider-id",
+    record_type_name: "Customer",
+    display_name: "Non-Insurance Malformed Target Fixture",
+    mobile_phone: { legacy: "214-555-0199" }
+  };
+  const activeForeignDuplicateContact = {
+    ...assignedContact,
+    jnid: "active-foreign-duplicate-provider-id",
+    number: 1703,
+    display_name: "Active Foreign Duplicate Fixture",
+    owners: [{ id: SECOND_OWNER_ID }]
+  };
+  const conflictingTargetDuplicateContact = {
+    ...assignedContact,
+    display_name: "Conflicting Duplicate Fixture"
+  };
+  const ambiguousMalformedEligibleContact = {
+    jnid: "ambiguous-malformed-provider-id",
+    number: 1704,
+    record_type_name: "Insurance",
+    owners: [{ id: SECOND_OWNER_ID }],
+    display_name: "Ambiguous Malformed Fixture",
+    mobile_phone: { legacy: "214-555-0199" },
+    is_active: true,
+    is_archived: false
+  };
+  let includeActiveForeignDuplicate = false;
+  let includeIdenticalTargetDuplicate = false;
+  let includeConflictingTargetDuplicate = false;
+  let includeAmbiguousMalformedEligible = false;
+  let includeOffTargetQuoCalls = false;
+  let freshAssignedPhoneOverride = null;
   const provider = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://provider.invalid");
     providerCalls.push(url.pathname);
@@ -80,7 +141,36 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       });
     }
     if (req.method === "GET" && url.pathname === "/calls") {
-      return json(res, 200, { data: [] });
+      const lineId = url.searchParams.get("phoneNumberId");
+      return json(res, 200, {
+        data: includeOffTargetQuoCalls && lineId === "PN_12"
+          ? [{
+              id: "CALL_exact_line_12",
+              phoneNumberId: lineId,
+              participants: [QUO_CLIENT_PHONE],
+              createdAt: "2026-08-20T14:05:00.000Z",
+              direction: "incoming",
+              status: "completed",
+              duration: 60
+            }, {
+              id: "SECRET_UNVERIFIABLE_CALL",
+              phoneNumberId: lineId,
+              participants: { unsafe: "+12145559999" },
+              createdAt: "2026-08-20T14:04:00.000Z",
+              direction: "incoming",
+              status: "completed",
+              duration: 30
+            }, ...Array.from({ length: 5 }, (_, index) => ({
+              id: `SECRET_OFF_TARGET_CALL_${index + 1}`,
+              phoneNumberId: lineId,
+              participants: [`+1214555000${index}`],
+              createdAt: `2026-08-20T1${index}:00:00.000Z`,
+              direction: "incoming",
+              status: "completed",
+              duration: 30
+            }))]
+          : []
+      });
     }
     if (req.method === "GET" && url.pathname === "/account/users") {
       return json(res, 200, {
@@ -105,14 +195,38 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     }
     if (req.method === "GET" && url.pathname === "/contacts") {
       return json(res, 200, {
-        contacts: [assignedContact, assignedContactB]
+        contacts: [
+          assignedContact,
+          assignedContactB,
+          archivedDuplicateContact,
+          malformedUnrelatedContact,
+          inactiveMalformedTargetContact,
+          nonInsuranceMalformedTargetContact,
+          ...(includeIdenticalTargetDuplicate
+            ? [assignedContact]
+            : []),
+          ...(includeConflictingTargetDuplicate
+            ? [conflictingTargetDuplicateContact]
+            : []),
+          ...(includeAmbiguousMalformedEligible
+            ? [ambiguousMalformedEligibleContact]
+            : []),
+          ...(includeActiveForeignDuplicate
+            ? [activeForeignDuplicateContact]
+            : [])
+        ]
       });
     }
     if (
       req.method === "GET"
       && url.pathname === "/contacts/assigned-file-provider-id"
     ) {
-      return json(res, 200, assignedContact);
+      return json(res, 200, freshAssignedPhoneOverride === null
+        ? assignedContact
+        : {
+            ...assignedContact,
+            mobile_phone: freshAssignedPhoneOverride
+          });
     }
     if (
       req.method === "GET"
@@ -361,6 +475,8 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(rejectedQuoPhoneHistory.response.status, 400);
   assert.equal(providerWrites.length, 0);
 
+  includeOffTargetQuoCalls = true;
+  includeIdenticalTargetDuplicate = true;
   const quoPhoneHistory = await signedPost(
     origin,
     "/integrations/jobrolo/v1/quo-phone-history",
@@ -371,11 +487,13 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       input: {
         phone: QUO_CLIENT_PHONE,
         maxResults: 25,
-        includeTranscripts: false,
-        transcriptLimit: 0
+        includeTranscripts: true,
+        transcriptLimit: 3
       }
     }
   );
+  includeOffTargetQuoCalls = false;
+  includeIdenticalTargetDuplicate = false;
   assert.equal(quoPhoneHistory.response.status, 200, quoPhoneHistory.text);
   assert.equal(
     quoPhoneHistory.body.result.schema,
@@ -387,11 +505,177 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   );
   assert.equal(quoPhoneHistory.body.result.scope.exactFileMatch, true);
   assert.equal(quoPhoneHistory.body.result.completeness.lineCount, 12);
+  assert.equal(quoPhoneHistory.body.result.completeness.complete, false);
+  assert.deepEqual(
+    quoPhoneHistory.body.result.completeness.reasons,
+    ["provider_filter_mismatch"]
+  );
+  assert.equal(
+    quoPhoneHistory.body.result.completeness.rejectedOffTargetCount,
+    5
+  );
+  assert.equal(
+    quoPhoneHistory.body.result.completeness.rejectedUnverifiableCount,
+    1
+  );
   assert.equal(quoPhoneHistory.body.result.summary.messages, 1);
+  assert.equal(quoPhoneHistory.body.result.summary.calls, 1);
   assert.equal(quoPhoneHistory.body.result.items[0].line, "Team Line 12");
   assert.equal(quoPhoneHistory.body.result.safety.messagesSent, 0);
   assert.equal(quoPhoneHistory.body.result.safety.callsPlaced, 0);
   assert.equal(quoPhoneHistory.body.result.safety.jobNimbusWrites, 0);
+  assert.doesNotMatch(
+    JSON.stringify(quoPhoneHistory.body),
+    /SECRET_(?:OFF_TARGET|UNVERIFIABLE)_CALL|\+1214555(?:000[0-4]|9999)/
+  );
+  assert.equal(
+    providerCalls.some((pathname) =>
+      /call-transcripts\/SECRET_/.test(pathname)
+    ),
+    false
+  );
+  assert.equal(providerWrites.length, 0);
+
+  const quoReadsBeforeAmbiguous = providerCalls.filter(
+    (pathname) => pathname === "/messages" || pathname === "/calls"
+  ).length;
+  includeActiveForeignDuplicate = true;
+  const ambiguousQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: `request_${"c1".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"d2".repeat(16)}`,
+      input: {
+        phone: QUO_CLIENT_PHONE,
+        maxResults: 25,
+        includeTranscripts: false,
+        transcriptLimit: 0
+      }
+    }
+  );
+  includeActiveForeignDuplicate = false;
+  assert.equal(ambiguousQuoPhoneHistory.response.status, 404);
+  assert.equal(
+    providerCalls.filter(
+      (pathname) => pathname === "/messages" || pathname === "/calls"
+    ).length,
+    quoReadsBeforeAmbiguous
+  );
+  assert.equal(providerWrites.length, 0);
+
+  const quoReadsBeforeConflictingDuplicate = providerCalls.filter(
+    (pathname) => pathname === "/messages" || pathname === "/calls"
+  ).length;
+  includeConflictingTargetDuplicate = true;
+  const conflictingDuplicateQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: `request_${"81".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"82".repeat(16)}`,
+      input: {
+        phone: QUO_CLIENT_PHONE,
+        maxResults: 25,
+        includeTranscripts: false,
+        transcriptLimit: 0
+      }
+    }
+  );
+  includeConflictingTargetDuplicate = false;
+  assert.equal(conflictingDuplicateQuoPhoneHistory.response.status, 503);
+  assert.equal(
+    providerCalls.filter(
+      (pathname) => pathname === "/messages" || pathname === "/calls"
+    ).length,
+    quoReadsBeforeConflictingDuplicate
+  );
+
+  const quoReadsBeforeMalformedTarget = providerCalls.filter(
+    (pathname) => pathname === "/messages" || pathname === "/calls"
+  ).length;
+  includeAmbiguousMalformedEligible = true;
+  const malformedTargetQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: `request_${"83".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"84".repeat(16)}`,
+      input: {
+        phone: QUO_CLIENT_PHONE,
+        maxResults: 25,
+        includeTranscripts: false,
+        transcriptLimit: 0
+      }
+    }
+  );
+  includeAmbiguousMalformedEligible = false;
+  assert.equal(malformedTargetQuoPhoneHistory.response.status, 503);
+  assert.equal(
+    providerCalls.filter(
+      (pathname) => pathname === "/messages" || pathname === "/calls"
+    ).length,
+    quoReadsBeforeMalformedTarget
+  );
+
+  const quoReadsBeforeFreshMismatch = providerCalls.filter(
+    (pathname) => pathname === "/messages" || pathname === "/calls"
+  ).length;
+  freshAssignedPhoneOverride = "+12145550197";
+  const freshMismatchQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: `request_${"85".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"86".repeat(16)}`,
+      input: {
+        phone: QUO_CLIENT_PHONE,
+        maxResults: 25,
+        includeTranscripts: false,
+        transcriptLimit: 0
+      }
+    }
+  );
+  freshAssignedPhoneOverride = null;
+  assert.equal(freshMismatchQuoPhoneHistory.response.status, 404);
+  assert.equal(
+    providerCalls.filter(
+      (pathname) => pathname === "/messages" || pathname === "/calls"
+    ).length,
+    quoReadsBeforeFreshMismatch
+  );
+
+  const quoReadsBeforeFreshMalformedTarget = providerCalls.filter(
+    (pathname) => pathname === "/messages" || pathname === "/calls"
+  ).length;
+  freshAssignedPhoneOverride = { legacy: "214-555-0199" };
+  const freshMalformedTargetQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: `request_${"8a".repeat(16)}`,
+      sessionRef,
+      nonce: `nonce_${"8b".repeat(16)}`,
+      input: {
+        phone: QUO_CLIENT_PHONE,
+        maxResults: 25,
+        includeTranscripts: false,
+        transcriptLimit: 0
+      }
+    }
+  );
+  freshAssignedPhoneOverride = null;
+  assert.equal(freshMalformedTargetQuoPhoneHistory.response.status, 503);
+  assert.equal(
+    providerCalls.filter(
+      (pathname) => pathname === "/messages" || pathname === "/calls"
+    ).length,
+    quoReadsBeforeFreshMalformedTarget
+  );
   assert.equal(providerWrites.length, 0);
 
   const managementSweep = await signedPost(

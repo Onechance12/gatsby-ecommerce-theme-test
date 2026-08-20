@@ -282,7 +282,7 @@ test("strict Quo history deduplicates records and reports bounded result truncat
   }
 });
 
-test("strict Quo history marks malformed pagination tokens and redacts fatal provider failures", async () => {
+test("strict Quo history rejects malformed pagination and redacts fatal provider failures", async () => {
   const originalFetch = globalThis.fetch;
   let mode = "malformed";
   globalThis.fetch = async (url) => {
@@ -299,12 +299,13 @@ test("strict Quo history marks malformed pagination tokens and redacts fatal pro
     return jsonResponse(500, { message: "SECRET-FATAL-PROVIDER-DETAIL" });
   };
   try {
-    const malformed = await readQuoHistoryStrict(
-      { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
-      { phone: "+12145550199" }
+    await assert.rejects(
+      readQuoHistoryStrict(
+        { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+        { phone: "+12145550199" }
+      ),
+      strictProviderFailure
     );
-    assert.equal(malformed.completeness.complete, false);
-    assert.deepEqual(malformed.completeness.reasons, ["malformed_pagination"]);
 
     mode = "fatal";
     await assert.rejects(
@@ -393,7 +394,7 @@ test("strict Quo history follows every page of the line inventory", async () => 
   }
 });
 
-test("strict Quo history reports repeated, malformed, and ceiling-limited line pagination", async () => {
+test("strict Quo history rejects invalid line pagination and reports bounded ceilings", async () => {
   const originalFetch = globalThis.fetch;
   const scenarios = [
     {
@@ -408,7 +409,7 @@ test("strict Quo history reports repeated, malformed, and ceiling-limited line p
           nextPageToken: "repeat-token"
         };
       },
-      reason: "malformed_line_pagination"
+      fatal: true
     },
     {
       name: "malformed",
@@ -419,7 +420,7 @@ test("strict Quo history reports repeated, malformed, and ceiling-limited line p
           nextPageToken: { unsafe: true }
         };
       },
-      reason: "malformed_line_pagination"
+      fatal: true
     },
     {
       name: "ceiling",
@@ -446,6 +447,16 @@ test("strict Quo history reports repeated, malformed, and ceiling-limited line p
         }
         return jsonResponse(200, { data: [] });
       };
+      if (scenario.fatal) {
+        await assert.rejects(
+          readQuoHistoryStrict(
+            { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+            { phone: "+12145550199", maxPages: scenario.maxPages }
+          ),
+          strictProviderFailure
+        );
+        continue;
+      }
       const result = await readQuoHistoryStrict(
         { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
         { phone: "+12145550199", maxPages: scenario.maxPages }
@@ -494,77 +505,115 @@ test("strict Quo history treats 400 and 404 as generic failures, not restricted 
   }
 });
 
-test("strict Quo history rejects cross-line and cross-participant provider rows", async () => {
+test("strict Quo history rejects non-array history payloads", async () => {
   const originalFetch = globalThis.fetch;
-  const cases = [
-    {
-      kind: "messages",
-      row: {
-        id: "SECRET-MISSING-SCOPE",
-        createdAt: "2026-07-15T14:00:00Z",
-        text: "SECRET-CROSS-CLIENT-TEXT"
-      }
-    },
-    {
-      kind: "messages",
-      row: scopedMessage("PN_other", "+19725550101", {
-        id: "SECRET-WRONG-LINE",
-        createdAt: "2026-07-15T14:00:00Z"
-      })
-    },
-    {
-      kind: "messages",
-      row: {
-        ...scopedMessage("PN_one", "+19725550101", {
-          id: "SECRET-WRONG-PARTICIPANT",
-          createdAt: "2026-07-15T14:00:00Z"
-        }),
-        from: "+12145550000"
-      }
-    },
-    {
-      kind: "calls",
-      row: scopedCall("PN_other", {
-        id: "SECRET-WRONG-CALL-LINE",
-        createdAt: "2026-07-15T14:00:00Z"
-      })
-    },
-    {
-      kind: "calls",
-      row: {
-        ...scopedCall("PN_one", {
-          id: "SECRET-WRONG-CALL-PARTICIPANT",
-          createdAt: "2026-07-15T14:00:00Z"
-        }),
-        participants: ["+12145550000"]
-      }
-    }
-  ];
   try {
-    for (const scenario of cases) {
-      globalThis.fetch = async (url) => {
-        const parsed = new URL(String(url));
-        if (parsed.pathname.endsWith("/phone-numbers")) {
-          return jsonResponse(200, {
-            data: [{
-              id: "PN_one",
-              number: "+19725550101"
-            }]
-          });
-        }
-        if (parsed.pathname.endsWith(`/${scenario.kind}`)) {
-          return jsonResponse(200, { data: [scenario.row] });
-        }
-        return jsonResponse(200, { data: [] });
-      };
-      await assert.rejects(
-        readQuoHistoryStrict(
-          { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
-          { phone: "+12145550199" }
-        ),
-        strictProviderFailure
-      );
+    globalThis.fetch = async (url) => {
+      const parsed = new URL(String(url));
+      if (parsed.pathname.endsWith("/phone-numbers")) {
+        return jsonResponse(200, {
+          data: [{ id: "PN_one", number: "+19725550101" }]
+        });
+      }
+      if (parsed.pathname.endsWith("/messages")) {
+        return jsonResponse(200, { data: { unsafe: true } });
+      }
+      return jsonResponse(200, { data: [] });
+    };
+    await assert.rejects(
+      readQuoHistoryStrict(
+        { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+        { phone: "+12145550199" }
+      ),
+      strictProviderFailure
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("strict Quo history quarantines off-target and unverifiable rows without leakage", async () => {
+  const originalFetch = globalThis.fetch;
+  const offTargetCalls = Array.from({ length: 5 }, (_, index) => ({
+    ...scopedCall("PN_one", {
+      id: `SECRET-CROSS-CALL-${index + 1}`,
+      createdAt: `2026-07-15T1${index}:00:00Z`
+    }),
+    participants: [`+1214555000${index}`]
+  }));
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith("/phone-numbers")) {
+      return jsonResponse(200, {
+        data: [{
+          id: "PN_one",
+          name: "Line One",
+          number: "+19725550101"
+        }]
+      });
     }
+    if (parsed.pathname.endsWith("/messages")) {
+      return jsonResponse(200, {
+        data: [
+          {
+            id: "SECRET-UNVERIFIABLE-MESSAGE",
+            createdAt: "2026-07-15T13:00:00Z",
+            content: "SECRET-UNVERIFIABLE-CONTENT"
+          },
+          scopedMessage("PN_other", "+19725550101", {
+            id: "SECRET-CROSS-LINE-MESSAGE",
+            createdAt: "2026-07-15T14:00:00Z",
+            content: "SECRET-CROSS-CLIENT-TEXT"
+          }),
+          scopedMessage("PN_one", "+19725550101", {
+            id: "MSG_exact",
+            createdAt: "2026-07-15T20:00:00Z",
+            content: "Exact client evidence"
+          })
+        ]
+      });
+    }
+    if (parsed.pathname.endsWith("/calls")) {
+      return jsonResponse(200, {
+        data: [
+          {
+            ...scopedCall("PN_one", {
+              id: "SECRET-UNVERIFIABLE-CALL",
+              createdAt: "2026-07-15T12:00:00Z"
+            }),
+            participants: { unsafe: "+12145559999" }
+          },
+          ...offTargetCalls,
+          scopedCall("PN_one", {
+            id: "CALL_exact",
+            createdAt: "2026-07-15T21:00:00Z"
+          })
+        ]
+      });
+    }
+    return jsonResponse(404, { message: "not found" });
+  };
+  try {
+    const result = await readQuoHistoryStrict(
+      { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+      { phone: "+12145550199", maxResults: 25 }
+    );
+    assert.equal(result.completeness.complete, false);
+    assert.deepEqual(
+      result.completeness.reasons,
+      ["provider_filter_mismatch"]
+    );
+    assert.equal(result.completeness.rejectedOffTargetCount, 6);
+    assert.equal(result.completeness.rejectedUnverifiableCount, 2);
+    assert.equal(result.completeness.matchedCount, 2);
+    assert.equal(result.completeness.returnedCount, 2);
+    assert.deepEqual(
+      result.timeline.map((item) => item.id),
+      ["MSG_exact", "CALL_exact"]
+    );
+    const serialized = JSON.stringify(result);
+    assert.doesNotMatch(serialized, /SECRET-(?:CROSS|UNVERIFIABLE)/);
+    assert.doesNotMatch(serialized, /\+1214555(?:000[0-4]|9999)/);
   } finally {
     globalThis.fetch = originalFetch;
   }
