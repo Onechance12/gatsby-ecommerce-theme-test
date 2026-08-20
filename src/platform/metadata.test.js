@@ -71,7 +71,6 @@ test("public metadata proves the runtime without exposing environment contents",
     meta.runtime.configurationDrift.differences.map((item) => item.key),
     [
       "ALLOW_CARRIER_FOLLOWUP_CALLS",
-      "ALLOW_RETELL_CALLS",
       "HCN_ACTION_EXECUTION_ENABLED"
     ]
   );

@@ -402,11 +402,6 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
       runtime: "disabled"
     },
     {
-      key: "ALLOW_RETELL_CALLS",
-      checkedIn: "disabled",
-      runtime: "enabled"
-    },
-    {
       key: "HCN_ACTION_EXECUTION_ENABLED",
       checkedIn: "enabled",
       runtime: "disabled"
