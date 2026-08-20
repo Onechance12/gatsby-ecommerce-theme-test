@@ -4330,16 +4330,31 @@ async function resolveHcnJobroloQuoPhoneFile({
   } catch {
     throw hcnQuoPhoneScopeUnavailable();
   }
-  let scope;
+  let freshContact;
   try {
-    scope = await hcnExactCommunicationScope(providerFileId, ownerId);
+    freshContact = await hcnCachedContact(providerFileId);
   } catch {
+    throw hcnQuoPhoneScopeUnavailable();
+  }
+  if (
+    String(freshContact?.jnid || freshContact?.id || "") !== providerFileId
+    || !isInsuranceFile(freshContact)
+    || !assignedTo(freshContact, ownerId)
+    || !hcnContactIsExplicitlyActive(freshContact)
+  ) {
     throw hcnQuoPhoneFileNotFound();
   }
-  if (normalizePhone(scope?.file?.phone) !== phone) {
+  const freshPhoneInventory = hcnContactPhoneInventory(
+    freshContact,
+    phone
+  );
+  if (!freshPhoneInventory.complete) {
+    throw hcnQuoPhoneScopeUnavailable();
+  }
+  if (!freshPhoneInventory.phones.has(phone)) {
     throw hcnQuoPhoneFileNotFound();
   }
-  return scope.file;
+  return compactContact(freshContact);
 }
 
 function hcnQuoPhoneFileNotFound() {
@@ -18814,9 +18829,44 @@ function hcnGlobalPhoneCorrelation(contacts, expectedPhone) {
   ) {
     return { complete: false, matches: [] };
   }
-  const matches = [];
+  const eligibleByProviderId = new Map();
   for (const contact of contacts) {
-    const inventory = hcnContactPhoneInventory(contact);
+    if (
+      !contact
+      || typeof contact !== "object"
+      || Array.isArray(contact)
+    ) {
+      return { complete: false, matches: [] };
+    }
+    // Only live insurance files can authorize an exact-file communication
+    // read. Historical/archived records often retain the homeowner's phone
+    // and must not make the one live file ambiguous.
+    if (
+      !isInsuranceFile(contact)
+      || !hcnContactIsExplicitlyActive(contact)
+    ) {
+      continue;
+    }
+    let providerFileId;
+    let fingerprint;
+    try {
+      providerFileId = hcnProviderFileId(contact?.jnid || contact?.id);
+      fingerprint = hcnProviderRecordFingerprint(contact);
+    } catch {
+      return { complete: false, matches: [] };
+    }
+    const existing = eligibleByProviderId.get(providerFileId);
+    if (existing && existing.fingerprint !== fingerprint) {
+      return { complete: false, matches: [] };
+    }
+    if (!existing) {
+      eligibleByProviderId.set(providerFileId, { contact, fingerprint });
+    }
+  }
+
+  const matches = [];
+  for (const { contact } of eligibleByProviderId.values()) {
+    const inventory = hcnContactPhoneInventory(contact, expectedPhone);
     if (!inventory.complete) {
       return { complete: false, matches: [] };
     }
@@ -18825,11 +18875,12 @@ function hcnGlobalPhoneCorrelation(contacts, expectedPhone) {
   return { complete: true, matches };
 }
 
-function hcnContactPhoneInventory(contact) {
+function hcnContactPhoneInventory(contact, expectedPhone) {
   if (
     !contact
     || typeof contact !== "object"
     || Array.isArray(contact)
+    || !/^\+[1-9]\d{7,14}$/.test(String(expectedPhone || ""))
   ) {
     return { complete: false, phones: new Set() };
   }
@@ -18844,16 +18895,44 @@ function hcnContactPhoneInventory(contact) {
         typeof value !== "string"
         && typeof value !== "number"
       ) {
-        return { complete: false, phones: new Set() };
+        if (hcnMalformedPhoneCouldMatch(value, expectedPhone)) {
+          return { complete: false, phones: new Set() };
+        }
+        continue;
       }
       const phone = normalizePhone(value);
       if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
-        return { complete: false, phones: new Set() };
+        if (hcnMalformedPhoneCouldMatch(value, expectedPhone)) {
+          return { complete: false, phones: new Set() };
+        }
+        continue;
       }
       phones.add(phone);
     }
   }
   return { complete: true, phones };
+}
+
+function hcnMalformedPhoneCouldMatch(value, expectedPhone) {
+  const expectedDigits = String(expectedPhone || "").replace(/\D/g, "");
+  if (expectedDigits.length < 8) return false;
+  const text =
+    typeof value === "string" || typeof value === "number"
+      ? String(value)
+      : safeStringify(value);
+  const recoverableDigits = text.replace(/\D/g, "");
+  if (!recoverableDigits) return false;
+  const nationalDigits =
+    expectedDigits.length === 11 && expectedDigits.startsWith("1")
+      ? expectedDigits.slice(1)
+      : expectedDigits;
+  return (
+    recoverableDigits.includes(expectedDigits)
+    || (
+      nationalDigits.length >= 8
+      && recoverableDigits.includes(nationalDigits)
+    )
+  );
 }
 
 function compactActivity(activity) {
