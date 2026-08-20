@@ -975,7 +975,11 @@ function validateExactReferenceValue(
     return String(value) === expectedProviderFileId;
   }
   if (Array.isArray(value)) {
-    return value.length > 0 && value.every((item) =>
+    // JobNimbus can emit an empty relation container alongside a separate,
+    // exact contact reference. Treat the empty container as neutral here;
+    // recordReferencesFile still requires at least one exact reference in an
+    // allowed field and rejects every known foreign-file reference.
+    return value.every((item) =>
       validateExactReferenceValue(
         item,
         role,

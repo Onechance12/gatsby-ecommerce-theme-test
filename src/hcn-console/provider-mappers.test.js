@@ -963,6 +963,93 @@ test('exact JobNimbus import activities require typed references and reject ever
 
 });
 
+test('exact JobNimbus import treats empty relation arrays as neutral without weakening exact scope', () => {
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+    requireExactContactReferences: true,
+  };
+
+  const result = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activities: [{
+        jnid: 'empty-related-activity',
+        primary: { id: FILE_ID },
+        related: [],
+        contact: [],
+        date_created: 1785261000,
+      }],
+      tasks: [{
+        jnid: 'empty-primary-task',
+        primary: [],
+        related: [{ id: FILE_ID }],
+        parent: [],
+      }],
+      documents: [{
+        jnid: 'empty-primary-document',
+        primary: [],
+        related: [{ id: FILE_ID }],
+        filename: 'Exact file document.pdf',
+        created_at: 1785261000,
+      }],
+    },
+    options,
+  );
+  assert.equal(result.data.activities.length, 1);
+  assert.equal(result.data.tasks.length, 1);
+  assert.equal(result.data.documents.length, 1);
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        activities: [{
+          jnid: 'unbound-empty-activity',
+          primary: [],
+          related: [],
+          date_created: 1785261000,
+        }],
+      },
+      options,
+    ),
+    mappingError('scope_mismatch'),
+  );
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        activities: [{
+          jnid: 'foreign-contact-with-empty-relation',
+          primary: [],
+          related: [
+            { id: FILE_ID },
+            {
+              id: 'unassigned-foreign-client',
+              record_type_name: 'Contact',
+            },
+          ],
+          date_created: 1785261000,
+        }],
+      },
+      options,
+    ),
+    mappingError('scope_mismatch'),
+  );
+});
+
 test('exact JobNimbus import reference enforcement also covers tasks and documents', () => {
   const base = {
     ...FRESHNESS,
