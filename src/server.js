@@ -1289,6 +1289,7 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/work-center", hcnReadWorkCenter],
   ["POST /integrations/jobrolo/v1/file-review", hcnReadFile],
   ["POST /integrations/jobrolo/v1/communication-sweep", hcnReadCommunicationSweep],
+  ["POST /integrations/jobrolo/v1/quo-phone-history", hcnReadQuoPhoneHistory],
   ["POST /integrations/jobrolo/v1/management-sweep", hcnReadManagementSweep],
   ["POST /integrations/jobrolo/v1/assistant/turn", jobroloHcnAssistantTurn],
   ["POST /integrations/jobrolo/v1/action-plans/prepare", jobroloHcnPrepareActionPlan],
@@ -1853,6 +1854,7 @@ function health() {
       automaticExecution: false,
       providerCredentialsExposed: false,
       communicationSweepExposed: true,
+      quoPhoneHistoryExposed: true,
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       legacyTokensAccepted: false
@@ -3489,6 +3491,7 @@ async function jobroloHcnStatus(input = {}) {
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       communicationSweepExposed: true,
+      quoPhoneHistoryExposed: true,
       providerCredentialsExposed: false
     })
   });
@@ -4184,6 +4187,267 @@ async function hcnReadCommunicationSweep(input = {}) {
     const result = await startCommunicationRecoveryReview(request, principal);
     return projectHcnCommunicationSweep(result);
   });
+}
+
+async function hcnReadQuoPhoneHistory(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  if (principal.role !== "chance") {
+    const error = new Error(
+      "All-line Quo phone history requires Chance's fixed HCN principal."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const request = validateHcnQuoPhoneHistoryInput(input);
+  return withHcnReadAdmission(async () => {
+    const file = await resolveHcnJobroloQuoPhoneFile({
+      phone: request.phone,
+      assignedOwnerId: principal.jobNimbusOwnerId
+    });
+    let history;
+    try {
+      history = await readQuoHistoryStrict(quoConfig(), {
+        phone: request.phone,
+        maxResults: request.maxResults,
+        maxPages: 5
+      });
+    } catch {
+      const error = new Error(
+        "Quo phone history is temporarily unavailable."
+      );
+      error.statusCode = 503;
+      throw error;
+    }
+
+    const transcriptByCallId = new Map();
+    if (request.includeTranscripts && request.transcriptLimit > 0) {
+      const calls = history.timeline
+        .filter((item) => item.type === "call")
+        .sort((left, right) =>
+          String(right.atUtc).localeCompare(String(left.atUtc))
+        )
+        .slice(0, request.transcriptLimit);
+      for (const call of calls) {
+        try {
+          const transcript = await readQuoTranscript(
+            quoConfig(),
+            call.id,
+            { allowMissing: true }
+          );
+          if (transcript) transcriptByCallId.set(call.id, transcript);
+        } catch {
+          // The verified call remains useful evidence when an optional
+          // transcript is unavailable. Never replace it with provider detail.
+        }
+      }
+    }
+    return projectHcnQuoPhoneHistory(
+      history,
+      transcriptByCallId,
+      file
+    );
+  });
+}
+
+function validateHcnQuoPhoneHistoryInput(input) {
+  const allowed = new Set([
+    "phone",
+    "maxResults",
+    "includeTranscripts",
+    "transcriptLimit"
+  ]);
+  if (
+    !input
+    || typeof input !== "object"
+    || Array.isArray(input)
+    || Object.keys(input).some((key) => !allowed.has(key))
+  ) {
+    badRequest("Quo phone-history input contains unsupported fields.");
+  }
+  const phone = normalizePhone(input.phone);
+  if (!/^\+1[2-9]\d{9}$/.test(phone)) {
+    badRequest("phone must be a valid US phone number.");
+  }
+  const maxResults = input.maxResults === undefined ? 25 : input.maxResults;
+  const transcriptLimit = input.transcriptLimit === undefined
+    ? 3
+    : input.transcriptLimit;
+  if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 50) {
+    badRequest("maxResults must be an integer from 1 to 50.");
+  }
+  if (
+    !Number.isSafeInteger(transcriptLimit)
+    || transcriptLimit < 0
+    || transcriptLimit > 3
+  ) {
+    badRequest("transcriptLimit must be an integer from 0 to 3.");
+  }
+  if (
+    input.includeTranscripts !== undefined
+    && typeof input.includeTranscripts !== "boolean"
+  ) {
+    badRequest("includeTranscripts must be a boolean.");
+  }
+  const includeTranscripts = input.includeTranscripts !== false;
+  return {
+    phone,
+    maxResults,
+    includeTranscripts,
+    transcriptLimit: includeTranscripts ? transcriptLimit : 0
+  };
+}
+
+async function resolveHcnJobroloQuoPhoneFile({
+  phone,
+  assignedOwnerId
+}) {
+  const ownerId = hcnProviderFileId(assignedOwnerId);
+  let index;
+  try {
+    index = await hcnCachedContactIndex({ maxRecords: 5000 });
+  } catch {
+    throw hcnQuoPhoneScopeUnavailable();
+  }
+  if (!index.complete) throw hcnQuoPhoneScopeUnavailable();
+
+  const correlation = hcnGlobalPhoneCorrelation(index.rows, phone);
+  if (!correlation.complete) throw hcnQuoPhoneScopeUnavailable();
+  if (correlation.matches.length !== 1) {
+    throw hcnQuoPhoneFileNotFound();
+  }
+  const matched = correlation.matches[0];
+  if (
+    !isInsuranceFile(matched)
+    || !assignedTo(matched, ownerId)
+    || !hcnContactIsExplicitlyActive(matched)
+  ) {
+    throw hcnQuoPhoneFileNotFound();
+  }
+
+  let providerFileId;
+  try {
+    providerFileId = hcnProviderFileId(matched?.jnid || matched?.id);
+  } catch {
+    throw hcnQuoPhoneScopeUnavailable();
+  }
+  let scope;
+  try {
+    scope = await hcnExactCommunicationScope(providerFileId, ownerId);
+  } catch {
+    throw hcnQuoPhoneFileNotFound();
+  }
+  if (normalizePhone(scope?.file?.phone) !== phone) {
+    throw hcnQuoPhoneFileNotFound();
+  }
+  return scope.file;
+}
+
+function hcnQuoPhoneFileNotFound() {
+  const error = new Error(
+    "No exact active assigned JobNimbus file matched that phone."
+  );
+  error.statusCode = 404;
+  return error;
+}
+
+function hcnQuoPhoneScopeUnavailable() {
+  const error = new Error(
+    "Exact assigned-file phone verification is temporarily unavailable."
+  );
+  error.statusCode = 503;
+  return error;
+}
+
+function projectHcnQuoPhoneHistory(
+  history,
+  transcriptByCallId = new Map(),
+  file = {}
+) {
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const generatedAt = new Date().toISOString();
+  const providerFileId = hcnProviderFileId(file.id);
+  const timeline = Array.isArray(history?.timeline) ? history.timeline : [];
+  const items = timeline.slice(-50).map((item) => {
+    const transcript = item.type === "call"
+      ? transcriptByCallId.get(item.id)
+      : null;
+    const transcriptPreview = transcript
+      ? transcript.dialogue
+        .map((segment) => String(segment.text || "").trim())
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .slice(0, 1200)
+      : "";
+    return {
+      communicationRef: references.sourceRecordRef(
+        "quo",
+        `${String(item.type || "item").slice(0, 16)}:${String(item.id || "unknown").slice(0, 512)}`
+      ),
+      type: item.type === "call" ? "call" : "text",
+      line: String(item.line || "").slice(0, 120),
+      atUtc: String(item.atUtc || "").slice(0, 40),
+      direction: String(item.direction || "").slice(0, 32),
+      status: String(item.status || "").slice(0, 80),
+      preview: item.type === "text"
+        ? String(item.text || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 800)
+        : "",
+      durationSec: item.type === "call"
+        ? Math.max(0, Number(item.durationSec || 0))
+        : 0,
+      aiHandled: item.type === "call" && item.aiHandled === true,
+      transcriptAvailable: Boolean(transcriptPreview),
+      transcriptPreview
+    };
+  });
+  return {
+    schema: "hcn.console.quo-phone-history.v1",
+    generatedAt,
+    checkedAt: generatedAt,
+    validUntil: new Date(
+      Date.parse(generatedAt) + 5 * 60_000
+    ).toISOString(),
+    ephemeral: true,
+    cachePolicy: "no_store",
+    focus: "quo_phone_history",
+    phone: String(history?.phone || ""),
+    file: {
+      fileRef: references.subjectId("jobnimbus", providerFileId),
+      jobNumber: String(file.number || "").slice(0, 80),
+      displayName: String(file.name || "Assigned JobNimbus file")
+        .slice(0, 160),
+      status: String(file.status || "").slice(0, 120)
+    },
+    scope: {
+      jobNimbus: "one_fresh_active_assigned_file",
+      quo: "all_available_team_lines",
+      readOnly: true,
+      phoneExact: true,
+      exactFileMatch: true
+    },
+    completeness: history?.completeness || {
+      complete: false,
+      reasons: ["provider_contract_missing"]
+    },
+    summary: {
+      messages: Number(history?.messageCount || 0),
+      calls: Number(history?.callCount || 0),
+      total:
+        Number(history?.messageCount || 0)
+        + Number(history?.callCount || 0),
+      returned: items.length
+    },
+    items,
+    safety: {
+      writesPossible: false,
+      messagesSent: 0,
+      callsPlaced: 0,
+      jobNimbusWrites: 0
+    }
+  };
 }
 
 function validateHcnCommunicationSweepInput(input) {
@@ -8504,6 +8768,26 @@ function jobroloNoteWritebackProfileActive() {
 function jobroloClaimFilingProfileActive() {
   return currentRequestAuthentication()?.jobroloCapabilityProfile
     === HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE;
+}
+
+function jobroloGeneralChanceAllLineQuoReadActive() {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  const email = String(identity?.email || "").trim().toLowerCase();
+  return Boolean(
+    HCN_JOBROLO_CONFIGURATION.ready === true
+    && context?.authenticationMethod === "jobrolo_hmac"
+    && context?.jobroloCapabilityProfile
+      === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    && identity?.type === "hcn_jobrolo_service"
+    && identity?.role === "chance"
+    && email === String(CHANCE_GOOGLE_EMAIL || "").trim().toLowerCase()
+    && email === String(
+      HCN_JOBROLO_CONFIGURATION.principalEmail || ""
+    ).trim().toLowerCase()
+    && String(identity?.jobNimbusOwnerId || "") === CHANCE_OWNER_ID
+    && identity?.jobNimbusScope === "assigned"
+  );
 }
 
 function hcnClaimFilingPrincipalEligible(principal) {
@@ -15867,27 +16151,34 @@ async function loadHcnQuoFile({
       phoneFailure.message
     );
   }
-  let employeeLine;
-  try {
-    employeeLine = await authorizedQuoLine();
-  } catch {
-    throw hcnOptionalSourceFailure(
-      "work_line_not_linked",
-      "The signed-in employee's Quo work line could not be verified."
-    );
-  }
-  if (!employeeLine.number && !employeeLine.id) {
-    throw hcnOptionalSourceFailure(
-      "work_line_not_linked",
-      "The signed-in employee has no linked Quo work line."
-    );
+  const allTeamLines = jobroloGeneralChanceAllLineQuoReadActive();
+  let employeeLine = null;
+  if (!allTeamLines) {
+    try {
+      employeeLine = await authorizedQuoLine();
+    } catch {
+      throw hcnOptionalSourceFailure(
+        "work_line_not_linked",
+        "The signed-in employee's Quo work line could not be verified."
+      );
+    }
+    if (!employeeLine.number && !employeeLine.id) {
+      throw hcnOptionalSourceFailure(
+        "work_line_not_linked",
+        "The signed-in employee has no linked Quo work line."
+      );
+    }
   }
   let history;
   try {
     history = await readQuoHistoryStrict(quoConfig(), {
       phone: scope.file.phone,
-      lineId: employeeLine.id,
-      lineNumber: employeeLine.number,
+      ...(allTeamLines
+        ? {}
+        : {
+            lineId: employeeLine.id,
+            lineNumber: employeeLine.number
+          }),
       maxResults: Math.min(50, Math.max(10, Number(recentLimit || 20))),
       maxPages: 5
     });

@@ -109,6 +109,8 @@ export function jobroloHcnResponse(requestId, result) {
   const isManagementSweep =
     result?.schema === "hcn.console.management-sweep.v1"
     || result?.schemaVersion === "hcn.console.management-sweep.v1";
+  const isQuoPhoneHistory =
+    result?.schema === "hcn.console.quo-phone-history.v1";
   return Object.freeze({
     schema: "hcn.jobrolo.response.v1",
     requestId,
@@ -117,10 +119,12 @@ export function jobroloHcnResponse(requestId, result) {
       principalMode: "fixed_server_side",
       fileScope: isManagementSweep
         ? "configured_management_adjusters"
-        : "assigned_only",
+        : isQuoPhoneHistory
+          ? "fixed_principal_all_team_lines"
+          : "assigned_only",
       liveSourcesWin: true,
       automaticExecution: false,
-      exactApprovalRequired: !isManagementSweep,
+      exactApprovalRequired: !isManagementSweep && !isQuoPhoneHistory,
       providerCredentialsExposed: false
     }),
     result

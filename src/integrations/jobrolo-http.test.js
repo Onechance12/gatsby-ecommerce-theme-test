@@ -18,6 +18,7 @@ const SHARED_SECRET = "jobrolo-http-fixture-shared-secret-123456789";
 const NOTE_CLIENT_ID = "jobrolo-note-writeback-http-fixture";
 const NOTE_SHARED_SECRET =
   "jobrolo-note-writeback-http-fixture-secret-123456789";
+const QUO_CLIENT_PHONE = "+12145550199";
 
 test("signed adapter fixes principal scope and requires both approval gates for one synthetic action", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hcn-jobrolo-http-"));
@@ -33,6 +34,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     display_name: "Assigned File Fixture",
     status_name: "Ready for Review",
     stage_name: "Carrier Review",
+    mobile_phone: QUO_CLIENT_PHONE,
     is_active: true,
     date_updated: 1785261000
   };
@@ -44,12 +46,42 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     display_name: "Assigned File Fixture B",
     status_name: "Ready for Review",
     stage_name: "Carrier Review",
+    mobile_phone: "+12145550198",
     is_active: true,
     date_updated: 1785260900
   };
   const provider = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://provider.invalid");
     providerCalls.push(url.pathname);
+    const quoLines = Array.from({ length: 12 }, (_, index) => ({
+      id: `PN_${String(index + 1).padStart(2, "0")}`,
+      name: `Team Line ${index + 1}`,
+      number: `+1972555${String(1000 + index).slice(-4)}`
+    }));
+    if (req.method === "GET" && url.pathname === "/phone-numbers") {
+      return json(res, 200, { data: quoLines });
+    }
+    if (req.method === "GET" && url.pathname === "/conversations") {
+      return json(res, 200, { data: [] });
+    }
+    if (req.method === "GET" && url.pathname === "/messages") {
+      const lineId = url.searchParams.get("phoneNumberId");
+      const line = quoLines.find((candidate) => candidate.id === lineId);
+      return json(res, 200, {
+        data: lineId === "PN_12" ? [{
+          id: "MSG_line_12",
+          phoneNumberId: lineId,
+          from: QUO_CLIENT_PHONE,
+          to: [line.number],
+          createdAt: "2026-08-20T14:00:00.000Z",
+          direction: "incoming",
+          content: "Verified line-12 fixture message."
+        }] : []
+      });
+    }
+    if (req.method === "GET" && url.pathname === "/calls") {
+      return json(res, 200, { data: [] });
+    }
     if (req.method === "GET" && url.pathname === "/account/users") {
       return json(res, 200, {
         total: 3,
@@ -181,7 +213,10 @@ test("signed adapter fixes principal scope and requires both approval gates for 
         Buffer.alloc(32, 0x62).toString("base64url"),
       HCN_THRESHER_AI_ENABLED: "true",
       HCN_THRESHER_AI_GROQ_API_KEY: "",
-      QUO_API_KEY: "",
+      QUO_API_KEY: "quo-http-fixture-key",
+      QUO_API_BASE_URL:
+        `http://127.0.0.1:${provider.address().port}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725551000",
       TWILIO_AUTH_TOKEN: "",
       RETELL_API_KEY: "",
       OPENAI_API_KEY: "",
@@ -240,6 +275,29 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(providerCalls.includes("/account/users"), true);
   assert.equal(providerCalls.includes("/contacts"), true);
 
+  const fileReview = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/file-review",
+    {
+      requestId: "request_94949494949494949494949494949494",
+      sessionRef,
+      nonce: "nonce_94949494949494949494949494949494",
+      input: {
+        fileRef: workCenterByName.get("Assigned File Fixture").fileRef,
+        recentLimit: 20
+      }
+    }
+  );
+  assert.equal(fileReview.response.status, 200, fileReview.text);
+  assert.equal(fileReview.body.result.schema, "hcn.console.file.v1");
+  assert.equal(fileReview.body.result.sources.quo.status, "fresh");
+  assert.equal(fileReview.body.result.recent.quo.length, 1);
+  assert.equal(
+    fileReview.body.result.recent.quo[0].preview,
+    "Verified line-12 fixture message."
+  );
+  assert.equal(providerWrites.length, 0);
+
   const communicationSweep = await signedPost(
     origin,
     "/integrations/jobrolo/v1/communication-sweep",
@@ -272,7 +330,8 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(communicationSweep.body.result.scope.readOnly, true);
   assert.equal(communicationSweep.body.result.activeFileCount, 2);
   assert.equal(communicationSweep.body.result.sources.gmail.status, "unavailable");
-  assert.equal(communicationSweep.body.result.sources.quo.status, "unavailable");
+  assert.equal(communicationSweep.body.result.sources.quo.status, "fresh");
+  assert.equal(communicationSweep.body.result.sources.quo.lineCount, 12);
   assert.equal(communicationSweep.body.result.safety.jobNimbusWrites, 0);
   assert.equal(providerWrites.length, 0);
 
@@ -287,6 +346,52 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     }
   );
   assert.equal(rejectedCommunicationSweep.response.status, 400);
+  assert.equal(providerWrites.length, 0);
+
+  const rejectedQuoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: "request_96969696969696969696969696969696",
+      sessionRef,
+      nonce: "nonce_96969696969696969696969696969696",
+      input: { phone: "+19725731730", ownerId: SECOND_OWNER_ID }
+    }
+  );
+  assert.equal(rejectedQuoPhoneHistory.response.status, 400);
+  assert.equal(providerWrites.length, 0);
+
+  const quoPhoneHistory = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/quo-phone-history",
+    {
+      requestId: "request_95959595959595959595959595959595",
+      sessionRef,
+      nonce: "nonce_95959595959595959595959595959595",
+      input: {
+        phone: QUO_CLIENT_PHONE,
+        maxResults: 25,
+        includeTranscripts: false,
+        transcriptLimit: 0
+      }
+    }
+  );
+  assert.equal(quoPhoneHistory.response.status, 200, quoPhoneHistory.text);
+  assert.equal(
+    quoPhoneHistory.body.result.schema,
+    "hcn.console.quo-phone-history.v1"
+  );
+  assert.equal(
+    quoPhoneHistory.body.authority.fileScope,
+    "fixed_principal_all_team_lines"
+  );
+  assert.equal(quoPhoneHistory.body.result.scope.exactFileMatch, true);
+  assert.equal(quoPhoneHistory.body.result.completeness.lineCount, 12);
+  assert.equal(quoPhoneHistory.body.result.summary.messages, 1);
+  assert.equal(quoPhoneHistory.body.result.items[0].line, "Team Line 12");
+  assert.equal(quoPhoneHistory.body.result.safety.messagesSent, 0);
+  assert.equal(quoPhoneHistory.body.result.safety.callsPlaced, 0);
+  assert.equal(quoPhoneHistory.body.result.safety.jobNimbusWrites, 0);
   assert.equal(providerWrites.length, 0);
 
   const managementSweep = await signedPost(
@@ -652,12 +757,13 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.notEqual(crossProfileExecution.response.status, 200);
   assert.equal(providerWrites.length, 2);
 
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < 7; index += 1) {
     const pathname = [
       "/integrations/jobrolo/v1/status",
       "/integrations/jobrolo/v1/work-center",
       "/integrations/jobrolo/v1/file-review",
       "/integrations/jobrolo/v1/communication-sweep",
+      "/integrations/jobrolo/v1/quo-phone-history",
       "/integrations/jobrolo/v1/management-sweep",
       "/integrations/jobrolo/v1/assistant/turn"
     ][index];

@@ -596,6 +596,11 @@ test("server exposes claim actions and protects them when auth is unconfigured",
         runtime: "disabled"
       },
       {
+        key: "ALLOW_RETELL_CALLS",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
         key: "BRIDGE_ALLOW_WRITES",
         checkedIn: "enabled",
         runtime: "disabled"
