@@ -1050,6 +1050,99 @@ test('exact JobNimbus import treats empty relation arrays as neutral without wea
   );
 });
 
+test('exact JobNimbus import accepts an explicit email relation only beside the exact contact', () => {
+  const tenantCustomerId = 'jobnimbus-tenant-account';
+  const emailRecordId = 'jobnimbus-email-record';
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact({ customer: tenantCustomerId }),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+    requireExactContactReferences: true,
+  };
+  const exactContact = {
+    id: FILE_ID,
+    type: 'contact',
+    name: 'Fixture Homeowner',
+    number: '2739',
+    email: 'owner@example.test',
+    subject: 'fixture',
+  };
+  const emailReference = {
+    id: emailRecordId,
+    type: 'email',
+    name: 'Provider email',
+    email: 'carrier@example.test',
+    subject: 'Provider message',
+  };
+  const productionShapedActivity = {
+    jnid: 'email-activity',
+    primary: {
+      id: emailRecordId,
+      type: 'email',
+      name: 'Provider email',
+      old_status: null,
+      new_status: 'sent',
+    },
+    related: [exactContact, emailReference],
+    customer: tenantCustomerId,
+    record_type_name: 'email',
+    date_created: 1785261000,
+    note: 'Bounded activity label',
+  };
+
+  const result = mapJobNimbusFileEnvelope({
+    ...base,
+    activities: [productionShapedActivity],
+  }, options);
+  assert.equal(result.data.activities.length, 1);
+  assert.equal(JSON.stringify(result).includes(emailRecordId), false);
+  assert.equal(JSON.stringify(result).includes(tenantCustomerId), false);
+
+  for (const related of [
+    [emailReference],
+    [
+      exactContact,
+      { id: 'unassigned-foreign-client', type: 'contact' },
+    ],
+    [
+      exactContact,
+      { id: 'another-known-client-file', type: 'email' },
+    ],
+    [
+      exactContact,
+      { id: 'unsupported-email-record', type: 'email_message' },
+    ],
+    [
+      exactContact,
+      {
+        ...emailReference,
+        contact: { id: 'unassigned-foreign-client', type: 'contact' },
+      },
+    ],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope({
+        ...base,
+        activities: [{
+          ...productionShapedActivity,
+          related,
+        }],
+      }, options),
+      mappingError('scope_mismatch'),
+    );
+  }
+});
+
 test('exact JobNimbus import reference enforcement also covers tasks and documents', () => {
   const base = {
     ...FRESHNESS,
