@@ -886,6 +886,7 @@ function recordReferencesFile(
 const EXPLICIT_NON_CONTACT_REFERENCE_TYPES = new Set([
   'activity',
   'document',
+  'email',
   'file',
   'note',
   'photo',
