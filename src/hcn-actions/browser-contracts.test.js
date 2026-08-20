@@ -16,9 +16,13 @@ import {
 
 const FILE_REF = `subject_${"a".repeat(32)}`;
 const TASK_REF = `ref_${"b".repeat(32)}`;
+const EVENT_REF = `ref_${"e".repeat(32)}`;
+const DRAFT_REF = `ref_${"f".repeat(32)}`;
 const PLAN_ID = `plan_${"c".repeat(32)}`;
 const PROVIDER_JOB_ID = "provider-job-private-17";
 const PROVIDER_TASK_ID = "provider-task-private-99";
+const PROVIDER_EVENT_ID = "provider-event-private-77";
+const PROVIDER_DRAFT_ID = "provider-draft-private-55";
 const APPROVAL_DIGEST = "d".repeat(64);
 const APPROVAL_CHALLENGE =
   "private_challenge_value_that_must_never_reach_the_browser_123";
@@ -204,13 +208,18 @@ function engineFixture() {
   };
 }
 
-test("prepare validation accepts only the five HCN v1 action contracts", () => {
+test("prepare validation accepts the exact HCN action contracts", () => {
   assert.deepEqual(HCN_BROWSER_ACTION_TYPES, [
     "jobnimbus.create_note",
     "jobnimbus.create_task",
     "jobnimbus.update_task",
     "jobnimbus.update_status",
-    "jobnimbus.update_contact"
+    "jobnimbus.update_contact",
+    "jobnimbus.create_calendar_event",
+    "jobnimbus.update_calendar_event",
+    "gmail.create_draft",
+    "gmail.send",
+    "quo.send_text"
   ]);
 
   const input = prepareFixture();
@@ -1013,6 +1022,447 @@ test("minimal optional task inputs project without invented material", async () 
     completed: true
   });
   assert.equal(JSON.stringify(presentation).includes("provider PII"), false);
+});
+
+test("expanded work-file actions translate opaque references and project exact review material", async () => {
+  const startsAt = "2026-08-05T13:00:00.000Z";
+  const endsAt = "2026-08-05T14:00:00.000Z";
+  const prepareInput = {
+    fileRef: FILE_REF,
+    operations: [
+      {
+        type: "jobnimbus.create_calendar_event",
+        input: {
+          title: "Carrier inspection",
+          description: "Homeowner and adjuster inspection.",
+          startsAt,
+          endsAt
+        }
+      },
+      {
+        type: "jobnimbus.update_calendar_event",
+        input: {
+          eventRef: EVENT_REF,
+          title: "Carrier inspection confirmed",
+          startsAt,
+          endsAt
+        }
+      },
+      {
+        type: "gmail.create_draft",
+        input: {
+          to: "carrier@example.test",
+          cc: "manager@example.test",
+          subject: "Claim documents",
+          body: "Please review the attached claim documents."
+        }
+      },
+      {
+        type: "gmail.send",
+        input: { draftRef: DRAFT_REF }
+      },
+      {
+        type: "quo.send_text",
+        input: {
+          to: "+12145550100",
+          content: "Please confirm you will be present for the inspection."
+        }
+      }
+    ]
+  };
+  const privateEngineRequest =
+    await translateHcnBrowserActionsToPrivateEngineRequest(
+      prepareInput,
+      {
+        async resolveProviderJobId() {
+          return PROVIDER_JOB_ID;
+        },
+        async resolveProviderEventId({ eventRef }) {
+          assert.equal(eventRef, EVENT_REF);
+          return PROVIDER_EVENT_ID;
+        },
+        async resolveProviderDraftId({ draftRef }) {
+          assert.equal(draftRef, DRAFT_REF);
+          return PROVIDER_DRAFT_ID;
+        }
+      }
+    );
+  assert.deepEqual(privateEngineRequest.operations, [
+    {
+      type: "jobnimbus.create_calendar_event",
+      payload: {
+        query: PROVIDER_JOB_ID,
+        title: "Carrier inspection",
+        description: "Homeowner and adjuster inspection.",
+        dateStart: startsAt,
+        dateEnd: endsAt
+      }
+    },
+    {
+      type: "jobnimbus.update_calendar_event",
+      payload: {
+        query: PROVIDER_JOB_ID,
+        eventId: PROVIDER_EVENT_ID,
+        fields: {
+          title: "Carrier inspection confirmed",
+          dateStart: startsAt,
+          dateEnd: endsAt
+        }
+      }
+    },
+    {
+      type: "gmail.create_draft",
+      payload: {
+        query: PROVIDER_JOB_ID,
+        to: "carrier@example.test",
+        cc: "manager@example.test",
+        subject: "Claim documents",
+        body: "Please review the attached claim documents."
+      }
+    },
+    {
+      type: "gmail.send",
+      payload: {
+        query: PROVIDER_JOB_ID,
+        draftId: PROVIDER_DRAFT_ID
+      }
+    },
+    {
+      type: "quo.send_text",
+      payload: {
+        query: PROVIDER_JOB_ID,
+        to: "+12145550100",
+        content: "Please confirm you will be present for the inspection."
+      }
+    }
+  ]);
+
+  const fileScope = {
+    id: PROVIDER_JOB_ID,
+    number: "private",
+    name: "private"
+  };
+  const compactFileScope = {
+    ...fileScope,
+    status: "private",
+    address: "private",
+    phone: "+12145550100",
+    email: "private@example.test",
+    carrier: "private",
+    claimNumber: "private",
+    policyNumber: "private",
+    typeOfLoss: "private",
+    dateOfLoss: "2026-06-01",
+    adjusterName: "private",
+    adjusterPhone: "+12145550102",
+    adjusterEmail: "private-adjuster@example.test"
+  };
+  const body =
+    "This reviewed draft is the immutable message that will be sent.";
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  const engineDryRun = {
+    mode: "dry_run",
+    operationCount: 5,
+    operations: [
+      {
+        type: "jobnimbus.create_calendar_event",
+        plan: {
+          mode: "dry_run",
+          file: fileScope,
+          plan: {
+            endpoint: "/activities",
+            body: {
+              title: "Carrier inspection",
+              subject: "Carrier inspection",
+              description: "Homeowner and adjuster inspection.",
+              note: "Homeowner and adjuster inspection.",
+              date_start: Date.parse(startsAt) / 1000,
+              date_end: Date.parse(endsAt) / 1000,
+              record_type_name: "Event",
+              owners: [{ id: "private-owner" }],
+              primary: { id: PROVIDER_JOB_ID },
+              related: [{ id: PROVIDER_JOB_ID }]
+            },
+            schedule: {
+              timeZone: "America/Chicago",
+              start: "Aug 5, 2026, 8:00 AM CDT",
+              end: "Aug 5, 2026, 9:00 AM CDT"
+            }
+          }
+        }
+      },
+      {
+        type: "jobnimbus.update_calendar_event",
+        plan: {
+          mode: "dry_run",
+          file: fileScope,
+          plan: {
+            endpoint: `/activities/${PROVIDER_EVENT_ID}`,
+            body: {
+              title: "Carrier inspection confirmed",
+              date_start: Date.parse(startsAt) / 1000,
+              date_end: Date.parse(endsAt) / 1000
+            },
+            schedule: {
+              timeZone: "America/Chicago",
+              start: "Aug 5, 2026, 8:00 AM CDT",
+              end: "Aug 5, 2026, 9:00 AM CDT"
+            }
+          }
+        }
+      },
+      {
+        type: "gmail.create_draft",
+        plan: {
+          mode: "dry_run",
+          plan: {
+            endpoint: "/gmail/v1/users/me/drafts",
+            fileScope,
+            to: "carrier@example.test",
+            cc: "manager@example.test",
+            bcc: "",
+            subject: "Claim documents",
+            body: "Please review the attached claim documents.",
+            bodyTemplate: "custom",
+            threadId: "",
+            attemptId: "initial",
+            attachments: []
+          },
+          approvalDigest: "1".repeat(64)
+        }
+      },
+      {
+        type: "gmail.send",
+        plan: {
+          mode: "dry_run",
+          plan: {
+            endpoint: "/gmail/v1/users/me/messages/send",
+            action: "send_existing_draft",
+            deliveryMode:
+              "immutable_reviewed_snapshot_source_draft_retained",
+            fileScope,
+            draftId: PROVIDER_DRAFT_ID,
+            messageId: "private-message-id",
+            threadId: "private-thread-id",
+            to: "carrier@example.test",
+            cc: "",
+            bcc: "",
+            subject: "Reviewed claim update",
+            deliveryHeaders: {
+              from: "Chance <chance@example.test>",
+              to: "carrier@example.test",
+              subject: "Reviewed claim update"
+            },
+            body,
+            bodyRepresentations: [{
+              partId: "0",
+              mimeType: "text/plain",
+              bytes: bodyBytes,
+              sha256: "2".repeat(64),
+              content: body
+            }],
+            attachments: [{
+              partId: "1",
+              filename: "claim.pdf",
+              mimeType: "application/pdf",
+              disposition: "attachment",
+              bytes: 1200,
+              sha256: "3".repeat(64)
+            }],
+            contentDigest: "4".repeat(64),
+            transmittedHeaders: [
+              "From",
+              "Sender",
+              "Reply-To",
+              "To",
+              "Cc",
+              "Bcc",
+              "Subject",
+              "MIME-Version",
+              "Content-Type"
+            ],
+            omittedOriginalHeaders:
+              "Any original draft header not listed in transmittedHeaders is excluded from the immutable send.",
+            sourceDraftRetention: "retained_for_separate_cleanup"
+          },
+          approvalDigest: "5".repeat(64),
+          instruction: "Nothing was sent."
+        }
+      },
+      {
+        type: "quo.send_text",
+        plan: {
+          mode: "dry_run",
+          file: compactFileScope,
+          plan: {
+            from: "+12145550101",
+            to: "+12145550100",
+            content:
+              "Please confirm you will be present for the inspection.",
+            characterCount: 54,
+            attemptId: "initial"
+          },
+          approvalDigest: "6".repeat(64),
+          instruction: "Nothing was sent."
+        }
+      }
+    ],
+    approvalDigest: APPROVAL_DIGEST,
+    approvalChallenge: APPROVAL_CHALLENGE,
+    approvalExpiresAt: APPROVAL_EXPIRES_AT
+  };
+  const presentation = projectHcnBrowserActionDryRun({
+    prepareInput,
+    privateEngineRequest,
+    engineDryRun,
+    fileDisplayLabel: "Selected file"
+  });
+  assert.equal(presentation.operationCount, 5);
+  assert.deepEqual(presentation.operations[2].material, {
+    to: "carrier@example.test",
+    cc: "manager@example.test",
+    subject: "Claim documents",
+    body: "Please review the attached claim documents.",
+    attachments: []
+  });
+  assert.deepEqual(presentation.operations[3].material, {
+    draftRef: DRAFT_REF,
+    to: "carrier@example.test",
+    subject: "Reviewed claim update",
+    body,
+    attachments: [{
+      partId: "1",
+      filename: "claim.pdf",
+      mimeType: "application/pdf",
+      disposition: "attachment",
+      bytes: 1200,
+      sha256: "3".repeat(64)
+    }],
+    contentDigest: "4".repeat(64),
+    sourceDraftRetention: "retained_for_separate_cleanup"
+  });
+  const serialized = JSON.stringify(presentation);
+  for (const privateValue of [
+    PROVIDER_JOB_ID,
+    PROVIDER_EVENT_ID,
+    PROVIDER_DRAFT_ID,
+    "private-message-id",
+    "private-thread-id",
+    "private-owner"
+  ]) {
+    assert.equal(serialized.includes(privateValue), false);
+  }
+
+  for (const operationIndex of [2, 3, 4]) {
+    const changed = structuredClone(engineDryRun);
+    const scopedFile = operationIndex === 4
+      ? changed.operations[operationIndex].plan.file
+      : changed.operations[operationIndex].plan.plan.fileScope;
+    scopedFile.unreviewed = "private";
+    assert.throws(
+      () => projectHcnBrowserActionDryRun({
+        prepareInput,
+        privateEngineRequest,
+        engineDryRun: changed,
+        fileDisplayLabel: "Selected file"
+      }),
+      contractError(502, "action_engine_contract_drift")
+    );
+  }
+});
+
+test("expanded contracts reject unsafe dates, draft ids, recipients, and oversized material", async () => {
+  const cases = [
+    {
+      type: "jobnimbus.create_calendar_event",
+      input: {
+        title: "Bad range",
+        startsAt: "2026-08-05T14:00:00.000Z",
+        endsAt: "2026-08-05T13:00:00.000Z"
+      }
+    },
+    {
+      type: "jobnimbus.update_calendar_event",
+      input: { eventRef: EVENT_REF }
+    },
+    {
+      type: "jobnimbus.update_calendar_event",
+      input: {
+        eventRef: EVENT_REF,
+        startsAt: "2026-08-05T14:00:00.000Z"
+      }
+    },
+    {
+      type: "gmail.send",
+      input: { draftRef: PROVIDER_DRAFT_ID }
+    },
+    {
+      type: "gmail.create_draft",
+      input: {
+        to: "carrier@example.test\r\nBcc: attacker@example.test",
+        subject: "Claim",
+        body: "Exact body"
+      }
+    },
+    {
+      type: "gmail.create_draft",
+      input: {
+        to: "carrier@example.test",
+        subject: "Claim\u0001hidden",
+        body: "Exact body"
+      }
+    },
+    {
+      type: "quo.send_text",
+      input: { to: "214-555-0100", content: "Exact text" }
+    },
+    {
+      type: "quo.send_text",
+      input: {
+        to: "+12145550100",
+        content: "x".repeat(1601)
+      }
+    },
+    {
+      type: "quo.send_text",
+      input: {
+        to: "+12145550100",
+        content: "\u{1f642}".repeat(1000)
+      }
+    }
+  ];
+  for (const operation of cases) {
+    assert.throws(
+      () => validateHcnBrowserActionPrepareInput({
+        fileRef: FILE_REF,
+        operations: [operation]
+      }),
+      contractError(400)
+    );
+  }
+
+  await assert.rejects(
+    translateHcnBrowserActionsToPrivateEngineRequest({
+      fileRef: FILE_REF,
+      operations: [{
+        type: "gmail.send",
+        input: { draftRef: DRAFT_REF }
+      }]
+    }, {
+      async resolveProviderJobId() {
+        return PROVIDER_JOB_ID;
+      },
+      async resolveProviderDraftId() {
+        throw new Error(`private ${PROVIDER_DRAFT_ID}`);
+      }
+    }),
+    (error) => (
+      error instanceof HcnBrowserActionContractError
+      && error.statusCode === 409
+      && error.code === "draft_resolution_failed"
+      && !error.message.includes(PROVIDER_DRAFT_ID)
+    )
+  );
 });
 
 test("module remains pure and has no provider, persistence, browser-state, or model imports", async () => {

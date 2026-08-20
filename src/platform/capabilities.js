@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-28.3";
+export const CAPABILITY_VERSION = "2026-08-03.1";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -21,8 +21,21 @@ const GOOGLE_ROLES = new Set([
 export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("identity.read", "GET /auth/whoami"),
   capability("platform.session.read", "GET /api/v1/session"),
+  capability("hcn.connectors.read", "POST /hcn/api/v1/connectors/status"),
+  capability("hcn.connectors.google.link", "GET /hcn/connect/google/start"),
+  capability("hcn.connectors.google.disconnect", "POST /hcn/api/v1/connectors/google/disconnect"),
+  capability("hcn.connectors.quo_line.link", "POST /hcn/api/v1/connectors/quo-line"),
   capability("hcn.work_center.read", "POST /hcn/api/v1/work-center"),
+  capability("hcn.management_sweep.read", "POST /hcn/api/v1/management-sweep"),
+  capability("hcn.closed_file_benchmark.read", "POST /hcn/api/v1/closed-file-benchmark"),
   capability("hcn.file.review", "POST /hcn/api/v1/file-review"),
+  capability("hcn.assistant.conversations.read", "POST /hcn/api/v1/assistant/conversations/list"),
+  capability("hcn.assistant.conversations.read", "POST /hcn/api/v1/assistant/conversations/detail"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/create"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/rename"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/archive"),
+  capability("hcn.assistant.conversations.manage", "POST /hcn/api/v1/assistant/conversations/restore"),
+  capability("hcn.assistant.turn", "POST /hcn/api/v1/assistant/turns"),
   capability("hcn.action_plans.prepare", "POST /hcn/api/v1/action-plans/prepare"),
   capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/list"),
   capability("hcn.action_plans.read", "POST /hcn/api/v1/action-plans/detail"),
@@ -38,9 +51,6 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("handoff.artifact.read", "POST /handoff/get"),
   capability("handoff.artifact.process", "POST /handoff/process"),
   capability("handoff.artifact.complete", "POST /handoff/complete"),
-  capability("brain.context.read", "POST /brain/context"),
-  capability("memory.file_actions.read", "POST /memory/file-actions"),
-  capability("memory.persistence.probe", "POST /memory/persistence-check"),
   capability("operations.session.start", "POST /ops/start-session"),
   capability("operations.scheduling.recover", "POST /ops/recover-scheduling-communications"),
   capability("operations.files.review", "POST /ops/review-chance-files"),
@@ -112,7 +122,16 @@ export function capabilitiesForIdentity(identity) {
   if (safeIdentity.authentication !== "authenticated") return [];
 
   const policyIdentity = safeIdentity.type === "codex_operator"
-    ? { type: "codex_operator_token", role: "codex_operator" }
+    ? {
+        type: "codex_operator_token",
+        role: "codex_operator",
+        subject: typeof identity?.subject === "string"
+          ? identity.subject
+          : "",
+        scopes: Array.isArray(identity?.scopes)
+          ? identity.scopes
+          : []
+      }
     : safeIdentity.type === "hcn_browser_session"
       ? { type: "hcn_browser_session", role: safeIdentity.role }
       : { type: "google_oauth", role: safeIdentity.role };
@@ -136,19 +155,46 @@ export function buildRuntimeStatus(runtime = {}) {
   const clientCoordinator = safeObject(source.clientCoordinator);
   const carrierFollowUp = safeObject(source.carrierFollowUp);
   const scheduling = safeObject(source.schedulingAvailability);
-  const brain = safeObject(source.brain);
+  const hcnOperationsBrain = safeObject(source.hcnOperationsBrain);
+  const hcnAssistant = safeObject(source.hcnAssistant);
   const hcnActions = safeObject(source.hcnActions);
+  const hcnConsole = safeObject(source.hcnConsole);
+  const managementSweep = safeObject(hcnConsole.managementSweep);
 
   return {
-    brain: {
-      advisory: advisoryStatus(brain),
-      availability: configurationStatus(brain.available),
-      clientMemory: clientMemoryStatus(brain),
-      execution: gateStatus(brain.modelCanExecute),
-      fallback: fallbackStatus(brain),
-      legacyClientMemoryWrites: gateStatus(brain.legacyClientMemoryWritesAllowed),
-      persistence: configurationStatus(brain.persistentRootConfigured),
-      snapshotSafety: snapshotSafetyStatus(brain)
+    assistant: {
+      availability: configurationStatus(hcnAssistant.ready),
+      directReads: configurationStatus(hcnAssistant.deterministicReady),
+      provider: typeof hcnAssistant.provider === "string"
+        ? hcnAssistant.provider
+        : "unknown",
+      model: typeof hcnAssistant.model === "string"
+        ? hcnAssistant.model
+        : "unknown",
+      responsesApiStore:
+        hcnAssistant.responsesApiStore === false
+          ? "disabled"
+          : hcnAssistant.responsesApiStore === true
+            ? "enabled"
+            : "unknown",
+      durableHistory: configurationStatus(
+        hcnAssistant.historyReady
+      ),
+      assignedFileScope: configurationStatus(
+        hcnAssistant.assignedFileScopeOnly
+      ),
+      actionPlanning: configurationStatus(
+        hcnAssistant.modelCanPrepareActionPlans
+      ),
+      execution: gateStatus(hcnAssistant.modelCanExecute)
+    },
+    hcnOperationsBrain: {
+      advisory: advisoryStatus(hcnOperationsBrain),
+      contracts: configurationStatus(hcnOperationsBrain.contractsAvailable),
+      execution: gateStatus(hcnOperationsBrain.modelCanExecute),
+      externalActions: gateStatus(hcnOperationsBrain.externalActions),
+      persistence: configurationStatus(hcnOperationsBrain.persistenceConfigured),
+      thresherRules: configurationStatus(hcnOperationsBrain.thresherRulesAvailable)
     },
     connectors: {
       carrierFollowUp: configurationStatus(carrierFollowUp.available),
@@ -158,6 +204,9 @@ export function buildRuntimeStatus(runtime = {}) {
       googleCalendar: configurationStatus(scheduling.googleCalendarConfigured),
       googleOAuth: configurationStatus(userOAuth.available),
       jobNimbus: configurationStatus(source.jobNimbusConfigured),
+      managementSweep: configurationStatus(
+        managementSweep.ready
+      ),
       quo: configurationStatus(source.quoConfigured),
       realtimeVoice: configurationStatus(voice.available)
     },
@@ -168,7 +217,7 @@ export function buildRuntimeStatus(runtime = {}) {
       directEffectRoutes: gateStatus(codexOperator.directWriteUploadSendOrCallRoutes),
       exactDryRunDigestRequired: gateStatus(outboundSafety.exactDryRunDigestRequired),
       explicitChanceApprovalRequired: gateStatus(outboundSafety.explicitChanceApprovalRequired),
-      modelCanExecute: gateStatus(brain.modelCanExecute),
+      modelCanExecute: gateStatus(hcnOperationsBrain.modelCanExecute),
       roleEnforcement: gateStatus(userOAuth.roleEnforcement),
       schedulingFailClosed: gateStatus(scheduling.failClosed),
       shortLivedSingleUseChallengeRequired: gateStatus(
@@ -259,13 +308,16 @@ function normalizeIdentity(identity) {
     && candidate.type === "hcn_browser_session"
     && GOOGLE_ROLES.has(role)
   ) {
-    const isChance = role === "chance";
+    const jobNimbusScope = normalizeJobNimbusScope(
+      candidate.jobNimbusScope,
+      role
+    );
     return {
       authentication: "authenticated",
       type: "hcn_browser_session",
       role,
-      jobNimbusScope: isChance ? "assigned" : "none",
-      gmailMode: isChance ? "exact_assigned_file_evidence" : "none"
+      jobNimbusScope,
+      gmailMode: "per_user_connector_required"
     };
   }
 
@@ -286,43 +338,13 @@ function normalizeRole(value) {
 function normalizeJobNimbusScope(value, role) {
   const scope = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (scope === "assigned" || scope === "company") return scope;
-  return role === "chance" ? "assigned" : "company";
+  return role === "unsupported" ? "none" : "assigned";
 }
 
 function advisoryStatus(brain) {
+  if (brain.optionalModelAdvisory === false) return "disabled";
   if (brain.operationalProviderConfigured === true) return "configured";
   if (brain.operationalProviderConfigured === false) return "unconfigured";
-  if (brain.optionalModelAdvisory === false) return "disabled";
-  return "unknown";
-}
-
-function fallbackStatus(brain) {
-  if (brain.fallbackProviderConfigured === true) return "configured";
-  if (brain.fallbackProvider === "disabled" || brain.optionalModelAdvisory === false) return "disabled";
-  if (brain.fallbackProviderConfigured === false) return "unconfigured";
-  return "unknown";
-}
-
-function clientMemoryStatus(brain) {
-  if (
-    brain.codexOperatorClientMemory === "disabled_no_read_no_write"
-    || brain.codexOperatorClientMemory === "disabled"
-  ) {
-    return "disabled";
-  }
-  if (brain.clientSnapshots === "legacy_v1_unsafe_until_migrated") return "legacy_restricted";
-  if (brain.clientSnapshots === "hcn_v2_minimized") return "hcn_v2_minimized";
-  return "unknown";
-}
-
-function snapshotSafetyStatus(brain) {
-  if (
-    brain.mode === "legacy_v1_client_snapshot_persistence_requires_v2_privacy_migration"
-    || brain.clientSnapshots === "legacy_v1_unsafe_until_migrated"
-  ) {
-    return "migration_required";
-  }
-  if (brain.mode === "hcn_v2" || brain.clientSnapshots === "hcn_v2_minimized") return "current";
   return "unknown";
 }
 

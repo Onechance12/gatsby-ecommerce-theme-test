@@ -1,6 +1,7 @@
 const GOOGLE_PROVIDER_ENDPOINTS = Object.freeze({
   authorize: "https://accounts.google.com/o/oauth2/v2/auth",
   token: "https://oauth2.googleapis.com/token",
+  revoke: "https://oauth2.googleapis.com/revoke",
   tokenInfo: "https://www.googleapis.com/oauth2/v2/tokeninfo",
   userInfo: "https://openidconnect.googleapis.com/v1/userinfo"
 });

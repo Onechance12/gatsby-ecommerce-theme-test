@@ -1,9 +1,9 @@
 {
-  "name": "HCN Operations Console",
-  "short_name": "HCN Ops",
-  "description": "Home Claim Network operational readiness console.",
+  "name": "HCN Work Center",
+  "short_name": "HCN",
+  "description": "Home Claim Network employee Work Center.",
   "id": "/hcn/",
-  "start_url": "/hcn/",
+  "start_url": "/hcn/?shell=v15",
   "scope": "/hcn/",
   "display": "standalone",
   "orientation": "any",

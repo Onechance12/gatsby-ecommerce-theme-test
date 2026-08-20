@@ -71,7 +71,12 @@ function jobNimbusDetail(file = eligibleFile()) {
       propertyAddress: "100 Private Street, Example, TX 75001",
       carrierName: "Example Carrier",
       claimNumber: "CLAIM-PRIVATE-1",
-      policyNumber: "POLICY-PRIVATE-1",
+       policyNumber: "POLICY-PRIVATE-1",
+       dateOfLoss: "2026-05-17",
+       damageFactsPresent: true,
+       adjusterName: "Taylor Adjuster",
+      adjusterEmail: "ADJUSTER@CARRIER.EXAMPLE",
+      adjusterPhone: "(555) 555-0130",
       rawContact: {
         accessToken: "DO-NOT-LEAK-RAW-CONTACT"
       }
@@ -118,11 +123,12 @@ function gmailSuccess() {
     complete: true,
     items: [
       {
-        providerRecordId: "gmail-provider-id",
-        direction: "inbound",
-        occurredAt: "2026-07-28T17:20:00.000Z",
-        hasAttachment: true,
-        actionState: "needs_reply",
+         providerRecordId: "gmail-provider-id",
+         direction: "inbound",
+         occurredAt: "2026-07-28T17:20:00.000Z",
+         hasAttachment: true,
+         deliveryState: "received",
+         actionState: "needs_reply",
         subject: `Subject ${"s".repeat(300)}`,
         snippet: `Snippet ${"p".repeat(400)}`,
         body: "DO-NOT-LEAK-GMAIL-BODY"
@@ -237,11 +243,56 @@ test("Work Center includes only active Chance-assigned insurance files", async (
   assert.equal(result.page.total, 3);
   assert.deepEqual(
     result.files.map((file) => file.jobNumber),
-    ["JN-1006", "JN-1005", "JN-1001"]
+    ["JN-1006", "JN-1001", "JN-1005"]
   );
   assert.equal(result.files[0].lane, "priority");
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.files), true);
+});
+
+test("Work Center ranks actionable older workflow files ahead of recent active files", async () => {
+  const files = [
+    eligibleFile({
+      providerFileId: "provider-file-recent",
+      jobNumber: "JN-2001",
+      statusCode: "submitted_for_appraisal",
+      updatedAt: "2026-07-28T17:59:00.000Z"
+    }),
+    eligibleFile({
+      providerFileId: "provider-file-pa-review",
+      jobNumber: "JN-2002",
+      statusCode: "ready_for_pa_review",
+      updatedAt: "2026-06-01T17:00:00.000Z",
+      missingFacts: {
+        claimNumber: true,
+        policyNumber: true,
+        dateOfLoss: false,
+        adjuster: false
+      }
+    }),
+    eligibleFile({
+      providerFileId: "provider-file-confirmation",
+      jobNumber: "JN-2003",
+      statusCode: "submitted_awaiting_confirmation",
+      updatedAt: "2026-07-01T17:00:00.000Z",
+      missingFacts: {
+        claimNumber: false,
+        policyNumber: false,
+        dateOfLoss: false,
+        adjuster: true
+      }
+    })
+  ];
+
+  const result = await createService({ files }).readWorkCenter({
+    offset: 0,
+    limit: 50
+  });
+
+  assert.deepEqual(
+    result.files.map((file) => file.jobNumber),
+    ["JN-2002", "JN-2003", "JN-2001"]
+  );
 });
 
 test("Work Center list minimizes PII and never emits raw provider data", async () => {
@@ -370,6 +421,32 @@ test("exact file lookup accepts only a current opaque ref and blocks forged refs
   );
 });
 
+test("internal deterministic lookup resolves one exact assigned numeric job number", async () => {
+  const file = eligibleFile({ jobNumber: "2862" });
+  const result = await createService({
+    files: [file],
+    dependencies: {
+      loadJobNimbusFile: async () => jobNimbusDetail(file)
+    }
+  }).readFileByJobNumber({
+    jobNumber: "2862",
+    recentLimit: 10
+  });
+
+  assert.equal(result.file.jobNumber, "2862");
+  assert.equal(result.file.fileRef, fileRef());
+  assert.equal(result.evidenceStatus, "complete");
+
+  await assert.rejects(
+    () =>
+      createService({ files: [file] }).readFileByJobNumber({
+        jobNumber: "JN-2862",
+        recentLimit: 10
+      }),
+    { code: "invalid_request", statusCode: 400 }
+  );
+});
+
 test("exact file response is bounded, ephemeral, and strips provider extras", async () => {
   const result = await createService().readFile({
     fileRef: fileRef(),
@@ -381,6 +458,12 @@ test("exact file response is bounded, ephemeral, and strips provider extras", as
   assert.equal(result.file.fileRef, fileRef());
   assert.equal(result.file.client.primaryEmail, "owner@example.com");
   assert.equal(result.file.property.address, "100 Private Street, Example, TX 75001");
+  assert.equal(result.file.insurance.dateOfLoss, "2026-05-17");
+  assert.deepEqual(result.file.adjuster, {
+    name: "Taylor Adjuster",
+    email: "adjuster@carrier.example",
+    phone: "(555) 555-0130"
+  });
   assert.equal(Array.from(result.recent.activities[0].label).length, 160);
   assert.equal(Array.from(result.recent.documents[0].fileName).length, 160);
   assert.equal(Array.from(result.recent.gmail[0].subject).length, 160);
@@ -417,7 +500,93 @@ test("exact file response is bounded, ephemeral, and strips provider extras", as
   }
 });
 
-test("recent projections enforce the requested maximum and mark partial evidence", async () => {
+test("actionable workflow files receive a read-only Today review item", async () => {
+  const file = eligibleFile({
+    statusCode: "ready_for_pa_review",
+    stageCode: "estimating",
+    updatedAt: "2026-07-28T17:50:00.000Z",
+    missingFacts: {
+      claimNumber: true,
+      policyNumber: false,
+      dateOfLoss: false,
+      adjuster: false
+    }
+  });
+  const details = jobNimbusDetail(file);
+  details.data.file.claimNumber = null;
+  const result = await createService({
+    files: [file],
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+
+  assert.deepEqual(
+    result.lanes.today.map((item) => item.reasonCode),
+    ["file_review_today"]
+  );
+});
+
+test("workflow status alone does not invent a Today review item", async () => {
+  const file = eligibleFile({
+    statusCode: "ready_for_pa_review",
+    stageCode: "unknown",
+    missingFacts: {
+      claimNumber: false,
+      policyNumber: false,
+      dateOfLoss: false,
+      adjuster: false
+    }
+  });
+  const details = jobNimbusDetail(file);
+  details.data.tasks = [];
+  details.data.documents = [];
+  const result = await createService({
+    files: [file],
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+
+  assert.deepEqual(result.lanes.today, []);
+});
+
+test("later estimate evidence never silently removes an open inspection task", async () => {
+  const file = eligibleFile({
+    statusCode: "ready_for_pa_review",
+    stageCode: "estimating"
+  });
+  const details = jobNimbusDetail(file);
+  details.data.tasks = [{
+    providerRecordId: "stale-inspection-task",
+    kind: "task",
+    status: "open",
+    priority: "normal",
+    dueAt: "2026-06-15T18:00:00.000Z",
+    assignedRole: "chance",
+    label: "Estimate Inspection"
+  }];
+  details.data.documents = [{
+    providerRecordId: "later-estimate",
+    kind: "estimate",
+    reviewState: "needs_review",
+    createdAt: "2026-07-08T18:00:00.000Z",
+    fileName: "Current estimate.pdf"
+  }];
+  const result = await createService({
+    files: [file],
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+
+  assert.equal(
+    result.lanes.priority.some((item) => item.reasonCode === "overdue_task"),
+    true
+  );
+  assert.equal(
+    result.lanes.priority.some(
+      (item) => item.reasonCode === "document_review_required"
+    ),
+    true
+  );
+});
+
+test("recent projections omit older valid items without marking complete evidence partial", async () => {
   const details = jobNimbusDetail();
   details.data.activities = Array.from({ length: 25 }, (_, index) => ({
     providerRecordId: `activity-${index}`,
@@ -437,8 +606,126 @@ test("recent projections enforce the requested maximum and mark partial evidence
   });
 
   assert.equal(result.recent.activities.length, 5);
+  assert.equal(result.sources.jobnimbus.completeness, "complete");
+  assert.equal(result.sources.jobnimbus.failureCode, null);
+  assert.equal(result.sources.jobnimbus.droppedItems, 0);
+  assert.equal(result.evidenceStatus, "complete");
+});
+
+test("task projection retains the oldest overdue work beyond the display limit", async () => {
+  const details = jobNimbusDetail();
+  details.data.tasks = [
+    ...Array.from({ length: 25 }, (_, index) => ({
+      providerRecordId: `future-task-${index}`,
+      kind: "file_review",
+      status: "pending",
+      priority: "normal",
+      dueAt: new Date(
+        Date.parse("2026-08-01T12:00:00.000Z") + index * 86_400_000
+      ).toISOString(),
+      assignedRole: "employee",
+      label: `Future task ${index}`
+    })),
+    {
+      providerRecordId: "oldest-overdue-task",
+      kind: "carrier_follow_up",
+      status: "pending",
+      priority: "high",
+      dueAt: "2026-05-01T12:00:00.000Z",
+      assignedRole: "employee",
+      label: "Oldest overdue task"
+    }
+  ];
+  const result = await createService({
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 20 });
+
+  assert.equal(result.recent.tasks.length, 20);
+  assert.equal(
+    result.recent.tasks.some(({ label }) => label === "Oldest overdue task"),
+    true
+  );
+  assert.equal(
+    result.lanes.priority.some(
+      ({ reasonCode, reference }) =>
+        reasonCode === "overdue_task"
+        && reference === result.recent.tasks[0].reference
+    ),
+    true
+  );
+  assert.equal(result.sources.jobnimbus.completeness, "complete");
+});
+
+test("document projection retains operational categories beyond the display limit", async () => {
+  const details = jobNimbusDetail();
+  details.data.documents = [
+    ...Array.from({ length: 25 }, (_, index) => ({
+      providerRecordId: `generic-document-${index}`,
+      kind: "document",
+      reviewState: "reviewed",
+      createdAt: new Date(
+        Date.parse("2026-07-28T17:00:00.000Z") - index * 60_000
+      ).toISOString(),
+      fileName: `Generic ${index}.pdf`
+    })),
+    {
+      providerRecordId: "older-policy",
+      kind: "declaration_page",
+      reviewState: "reviewed",
+      createdAt: "2026-04-01T12:00:00.000Z",
+      fileName: "Policy declaration.pdf"
+    },
+    {
+      providerRecordId: "older-lor",
+      kind: "authorization_lor",
+      reviewState: "reviewed",
+      createdAt: "2026-04-02T12:00:00.000Z",
+      fileName: "Letter of representation.pdf"
+    },
+    {
+      providerRecordId: "older-estimate",
+      kind: "estimate",
+      reviewState: "reviewed",
+      createdAt: "2026-04-03T12:00:00.000Z",
+      fileName: "Estimate.pdf"
+    }
+  ];
+  const result = await createService({
+    dependencies: { loadJobNimbusFile: async () => details }
+  }).readFile({ fileRef: fileRef(), recentLimit: 20 });
+
+  assert.equal(result.recent.documents.length, 20);
+  assert.deepEqual(
+    ["declaration_page", "authorization_lor", "estimate"].map((kind) =>
+      result.recent.documents.some((document) => document.kind === kind)
+    ),
+    [true, true, true]
+  );
+  assert.equal(result.sources.jobnimbus.completeness, "complete");
+});
+
+test("invalid recent items remain dropped evidence and mark the source partial", async () => {
+  const details = jobNimbusDetail();
+  details.data.activities.push({
+    providerRecordId: "malformed-activity",
+    kind: "status_change",
+    state: "completed",
+    occurredAt: "not-a-timestamp",
+    actorRole: "team",
+    label: "Malformed activity"
+  });
+  const result = await createService({
+    dependencies: {
+      loadJobNimbusFile: async () => details
+    }
+  }).readFile({
+    fileRef: fileRef(),
+    recentLimit: 10
+  });
+
   assert.equal(result.sources.jobnimbus.completeness, "partial");
   assert.equal(result.sources.jobnimbus.failureCode, "source_partial");
+  assert.equal(result.sources.jobnimbus.droppedItems, 1);
   assert.equal(result.evidenceStatus, "partial");
 });
 
@@ -555,6 +842,43 @@ test("Gmail and Quo failures become coded incomplete empty sources", async () =>
   assert.equal(serialized.includes("GMAIL-SECRET"), false);
   assert.equal(serialized.includes("QUO-SECRET"), false);
   assert.equal(serialized.includes("QUO-PROVIDER-ERROR"), false);
+});
+
+test("optional source failures expose only allowlisted employee-safe reason codes", async () => {
+  const providerError = new Error("PRIVATE provider response");
+  providerError.hcnSourceFailureCode = "provider_check_failed";
+  const phoneMatchError = new Error("PRIVATE phone correlation response");
+  phoneMatchError.hcnSourceFailureCode = "phone_match_unverified";
+  const forgedError = new Error("PRIVATE forged response");
+  forgedError.hcnSourceFailureCode = "private_provider_secret";
+  const result = await createService({
+    dependencies: {
+      loadGmailFile: async () => { throw forgedError; },
+      loadQuoFile: async () => { throw providerError; }
+    }
+  }).readFile({
+    fileRef: fileRef(),
+    recentLimit: 10
+  });
+
+  assert.equal(result.sources.quo.failureCode, "provider_check_failed");
+  assert.equal(result.sources.gmail.failureCode, "source_unavailable");
+  const phoneResult = await createService({
+    dependencies: {
+      loadGmailFile: async () => { throw phoneMatchError; }
+    }
+  }).readFile({
+    fileRef: fileRef(),
+    recentLimit: 10
+  });
+  assert.equal(
+    phoneResult.sources.gmail.failureCode,
+    "phone_match_unverified"
+  );
+  assert.doesNotMatch(
+    JSON.stringify([result, phoneResult]),
+    /private_provider_secret|forged response|provider response|correlation response/
+  );
 });
 
 test("proved exact optional evidence remains visible when provider pagination is partial", async () => {

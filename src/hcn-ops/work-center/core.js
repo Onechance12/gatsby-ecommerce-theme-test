@@ -60,6 +60,7 @@ const COMMUNICATION_ACTION_STATES = new Set([
 const DIRECTIONS = new Set(["inbound", "outbound", "internal", "unknown"]);
 const ACTOR_ROLES = new Set([
   "chance",
+  "employee",
   "homeowner",
   "adjuster",
   "carrier",

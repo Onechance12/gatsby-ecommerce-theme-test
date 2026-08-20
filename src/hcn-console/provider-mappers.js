@@ -168,6 +168,18 @@ const CONTACT_FIELDS = Object.freeze({
     'dateOfLoss',
     'cf_date_1',
   ],
+  damageFacts: [
+    'Damage Details',
+    'Damage Summary',
+    'Description of Loss',
+    'Loss Description',
+    'damage_details',
+    'damageDetails',
+    'damage_summary',
+    'damageSummary',
+    'description_of_loss',
+    'descriptionOfLoss',
+  ],
   adjusterName: [
     'Carrier DA',
     'Carrier Adjuster',
@@ -205,10 +217,9 @@ export class HcnProviderMappingError extends Error {
  * Map a completely paginated JobNimbus contact index.
  */
 export function mapJobNimbusIndexEnvelope(input, options = {}) {
-  const chanceOwnerId = requireProviderId(
-    options.chanceOwnerId,
-    'chanceOwnerId',
-  );
+  const assignedOwnerId = assignedOwnerIdFromOptions(options);
+  const legacyChanceField = !options.assignedOwnerId
+    && Boolean(options.chanceOwnerId);
   const freshness = normalizeFreshness(input);
   requireCompletePagination(input, 'contacts');
   const contacts = requireArray(input?.contacts, 'contacts');
@@ -228,8 +239,11 @@ export function mapJobNimbusIndexEnvelope(input, options = {}) {
         'JobNimbus contact index contains an invalid record.',
       );
     }
-    if (!isEligibleContact(contact, chanceOwnerId)) continue;
-    const file = mapEligibleContact(contact, chanceOwnerId, { detail: false });
+    if (!isEligibleContact(contact, assignedOwnerId)) continue;
+    const file = mapEligibleContact(contact, assignedOwnerId, {
+      detail: false,
+      legacyChanceField,
+    });
     if (seen.has(file.providerFileId)) {
       fail(
         'duplicate_provider_record',
@@ -254,21 +268,43 @@ export function mapJobNimbusIndexEnvelope(input, options = {}) {
  * Map one exact, completely paginated JobNimbus file read.
  */
 export function mapJobNimbusFileEnvelope(input, options = {}) {
-  const chanceOwnerId = requireProviderId(
-    options.chanceOwnerId,
-    'chanceOwnerId',
-  );
+  const assignedOwnerId = assignedOwnerIdFromOptions(options);
+  const legacyChanceField = !options.assignedOwnerId
+    && Boolean(options.chanceOwnerId);
   const expectedProviderFileId = requireProviderId(
     options.expectedProviderFileId,
     'expectedProviderFileId',
   );
+  const knownProviderFileIds = normalizeKnownProviderFileIds(
+    options.knownProviderFileIds,
+    expectedProviderFileId,
+  );
+  const knownProviderUserIds = normalizeKnownProviderUserIds(
+    options.knownProviderUserIds,
+    knownProviderFileIds,
+    expectedProviderFileId,
+  );
+  const requireExactContactReferences =
+    options.requireExactContactReferences === true;
   const freshness = normalizeFreshness(input);
-  for (const collection of ['activities', 'tasks', 'documents']) {
-    requireCompletePagination(input, collection);
+  const collectionCompleteness = {
+    activities: readCollectionPaginationState(input, 'activities'),
+    tasks: readCollectionPaginationState(input, 'tasks'),
+    documents: readCollectionPaginationState(input, 'documents'),
+  };
+  if (!collectionCompleteness.documents) {
+    fail(
+      'incomplete_pagination',
+      'documents pagination is not verified complete.',
+    );
   }
 
   const contact = requirePlainObject(input?.contact, 'contact');
-  const file = mapEligibleContact(contact, chanceOwnerId, { detail: true });
+  const expectedProviderCustomerId = normalizeProviderId(contact.customer);
+  const file = mapEligibleContact(contact, assignedOwnerId, {
+    detail: true,
+    legacyChanceField,
+  });
   if (file.providerFileId !== expectedProviderFileId) {
     fail(
       'scope_mismatch',
@@ -276,25 +312,50 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     );
   }
 
-  const activities = mapScopedCollection({
+  const activityResult = mapScopedCollection({
     value: input.activities,
     label: 'activities',
     expectedProviderFileId,
-    mapper: (record) => mapActivity(record, chanceOwnerId),
+    knownProviderFileIds,
+    mapper: (record) =>
+      mapActivity(record, assignedOwnerId, legacyChanceField),
+    allowedExactReferenceFields: ['primary', 'related'],
+    dedupeIdenticalProviderIds: true,
+    requireExactContactReferences,
+    expectedProviderCustomerId,
+    knownProviderUserIds,
   });
-  const tasks = mapScopedCollection({
+  const taskResult = mapScopedCollection({
     value: input.tasks,
     label: 'tasks',
     expectedProviderFileId,
-    mapper: (record) => mapTask(record, chanceOwnerId),
+    knownProviderFileIds,
+    mapper: (record) =>
+      mapTask(record, assignedOwnerId, legacyChanceField),
+    requireExactContactReferences,
+    expectedProviderCustomerId,
+    knownProviderUserIds,
   });
-  const documents = mapScopedCollection({
+  const documentResult = mapScopedCollection({
     value: input.documents,
     label: 'documents',
     expectedProviderFileId,
+    knownProviderFileIds,
     mapper: mapDocument,
-    filter: (record) => !isPhotoLikeDocument(record),
+    // Ordinary file reviews keep photo-heavy jobs compact. The separate,
+    // signed Jobrolo import transport opts in so it can issue opaque refs for
+    // exact images and let Jobrolo's own approval/scanner/photo pipeline
+    // decide whether bytes become canonical evidence.
+    filter: options.includePhotoDocuments === true
+      ? undefined
+      : (record) => !isPhotoLikeDocument(record),
+    requireExactContactReferences,
+    expectedProviderCustomerId,
+    knownProviderUserIds,
   });
+  const activities = activityResult.items;
+  const tasks = taskResult.items;
+  const documents = documentResult.items;
 
   assertUniqueRecordIds([...activities, ...tasks, ...documents], 'jobnimbus');
 
@@ -306,8 +367,89 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
       activities,
       tasks,
       documents,
+      collectionCoverage: {
+        activities: collectionCoverage(
+          collectionCompleteness.activities,
+          activities.length,
+          activityResult.duplicateItemsRemoved,
+        ),
+        tasks: collectionCoverage(
+          collectionCompleteness.tasks,
+          tasks.length,
+          taskResult.duplicateItemsRemoved,
+        ),
+        documents: collectionCoverage(
+          collectionCompleteness.documents,
+          documents.length,
+          documentResult.duplicateItemsRemoved,
+        ),
+      },
     },
   });
+}
+
+/**
+ * Map the complete document manifest for one exact assigned file. Photo-like
+ * rows remain excluded unless the signed Jobrolo import transport opts in.
+ * This is the only provider-record shape accepted by the binary transfer
+ * boundary; raw provider ids remain server-local.
+ */
+export function mapJobNimbusDocumentCollection(input, options = {}) {
+  const expectedProviderFileId = requireProviderId(
+    options.expectedProviderFileId,
+    'expectedProviderFileId',
+  );
+  const knownProviderFileIds = normalizeKnownProviderFileIds(
+    options.knownProviderFileIds,
+    expectedProviderFileId,
+  );
+  if (!readCollectionPaginationState(input, 'documents')) {
+    fail(
+      'incomplete_pagination',
+      'documents pagination is not verified complete.',
+    );
+  }
+  const documents = requireArray(input.documents, 'documents');
+  assertUniqueDocumentProviderIds(documents);
+  const result = mapScopedCollection({
+    value: documents,
+    label: 'documents',
+    expectedProviderFileId,
+    knownProviderFileIds,
+    mapper: mapDocument,
+    filter: options.includePhotoDocuments === true
+      ? undefined
+      : (record) => !isPhotoLikeDocument(record),
+    requireExactContactReferences:
+      options.requireExactContactReferences === true,
+  });
+  assertUniqueRecordIds(result.items, 'jobnimbus');
+  return immutableCopy({
+    documents: result.items,
+    collectionCoverage: collectionCoverage(
+      true,
+      result.items.length,
+      result.duplicateItemsRemoved,
+    ),
+  });
+}
+
+function assertUniqueDocumentProviderIds(documents) {
+  const seen = new Set();
+  for (const document of documents) {
+    if (!isPlainObject(document)) continue;
+    const providerRecordId = normalizeProviderId(
+      field(document, DOCUMENT_FIELDS.id),
+    );
+    if (!providerRecordId) continue;
+    if (seen.has(providerRecordId)) {
+      fail(
+        'duplicate_provider_record',
+        'jobnimbus evidence contains a duplicate provider record.',
+      );
+    }
+    seen.add(providerRecordId);
+  }
 }
 
 /**
@@ -381,6 +523,11 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
     items.push(mapped);
   }
   assertUniqueRecordIds(items, source);
+  const resolvedItems = resolveCommunicationActionStates(
+    source,
+    items,
+    itemsComplete,
+  );
 
   return immutableCopy({
     status: 'ok',
@@ -388,16 +535,20 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
     data: {
       providerFileId: expectedProviderFileId,
       complete: itemsComplete,
-      items,
+      items: resolvedItems,
     },
   });
 }
 
-function mapEligibleContact(contact, chanceOwnerId, { detail }) {
-  if (!isEligibleContact(contact, chanceOwnerId)) {
+function mapEligibleContact(
+  contact,
+  assignedOwnerId,
+  { detail, legacyChanceField = false },
+) {
+  if (!isEligibleContact(contact, assignedOwnerId)) {
     fail(
       'file_not_eligible',
-      'JobNimbus file is not an active Chance-assigned insurance file.',
+      'JobNimbus file is not an active file assigned to the authenticated employee.',
     );
   }
   const providerFileId = requireProviderId(
@@ -416,27 +567,52 @@ function mapEligibleContact(contact, chanceOwnerId, { detail }) {
   if (!updatedAt) {
     fail('invalid_provider_record', 'JobNimbus file update time is invalid.');
   }
+  const claimNumber = boundedText(
+    field(contact, CONTACT_FIELDS.claimNumber),
+    80,
+  );
+  const policyNumber = boundedText(
+    field(contact, CONTACT_FIELDS.policyNumber),
+    80,
+  );
+  const dateOfLoss = normalizeProviderDate(
+    field(contact, CONTACT_FIELDS.dateOfLoss),
+  );
+  const adjusterName = boundedText(
+    field(contact, CONTACT_FIELDS.adjusterName),
+    120,
+  );
+  const adjusterPhone = normalizePhone(
+    field(contact, CONTACT_FIELDS.adjusterPhone),
+  );
+  const adjusterEmail = normalizeEmail(
+    field(contact, CONTACT_FIELDS.adjusterEmail),
+  );
+  const damageFactsPresent = Boolean(
+    boundedText(field(contact, CONTACT_FIELDS.damageFacts), 1000),
+  );
 
   const base = {
     providerFileId,
     jobNumber,
-    displayName: contactDisplayName(contact, detail ? 120 : 80),
+    // The assigned import catalog and exact snapshot share the same v1 text
+    // language; index reads must not truncate otherwise valid 81-120 character
+    // display names before opaque catalog projection.
+    displayName: contactDisplayName(contact, 120),
     statusCode: toCode(field(contact, CONTACT_FIELDS.status)),
     stageCode: toCode(field(contact, CONTACT_FIELDS.stage)),
     fileTypeCode: 'insurance',
     isInsuranceFile: true,
     isActive: true,
-    assignedToChance: true,
+    ...(legacyChanceField
+      ? { assignedToChance: true }
+      : { assignedToCurrentUser: true }),
     updatedAt,
     missingFacts: {
-      claimNumber: !hasValue(field(contact, CONTACT_FIELDS.claimNumber)),
-      policyNumber: !hasValue(field(contact, CONTACT_FIELDS.policyNumber)),
-      dateOfLoss: !hasValue(field(contact, CONTACT_FIELDS.dateOfLoss)),
-      adjuster: ![
-        field(contact, CONTACT_FIELDS.adjusterName),
-        field(contact, CONTACT_FIELDS.adjusterPhone),
-        field(contact, CONTACT_FIELDS.adjusterEmail),
-      ].some(hasValue),
+      claimNumber: !claimNumber,
+      policyNumber: !policyNumber,
+      dateOfLoss: !dateOfLoss,
+      adjuster: ![adjusterPhone, adjusterEmail].some(Boolean),
     },
   };
   if (!detail) return base;
@@ -450,17 +626,22 @@ function mapEligibleContact(contact, chanceOwnerId, { detail }) {
     primaryPhone: normalizePhone(field(contact, CONTACT_FIELDS.phone)),
     propertyAddress: contactAddress(contact),
     carrierName: boundedText(field(contact, CONTACT_FIELDS.carrier), 120),
-    claimNumber: boundedText(field(contact, CONTACT_FIELDS.claimNumber), 80),
-    policyNumber: boundedText(field(contact, CONTACT_FIELDS.policyNumber), 80),
+    claimNumber,
+    policyNumber,
+    dateOfLoss,
+    damageFactsPresent,
+    adjusterName,
+    adjusterPhone,
+    adjusterEmail,
   };
 }
 
-function isEligibleContact(contact, chanceOwnerId) {
+function isEligibleContact(contact, assignedOwnerId) {
   if (!isPlainObject(contact)) return false;
   const recordType = normalizedLabel(field(contact, CONTACT_FIELDS.recordType));
   if (recordType !== 'insurance') return false;
   if (!contactIsActive(contact)) return false;
-  return ownerIds(contact).includes(chanceOwnerId);
+  return ownerIds(contact).includes(assignedOwnerId);
 }
 
 function contactIsActive(contact) {
@@ -529,16 +710,32 @@ function mapScopedCollection({
   value,
   label,
   expectedProviderFileId,
+  knownProviderFileIds,
   mapper,
   filter = () => true,
+  allowedExactReferenceFields = ['related'],
+  dedupeIdenticalProviderIds = false,
+  requireExactContactReferences = false,
+  expectedProviderCustomerId = null,
+  knownProviderUserIds = null,
 }) {
   const rows = requireArray(value, label);
   if (rows.length > HCN_PROVIDER_MAPPER_LIMITS.maximumCollectionItems) {
     fail('provider_bounds_exceeded', `JobNimbus ${label} exceed their bound.`);
   }
   const mapped = [];
+  const byProviderRecordId = new Map();
+  let duplicateItemsRemoved = 0;
   for (const row of rows) {
-    if (!recordReferencesFile(row, expectedProviderFileId)) {
+    if (!recordReferencesFile(
+      row,
+      expectedProviderFileId,
+      knownProviderFileIds,
+      allowedExactReferenceFields,
+      requireExactContactReferences,
+      expectedProviderCustomerId,
+      knownProviderUserIds,
+    )) {
       fail(
         'scope_mismatch',
         `JobNimbus ${label} escaped the exact file scope.`,
@@ -552,13 +749,125 @@ function mapScopedCollection({
         `JobNimbus ${label} contain an invalid record.`,
       );
     }
+    if (dedupeIdenticalProviderIds) {
+      const existing = byProviderRecordId.get(item.providerRecordId);
+      const fingerprint = stableProviderRecord(row);
+      if (existing) {
+        if (
+          existing.fingerprint !== fingerprint
+          || JSON.stringify(existing.item) !== JSON.stringify(item)
+        ) {
+          fail(
+            'duplicate_provider_record',
+            `JobNimbus ${label} contain conflicting duplicate ids.`,
+          );
+        }
+        duplicateItemsRemoved += 1;
+        continue;
+      }
+      byProviderRecordId.set(item.providerRecordId, { item, fingerprint });
+    }
     mapped.push(item);
   }
-  return mapped;
+  return { items: mapped, duplicateItemsRemoved };
 }
 
-function recordReferencesFile(record, expectedProviderFileId) {
+function normalizeKnownProviderFileIds(value, expectedProviderFileId) {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 5000) {
+    fail(
+      'invalid_configuration',
+      'Known JobNimbus file scope is unavailable.',
+    );
+  }
+  const ids = new Set();
+  for (const valueId of value) {
+    ids.add(requireProviderId(valueId, 'knownProviderFileIds'));
+  }
+  if (!ids.has(expectedProviderFileId)) {
+    fail(
+      'scope_mismatch',
+      'Known JobNimbus file scope does not contain the exact file.',
+    );
+  }
+  return ids;
+}
+
+function normalizeKnownProviderUserIds(
+  value,
+  knownProviderFileIds,
+  expectedProviderFileId,
+) {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 10_000) {
+    fail(
+      'invalid_configuration',
+      'Known JobNimbus user scope is unavailable.',
+    );
+  }
+  const ids = new Set();
+  for (const valueId of value) {
+    const id = requireProviderId(valueId, 'knownProviderUserIds');
+    if (
+      ids.has(id)
+      || id === expectedProviderFileId
+      || knownProviderFileIds?.has(id)
+    ) {
+      fail(
+        'invalid_configuration',
+        'Known JobNimbus user scope is ambiguous.',
+      );
+    }
+    ids.add(id);
+  }
+  return ids;
+}
+
+function recordReferencesFile(
+  record,
+  expectedProviderFileId,
+  knownProviderFileIds,
+  allowedExactReferenceFields = ['related'],
+  requireExactContactReferences = false,
+  expectedProviderCustomerId = null,
+  knownProviderUserIds = null,
+) {
   if (!isPlainObject(record)) return false;
+  if (
+    requireExactContactReferences
+    && !hasExactTypedContactReferenceScope(
+      record,
+      expectedProviderFileId,
+      expectedProviderCustomerId,
+      knownProviderUserIds,
+    )
+  ) {
+    return false;
+  }
+  if (knownProviderFileIds) {
+    const exactReferenceIds = [];
+    for (const fieldName of allowedExactReferenceFields) {
+      if (!['primary', 'related'].includes(fieldName)) return false;
+      collectReferenceIds(record[fieldName], exactReferenceIds);
+    }
+    if (!exactReferenceIds.includes(expectedProviderFileId)) return false;
+
+    const allIds = [];
+    for (const value of [
+      record.primary,
+      record.related,
+      record.customer,
+      record.contact,
+      record.parent,
+    ]) {
+      collectReferenceIds(value, allIds);
+    }
+    return !allIds.some(
+      (id) =>
+        id !== expectedProviderFileId
+        && knownProviderFileIds.has(id),
+    );
+  }
   const containers = [
     record.primary,
     record.related,
@@ -568,7 +877,240 @@ function recordReferencesFile(record, expectedProviderFileId) {
   ];
   const ids = [];
   for (const value of containers) collectReferenceIds(value, ids);
-  return ids.includes(expectedProviderFileId);
+  return (
+    ids.length > 0
+    && ids.every((id) => id === expectedProviderFileId)
+  );
+}
+
+const EXPLICIT_NON_CONTACT_REFERENCE_TYPES = new Set([
+  'activity',
+  'document',
+  'email',
+  'file',
+  'note',
+  'photo',
+  'stage',
+  'status',
+  'task',
+  'team_member',
+  'user',
+  'workflow',
+]);
+const EXACT_REFERENCE_MAXIMUM_DEPTH = 6;
+const EXACT_REFERENCE_MAXIMUM_NODES = 128;
+const GENERIC_REFERENCE_ID_FIELDS = ['id', 'jnid'];
+const CONTACT_REFERENCE_ID_FIELDS = ['contact_id', 'contactId'];
+const REFERENCE_TYPE_FIELDS = [
+  'record_type_name',
+  'recordTypeName',
+  'record_type',
+  'recordType',
+  'type_name',
+  'typeName',
+  'type',
+];
+const NESTED_REFERENCE_FIELDS = new Map([
+  ['primary', 'generic'],
+  ['related', 'generic'],
+  ['parent', 'generic'],
+  ['customer', 'contact'],
+  ['contact', 'contact'],
+]);
+
+/**
+ * Import-only scope hardening. An unknown id is never assumed harmless merely
+ * because it is absent from the eligible assigned catalog. Every reference in
+ * a contact-bearing provider container must either be the selected contact or
+ * carry one unambiguous, explicitly allowlisted non-contact record type.
+ */
+function hasExactTypedContactReferenceScope(
+  record,
+  expectedProviderFileId,
+  expectedProviderCustomerId,
+  knownProviderUserIds,
+) {
+  const state = { nodes: 0, seen: new WeakSet() };
+  for (const [container, role] of NESTED_REFERENCE_FIELDS) {
+    const value = record[container];
+    if (value === undefined || value === null) continue;
+    // JobNimbus uses a primitive top-level `customer` value for the tenant
+    // account id, not for the related contact. Bind it to the exact contact
+    // detail's tenant id instead of treating it as a second contact ref.
+    if (
+      container === 'customer'
+      && (typeof value === 'string' || typeof value === 'number')
+    ) {
+      if (
+        !expectedProviderCustomerId
+        || normalizeProviderId(value) !== expectedProviderCustomerId
+      ) return false;
+      continue;
+    }
+    if (!validateExactReferenceValue(
+      value,
+      role,
+      expectedProviderFileId,
+      knownProviderUserIds,
+      state,
+      0,
+    )) return false;
+  }
+  return true;
+}
+
+function validateExactReferenceValue(
+  value,
+  role,
+  expectedProviderFileId,
+  knownProviderUserIds,
+  state,
+  depth,
+) {
+  state.nodes += 1;
+  if (
+    state.nodes > EXACT_REFERENCE_MAXIMUM_NODES
+    || depth > EXACT_REFERENCE_MAXIMUM_DEPTH
+  ) return false;
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value) === expectedProviderFileId;
+  }
+  if (Array.isArray(value)) {
+    // JobNimbus can emit an empty relation container alongside a separate,
+    // exact contact reference. Treat the empty container as neutral here;
+    // recordReferencesFile still requires at least one exact reference in an
+    // allowed field and rejects every known foreign-file reference.
+    return value.every((item) =>
+      validateExactReferenceValue(
+        item,
+        role,
+        expectedProviderFileId,
+        knownProviderUserIds,
+        state,
+        depth + 1,
+      )
+    );
+  }
+  if (!isPlainObject(value) || state.seen.has(value)) return false;
+  state.seen.add(value);
+
+  const genericIds = distinctReferenceFields(
+    value,
+    GENERIC_REFERENCE_ID_FIELDS,
+    (entry) => referenceId(entry),
+  );
+  const contactIds = distinctReferenceFields(
+    value,
+    CONTACT_REFERENCE_ID_FIELDS,
+    (entry) => referenceId(entry),
+  );
+  const declaredTypes = distinctReferenceFields(
+    value,
+    REFERENCE_TYPE_FIELDS,
+    (entry) => toCode(entry),
+  );
+  if (
+    genericIds === null
+    || contactIds === null
+    || declaredTypes === null
+    || genericIds.length > 1
+    || contactIds.length > 1
+    || declaredTypes.length > 1
+  ) return false;
+  if (
+    genericIds.length === 1
+    && contactIds.length === 1
+    && genericIds[0] !== contactIds[0]
+  ) return false;
+
+  const declaredType = declaredTypes[0] ?? null;
+  let foundReference = false;
+  if (contactIds.length === 1) {
+    foundReference = true;
+    if (contactIds[0] !== expectedProviderFileId) return false;
+  }
+  if (genericIds.length === 1) {
+    foundReference = true;
+    const id = genericIds[0];
+    if (id !== expectedProviderFileId) {
+      const verifiedUserReference =
+        role === 'generic' && knownProviderUserIds?.has(id);
+      if (
+        !verifiedUserReference
+        && (
+          role === 'contact'
+          || !declaredType
+          || !EXPLICIT_NON_CONTACT_REFERENCE_TYPES.has(declaredType)
+        )
+      ) return false;
+    }
+  }
+
+  for (const [key, nestedRole] of NESTED_REFERENCE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const nested = value[key];
+    if (nested === undefined || nested === null) return false;
+    foundReference = true;
+    if (!validateExactReferenceValue(
+      nested,
+      nestedRole,
+      expectedProviderFileId,
+      knownProviderUserIds,
+      state,
+      depth + 1,
+    )) return false;
+  }
+
+  // A provider relation wrapper is part of the authorization evidence. Do not
+  // silently ignore an unknown nested object/array shape: it may contain a
+  // second contact reference even when its outer relation names this file.
+  for (const [key, entry] of Object.entries(value)) {
+    if (NESTED_REFERENCE_FIELDS.has(key)) continue;
+    if (entry !== null && typeof entry === 'object') return false;
+  }
+  return foundReference;
+}
+
+function distinctReferenceFields(value, keys, normalize) {
+  const distinct = new Set();
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const raw = value[key];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const normalized = normalize(raw);
+    if (!normalized) return null;
+    distinct.add(normalized);
+  }
+  return [...distinct];
+}
+
+function referenceId(value) {
+  return normalizeProviderId(value);
+}
+
+function collectionCoverage(complete, returnedItems, duplicateItemsRemoved) {
+  return {
+    completeness: complete ? 'complete' : 'partial',
+    returnedItems,
+    duplicateItemsRemoved,
+    limitationCode: complete ? null : 'incomplete_pagination',
+  };
+}
+
+function stableProviderRecord(value) {
+  if (Array.isArray(value)) {
+    return JSON.stringify(
+      value.map(stableProviderRecord).sort((left, right) =>
+        left.localeCompare(right)
+      ),
+    );
+  }
+  if (!isPlainObject(value)) return JSON.stringify(value);
+  return JSON.stringify(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stableProviderRecord(entry)]),
+  );
 }
 
 function collectReferenceIds(value, ids) {
@@ -588,7 +1130,7 @@ function collectReferenceIds(value, ids) {
   }
 }
 
-function mapActivity(record, chanceOwnerId) {
+function mapActivity(record, assignedOwnerId, legacyChanceField = false) {
   if (!isPlainObject(record)) return null;
   const providerRecordId = normalizeProviderId(
     field(record, ACTIVITY_FIELDS.id),
@@ -604,12 +1146,14 @@ function mapActivity(record, chanceOwnerId) {
     occurredAt,
     actorRole:
       toCode(field(record, ACTIVITY_FIELDS.actorRole)) ??
-      (ownerIds(record).includes(chanceOwnerId) ? 'chance' : 'team'),
+      (ownerIds(record).includes(assignedOwnerId)
+        ? legacyChanceField ? 'chance' : 'employee'
+        : 'team'),
     label: boundedText(field(record, ACTIVITY_FIELDS.label), 160),
   };
 }
 
-function mapTask(record, chanceOwnerId) {
+function mapTask(record, assignedOwnerId, legacyChanceField = false) {
   if (!isPlainObject(record)) return null;
   const providerRecordId = normalizeProviderId(field(record, TASK_FIELDS.id));
   if (!providerRecordId) return null;
@@ -631,7 +1175,9 @@ function mapTask(record, chanceOwnerId) {
     dueAt,
     assignedRole:
       toCode(field(record, TASK_FIELDS.assignedRole)) ??
-      (ownerIds(record).includes(chanceOwnerId) ? 'chance' : 'team'),
+      (ownerIds(record).includes(assignedOwnerId)
+        ? legacyChanceField ? 'chance' : 'employee'
+        : 'team'),
     label: boundedText(field(record, TASK_FIELDS.label), 160),
   };
 }
@@ -681,6 +1227,13 @@ function mapGmailItem(record) {
   const direction = normalizeDirection(
     field(record, ['direction', 'messageDirection', 'message_direction']),
   );
+  const requestedActionState = normalizeCommunicationActionState(
+    field(record, ['actionState', 'action_state']),
+  );
+  const deliveryState = gmailDeliveryState(
+    requestedActionState,
+    direction,
+  );
   const hasAttachment =
     typeof record.hasAttachment === 'boolean'
       ? record.hasAttachment
@@ -692,15 +1245,22 @@ function mapGmailItem(record) {
     direction,
     occurredAt,
     hasAttachment,
-    actionState: communicationActionState(
-      field(record, ['actionState', 'action_state']),
-      direction,
-    ),
+    deliveryState,
+    actionState: deliveryState === 'draft'
+      ? 'draft'
+      : deliveryState === 'failed'
+        ? 'failed'
+        : deliveryState === 'unverified'
+          ? 'unverified'
+          : 'no_action',
     subject: boundedText(field(record, ['subject']), 160),
     snippet: boundedText(
       field(record, ['snippet', 'preview', 'plainText', 'plain_text', 'text']),
       240,
     ),
+    conversationKey: normalizeProviderId(
+      field(record, ['threadId', 'thread_id', 'conversationId']),
+    ) ?? providerRecordId,
   };
 }
 
@@ -730,17 +1290,31 @@ function mapQuoItem(record) {
   if (!providerRecordId || !occurredAt) return null;
   const direction = normalizeDirection(field(record, ['direction']));
   const channel = quoChannel(field(record, ['channel', 'type']));
+  const disposition =
+    toCode(field(record, ['disposition', 'status'])) ?? 'unknown';
+  const requestedActionState = normalizeCommunicationActionState(
+    field(record, ['actionState', 'action_state']),
+  );
+  let actionState = requestedActionState;
+  if (/failed|undelivered/.test(disposition)) actionState = 'failed';
+  if (
+    channel === 'call'
+    && direction === 'inbound'
+    && /missed|voicemail/.test(disposition)
+  ) {
+    actionState = 'needs_reply';
+  }
   return {
     providerRecordId,
     channel,
     direction,
     occurredAt,
-    disposition: toCode(field(record, ['disposition', 'status'])) ?? 'unknown',
-    actionState: communicationActionState(
-      field(record, ['actionState', 'action_state']),
-      direction,
-    ),
+    disposition,
+    actionState,
     preview: boundedText(field(record, ['preview', 'text', 'voicemail']), 240),
+    conversationKey: normalizeProviderId(
+      field(record, ['conversationId', 'conversation_id', 'threadId']),
+    ) ?? 'quo_file_stream',
   };
 }
 
@@ -825,12 +1399,89 @@ function quoChannel(value) {
   return 'unknown';
 }
 
-function communicationActionState(value, direction) {
+function normalizeCommunicationActionState(value) {
   const code = toCode(value);
-  if (code) return code;
-  if (direction === 'inbound') return 'needs_reply';
-  if (direction === 'outbound') return 'awaiting_response';
+  if (
+    [
+      'draft',
+      'failed',
+      'sent_verified',
+      'unverified',
+      'needs_reply',
+      'awaiting_response',
+      'responded',
+      'no_action',
+    ].includes(code)
+  ) {
+    return code;
+  }
   return 'no_action';
+}
+
+function gmailDeliveryState(actionState, direction) {
+  if (actionState === 'draft') return 'draft';
+  if (actionState === 'failed') return 'failed';
+  if (direction === 'inbound') return 'received';
+  if (direction === 'outbound' && actionState === 'sent_verified') {
+    return 'sent_verified';
+  }
+  if (direction === 'outbound') return 'unverified';
+  return 'unknown';
+}
+
+function resolveCommunicationActionStates(source, items, complete) {
+  const grouped = new Map();
+  const resolved = items.map((item) => {
+    const copy = { ...item };
+    const key = copy.conversationKey;
+    delete copy.conversationKey;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(copy);
+    return copy;
+  });
+  if (!complete) return resolved;
+
+  for (const group of grouped.values()) {
+    const candidates = group
+      .filter((item) => responseCandidate(source, item))
+      .sort(
+        (left, right) =>
+          Date.parse(right.occurredAt) - Date.parse(left.occurredAt)
+          || left.providerRecordId.localeCompare(right.providerRecordId),
+      );
+    if (candidates.length === 0) continue;
+    const latest = candidates[0];
+    if (latest.direction === 'inbound') {
+      latest.actionState = 'needs_reply';
+    } else {
+      latest.actionState = 'awaiting_response';
+    }
+  }
+  return resolved;
+}
+
+function responseCandidate(source, item) {
+  if (source === 'gmail') {
+    if (isAutomatedJobNimbusTaskReminder(item)) return false;
+    return item.deliveryState === 'received'
+      || item.deliveryState === 'sent_verified';
+  }
+  if (source === 'quo' && item.channel === 'text') {
+    return item.direction === 'inbound'
+      || (
+        item.direction === 'outbound'
+        && item.disposition === 'delivered'
+      );
+  }
+  return false;
+}
+
+function isAutomatedJobNimbusTaskReminder(item) {
+  const subject = String(item?.subject || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  return /^jobnimbus task reminders?(?:\b|$)/.test(subject);
 }
 
 function normalizeFreshness(input) {
@@ -852,6 +1503,15 @@ function normalizeFreshness(input) {
 }
 
 function requireCompletePagination(input, collection) {
+  if (!readCollectionPaginationState(input, collection)) {
+    fail(
+      'incomplete_pagination',
+      `${collection} pagination is not verified complete.`,
+    );
+  }
+}
+
+function readCollectionPaginationState(input, collection) {
   const pagination = isPlainObject(input?.pagination) ? input.pagination : {};
   const singular = collection.endsWith('ies')
     ? `${collection.slice(0, -3)}y`
@@ -859,22 +1519,30 @@ function requireCompletePagination(input, collection) {
       ? collection.slice(0, -1)
       : collection;
   const pascal = singular[0].toUpperCase() + singular.slice(1);
-  const explicit =
-    input?.[`${collection}Complete`] === true ||
-    input?.[`${singular}Complete`] === true ||
-    pagination[`${collection}Complete`] === true ||
-    pagination[`${singular}Complete`] === true ||
-    pagination[collection] === true ||
-    (pagination.collection === collection && pagination.complete === true) ||
-    (collection === 'contacts' && pagination.complete === true) ||
-    (collection === 'items' && pagination.complete === true) ||
-    input?.[`is${pascal}Complete`] === true;
-  if (!explicit) {
+  const candidates = [
+    input?.[`${collection}Complete`],
+    input?.[`${singular}Complete`],
+    pagination[`${collection}Complete`],
+    pagination[`${singular}Complete`],
+    pagination[collection],
+    pagination.collection === collection ? pagination.complete : undefined,
+    collection === 'contacts' ? pagination.complete : undefined,
+    collection === 'items' ? pagination.complete : undefined,
+    input?.[`is${pascal}Complete`],
+  ].filter((value) => typeof value === 'boolean');
+  if (candidates.length === 0) {
     fail(
       'incomplete_pagination',
-      `${collection} pagination is not verified complete.`,
+      `${collection} pagination state is not verified.`,
     );
   }
+  if (candidates.some((value) => value !== candidates[0])) {
+    fail(
+      'incomplete_pagination',
+      `${collection} pagination state is inconsistent.`,
+    );
+  }
+  return candidates[0];
 }
 
 function readCommunicationPaginationState(input) {
@@ -962,6 +1630,11 @@ function requirePlainObject(value, label) {
   return value;
 }
 
+function assignedOwnerIdFromOptions(options) {
+  const value = options.assignedOwnerId ?? options.chanceOwnerId;
+  return requireProviderId(value, 'assignedOwnerId');
+}
+
 function requireProviderId(value, label) {
   const normalized = normalizeProviderId(value);
   if (!normalized) {
@@ -1010,6 +1683,66 @@ function normalizeNullableProviderTimestamp(value) {
   return value === undefined || value === null || value === ''
     ? null
     : normalizeProviderTimestamp(value);
+}
+
+function normalizeProviderDate(value) {
+  if (value === undefined || value === null || value === '') return null;
+  // JobNimbus emits both zero and positive epoch-like numbers for this civil
+  // field. No source-zone contract exists, so those numeric values are
+  // unavailable rather than instants that may be shifted into a date.
+  if (value === 0) return null;
+  if (
+    typeof value === 'number'
+    && Number.isFinite(value)
+    && value > 0
+  ) return null;
+  // Date objects, negative numbers, and non-finite numbers are malformed
+  // provider values. Date objects must never be UTC-converted into an
+  // apparent civil loss date.
+  if (value instanceof Date || typeof value === 'number') {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be a calendar date without a time or timezone.',
+    );
+  }
+  if (typeof value !== 'string') {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be a calendar date without a time or timezone.',
+    );
+  }
+  const text = value.trim();
+  if (!text) return null;
+  if (/^0+(?:\.0+)?$/.test(text)) return null;
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  const usDate = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text);
+  let year;
+  let month;
+  let day;
+  if (isoDate) {
+    [, year, month, day] = isoDate;
+  } else if (usDate) {
+    [, month, day, year] = usDate;
+    month = month.padStart(2, '0');
+    day = day.padStart(2, '0');
+  } else {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be YYYY-MM-DD or M/D/YYYY without a time or timezone.',
+    );
+  }
+  const candidate = `${year}-${month}-${day}`;
+  const parsed = new Date(`${candidate}T00:00:00.000Z`);
+  if (
+    Number.isNaN(parsed.getTime())
+    || parsed.toISOString().slice(0, 10) !== candidate
+  ) {
+    fail(
+      'invalid_provider_record',
+      'JobNimbus date of loss must be a real calendar date.',
+    );
+  }
+  return candidate;
 }
 
 function normalizeEmail(value) {
@@ -1061,7 +1794,10 @@ function boundedText(value, maximumCharacters) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!normalized) return null;
-  return Array.from(normalized).slice(0, maximumCharacters).join('');
+  return Array.from(normalized)
+    .slice(0, maximumCharacters)
+    .join('')
+    .trim();
 }
 
 function hasValue(value) {

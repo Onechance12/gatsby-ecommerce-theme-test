@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   HCN_PROVIDER_MAPPER_LIMITS,
   HcnProviderMappingError,
+  mapJobNimbusDocumentCollection,
   mapJobNimbusFileEnvelope,
   mapJobNimbusIndexEnvelope,
   mapScopedGmailEnvelope,
@@ -39,6 +40,11 @@ function contact(overrides = {}) {
     'Insurance Company': 'Example Carrier',
     'Claim #': 'CLAIM-PRIVATE',
     'Policy #': 'POLICY-PRIVATE',
+    'Date of Loss': '2026-05-17',
+    'Damage Summary': 'Roof and interior damage documented',
+    'Carrier DA': 'Taylor Adjuster',
+    'Carrier DA Contact #': '(555) 555-0130',
+    'Carrier DA Email': 'ADJUSTER@CARRIER.EXAMPLE',
     ...overrides,
   };
 }
@@ -156,12 +162,127 @@ test('index maps field aliases and keeps only active exact-owner insurance files
   assert.deepEqual(result.data.files[0].missingFacts, {
     claimNumber: false,
     policyNumber: false,
-    dateOfLoss: true,
-    adjuster: true,
+    dateOfLoss: false,
+    adjuster: false,
   });
   assert.equal(JSON.stringify(result).includes(CHANCE_ID), false);
   assert.equal(JSON.stringify(result).includes('DO-NOT-LEAK'), false);
   assert.equal(Object.isFrozen(result.data.files), true);
+});
+
+test('assigned index preserves the shared 120-character import display name bound', () => {
+  const displayName = 'A'.repeat(120);
+  const result = mapJobNimbusIndexEnvelope({
+    ...FRESHNESS,
+    contactsComplete: true,
+    contacts: [contact({ display_name: displayName })],
+  }, {
+    assignedOwnerId: CHANCE_ID,
+  });
+  assert.equal(result.data.files[0].displayName, displayName);
+  assert.equal(Array.from(result.data.files[0].displayName).length, 120);
+  assert.equal(result.data.files[0].assignedToCurrentUser, true);
+});
+
+test('document transfer mapper requires a complete exact-file non-photo collection', () => {
+  const result = mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'document-one',
+      filename: 'Carrier estimate.pdf',
+      content_type: 'application/pdf',
+      status_name: 'New',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: FILE_ID },
+    }, {
+      jnid: 'photo-one',
+      filename: 'Roof photo.jpg',
+      content_type: 'image/jpeg',
+      status_name: 'New',
+      created_at: '2026-07-28T17:51:00.000Z',
+      related: { id: FILE_ID },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  });
+  assert.deepEqual(result.documents, [{
+    providerRecordId: 'document-one',
+    kind: 'estimate',
+    reviewState: 'needs_review',
+    createdAt: '2026-07-28T17:50:00.000Z',
+    fileName: 'Carrier estimate.pdf',
+  }]);
+  assert.equal(result.collectionCoverage.completeness, 'complete');
+  const withPhotos = mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'document-one',
+      filename: 'Carrier estimate.pdf',
+      content_type: 'application/pdf',
+      status_name: 'New',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: FILE_ID },
+    }, {
+      jnid: 'photo-one',
+      filename: 'Roof photo.jpg',
+      content_type: 'image/jpeg',
+      status_name: 'New',
+      created_at: '2026-07-28T17:51:00.000Z',
+      related: { id: FILE_ID },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+    includePhotoDocuments: true,
+  });
+  assert.deepEqual(withPhotos.documents.map(document => document.providerRecordId), [
+    'document-one',
+    'photo-one',
+  ]);
+  assert.equal(withPhotos.documents[1].kind, 'document');
+  assert.throws(() => mapJobNimbusDocumentCollection({
+    documentsComplete: false,
+    documents: [],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+  }), mappingError('incomplete_pagination'));
+  assert.throws(() => mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'foreign-document',
+      filename: 'Foreign.pdf',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: 'unassigned-foreign-contact' },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  }), mappingError('scope_mismatch'));
+  assert.throws(() => mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'ambiguous-document',
+      filename: 'Carrier estimate.pdf',
+      content_type: 'application/pdf',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: FILE_ID },
+    }, {
+      jnid: 'ambiguous-document',
+      filename: 'Roof photo.jpg',
+      content_type: 'image/jpeg',
+      created_at: '2026-07-28T17:51:00.000Z',
+      related: { id: FILE_ID },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  }), mappingError('duplicate_provider_record'));
 });
 
 test('index fails closed on incomplete pagination, bad freshness, and malformed eligible records', () => {
@@ -312,6 +433,14 @@ test('exact JobNimbus file maps aliases, bounds presentation text, and excludes 
 
   assert.equal(result.data.file.nextAppointmentAt, '2026-07-29T14:00:00.000Z');
   assert.equal(result.data.file.primaryEmail, 'owner@example.test');
+  assert.equal(result.data.file.dateOfLoss, '2026-05-17');
+  assert.equal(result.data.file.damageFactsPresent, true);
+  assert.equal(result.data.file.adjusterName, 'Taylor Adjuster');
+  assert.equal(result.data.file.adjusterPhone, '(555) 555-0130');
+  assert.equal(
+    result.data.file.adjusterEmail,
+    'adjuster@carrier.example',
+  );
   assert.equal(
     result.data.file.propertyAddress,
     '100 Private Street, Example TX 75001',
@@ -344,7 +473,39 @@ test('exact JobNimbus file maps aliases, bounds presentation text, and excludes 
   }
 });
 
-test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete collections, and duplicate IDs', () => {
+test('exact JobNimbus import opt-in includes scoped photo manifests without bytes', () => {
+  const result = mapJobNimbusFileEnvelope({
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [scoped({
+      fileId: 'photo-provider-id',
+      filename: 'roof.jpg',
+      contentType: 'image/jpeg',
+      type: 'Photo',
+      uploadedAt: '2026-07-28T17:31:00.000Z',
+      bytes: 'DO-NOT-EMIT',
+      downloadUrl: 'https://provider.invalid/photo',
+    })],
+  }, {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    includePhotoDocuments: true,
+  });
+
+  assert.equal(result.data.documents.length, 1);
+  assert.equal(result.data.documents[0].providerRecordId, 'photo-provider-id');
+  assert.equal(result.data.documents[0].fileName, 'roof.jpg');
+  assert.equal(result.data.documents[0].kind, 'photo');
+  assert.equal(JSON.stringify(result).includes('DO-NOT-EMIT'), false);
+  assert.equal(JSON.stringify(result).includes('provider.invalid'), false);
+});
+
+test('exact JobNimbus file preserves bounded activity/task history but fails closed on document pagination and conflicting IDs', () => {
   const base = {
     ...FRESHNESS,
     activitiesComplete: true,
@@ -393,11 +554,76 @@ test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete
       mapJobNimbusFileEnvelope(
         {
           ...base,
+          activities: [
+            {
+              jnid: 'cross-linked-activity',
+              primary: { id: 'different-client-file' },
+              related: [{ id: FILE_ID }],
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+    mappingError('scope_mismatch'),
+  );
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
           documentsComplete: false,
         },
         options,
       ),
     mappingError('incomplete_pagination'),
+  );
+
+  const boundedHistory = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activitiesComplete: false,
+      tasksComplete: false,
+      activities: [
+        scoped({ jnid: 'bounded-activity', date_created: 1785261000 }),
+      ],
+      tasks: [
+        scoped({
+          jnid: 'bounded-task',
+          date_created: 1785261000,
+          status_name: 'Open',
+        }),
+      ],
+    },
+    options,
+  );
+  assert.equal(boundedHistory.data.file.providerFileId, FILE_ID);
+  assert.deepEqual(boundedHistory.data.collectionCoverage.activities, {
+    completeness: 'partial',
+    returnedItems: 1,
+    duplicateItemsRemoved: 0,
+    limitationCode: 'incomplete_pagination',
+  });
+  assert.equal(
+    boundedHistory.data.collectionCoverage.tasks.completeness,
+    'partial',
+  );
+
+  const duplicateActivities = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activities: [
+        scoped({ jnid: 'same-id', date_created: 1785261000 }),
+        scoped({ jnid: 'same-id', date_created: 1785261000 }),
+      ],
+    },
+    options,
+  );
+  assert.equal(duplicateActivities.data.activities.length, 1);
+  assert.equal(
+    duplicateActivities.data.collectionCoverage.activities
+      .duplicateItemsRemoved,
+    1,
   );
   assert.throws(
     () =>
@@ -413,6 +639,682 @@ test('exact JobNimbus file fails on reassignment, wrong record scope, incomplete
       ),
     mappingError('duplicate_provider_record'),
   );
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          activities: [
+            scoped({
+              jnid: 'same-normalized-id',
+              date_created: 1785261000,
+              rawBody: 'first provider body',
+            }),
+            scoped({
+              jnid: 'same-normalized-id',
+              date_created: 1785261000,
+              rawBody: 'different provider body',
+            }),
+          ],
+        },
+        options,
+      ),
+    mappingError('duplicate_provider_record'),
+  );
+});
+
+test('exact JobNimbus import activities require typed references and reject every foreign contact', () => {
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+    requireExactContactReferences: true,
+  };
+
+  const result = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activities: [
+        {
+          jnid: 'related-file-activity',
+          primary: { id: 'jobnimbus-task-id', record_type_name: 'Task' },
+          related: [{ id: FILE_ID }],
+          date_created: 1785261000,
+        },
+        {
+          jnid: 'primary-file-activity',
+          primary: { id: FILE_ID },
+          related: [{ id: 'jobnimbus-task-id', record_type_name: 'Task' }],
+          date_created: 1785261001,
+        },
+      ],
+    },
+    options,
+  );
+  assert.equal(result.data.activities.length, 2);
+
+  const tenantBound = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      contact: contact({ customer: 'jobnimbus-tenant-account' }),
+      activities: [
+        {
+          jnid: 'tenant-bound-activity',
+          primary: { id: FILE_ID },
+          related: [{ id: FILE_ID }],
+          customer: 'jobnimbus-tenant-account',
+          date_created: 1785261000,
+        },
+      ],
+    },
+    options,
+  );
+  assert.equal(tenantBound.data.activities.length, 1);
+  assert.equal(
+    JSON.stringify(tenantBound).includes('jobnimbus-tenant-account'),
+    false,
+  );
+
+  const verifiedUserBound = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      contact: contact({ customer: 'jobnimbus-tenant-account' }),
+      activities: [
+        {
+          jnid: 'verified-user-status-activity',
+          primary: {
+            id: 'verified-jobnimbus-user',
+            type: 'Contact',
+            old_status: 'Ready',
+            new_status: 'Review',
+          },
+          related: [
+            { id: FILE_ID, type: 'Contact' },
+            { id: 'verified-jobnimbus-user', type: 'Contact' },
+          ],
+          customer: 'jobnimbus-tenant-account',
+          date_created: 1785261000,
+        },
+      ],
+    },
+    {
+      ...options,
+      knownProviderUserIds: ['verified-jobnimbus-user'],
+    },
+  );
+  assert.equal(verifiedUserBound.data.activities.length, 1);
+  assert.equal(
+    JSON.stringify(verifiedUserBound).includes('verified-jobnimbus-user'),
+    false,
+  );
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        contact: contact({ customer: 'jobnimbus-tenant-account' }),
+        activities: [
+          {
+            jnid: 'verified-user-customer-activity',
+            primary: { id: FILE_ID },
+            related: [{ id: FILE_ID }],
+            customer: {
+              id: 'verified-jobnimbus-user',
+              type: 'Contact',
+            },
+            date_created: 1785261000,
+          },
+        ],
+      },
+      {
+        ...options,
+        knownProviderUserIds: ['verified-jobnimbus-user'],
+      },
+    ),
+    mappingError('scope_mismatch'),
+  );
+
+  for (const knownProviderUserIds of [
+    undefined,
+    ['different-jobnimbus-user'],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          activities: [
+            {
+              jnid: 'unverified-user-activity',
+              primary: { id: FILE_ID },
+              related: [
+                { id: FILE_ID },
+                { id: 'unverified-contact', type: 'Contact' },
+              ],
+              date_created: 1785261000,
+            },
+          ],
+        },
+        {
+          ...options,
+          ...(knownProviderUserIds ? { knownProviderUserIds } : {}),
+        },
+      ),
+      mappingError('scope_mismatch'),
+    );
+  }
+
+  for (const knownProviderUserIds of [
+    [FILE_ID],
+    ['verified-jobnimbus-user', 'verified-jobnimbus-user'],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(base, {
+        ...options,
+        knownProviderUserIds,
+      }),
+      mappingError('invalid_configuration'),
+    );
+  }
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(base, {
+      chanceOwnerId: CHANCE_ID,
+      expectedProviderFileId: FILE_ID,
+      knownProviderUserIds: [FILE_ID],
+      requireExactContactReferences: true,
+    }),
+    mappingError('invalid_configuration'),
+  );
+
+  for (const customer of [
+    'another-jobnimbus-tenant',
+    'unassigned-foreign-client',
+    { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+    [{ id: 'unassigned-foreign-client', record_type_name: 'Contact' }],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          contact: contact({ customer: 'jobnimbus-tenant-account' }),
+          activities: [
+            {
+              jnid: 'tenant-mismatch-activity',
+              primary: { id: FILE_ID },
+              related: [{ id: FILE_ID }],
+              customer,
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+      mappingError('scope_mismatch'),
+    );
+  }
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        activities: [
+          {
+            jnid: 'unbound-tenant-activity',
+            primary: { id: FILE_ID },
+            related: [{ id: FILE_ID }],
+            customer: 'jobnimbus-tenant-account',
+            date_created: 1785261000,
+          },
+        ],
+      },
+      options,
+    ),
+    mappingError('scope_mismatch'),
+  );
+
+  assert.throws(
+    () =>
+      mapJobNimbusFileEnvelope(
+        {
+          ...base,
+          activities: [
+            {
+              jnid: 'cross-client-activity',
+              primary: { id: 'another-known-client-file' },
+              related: [{ id: FILE_ID }],
+              date_created: 1785261000,
+            },
+          ],
+        },
+        options,
+      ),
+    mappingError('scope_mismatch'),
+  );
+
+  let overDeepReference = { id: FILE_ID };
+  for (let depth = 0; depth < 8; depth += 1) {
+    overDeepReference = { parent: overDeepReference };
+  }
+  for (const reference of [
+    { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+    { id: 'unassigned-foreign-client' },
+    {
+      id: 'unassigned-foreign-client',
+      record_type_name: 'Task',
+      type: 'Contact',
+    },
+    {
+      id: 'jobnimbus-task-id',
+      contact_id: 'unassigned-foreign-client',
+      record_type_name: 'Task',
+    },
+    {
+      id: 'jobnimbus-task-id',
+      jnid: 'different-jobnimbus-task-id',
+      record_type_name: 'Task',
+    },
+    {
+      id: 'jobnimbus-task-id',
+      record_type_name: 'Task',
+      contact: {
+        id: 'unassigned-foreign-client',
+        record_type_name: 'Contact',
+      },
+    },
+    {
+      wrapper: {
+        id: 'unassigned-foreign-client',
+        record_type_name: 'Contact',
+      },
+    },
+    overDeepReference,
+    Array.from({ length: 129 }, () => ({ id: FILE_ID })),
+  ]) {
+    assert.throws(
+      () =>
+        mapJobNimbusFileEnvelope(
+          {
+            ...base,
+            activities: [
+              {
+                jnid: 'private-cross-client-activity',
+                primary: reference,
+                related: [{ id: FILE_ID }],
+                date_created: 1785261000,
+                label: 'Private foreign client label',
+              },
+            ],
+          },
+          options,
+        ),
+      mappingError('scope_mismatch'),
+    );
+  }
+
+});
+
+test('exact JobNimbus import treats empty relation arrays as neutral without weakening exact scope', () => {
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+    requireExactContactReferences: true,
+  };
+
+  const result = mapJobNimbusFileEnvelope(
+    {
+      ...base,
+      activities: [{
+        jnid: 'empty-related-activity',
+        primary: { id: FILE_ID },
+        related: [],
+        contact: [],
+        date_created: 1785261000,
+      }],
+      tasks: [{
+        jnid: 'empty-primary-task',
+        primary: [],
+        related: [{ id: FILE_ID }],
+        parent: [],
+      }],
+      documents: [{
+        jnid: 'empty-primary-document',
+        primary: [],
+        related: [{ id: FILE_ID }],
+        filename: 'Exact file document.pdf',
+        created_at: 1785261000,
+      }],
+    },
+    options,
+  );
+  assert.equal(result.data.activities.length, 1);
+  assert.equal(result.data.tasks.length, 1);
+  assert.equal(result.data.documents.length, 1);
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        activities: [{
+          jnid: 'unbound-empty-activity',
+          primary: [],
+          related: [],
+          date_created: 1785261000,
+        }],
+      },
+      options,
+    ),
+    mappingError('scope_mismatch'),
+  );
+
+  assert.throws(
+    () => mapJobNimbusFileEnvelope(
+      {
+        ...base,
+        activities: [{
+          jnid: 'foreign-contact-with-empty-relation',
+          primary: [],
+          related: [
+            { id: FILE_ID },
+            {
+              id: 'unassigned-foreign-client',
+              record_type_name: 'Contact',
+            },
+          ],
+          date_created: 1785261000,
+        }],
+      },
+      options,
+    ),
+    mappingError('scope_mismatch'),
+  );
+});
+
+test('exact JobNimbus import accepts an explicit email relation only beside the exact contact', () => {
+  const tenantCustomerId = 'jobnimbus-tenant-account';
+  const emailRecordId = 'jobnimbus-email-record';
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact({ customer: tenantCustomerId }),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID, 'another-known-client-file'],
+    requireExactContactReferences: true,
+  };
+  const exactContact = {
+    id: FILE_ID,
+    type: 'contact',
+    name: 'Fixture Homeowner',
+    number: '2739',
+    email: 'owner@example.test',
+    subject: 'fixture',
+  };
+  const emailReference = {
+    id: emailRecordId,
+    type: 'email',
+    name: 'Provider email',
+    email: 'carrier@example.test',
+    subject: 'Provider message',
+  };
+  const productionShapedActivity = {
+    jnid: 'email-activity',
+    primary: {
+      id: emailRecordId,
+      type: 'email',
+      name: 'Provider email',
+      old_status: null,
+      new_status: 'sent',
+    },
+    related: [exactContact, emailReference],
+    customer: tenantCustomerId,
+    record_type_name: 'email',
+    date_created: 1785261000,
+    note: 'Bounded activity label',
+  };
+
+  const result = mapJobNimbusFileEnvelope({
+    ...base,
+    activities: [productionShapedActivity],
+  }, options);
+  assert.equal(result.data.activities.length, 1);
+  assert.equal(JSON.stringify(result).includes(emailRecordId), false);
+  assert.equal(JSON.stringify(result).includes(tenantCustomerId), false);
+
+  for (const related of [
+    [emailReference],
+    [
+      exactContact,
+      { id: 'unassigned-foreign-client', type: 'contact' },
+    ],
+    [
+      exactContact,
+      { id: 'another-known-client-file', type: 'email' },
+    ],
+    [
+      exactContact,
+      { id: 'unsupported-email-record', type: 'email_message' },
+    ],
+    [
+      exactContact,
+      {
+        ...emailReference,
+        contact: { id: 'unassigned-foreign-client', type: 'contact' },
+      },
+    ],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope({
+        ...base,
+        activities: [{
+          ...productionShapedActivity,
+          related,
+        }],
+      }, options),
+      mappingError('scope_mismatch'),
+    );
+  }
+});
+
+test('exact JobNimbus import reference enforcement also covers tasks and documents', () => {
+  const base = {
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [],
+  };
+  const options = {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+  };
+  for (const [collectionName, record] of [
+    ['tasks', {
+      jnid: 'private-cross-client-task',
+      related: [
+        { id: FILE_ID },
+        { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+      ],
+      label: 'Private foreign task label',
+    }],
+    ['documents', {
+      jnid: 'private-cross-client-document',
+      related: [
+        { id: FILE_ID },
+        { id: 'unassigned-foreign-client', record_type_name: 'Contact' },
+      ],
+      filename: 'Private foreign document.pdf',
+      created_at: 1785261000,
+    }],
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        { ...base, [collectionName]: [record] },
+        options,
+      ),
+      mappingError('scope_mismatch'),
+    );
+  }
+});
+
+test('JobNimbus zero and positive finite numeric dates remain missing without UTC shifts', () => {
+  for (const dateOfLoss of [
+    0,
+    1785261000,
+    1785261000000,
+    1,
+    1.5,
+    Number.MAX_VALUE,
+  ]) {
+    const index = mapJobNimbusIndexEnvelope(
+      {
+        ...FRESHNESS,
+        contactsComplete: true,
+        contacts: [contact({ 'Date of Loss': dateOfLoss })],
+      },
+      { chanceOwnerId: CHANCE_ID },
+    );
+    assert.equal(index.data.files[0].missingFacts.dateOfLoss, true);
+
+    const result = mapJobNimbusFileEnvelope(
+      {
+        ...FRESHNESS,
+        activitiesComplete: true,
+        tasksComplete: true,
+        documentsComplete: true,
+        contact: contact({ 'Date of Loss': dateOfLoss }),
+        activities: [],
+        tasks: [],
+        documents: [],
+      },
+      {
+        chanceOwnerId: CHANCE_ID,
+        expectedProviderFileId: FILE_ID,
+      },
+    );
+    assert.equal(result.data.file.dateOfLoss, null);
+    assert.equal(result.data.file.missingFacts.dateOfLoss, true);
+  }
+});
+
+test('JobNimbus textual zero date sentinels remain missing', () => {
+  for (const dateOfLoss of ['0', '0000']) {
+    const result = mapJobNimbusFileEnvelope(
+      {
+        ...FRESHNESS,
+        activitiesComplete: true,
+        tasksComplete: true,
+        documentsComplete: true,
+        contact: contact({ 'Date of Loss': dateOfLoss }),
+        activities: [],
+        tasks: [],
+        documents: [],
+      },
+      {
+        chanceOwnerId: CHANCE_ID,
+        expectedProviderFileId: FILE_ID,
+      },
+    );
+    assert.equal(result.data.file.dateOfLoss, null);
+    assert.equal(result.data.file.missingFacts.dateOfLoss, true);
+  }
+});
+
+test('JobNimbus date of loss preserves supported civil calendar forms', () => {
+  for (const [dateOfLoss, expected] of [
+    ['2026-05-17', '2026-05-17'],
+    ['5/7/2026', '2026-05-07'],
+    ['05/07/2026', '2026-05-07'],
+    ['2/29/2024', '2024-02-29'],
+  ]) {
+    const result = mapJobNimbusFileEnvelope(
+      {
+        ...FRESHNESS,
+        activitiesComplete: true,
+        tasksComplete: true,
+        documentsComplete: true,
+        contact: contact({ 'Date of Loss': dateOfLoss }),
+        activities: [],
+        tasks: [],
+        documents: [],
+      },
+      {
+        chanceOwnerId: CHANCE_ID,
+        expectedProviderFileId: FILE_ID,
+      },
+    );
+    assert.equal(result.data.file.dateOfLoss, expected);
+  }
+});
+
+test('JobNimbus date of loss rejects timestamp strings, Date objects, non-finite numbers, and impossible dates', () => {
+  for (const dateOfLoss of [
+    '2026-05-17T23:00:00-05:00',
+    '2026-05-17T00:00:00.000Z',
+    new Date('2026-05-17T00:00:00.000Z'),
+    '1785261000',
+    '1785261000000',
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    -1,
+    -1785261000,
+    '2026-02-30',
+    '2/29/2026',
+    '13/1/2026',
+  ]) {
+    assert.throws(
+      () => mapJobNimbusFileEnvelope(
+        {
+          ...FRESHNESS,
+          activitiesComplete: true,
+          tasksComplete: true,
+          documentsComplete: true,
+          contact: contact({ 'Date of Loss': dateOfLoss }),
+          activities: [],
+          tasks: [],
+          documents: [],
+        },
+        {
+          chanceOwnerId: CHANCE_ID,
+          expectedProviderFileId: FILE_ID,
+        },
+      ),
+      mappingError('invalid_provider_record'),
+    );
+  }
 });
 
 test('Gmail mapper requires an exact complete scope and emits only bounded fresh-read fields', () => {
@@ -446,12 +1348,14 @@ test('Gmail mapper requires an exact complete scope and emits only bounded fresh
     'direction',
     'occurredAt',
     'hasAttachment',
+    'deliveryState',
     'actionState',
     'subject',
     'snippet',
   ]);
   assert.equal(result.data.items[0].direction, 'inbound');
   assert.equal(result.data.items[0].hasAttachment, true);
+  assert.equal(result.data.items[0].deliveryState, 'received');
   assert.equal(result.data.items[0].actionState, 'needs_reply');
   assert.equal(Array.from(result.data.items[0].subject).length, 160);
   assert.equal(Array.from(result.data.items[0].snippet).length, 240);
@@ -514,6 +1418,106 @@ test('scoped communication mappers preserve bounded evidence while marking pagin
   assert.equal(result.data.items[0].providerRecordId, 'partial-message');
 });
 
+test('Gmail delivery proof and per-thread ordering prevent drafts and answered messages from becoming response due', () => {
+  const result = mapScopedGmailEnvelope(
+    {
+      ...FRESHNESS,
+      scope: {
+        providerFileId: FILE_ID,
+        exactFileMatch: true,
+      },
+      itemsComplete: true,
+      items: [
+        {
+          id: 'older-inbound',
+          threadId: 'thread-one',
+          direction: 'incoming',
+          internalDate: '1785260000000',
+          subject: 'Older inbound',
+        },
+        {
+          id: 'later-sent',
+          threadId: 'thread-one',
+          direction: 'outgoing',
+          internalDate: '1785261000000',
+          actionState: 'sent_verified',
+          subject: 'Verified reply',
+        },
+        {
+          id: 'draft-only',
+          threadId: 'thread-two',
+          direction: 'outgoing',
+          internalDate: '1785262000000',
+          actionState: 'draft',
+          subject: 'Unsent draft',
+        },
+      ],
+    },
+    { expectedProviderFileId: FILE_ID },
+  );
+
+  const byId = new Map(
+    result.data.items.map((item) => [item.providerRecordId, item]),
+  );
+  assert.equal(byId.get('older-inbound').actionState, 'no_action');
+  assert.equal(byId.get('later-sent').deliveryState, 'sent_verified');
+  assert.equal(byId.get('later-sent').actionState, 'awaiting_response');
+  assert.equal(byId.get('draft-only').deliveryState, 'draft');
+  assert.equal(byId.get('draft-only').actionState, 'draft');
+  assert.equal(
+    result.data.items.some(
+      (item) =>
+        item.providerRecordId === 'draft-only'
+        && item.deliveryState === 'sent_verified',
+    ),
+    false,
+  );
+});
+
+test('automated JobNimbus task reminders remain evidence but never become response due', () => {
+  const result = mapScopedGmailEnvelope(
+    {
+      ...FRESHNESS,
+      scope: {
+        providerFileId: FILE_ID,
+        exactFileMatch: true,
+      },
+      itemsComplete: true,
+      items: [
+        {
+          id: 'jobnimbus-task-reminder',
+          threadId: 'automated-reminder-thread',
+          direction: 'incoming',
+          internalDate: '1785261000000',
+          subject: 'JobNimbus Task Reminders',
+          plainText: 'Tasks are due.',
+        },
+        {
+          id: 'human-inbound',
+          threadId: 'human-thread',
+          direction: 'incoming',
+          internalDate: '1785262000000',
+          subject: 'Question about the inspection',
+        },
+      ],
+    },
+    { expectedProviderFileId: FILE_ID },
+  );
+
+  const byId = new Map(
+    result.data.items.map((item) => [item.providerRecordId, item]),
+  );
+  assert.equal(
+    byId.get('jobnimbus-task-reminder').deliveryState,
+    'received',
+  );
+  assert.equal(
+    byId.get('jobnimbus-task-reminder').actionState,
+    'no_action',
+  );
+  assert.equal(byId.get('human-inbound').actionState, 'needs_reply');
+});
+
 test('Quo mapper normalizes call/text aliases without exposing participants, lines, or transcripts', () => {
   const result = mapScopedQuoEnvelope(
     {
@@ -565,6 +1569,52 @@ test('Quo mapper normalizes call/text aliases without exposing participants, lin
     'raw-conversation-id',
   ]) {
     assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test('only delivered Quo replies suppress an earlier inbound response due', () => {
+  for (const disposition of ['undelivered', 'sent', 'completed']) {
+    const result = mapScopedQuoEnvelope(
+      {
+        ...FRESHNESS,
+        scope: {
+          providerFileId: FILE_ID,
+          exactFileMatch: true,
+        },
+        itemsComplete: true,
+        items: [
+          {
+            id: `inbound-before-${disposition}`,
+            type: 'sms',
+            direction: 'incoming',
+            createdAt: '2026-07-28T17:00:00Z',
+            status: 'delivered',
+            conversationId: `conversation-${disposition}`,
+          },
+          {
+            id: `outbound-${disposition}`,
+            type: 'sms',
+            direction: 'outgoing',
+            createdAt: '2026-07-28T17:05:00Z',
+            status: disposition,
+            conversationId: `conversation-${disposition}`,
+          },
+        ],
+      },
+      { expectedProviderFileId: FILE_ID },
+    );
+
+    const byId = new Map(
+      result.data.items.map((item) => [item.providerRecordId, item]),
+    );
+    assert.equal(
+      byId.get(`inbound-before-${disposition}`).actionState,
+      'needs_reply',
+    );
+    assert.notEqual(
+      byId.get(`outbound-${disposition}`).actionState,
+      'awaiting_response',
+    );
   }
 });
 

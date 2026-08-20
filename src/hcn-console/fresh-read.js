@@ -24,10 +24,33 @@ const FILE_REF = /^subject_[a-f0-9]{32}$/;
 const EVIDENCE_REF = /^ref_[a-f0-9]{32}$/;
 const ISO_UTC =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const SAFE_PROVIDER_ID = /^[^\s\x00-\x1f\x7f]{1,512}$/;
 const SAFE_JOB_NUMBER = /^[a-z0-9][a-z0-9._/-]{0,63}$/i;
 const SAFE_CODE = /^[a-z][a-z0-9_.-]{0,63}$/;
 const MAX_PROVIDER_ITEMS = 500;
+const OPTIONAL_SOURCE_FAILURE_CODES = Object.freeze([
+  "file_phone_missing",
+  "google_not_linked",
+  "phone_match_unverified",
+  "provider_check_failed",
+  "scope_check_failed",
+  "work_line_not_linked"
+]);
+const WORK_CENTER_STATUS_WEIGHTS = Object.freeze({
+  ready_for_pa_review: 200,
+  photo_file_estimate_needed: 180,
+  need_paperwork_info: 170,
+  submitted_awaiting_confirmation: 150,
+  hot_final_negotiation: 130,
+  negotiating: 110,
+});
+const REVIEW_TODAY_STATUS_CODES = Object.freeze([
+  "need_paperwork_info",
+  "photo_file_estimate_needed",
+  "ready_for_pa_review",
+  "submitted_awaiting_confirmation"
+]);
 
 const AUTHORITY = Object.freeze({
   mode: "read_only",
@@ -69,7 +92,7 @@ export function createHcnConsoleFreshReadService({
     try {
       envelope = await loadJobNimbusIndex(
         immutableCopy({
-          scope: "active_chance_assigned_insurance",
+          scope: "active_authenticated_employee_assigned_insurance",
           maxRecords: HCN_WORK_CENTER_LIMITS.maximumIndexRecords,
           requestedAt: generatedAt
         })
@@ -106,11 +129,103 @@ export function createHcnConsoleFreshReadService({
       files.push({ ...normalized, fileRef });
     }
 
-    files.sort(compareIndexFiles);
+    files.sort((left, right) => compareIndexFiles(left, right, generatedAt));
     return {
       envelope: fresh,
       files
     };
+  }
+
+  async function readResolvedFile({
+    resolved,
+    recentLimit,
+    generatedAt
+  }) {
+    let jobNimbusEnvelope;
+    try {
+      jobNimbusEnvelope = await loadJobNimbusFile(
+        immutableCopy({
+          providerFileId: resolved.providerFileId,
+          recentLimit,
+          requestedAt: generatedAt
+        })
+      );
+    } catch {
+      throw requiredSourceUnavailable();
+    }
+
+    const jobNimbus = normalizeJobNimbusDetail({
+      envelope: jobNimbusEnvelope,
+      generatedAt,
+      resolved,
+      references,
+      recentLimit
+    });
+
+    const optionalRequest = immutableCopy({
+      providerFileId: resolved.providerFileId,
+      recentLimit,
+      requestedAt: generatedAt
+    });
+    const [gmail, quo] = await Promise.all([
+      readOptionalSource({
+        source: "gmail",
+        loader: loadGmailFile,
+        request: optionalRequest,
+        generatedAt,
+        resolved,
+        references,
+        recentLimit,
+        normalizeItem: normalizeGmailItem
+      }),
+      readOptionalSource({
+        source: "quo",
+        loader: loadQuoFile,
+        request: optionalRequest,
+        generatedAt,
+        resolved,
+        references,
+        recentLimit,
+        normalizeItem: normalizeQuoItem
+      })
+    ]);
+
+    const sources = {
+      jobnimbus: jobNimbus.source,
+      gmail: gmail.source,
+      quo: quo.source
+    };
+    const evidenceStatus = Object.values(sources).every(
+      (source) =>
+        source.status === "fresh" && source.completeness === "complete"
+    )
+      ? "complete"
+      : "partial";
+    const recent = {
+      activities: jobNimbus.activities,
+      tasks: jobNimbus.tasks,
+      documents: jobNimbus.documents,
+      gmail: gmail.items,
+      quo: quo.items
+    };
+
+    return immutableCopy({
+      schema: HCN_FILE_SCHEMA,
+      generatedAt,
+      ephemeral: true,
+      cachePolicy: "no_store",
+      authority: AUTHORITY,
+      evidenceStatus,
+      file: jobNimbus.file,
+      sources,
+      lanes: buildOperationalLanes({
+        file: jobNimbus.file,
+        sources,
+        recent,
+        generatedAt
+      }),
+      recent
+    });
   }
 
   return Object.freeze({
@@ -151,92 +266,27 @@ export function createHcnConsoleFreshReadService({
         (candidate) => candidate.fileRef === normalizedRequest.fileRef
       );
       if (matches.length !== 1) throw fileNotFound();
-      const resolved = matches[0];
-
-      let jobNimbusEnvelope;
-      try {
-        jobNimbusEnvelope = await loadJobNimbusFile(
-          immutableCopy({
-            providerFileId: resolved.providerFileId,
-            recentLimit: normalizedRequest.recentLimit,
-            requestedAt: generatedAt
-          })
-        );
-      } catch {
-        throw requiredSourceUnavailable();
-      }
-
-      const jobNimbus = normalizeJobNimbusDetail({
-        envelope: jobNimbusEnvelope,
-        generatedAt,
-        resolved,
-        references,
-        recentLimit: normalizedRequest.recentLimit
-      });
-
-      const optionalRequest = immutableCopy({
-        providerFileId: resolved.providerFileId,
+      return readResolvedFile({
+        resolved: matches[0],
         recentLimit: normalizedRequest.recentLimit,
-        requestedAt: generatedAt
+        generatedAt
       });
-      const [gmail, quo] = await Promise.all([
-        readOptionalSource({
-          source: "gmail",
-          loader: loadGmailFile,
-          request: optionalRequest,
-          generatedAt,
-          resolved,
-          references,
-          recentLimit: normalizedRequest.recentLimit,
-          normalizeItem: normalizeGmailItem
-        }),
-        readOptionalSource({
-          source: "quo",
-          loader: loadQuoFile,
-          request: optionalRequest,
-          generatedAt,
-          resolved,
-          references,
-          recentLimit: normalizedRequest.recentLimit,
-          normalizeItem: normalizeQuoItem
-        })
-      ]);
+    },
 
-      const sources = {
-        jobnimbus: jobNimbus.source,
-        gmail: gmail.source,
-        quo: quo.source
-      };
-      const evidenceStatus = Object.values(sources).every(
-        (source) =>
-          source.status === "fresh" && source.completeness === "complete"
-      )
-        ? "complete"
-        : "partial";
-      const recent = {
-        activities: jobNimbus.activities,
-        tasks: jobNimbus.tasks,
-        documents: jobNimbus.documents,
-        gmail: gmail.items,
-        quo: quo.items
-      };
-
-      return immutableCopy({
-        schema: HCN_FILE_SCHEMA,
-        generatedAt,
-        ephemeral: true,
-        cachePolicy: "no_store",
-        authority: AUTHORITY,
-        evidenceStatus,
-        file: jobNimbus.file,
-        sources,
-        lanes: buildOperationalLanes({
-          file: jobNimbus.file,
-          sources,
-          recent,
-          generatedAt
-        }),
-        recent
+    async readFileByJobNumber(request) {
+      const normalizedRequest =
+        validateInternalJobNumberRequest(request);
+      const generatedAt = readNow(now);
+      const index = await readFreshIndex(generatedAt);
+      const matches = index.files.filter(
+        (candidate) =>
+          candidate.jobNumber === normalizedRequest.jobNumber
+      );
+      if (matches.length !== 1) throw fileNotFound();
+      return readResolvedFile({
+        resolved: matches[0],
+        recentLimit: normalizedRequest.recentLimit,
+        generatedAt
       });
     }
   });
@@ -301,6 +351,26 @@ function validateFileRequest(value) {
   );
   return {
     fileRef: value.fileRef,
+    recentLimit: value.recentLimit
+  };
+}
+
+function validateInternalJobNumberRequest(value) {
+  assertExactRequest(value, ["jobNumber", "recentLimit"]);
+  if (
+    typeof value.jobNumber !== "string"
+    || !/^\d{2,12}$/.test(value.jobNumber)
+  ) {
+    invalidRequest("jobNumber must be an exact numeric JobNimbus number");
+  }
+  assertIntegerRange(
+    value.recentLimit,
+    HCN_WORK_CENTER_LIMITS.minimumRecentItems,
+    HCN_WORK_CENTER_LIMITS.maximumRecentItems,
+    "recentLimit"
+  );
+  return {
+    jobNumber: value.jobNumber,
     recentLimit: value.recentLimit
   };
 }
@@ -377,7 +447,10 @@ function isEligible(value) {
     isPlainObject(value)
     && value.isInsuranceFile === true
     && value.isActive === true
-    && value.assignedToChance === true
+    && (
+      value.assignedToCurrentUser === true
+      || value.assignedToChance === true
+    )
   );
 }
 
@@ -455,14 +528,34 @@ function createEvidenceRef(references, source, providerRecordId) {
   return value;
 }
 
-function compareIndexFiles(left, right) {
-  const byAttention =
-    Number(missingFactCodes(right.missingFacts).length > 0)
-    - Number(missingFactCodes(left.missingFacts).length > 0);
+function compareIndexFiles(left, right, generatedAt) {
+  const byAttention = workCenterAttentionScore(right, generatedAt)
+    - workCenterAttentionScore(left, generatedAt);
   if (byAttention !== 0) return byAttention;
-  const byUpdatedAt = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  const byUpdatedAt = Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
   if (byUpdatedAt !== 0) return byUpdatedAt;
   return left.jobNumber.localeCompare(right.jobNumber);
+}
+
+function workCenterAttentionScore(file, generatedAt) {
+  const statusWeight = WORK_CENTER_STATUS_WEIGHTS[file.statusCode] || 0;
+  const ageDays = Math.max(
+    0,
+    Math.min(
+      120,
+      Math.floor((Date.parse(generatedAt) - Date.parse(file.updatedAt)) / 86_400_000),
+    ),
+  );
+  const missing = file.missingFacts;
+  let score = statusWeight + ageDays;
+  if (missing.claimNumber && file.statusCode === "ready_for_pa_review") score += 45;
+  if (missing.policyNumber) score += 20;
+  if (missing.dateOfLoss) score += 20;
+  if (
+    missing.adjuster
+    && file.statusCode === "submitted_awaiting_confirmation"
+  ) score += 40;
+  return score;
 }
 
 function projectIndexFile(value) {
@@ -518,7 +611,9 @@ function normalizeJobNimbusDetail({
     references,
     recentLimit,
     normalizeItem: normalizeTask,
-    timestampField: "dueAt"
+    timestampField: "dueAt",
+    selectionKind: "tasks",
+    generatedAt
   });
   const documents = normalizeItems({
     source: "jobnimbus",
@@ -526,7 +621,9 @@ function normalizeJobNimbusDetail({
     references,
     recentLimit,
     normalizeItem: normalizeDocument,
-    timestampField: "createdAt"
+    timestampField: "createdAt",
+    selectionKind: "documents",
+    generatedAt
   });
   const droppedItems =
     activities.droppedItems + tasks.droppedItems + documents.droppedItems;
@@ -561,7 +658,15 @@ function normalizeJobNimbusDetail({
       insurance: {
         carrierName: boundedText(fresh.data.file.carrierName, 120),
         claimNumber: boundedText(fresh.data.file.claimNumber, 80),
-        policyNumber: boundedText(fresh.data.file.policyNumber, 80)
+        policyNumber: boundedText(fresh.data.file.policyNumber, 80),
+        dateOfLoss: boundedDate(fresh.data.file.dateOfLoss),
+        damageFactsPresent:
+          fresh.data.file.damageFactsPresent === true
+      },
+      adjuster: {
+        name: boundedText(fresh.data.file.adjusterName, 120),
+        email: boundedEmail(fresh.data.file.adjusterEmail),
+        phone: boundedPhone(fresh.data.file.adjusterPhone)
       },
       missing: normalized.missingFacts
     },
@@ -605,7 +710,7 @@ function buildOperationalLanes({
 
   const currentCentralDate = centralDateKey(generatedAt);
   for (const task of recent.tasks) {
-    if (!["open", "in_progress", "blocked"].includes(task.status)) {
+    if (!["open", "in_progress", "blocked", "pending"].includes(task.status)) {
       continue;
     }
     if (!task.dueAt) continue;
@@ -662,6 +767,27 @@ function buildOperationalLanes({
     }
   }
 
+  // "Today" means a fresh, actionable review condition. Neglect and activity
+  // gaps are separate reports and are never inferred from this lane.
+  const hasActionableJobNimbusReview = priority.some((item) =>
+    item.source === "jobnimbus"
+    && !["source_partial", "source_stale", "source_unavailable"].includes(
+      item.reasonCode
+    )
+  );
+  if (
+    today.length === 0
+    && REVIEW_TODAY_STATUS_CODES.includes(file.statusCode)
+    && hasActionableJobNimbusReview
+  ) {
+    today.push({
+      reasonCode: "file_review_today",
+      source: "jobnimbus",
+      reference: file.fileRef,
+      at: generatedAt
+    });
+  }
+
   const compare = (left, right) =>
     String(right.at || "").localeCompare(String(left.at || ""))
       || left.reasonCode.localeCompare(right.reasonCode)
@@ -706,8 +832,13 @@ async function readOptionalSource({
   let envelope;
   try {
     envelope = await loader(request);
-  } catch {
-    return optionalUnavailable(source, generatedAt, "source_unavailable");
+  } catch (error) {
+    const safeFailureCode = OPTIONAL_SOURCE_FAILURE_CODES.includes(
+      error?.hcnSourceFailureCode
+    )
+      ? error.hcnSourceFailureCode
+      : "source_unavailable";
+    return optionalUnavailable(source, generatedAt, safeFailureCode);
   }
 
   let fresh;
@@ -781,10 +912,12 @@ function normalizeItems({
   references,
   recentLimit,
   normalizeItem,
-  timestampField
+  timestampField,
+  selectionKind = "recent",
+  generatedAt = null
 }) {
   if (!Array.isArray(value)) {
-    return { items: [], droppedItems: 1 };
+    return { items: [], droppedItems: 1, omittedItems: 0 };
   }
   let droppedItems = Math.max(0, value.length - MAX_PROVIDER_ITEMS);
   const items = [];
@@ -810,11 +943,128 @@ function normalizeItems({
     const byTime = Date.parse(rightValue) - Date.parse(leftValue);
     return byTime || left.reference.localeCompare(right.reference);
   });
-  droppedItems += Math.max(0, items.length - recentLimit);
+  // `recentLimit` bounds only the presentation returned to the employee. A
+  // valid older record omitted from that view is not rejected evidence and
+  // must not make an otherwise complete provider read look partial.
+  const omittedItems = Math.max(0, items.length - recentLimit);
   return {
-    items: items.slice(0, recentLimit),
-    droppedItems
+    items: selectOperationalItems(items, {
+      selectionKind,
+      recentLimit,
+      generatedAt
+    }),
+    droppedItems,
+    omittedItems
   };
+}
+
+function selectOperationalItems(
+  items,
+  { selectionKind, recentLimit, generatedAt }
+) {
+  if (selectionKind === "tasks") {
+    const generatedAtMs = Date.parse(generatedAt || "");
+    const activeStatuses = new Set([
+      "open",
+      "in_progress",
+      "blocked",
+      "pending"
+    ]);
+    return [...items]
+      .sort((left, right) => {
+        const leftActive = activeStatuses.has(left.status);
+        const rightActive = activeStatuses.has(right.status);
+        const leftDue = left.dueAt ? Date.parse(left.dueAt) : null;
+        const rightDue = right.dueAt ? Date.parse(right.dueAt) : null;
+        const leftOverdue =
+          leftActive
+          && leftDue !== null
+          && Number.isFinite(generatedAtMs)
+          && leftDue < generatedAtMs;
+        const rightOverdue =
+          rightActive
+          && rightDue !== null
+          && Number.isFinite(generatedAtMs)
+          && rightDue < generatedAtMs;
+        if (leftOverdue !== rightOverdue) return leftOverdue ? -1 : 1;
+        if (leftOverdue && rightOverdue && leftDue !== rightDue) {
+          return leftDue - rightDue;
+        }
+        if (leftActive !== rightActive) return leftActive ? -1 : 1;
+        if (leftActive && rightActive) {
+          if (leftDue === null && rightDue !== null) return 1;
+          if (leftDue !== null && rightDue === null) return -1;
+          if (leftDue !== rightDue) return leftDue - rightDue;
+        }
+        if (leftDue !== rightDue) {
+          if (leftDue === null) return 1;
+          if (rightDue === null) return -1;
+          return rightDue - leftDue;
+        }
+        return left.reference.localeCompare(right.reference);
+      })
+      .slice(0, recentLimit);
+  }
+  if (selectionKind === "documents") {
+    return selectOperationalDocuments(items, recentLimit);
+  }
+  return items.slice(0, recentLimit);
+}
+
+function selectOperationalDocuments(items, recentLimit) {
+  const selected = [];
+  const selectedReferences = new Set();
+  const add = (item) => {
+    if (!item || selectedReferences.has(item.reference)) return;
+    selected.push(item);
+    selectedReferences.add(item.reference);
+  };
+  const recognizedCategory = (kind) => {
+    if (["declaration_page", "policy"].includes(kind)) return "policy";
+    if (
+      [
+        "authorization_lor",
+        "authorization",
+        "letter_of_representation",
+        "lor"
+      ].includes(kind)
+    ) {
+      return "authorization";
+    }
+    if (["damage_evidence", "proof_of_loss"].includes(kind)) {
+      return "damage_evidence";
+    }
+    if (["estimate", "settlement_estimate"].includes(kind)) {
+      return "estimate";
+    }
+    if (["scope", "carrier_scope"].includes(kind)) return "carrier_scope";
+    if (["settlement", "payment", "payment_record"].includes(kind)) {
+      return "settlement_payment";
+    }
+    return null;
+  };
+  const reviewRequired = new Set([
+    "needs_review",
+    "in_review",
+    "unreviewed",
+    "rejected"
+  ]);
+  const categories = new Set();
+  for (const item of items) {
+    const category = recognizedCategory(item.kind);
+    if (!category || categories.has(category)) continue;
+    add(item);
+    categories.add(category);
+  }
+  for (const item of items) {
+    if (selected.length >= recentLimit) break;
+    if (reviewRequired.has(item.reviewState)) add(item);
+  }
+  for (const item of items) {
+    if (selected.length >= recentLimit) break;
+    add(item);
+  }
+  return selected.slice(0, recentLimit);
 }
 
 function normalizeActivity(value, reference) {
@@ -880,10 +1130,12 @@ function normalizeGmailItem(value, reference) {
   if (!isPlainObject(value)) return null;
   const direction = boundedCode(value.direction);
   const occurredAt = normalizeTimestamp(value.occurredAt);
+  const deliveryState = boundedCode(value.deliveryState);
   const actionState = boundedCode(value.actionState);
   if (
     !direction
     || !occurredAt
+    || !deliveryState
     || !actionState
     || typeof value.hasAttachment !== "boolean"
   ) {
@@ -894,6 +1146,7 @@ function normalizeGmailItem(value, reference) {
     direction,
     occurredAt,
     hasAttachment: value.hasAttachment,
+    deliveryState,
     actionState,
     subject: boundedText(value.subject, 160),
     snippet: boundedText(value.snippet, 240)
@@ -964,6 +1217,15 @@ function normalizeNullableTimestamp(value) {
   return value === null || value === undefined
     ? null
     : normalizeTimestamp(value);
+}
+
+function boundedDate(value) {
+  if (typeof value !== "string" || !ISO_DATE.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime())
+    && parsed.toISOString().slice(0, 10) === value
+    ? value
+    : null;
 }
 
 function boundedText(value, maximumCharacters) {

@@ -13,6 +13,7 @@ const IDENTIFIER_BYTES = 32;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
 const ROLE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const AUTHORIZATION_VERSION_PATTERN = /^authz_v1_[a-f0-9]{64}$/;
 const SUBJECT_MAX_BYTES = 256;
 const DEFAULT_TRANSACTION_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_SESSION_IDLE_TTL_MS = 60 * 60 * 1000;
@@ -155,7 +156,12 @@ export function createHcnConsoleSessionStore({
   }
 
   function createSession(input) {
-    assertExactObjectKeys(input, [
+    assertAllowedObjectKeys(input, [
+      "subject",
+      "googleSubject",
+      "role",
+      "authorizationVersion"
+    ], [
       "subject",
       "googleSubject",
       "role"
@@ -163,6 +169,10 @@ export function createHcnConsoleSessionStore({
     const subject = assertSubject(input.subject);
     const googleSubject = assertGoogleSubject(input.googleSubject);
     const role = assertRole(input.role);
+    const authorizationVersion =
+      input.authorizationVersion === undefined
+        ? ""
+        : assertAuthorizationVersion(input.authorizationVersion);
     const timestamp = readNow(now);
     cleanupAt(timestamp);
     if (sessions.size >= maxSessions) {
@@ -189,6 +199,7 @@ export function createHcnConsoleSessionStore({
       subject,
       googleSubject,
       role,
+      authorizationVersion,
       createdAt: timestamp,
       lastSeenAt: timestamp,
       idleExpiresAt,
@@ -370,6 +381,11 @@ function safeSessionRecord(record) {
   };
   defineSensitive(result, "subject", record.subject);
   defineSensitive(result, "googleSubject", record.googleSubject);
+  defineSensitive(
+    result,
+    "authorizationVersion",
+    record.authorizationVersion
+  );
   defineSensitive(result, "csrfToken", record.csrfToken);
   Object.defineProperty(result, "toJSON", {
     value() {
@@ -427,6 +443,33 @@ function assertExactObjectKeys(input, expectedKeys, label) {
   if (!hasExactObjectKeys(input, expectedKeys)) {
     throw storeError(
       `${label} must contain exactly: ${expectedKeys.join(", ")}`
+    );
+  }
+}
+
+function assertAllowedObjectKeys(
+  input,
+  allowedKeys,
+  requiredKeys,
+  label
+) {
+  if (
+    input === null
+    || typeof input !== "object"
+    || Array.isArray(input)
+  ) {
+    throw storeError(`${label} must be a plain object`);
+  }
+  const actual = Reflect.ownKeys(input);
+  if (
+    !actual.every((key) => typeof key === "string")
+    || actual.some((key) => !allowedKeys.includes(key))
+    || requiredKeys.some(
+      (key) => !Object.prototype.hasOwnProperty.call(input, key)
+    )
+  ) {
+    throw storeError(
+      `${label} contains unsupported or missing fields`
     );
   }
 }
@@ -490,6 +533,18 @@ function isSubject(value) {
 function assertRole(value) {
   if (typeof value !== "string" || !ROLE_PATTERN.test(value)) {
     throw storeError("role must be a normalized authorization role");
+  }
+  return value;
+}
+
+function assertAuthorizationVersion(value) {
+  if (
+    typeof value !== "string"
+    || !AUTHORIZATION_VERSION_PATTERN.test(value)
+  ) {
+    throw storeError(
+      "authorizationVersion must be a normalized HCN authorization version"
+    );
   }
   return value;
 }

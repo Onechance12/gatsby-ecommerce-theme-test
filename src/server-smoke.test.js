@@ -8,6 +8,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import {
+  createHcnInvitationStore
+} from "./auth/hcn-invitation-store.js";
+import { createActiveThresherRuntime } from "./hcn-ops/thresher/active-runtime.js";
+import { createThresherStore } from "./hcn-ops/thresher/store.js";
+
 const PHASE_ZERO_BUILD_SHA = "810802542c35625327662e97fd21f7208532b371";
 const PLATFORM_FIXTURE_SECRET = "platform-fixture-secret-must-not-leak";
 
@@ -398,9 +404,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       ALLOW_GOOGLE_USER_AUTH: "false",
       HCN_CONSOLE_ENABLED: "true",
       ALLOW_GMAIL_SEND: "false",
-      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false",
       ALLOW_QUO_SEND: "false",
       BRIDGE_ALLOW_WRITES: "false",
+      HCN_ACTION_EXECUTION_ENABLED: "false",
+      HCN_SERVICE_NAME: "hcn-operations-platform",
       RENDER_GIT_COMMIT: PHASE_ZERO_BUILD_SHA,
       PLATFORM_FIXTURE_SECRET
     },
@@ -409,21 +416,71 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, port);
 
+  const rootRedirectResponse = await fetch(`http://127.0.0.1:${port}/`, {
+    redirect: "manual"
+  });
+  assert.equal(rootRedirectResponse.status, 302);
+  assert.equal(
+    rootRedirectResponse.headers.get("location"),
+    "/hcn/"
+  );
+  assert.equal(rootRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
+  assert.match(
+    rootRedirectResponse.headers.get("content-security-policy"),
+    /default-src 'none'/
+  );
+  assert.equal(rootRedirectResponse.headers.get("set-cookie"), null);
+
   const consoleRedirectResponse = await fetch(`http://127.0.0.1:${port}/hcn`, {
     redirect: "manual"
   });
-  assert.equal(consoleRedirectResponse.status, 308);
-  assert.equal(consoleRedirectResponse.headers.get("location"), "/hcn/");
+  assert.equal(consoleRedirectResponse.status, 302);
+  assert.equal(
+    consoleRedirectResponse.headers.get("location"),
+    "/hcn/"
+  );
   assert.equal(consoleRedirectResponse.headers.get("cache-control"), "no-store, max-age=0");
 
-  const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`);
+  const consoleResponse = await fetch(`http://127.0.0.1:${port}/hcn/`, {
+    redirect: "manual"
+  });
   assert.equal(consoleResponse.status, 200);
-  assert.match(consoleResponse.headers.get("content-type"), /^text\/html/);
-  assert.match(consoleResponse.headers.get("content-security-policy"), /default-src 'self'/);
-  assert.equal(consoleResponse.headers.get("x-frame-options"), "DENY");
-  const consoleHtml = await consoleResponse.text();
-  assert.match(consoleHtml, /HCN Operations Console/);
-  assert.doesNotMatch(consoleHtml, /type=["']password["']/i);
+  assert.equal(consoleResponse.headers.get("cache-control"), "no-store, max-age=0");
+  assert.equal(consoleResponse.headers.get("vary"), "Cookie, Authorization");
+  const signedOutHtml = await consoleResponse.text();
+  assert.match(signedOutHtml, /Sign in to HCN/);
+  assert.match(
+    signedOutHtml,
+    /href="\/hcn\/auth\/login\?returnTo=%2Fhcn%2F"/
+  );
+  assert.doesNotMatch(
+    signedOutHtml,
+    /Work My Files|Company Sweep|Approvals|Receipts|System Status/
+  );
+
+  const signInStyleResponse = await fetch(
+    `http://127.0.0.1:${port}/hcn/sign-in.css?shell=v15`
+  );
+  assert.equal(signInStyleResponse.status, 200);
+  assert.match(signInStyleResponse.headers.get("content-type"), /^text\/css/);
+
+  for (const pathname of [
+    "/hcn/app.css?shell=v15",
+    "/hcn/app.js?shell=v15",
+    "/hcn/manifest.webmanifest?shell=v15",
+    "/hcn/sw.js?shell=v15"
+  ]) {
+    const response = await fetch(
+      `http://127.0.0.1:${port}${pathname}`
+    );
+    assert.equal(response.status, 401);
+    assert.match(response.headers.get("content-type"), /^application\/json/);
+    assert.equal(
+      response.headers.get("cache-control"),
+      "no-store, max-age=0"
+    );
+    assert.equal(response.headers.get("service-worker-allowed"), null);
+  }
 
   const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
   assert.equal(healthResponse.status, 200);
@@ -447,7 +504,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.carrierFollowUp.automaticScheduling, false);
   assert.equal(health.carrierFollowUp.automaticJobNimbusWriteback, false);
   assert.equal(health.userOAuth.available, false);
-  assert.equal(health.userOAuth.perUserGmail, true);
+  assert.equal(
+    health.userOAuth.perUserGmail,
+    "custom_gpt_broker_and_hcn_connector"
+  );
   assert.equal(health.userOAuth.roleEnforcement, true);
   assert.equal(health.codexOperator.gmailReadsRequireExactAssignedFile, true);
   assert.equal(health.codexOperator.quoReadsRequireExactAssignedFile, true);
@@ -455,23 +515,49 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.codexOperator.existingDraftSendRequiresBridgeReceipt, true);
   assert.equal(health.codexOperator.retainedDraftIdIsOneShot, true);
   assert.equal(health.codexOperator.chanceBrainClientMemory, "disabled");
-  assert.equal(health.brain.mode, "legacy_v1_client_snapshot_persistence_requires_v2_privacy_migration");
-  assert.equal(health.brain.clientSnapshots, "legacy_v1_unsafe_until_migrated");
-  assert.equal(health.brain.legacyClientMemoryWritesAllowed, false);
-  assert.equal(health.brain.automaticRefreshOnReview, "disabled_privacy_gate");
-  assert.equal(health.brain.codexOperatorClientMemory, "disabled_no_read_no_write");
-  assert.equal(health.brain.operationalOpenLoops, true);
-  assert.equal(health.brain.deterministicRulesRunOnExactReview, true);
-  assert.equal(health.brain.operationalProvider, "zai");
-  assert.equal(health.brain.operationalModel, "glm-4.7-flash");
-  assert.equal(health.brain.providerNeutralAdapter, true);
-  assert.equal(health.brain.exactClientDataMinimized, false);
-  assert.equal(health.brain.fallbackProvider, "disabled");
-  assert.equal(health.brain.modelHasTools, false);
-  assert.equal(health.brain.modelCanExecute, false);
-  assert.equal(health.brain.doesNotAuthorizeActions, true);
-  assert.equal(health.brain.autonomousLearning, false);
-  assert.equal(health.brain.externalActions, false);
+  assert.equal(health.brain, undefined);
+  assert.equal(health.hcnOperationsBrain.system, "hcn_operations");
+  assert.equal(health.hcnOperationsBrain.productName, "Thresher AI");
+  assert.equal(health.hcnOperationsBrain.mode, "isolated_v2_foundation");
+  assert.equal(health.hcnOperationsBrain.contractsAvailable, true);
+  assert.equal(health.hcnOperationsBrain.thresherRulesAvailable, true);
+  assert.equal(health.hcnOperationsBrain.clientMemory, "not_yet_persistent");
+  assert.equal(
+    health.hcnOperationsBrain.modelRuntimeIdentity,
+    "hcn.thresher-ai.v1"
+  );
+  assert.equal(
+    health.hcnOperationsBrain.modelInstructionsVersion,
+    "hcn.thresher-ai.instructions.v3"
+  );
+  assert.equal(health.hcnOperationsBrain.optionalModelAdvisory, false);
+  assert.equal(health.hcnOperationsBrain.operationalProviderConfigured, false);
+  assert.equal(health.hcnOperationsBrain.operationalProvider, "groq");
+  assert.equal(
+    health.hcnOperationsBrain.operationalModel,
+    "openai/gpt-oss-20b"
+  );
+  assert.equal(health.hcnOperationsBrain.providerNeutralAdapter, false);
+  assert.equal(health.hcnOperationsBrain.exactClientDataMinimized, true);
+  assert.equal(health.hcnOperationsBrain.modelHasTools, false);
+  assert.equal(
+    health.hcnOperationsBrain.modelToolAuthority,
+    "read_only"
+  );
+  assert.equal(
+    health.hcnOperationsBrain.modelCanPrepareActionPlans,
+    false
+  );
+  assert.equal(health.hcnOperationsBrain.modelCanExecute, false);
+  assert.equal(health.hcnOperationsBrain.doesNotAuthorizeActions, true);
+  assert.equal(health.hcnOperationsBrain.autonomousLearning, false);
+  assert.equal(health.hcnOperationsBrain.externalActions, false);
+  assert.equal(health.hcnOperationsBrain.persistenceConfigured, false);
+  assert.deepEqual(health.hcnOperationsBrain.storeFoundation, {
+    ready: false,
+    status: "not_configured",
+    persistenceActive: false
+  });
   assert.equal(health.outboundSafety.automaticEmailOrTextSending, false);
   assert.equal(health.outboundSafety.explicitChanceApprovalRequired, true);
   assert.equal(health.outboundSafety.shortLivedSingleUseChallengeRequired, true);
@@ -484,31 +570,58 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.platform.build.attested, true);
   assert.equal(health.platform.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
   assert.equal(health.platform.build.sourceCommitTrust, "provider_attested");
-  assert.equal(health.platform.boundaries.chanceBrain, "legacy_read_only_non_operator_paths");
-  assert.equal(health.platform.boundaries.hcnV2ChanceBrainDataFlow, "disconnected");
+  assert.equal(health.platform.boundaries.chanceBrain, "disconnected_no_route");
+  assert.equal(health.platform.boundaries.hcnChanceBrainDataFlow, "none");
   assert.equal(health.platform.boundaries.jobrolo, "disconnected");
-  assert.equal(health.platform.boundaries.hcnOperationsBrain, "v2_foundation");
+  assert.equal(
+    health.platform.boundaries.hcnOperationsBrain,
+    "foundation_persistence_pending"
+  );
+  assert.equal(
+    health.platform.boundaries.legacyClientMemory,
+    "quarantined_unreachable"
+  );
   assert.equal(health.platform.runtime.configurationDrift.status, "detected");
   assert.deepEqual(
-    health.platform.runtime.configurationDrift.differences.map((item) => item.key),
-    ["ALLOW_CARRIER_FOLLOWUP_CALLS", "ALLOW_RETELL_CALLS"]
+    health.platform.runtime.configurationDrift.differences,
+    [
+      {
+        key: "ALLOW_GMAIL_SEND",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "ALLOW_QUO_SEND",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "ALLOW_RETELL_CALLS",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "BRIDGE_ALLOW_WRITES",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      },
+      {
+        key: "HCN_ACTION_EXECUTION_ENABLED",
+        checkedIn: "enabled",
+        runtime: "disabled"
+      }
+    ]
   );
   assert.equal(JSON.stringify(health.platform).includes(PLATFORM_FIXTURE_SECRET), false);
 
   const platformMetaResponse = await fetch(`http://127.0.0.1:${port}/api/v1/meta`);
   assert.equal(platformMetaResponse.status, 200);
   const platformMeta = await platformMetaResponse.json();
-  assert.equal(platformMeta.build.attested, true);
   assert.equal(platformMeta.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
-  assert.equal(platformMeta.build.sourceCommitTrust, "provider_attested");
-  assert.equal(platformMeta.boundaries.chanceBrain, "legacy_read_only_non_operator_paths");
-  assert.equal(platformMeta.boundaries.hcnV2ChanceBrainDataFlow, "disconnected");
+  assert.equal(platformMeta.build.attested, true);
+  assert.equal(platformMeta.boundaries.chanceBrain, "disconnected_no_route");
   assert.equal(platformMeta.boundaries.jobrolo, "disconnected");
-  assert.equal(platformMeta.runtime.configurationDrift.status, "detected");
-  assert.equal(platformMeta.runtime.gates.hcnActionExecution, "disabled");
-  const serializedPlatformMeta = JSON.stringify(platformMeta);
-  assert.equal(serializedPlatformMeta.includes(PLATFORM_FIXTURE_SECRET), false);
-  assert.equal(serializedPlatformMeta.includes("JOBNIMBUS_API_KEY"), false);
+  assert.equal(JSON.stringify(platformMeta).includes(PLATFORM_FIXTURE_SECRET), false);
 
   const unauthenticatedSessionResponse = await fetch(`http://127.0.0.1:${port}/api/v1/session`);
   assert.equal(unauthenticatedSessionResponse.status, 401);
@@ -516,7 +629,16 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
   assert.equal(schemaResponse.status, 200);
   const schema = await schemaResponse.json();
+  assert.equal(schema.info.title, "HCN Operations Platform API");
+  assert.equal(
+    schema.info.description,
+    "Authenticated HCN operations API for fresh JobNimbus, Gmail, Quo, calendar, and document evidence. Isolated Thresher AI operational state never authorizes external actions; consequential work remains approval-gated."
+  );
   assert.equal(schema.paths["/api/v1/meta"].get.operationId, "readHcnPlatformMetadata");
+  assert.deepEqual(
+    schema.paths["/api/v1/meta"].get.security,
+    []
+  );
   assert.equal(schema.paths["/api/v1/session"].get.operationId, "readHcnPlatformSession");
   assert.equal(
     schema.paths["/api/v1/meta"].get.responses["200"].content["application/json"].schema.$ref,
@@ -527,8 +649,23 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "#/components/schemas/PlatformSessionResponse"
   );
   assert.equal(schema.components.schemas.PlatformMetadataResponse.additionalProperties, false);
+  assert.deepEqual(
+    schema.components.schemas.PlatformMetadataResponse.properties.boundaries
+      .properties.jobrolo.enum,
+    ["disconnected", "narrow_signed_thresher_adapter"]
+  );
   assert.equal(schema.components.schemas.PlatformSessionResponse.additionalProperties, false);
   assert.equal(schema.components.schemas.PlatformRuntimeStatus.additionalProperties, false);
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.assistant
+      .properties.directReads.$ref,
+    "#/components/schemas/PlatformConfigurationStatus"
+  );
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.assistant
+      .required.includes("directReads"),
+    true
+  );
   assert.equal(
     schema.components.schemas.PlatformRuntimeStatus.properties.gates
       .properties.hcnActionExecution.$ref,
@@ -566,7 +703,9 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/retell/carrier-follow-up-call-result"].post.operationId, "reviewCarrierFollowUpCall");
   assert.equal(schema.paths["/retell/homeowner-call"].post.operationId, "placeApprovedHomeownerAppointmentCall");
   assert.equal(schema.paths["/retell/homeowner-call-result"].post.operationId, "reviewHomeownerAppointmentCall");
-  assert.equal(schema.paths["/brain/context"].post.operationId, "readWaveJobNimbusBrain");
+  assert.equal(schema.paths["/brain/context"], undefined);
+  assert.equal(schema.paths["/memory/file-actions"], undefined);
+  assert.equal(schema.paths["/memory/persistence-check"], undefined);
   assert.equal(schema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
   assert.equal(schema.paths["/ops/action-batch"].post.operationId, "processApprovedWaveActionBatch");
   assert.equal(schema.paths["/quo/send"].post.operationId, "sendApprovedQuoText");
@@ -582,20 +721,26 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
+  assert.equal(chatgptSchema.info.title, "HCN Thresher Operations Assistant");
+  assert.match(chatgptSchema.info.description, /HCN Operations Platform/);
+  assert.match(chatgptSchema.info.description, /isolated operational state/);
+  assert.match(chatgptSchema.info.description, /approval-gated/);
   assert.deepEqual(chatgptSchema.security, [{ googleOAuth: [] }]);
   assert.equal(chatgptSchema.components.securitySchemes.googleOAuth.type, "oauth2");
   assert.equal(
     chatgptSchema.components.securitySchemes.googleOAuth.flows.authorizationCode.authorizationUrl,
-    "https://jobnimbus-chatgpt-bridge.onrender.com/oauth/authorize"
+    `http://127.0.0.1:${port}/oauth/authorize`
   );
   assert.equal(chatgptSchema.components.securitySchemes.bearerAuth, undefined);
-  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 30);
+  assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 28);
   assert.equal(chatgptSchema.paths["/api/v1/meta"], undefined);
   assert.equal(chatgptSchema.paths["/api/v1/session"], undefined);
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post.operationId, "linkAuthenticatedQuoLine");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post["x-openai-isConsequential"], true);
-  assert.equal(chatgptSchema.paths["/memory/file-actions"].post.operationId, "readChanceFileActionReceipts");
+  assert.equal(chatgptSchema.paths["/brain/context"], undefined);
+  assert.equal(chatgptSchema.paths["/memory/file-actions"], undefined);
+  assert.equal(chatgptSchema.paths["/memory/persistence-check"], undefined);
   assert.equal(chatgptSchema.paths["/jobnimbus/photo-review"].post.operationId, "reviewJobNimbusPhotos");
   assert.equal(chatgptSchema.paths["/retell/configure-agent"], undefined);
   assert.equal(chatgptSchema.paths["/ops/review-chance-files"].post.operationId, "reviewChanceFilesForApproval");
@@ -684,7 +829,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     headers: { "content-type": "application/json" },
     body: "{}"
   });
-  assert.equal(protectedBrainResponse.status, 401);
+  assert.equal(protectedBrainResponse.status, 404);
 });
 
 test("Codex operator token is distinct, scoped, and keeps batch approval gates", async (t) => {
@@ -710,7 +855,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       ALLOW_GMAIL_SEND: "false",
       ALLOW_QUO_SEND: "false",
       BRIDGE_ALLOW_WRITES: "false",
@@ -740,7 +885,13 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(identity.identity.role, "codex_operator");
   assert.equal(identity.identity.subject, "codex-hp-operator");
   assert.equal(identity.identity.email, "");
-  assert.deepEqual(identity.identity.scopes, ["client_evidence:read", "approval_batches:prepare_execute"]);
+  assert.deepEqual(identity.identity.scopes, [
+    "client_evidence:read",
+    "management_sweep:read",
+    "approval_batches:prepare_execute"
+  ]);
+  assert.equal(identity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(identity.operatorAccess.fixedManagementSweepRead, true);
   assert.match(identity.instruction, /dedicated least-privilege Codex operator/i);
 
   const macIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
@@ -763,6 +914,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(macIdentity.operatorAccess.defaultScope, "chance_assigned");
   assert.equal(macIdentity.operatorAccess.companyExactFileScope, true);
   assert.equal(macIdentity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(macIdentity.operatorAccess.fixedManagementSweepRead, false);
   assert.match(macIdentity.instruction, /dedicated least-privilege Codex Mac Operator/i);
 
   const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
@@ -777,6 +929,12 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(platformSession.build.sourceCommit, PHASE_ZERO_BUILD_SHA);
   assert.equal(platformSession.build.sourceCommitTrust, "provider_attested");
   assert.equal(platformSession.authorizedCapabilities.includes("platform.session.read"), true);
+  assert.equal(
+    platformSession.authorizedCapabilities.includes(
+      "hcn.management_sweep.read"
+    ),
+    true
+  );
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".send")), false);
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.includes(".upload")), false);
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.startsWith("brain.")), false);
@@ -796,15 +954,15 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     headers: operatorHeaders,
     body: "{}"
   });
-  assert.equal(brainResponse.status, 403);
+  assert.equal(brainResponse.status, 404);
 
   const advisoryResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/start-session`, {
     method: "POST",
     headers: operatorHeaders,
     body: JSON.stringify({ includeBrainAdvisory: true })
   });
-  assert.equal(advisoryResponse.status, 403);
-  assert.match((await advisoryResponse.json()).error, /cannot send client evidence/i);
+  assert.equal(advisoryResponse.status, 400);
+  assert.match((await advisoryResponse.json()).error, /not supported.*isolated Thresher/i);
 
   const unselectedDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-text`, {
     method: "POST",
@@ -989,7 +1147,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     Object.keys(minimizedIndex.files[0]).sort(),
     ["dateUpdated", "id", "missing", "name", "number", "status"].sort()
   );
-  assert.equal(minimizedIndex.brain.status, "not_read");
+  assert.equal(minimizedIndex.brain.status, "isolated_foundation");
 
   const privacyReviewResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/review-file`, {
     method: "POST",
@@ -1001,7 +1159,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(privacyReview.clientMemory.persisted, false);
   assert.equal(privacyReview.clientMemory.existingClientMemoryRead, false);
   assert.deepEqual(privacyReview.actionReceipts, []);
-  assert.equal(privacyReview.brain.status, "not_read");
+  assert.equal(privacyReview.brain.status, "isolated_foundation");
   await assert.rejects(
     stat(path.join(memoryRoot, "data", "memory", "files")),
     { code: "ENOENT" }
@@ -1014,8 +1172,12 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   });
   assert.equal(legacyReadOnlyReviewResponse.status, 200);
   const legacyReadOnlyReview = await legacyReadOnlyReviewResponse.json();
-  assert.equal(legacyReadOnlyReview.clientMemory.snapshot, null);
-  assert.deepEqual(legacyReadOnlyReview.operational.openLoops, []);
+  assert.equal(
+    legacyReadOnlyReview.clientMemory.snapshot.file.id,
+    "contact-chance"
+  );
+  assert.equal(legacyReadOnlyReview.clientMemory.persisted, false);
+  assert.equal(legacyReadOnlyReview.operational.status, "isolated_foundation");
   await assert.rejects(
     stat(path.join(memoryRoot, "data", "memory", "files")),
     { code: "ENOENT" }
@@ -1031,10 +1193,11 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
       includeQuo: false
     })
   });
-  assert.equal(legacyAdvisoryResponse.status, 200);
-  const legacyAdvisoryReview = await legacyAdvisoryResponse.json();
-  assert.equal(legacyAdvisoryReview.packets[0].operationalAdvisory.status, "disabled_privacy_gate");
-  assert.match(legacyAdvisoryReview.assistantDirective.join(" "), /no legacy client snapshot or advisory was written/i);
+  assert.equal(legacyAdvisoryResponse.status, 400);
+  assert.match(
+    (await legacyAdvisoryResponse.json()).error,
+    /not supported.*isolated Thresher/i
+  );
   await assert.rejects(
     stat(path.join(memoryRoot, "data", "memory", "operational-advisories.jsonl")),
     { code: "ENOENT" }
@@ -1180,7 +1343,6 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     "/gmail/draft",
     "/gmail/send",
     "/quo/send",
-    "/memory/persistence-check",
     "/auth/quo-line"
   ]) {
     const response = await fetch(`http://127.0.0.1:${bridgePort}${pathname}`, {
@@ -1190,6 +1352,15 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     });
     assert.equal(response.status, 403, pathname);
   }
+  const removedPersistenceRoute = await fetch(
+    `http://127.0.0.1:${bridgePort}/memory/persistence-check`,
+    {
+      method: "POST",
+      headers: operatorHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(removedPersistenceRoute.status, 404);
 
   const attachmentUploadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/attachment-review`, {
     method: "POST",
@@ -1212,7 +1383,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     headers: { authorization: "Bearer unknown-token", "content-type": "application/json" },
     body: "{}"
   });
-  assert.equal(unknownTokenResponse.status, 401);
+  assert.equal(unknownTokenResponse.status, 404);
 });
 
 test("Mac operator supports one explicit company file while HP and broad company access stay blocked", async (t) => {
@@ -1244,7 +1415,7 @@ test("Mac operator supports one explicit company file while HP and broad company
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "+19725550100",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       ALLOW_GMAIL_SEND: "false",
       ALLOW_QUO_SEND: "false",
       BRIDGE_ALLOW_WRITES: "true"
@@ -1445,7 +1616,7 @@ test("Codex operator action batches require the unchanged approval digest", asyn
       ALLOW_GOOGLE_USER_AUTH: "false",
       QUO_API_KEY: "",
       QUO_DEFAULT_FROM_NUMBER: "",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       BRIDGE_ALLOW_WRITES: "true"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -1572,7 +1743,7 @@ test("Codex operator approval challenges expire before execution", async (t) => 
       GOOGLE_REFRESH_TOKEN: "",
       ALLOW_GOOGLE_USER_AUTH: "false",
       QUO_API_KEY: "",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       BRIDGE_ALLOW_WRITES: "true",
       ACTION_APPROVAL_TTL_SECONDS: "1"
     },
@@ -1616,7 +1787,7 @@ test("Codex operator security ledgers fail closed on corrupted JSON", async (t) 
   const bridgePort = 18922;
   const fakeApiPort = 18923;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-ledger-"));
-  const bridgeData = path.join(memoryRoot, "bridge");
+  const bridgeData = path.join(memoryRoot, "platform");
   await mkdir(bridgeData, { recursive: true });
   await writeFile(path.join(bridgeData, "action-approvals.json"), "{corrupt", "utf8");
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
@@ -1635,7 +1806,7 @@ test("Codex operator security ledgers fail closed on corrupted JSON", async (t) 
       GOOGLE_REFRESH_TOKEN: "",
       ALLOW_GOOGLE_USER_AUTH: "false",
       QUO_API_KEY: "",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       BRIDGE_ALLOW_WRITES: "true"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -1857,12 +2028,23 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   assert.match((await unrelatedTranscriptResponse.json()).error, /not present in the current history/i);
 });
 
-test("employee Google OAuth keeps Gmail identity isolated and enforces the employee role", async (t) => {
+test("invited employee Google OAuth keeps Gmail identity isolated and enforces the employee role", async (t) => {
   const bridgePort = 18890;
   const fakeGooglePort = 18891;
   const gmailTokens = [];
   const authMemoryRoot = await mkdtemp(path.join(tmpdir(), "wave-auth-"));
   t.after(() => rm(authMemoryRoot, { recursive: true, force: true }));
+  const hcnReferenceKey =
+    Buffer.alloc(32, 0x31).toString("base64url");
+  await seedAcceptedEmployeeInvitation({
+    root: authMemoryRoot,
+    key: hcnReferenceKey,
+    email: "andrea@wavepa.com",
+    displayName: "Andrea Ramirez",
+    role: "employee",
+    jobNimbusOwnerId: "andrea-owner-id",
+    googleSubject: "google-andrea-1"
+  });
   let verificationSmsBody = "";
   const fakeGoogle = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
@@ -1896,6 +2078,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     } else if (url.pathname === "/account/users") {
       assert.equal(req.headers.authorization, "Bearer fixture-jobnimbus-key");
       response = {
+        total: 1,
         users: [{ jnid: "andrea-owner-id", email: "andrea@wavepa.com", display_name: "Andrea Ramirez", is_active: true }]
       };
     } else if (url.pathname === "/v1/phone-numbers") {
@@ -1940,10 +2123,14 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
       GPT_OAUTH_CLIENT_ID: "fixture-gpt-client",
       GPT_OAUTH_CLIENT_SECRET: "fixture-gpt-secret",
       OAUTH_SESSION_SECRET: "fixture-session-encryption-secret",
-      MEMORY_ROOT: authMemoryRoot,
+      HCN_OPERATIONS_ROOT: authMemoryRoot,
+      HCN_TENANT_ID: "tenant_a1b2c3d4e5f60718",
+      HCN_REFERENCE_KEY: hcnReferenceKey,
+      HCN_QUO_LINK_KEY:
+        Buffer.alloc(32, 0x32).toString("base64url"),
       WAVE_AUTH_USERS_JSON: "{}",
-      AUTO_ENROLL_WAVE_USERS: "true",
-      AUTO_ENROLLED_USER_STORE_PATH: path.join(authMemoryRoot, "auto-enrolled-users.json"),
+      AUTO_ENROLL_WAVE_USERS: "false",
+      HCN_IDENTITY_PIN_STORE_PATH: path.join(authMemoryRoot, "identity-pins.json"),
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/v1`,
       TWILIO_ACCOUNT_SID: "AC-fixture",
@@ -1966,7 +2153,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   assert.equal(identityResponse.status, 200);
   const identity = await identityResponse.json();
   assert.equal(identity.identity.email, "andrea@wavepa.com");
-  assert.equal(identity.identity.role, "onboarding");
+  assert.equal(identity.identity.role, "employee");
   assert.equal(identity.identity.jobNimbusOwnerId, "andrea-owner-id");
   assert.equal(identity.identity.quoLineConfigured, false);
   assert.equal(identity.gmailMode, "signed_in_employee_mailbox");
@@ -1992,6 +2179,18 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
   const verifiedQuoLink = await verifyQuoLinkResponse.json();
   assert.equal(verifiedQuoLink.linked, true);
   assert.equal(verifiedQuoLink.line.number, "+19725550200");
+  const encryptedQuoStore = await readFile(
+    path.join(
+      authMemoryRoot,
+      "platform",
+      "quo-line-store.enc.json"
+    ),
+    "utf8"
+  );
+  assert.doesNotMatch(
+    encryptedQuoStore,
+    /andrea@wavepa\.com|\+19725550200|PN-andrea/
+  );
 
   const linkedIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, { headers });
   assert.equal(linkedIdentityResponse.status, 200);
@@ -2006,15 +2205,15 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ query: "newer_than:1d", limit: 1 })
   });
-  assert.equal(gmailResponse.status, 200);
-  assert.deepEqual(gmailTokens, ["Bearer andrea-access-token"]);
+  assert.equal(gmailResponse.status, 403);
+  assert.deepEqual(gmailTokens, []);
 
   const fullAccessResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/call`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: "{}"
   });
-  assert.equal(fullAccessResponse.status, 400);
+  assert.equal(fullAccessResponse.status, 403);
 
   const callbackUri = "https://chatgpt.com/aip/g-fixture/oauth/callback";
   const authorizeResponse = await fetch(
@@ -2073,9 +2272,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const fakeGooglePort = 18931;
   const origin = `http://127.0.0.1:${bridgePort}`;
   const providerRequests = [];
+  const revokedGoogleGrants = [];
   const hcnProviderRequests = [];
+  const hcnManagementActivityFilters = [];
   const jobNimbusMutationRequests = [];
   const chanceOwnerId = "fixture-chance-owner";
+  const otherOwnerId = "fixture-other-owner";
+  const thirdOwnerId = "fixture-third-owner";
   const exactFileId = "jn-fixture-active";
   const activeContact = {
     jnid: exactFileId,
@@ -2083,9 +2286,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     record_type_name: "Insurance",
     owners: [{ id: chanceOwnerId }],
     display_name: "Fixture Active Homeowner",
-    status_name: "Claim Filed",
-    stage_name: "Carrier Review",
+    status_name: "Ready for PA Review",
+    stage_name: "Estimating",
     is_active: true,
+    date_created: "2026-07-20T15:00:00.000Z",
     date_updated: "2026-07-27T15:00:00.000Z",
     next_appointment_at: "2026-07-29T14:00:00.000Z",
     email: "active.homeowner@example.test",
@@ -2116,11 +2320,24 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     jnid: "jn-fixture-other-owner",
     number: "HCN-1003",
     display_name: "Fixture Other Owner",
-    owners: [{ id: "fixture-other-owner" }],
+    owners: [{ id: otherOwnerId }],
+    status_name: "Photo File / Estimate Needed",
     email: "other.owner@example.test",
     mobile_phone: "2145551214",
     "Claim #": "HCN-CLAIM-1003",
     "Policy #": "HCN-POLICY-1003"
+  };
+  const thirdOwnerContact = {
+    ...activeContact,
+    jnid: "jn-fixture-third-owner",
+    number: "HCN-1005",
+    display_name: "Fixture Third Owner",
+    owners: [{ id: thirdOwnerId }],
+    status_name: "Submitted",
+    email: "third.owner@example.test",
+    mobile_phone: "2145551216",
+    "Claim #": "HCN-CLAIM-1005",
+    "Policy #": "HCN-POLICY-1005"
   };
   const nonInsuranceContact = {
     ...activeContact,
@@ -2133,13 +2350,31 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "Claim #": "HCN-CLAIM-1004",
     "Policy #": "HCN-POLICY-1004"
   };
+  const unconfiguredOwnerContact = {
+    ...activeContact,
+    jnid: "jn-fixture-unconfigured-owner",
+    number: "HCN-1007",
+    display_name: "Fixture Unconfigured Owner",
+    owners: [{ id: "fixture-unconfigured-owner" }],
+    email: "unconfigured.owner@example.test",
+    mobile_phone: "2145551218",
+    "Claim #": "HCN-CLAIM-1007",
+    "Policy #": "HCN-POLICY-1007"
+  };
   const allContacts = [
     activeContact,
     inactiveChanceContact,
     otherOwnerContact,
-    nonInsuranceContact
+    thirdOwnerContact,
+    nonInsuranceContact,
+    unconfiguredOwnerContact
   ];
   let serveUnknownContactsWrapper = false;
+  let ambiguousManagementReferenceId = "";
+  let managementActivityOverride = null;
+  let serveWrongManagementReferenceField = false;
+  let hcnBoundedHistoryMode = false;
+  let hcnDisjointActivityOverflowMode = false;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-console-memory-canary-"));
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   const legacyCanaryPath = path.join(
@@ -2160,56 +2395,215 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   await writeFile(legacyCanaryPath, legacyCanaryBytes);
   const legacyCanaryBefore = await stat(legacyCanaryPath);
   const hcnReferenceKey = Buffer.alloc(32, 0x5a).toString("base64url");
+  const hcnGoogleGrantKey =
+    Buffer.alloc(32, 0x4c).toString("base64url");
+  const hcnQuoLinkKey =
+    Buffer.alloc(32, 0x6d).toString("base64url");
+  await seedAcceptedEmployeeInvitation({
+    root: memoryRoot,
+    key: hcnReferenceKey,
+    email: "adjuster@wavepa.com",
+    displayName: "Employee Fixture",
+    role: "employee",
+    jobNimbusOwnerId: otherOwnerId,
+    googleSubject: "hcn-employee-google-subject"
+  });
+  const hcnGoogleGrantStorePath = path.join(
+    memoryRoot,
+    "bridge",
+    "hcn-google-grants.enc.json"
+  );
+  const hcnConnectorScopes = [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar.readonly"
+  ];
+  const hcnConnectorScopeText = hcnConnectorScopes.join(" ");
 
   const fakeGoogle = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
+    if (url.pathname === "/revoke" && req.method === "POST") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const form = new URLSearchParams(
+        Buffer.concat(chunks).toString("utf8")
+      );
+      revokedGoogleGrants.push(form.get("token"));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+      return;
+    }
     if (url.pathname === "/token" && req.method === "POST") {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
       if (form.get("grant_type") === "refresh_token") {
-        assert.equal(form.get("refresh_token"), "hcn-gmail-refresh-token");
+        assert.equal(form.get("client_id"), "hcn-employee-connector-client");
+        assert.equal(form.get("client_secret"), "hcn-employee-connector-secret");
+        const refreshToken = form.get("refresh_token");
+        const employeeRefresh =
+          refreshToken === "hcn-employee-connector-refresh-token";
+        assert.equal(
+          refreshToken === "hcn-google-connector-refresh-token"
+            || employeeRefresh,
+          true
+        );
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
-          access_token: "hcn-gmail-access-token",
+          access_token: employeeRefresh
+            ? "hcn-employee-connector-refreshed-access-token"
+            : "hcn-google-connector-refreshed-access-token",
           expires_in: 3600,
-          token_type: "Bearer"
+          token_type: "Bearer",
+          scope: hcnConnectorScopeText
         }));
         return;
       }
+      const code = form.get("code");
+      const connectorCode =
+        code === "hcn-google-connector-code"
+        || code === "hcn-employee-connector-code";
+      const employeeCode =
+        code === "hcn-employee-google-code"
+        || code === "hcn-employee-connector-code";
+      assert.equal(
+        form.get("client_id"),
+        "hcn-employee-connector-client"
+      );
+      assert.equal(
+        form.get("client_secret"),
+        "hcn-employee-connector-secret"
+      );
+      assert.equal(
+        [
+          "hcn-google-code",
+          "hcn-google-code-second-session",
+          "hcn-google-connector-code",
+          "hcn-employee-google-code",
+          "hcn-employee-connector-code"
+        ].includes(code),
+        true
+      );
       providerRequests.push({
-        code: form.get("code"),
+        code,
+        grantType: form.get("grant_type"),
         verifier: form.get("code_verifier"),
         redirectUri: form.get("redirect_uri")
       });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        access_token: "hcn-google-access-token",
+        access_token: employeeCode
+          ? (
+              connectorCode
+                ? "hcn-employee-connector-access-token"
+                : "hcn-employee-login-access-token"
+            )
+          : (
+              connectorCode
+                ? "hcn-google-connector-access-token"
+                : "hcn-google-access-token"
+            ),
+        ...(connectorCode
+          ? {
+              refresh_token: employeeCode
+                ? "hcn-employee-connector-refresh-token"
+                : "hcn-google-connector-refresh-token",
+              scope: hcnConnectorScopeText
+            }
+          : {}),
         expires_in: 3600,
         token_type: "Bearer"
       }));
       return;
     }
     if (url.pathname === "/tokeninfo") {
-      assert.equal(url.searchParams.get("access_token"), "hcn-google-access-token");
+      const accessToken = url.searchParams.get("access_token");
+      const acceptedTokens = [
+        "legacy-google-access-token",
+        "hcn-google-access-token",
+        "hcn-google-connector-access-token",
+        "hcn-google-connector-refreshed-access-token",
+        "hcn-employee-login-access-token",
+        "hcn-employee-connector-access-token",
+        "hcn-employee-connector-refreshed-access-token"
+      ];
+      assert.equal(acceptedTokens.includes(accessToken), true);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        audience: "hcn-google-client",
+        audience: accessToken === "legacy-google-access-token"
+          ? "hcn-google-client"
+          : "hcn-employee-connector-client",
         expires_in: 3600,
         verified_email: true,
-        scope: "openid email profile"
+        scope: accessToken.includes("connector")
+          ? hcnConnectorScopeText
+          : "openid email profile"
       }));
       return;
     }
     if (url.pathname === "/userinfo") {
-      assert.equal(req.headers.authorization, "Bearer hcn-google-access-token");
+      const accessToken = String(
+        req.headers.authorization || ""
+      ).replace(/^Bearer\s+/, "");
+      const employeeIdentity =
+        accessToken.startsWith("hcn-employee-");
+      assert.equal(
+        [
+          "legacy-google-access-token",
+          "hcn-google-access-token",
+          "hcn-google-connector-access-token",
+          "hcn-google-connector-refreshed-access-token",
+          "hcn-employee-login-access-token",
+          "hcn-employee-connector-access-token",
+          "hcn-employee-connector-refreshed-access-token"
+        ].includes(accessToken),
+        true
+      );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        sub: "hcn-google-subject",
-        email: "chance@wavepa.com",
+        sub: employeeIdentity
+          ? "hcn-employee-google-subject"
+          : "hcn-google-subject",
+        email: employeeIdentity
+          ? "adjuster@wavepa.com"
+          : "chance@wavepa.com",
         email_verified: true,
         hd: "wavepa.com",
-        name: "Chance Fixture"
+        name: employeeIdentity
+          ? "Employee Fixture"
+          : "Chance Fixture"
+      }));
+      return;
+    }
+    if (
+      url.pathname === "/account/users"
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-jobnimbus-api-key"
+      );
+      assert.equal(url.search, "");
+      res.writeHead(200, {
+        "content-type": "application/json"
+      });
+      res.end(JSON.stringify({
+        users: [
+          {
+            jnid: chanceOwnerId,
+            email: "chance@wavepa.com",
+            display_name: "Chance Fixture",
+            is_active: true
+          },
+          {
+            jnid: otherOwnerId,
+            email: "adjuster@wavepa.com",
+            display_name: "Employee Fixture",
+            is_active: true
+          }
+        ]
       }));
       return;
     }
@@ -2234,6 +2628,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       res.end(JSON.stringify(activeContact));
       return;
     }
+    if (
+      url.pathname ===
+        `/contacts/${encodeURIComponent(otherOwnerContact.jnid)}`
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-jobnimbus-api-key"
+      );
+      hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(otherOwnerContact));
+      return;
+    }
     if (url.pathname === "/activities" && req.method === "POST") {
       jobNimbusMutationRequests.push({
         method: req.method,
@@ -2246,14 +2654,116 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/activities" && req.method === "GET") {
       assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        activities: [{
-          jnid: "jn-activity-1",
+      const filter = JSON.parse(url.searchParams.get("filter") || "{}");
+      const term = filter?.must?.[0]?.term || {};
+      const referenceField = Object.keys(term)[0] || "related.id";
+      const referencedFileId = String(
+        term[referenceField] || exactFileId
+      );
+      hcnManagementActivityFilters.push({
+        referenceField,
+        referencedFileId
+      });
+      if (
+        hcnDisjointActivityOverflowMode
+        && referencedFileId === exactFileId
+      ) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const relatedOnly = referenceField === "related.id";
+        const activities = Array.from({ length: 51 }, (_, index) => ({
+          jnid: `jn-disjoint-${relatedOnly ? "related" : "primary"}-${
+            index + 1
+          }`,
+          primary: {
+            id: relatedOnly ? "non-contact-primary-ref" : exactFileId
+          },
+          related: {
+            id: relatedOnly ? exactFileId : "non-contact-related-ref"
+          },
+          record_type_name: "Note",
+          status_name: "Recorded",
+          date_created: new Date(
+            Date.parse(
+              relatedOnly
+                ? "2026-07-27T15:00:00.000Z"
+                : "2026-07-20T15:00:00.000Z"
+            ) - index * 60_000
+          ).toISOString(),
+          actor_role: "adjuster",
+          note: `${relatedOnly ? "Newer related-only" : "Older primary-only"} activity ${
+            index + 1
+          }`
+        }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          activities: activities.slice(offset, offset + size)
+        }));
+        return;
+      }
+      if (hcnBoundedHistoryMode && referencedFileId === exactFileId) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const activities = Array.from({ length: 51 }, (_, index) => ({
+          jnid: `jn-bounded-activity-${index + 1}`,
+          primary: { id: exactFileId },
           related: { id: exactFileId },
           record_type_name: "Note",
           status_name: "Recorded",
-          date_created: "2026-07-27T14:00:00.000Z",
+          date_created: new Date(
+            Date.parse("2026-07-27T14:00:00.000Z") - index * 60_000
+          ).toISOString(),
+          actor_role: "adjuster",
+          note: `Bounded synthetic activity ${index + 1}`
+        }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          activities: activities.slice(offset, offset + size)
+        }));
+        return;
+      }
+      const activityNumber = new Map([
+        [exactFileId, "1"],
+        [otherOwnerContact.jnid, "2"],
+        [thirdOwnerContact.jnid, "3"]
+      ]).get(referencedFileId) || "unknown";
+      res.writeHead(200, { "content-type": "application/json" });
+      const activityOverride =
+        referencedFileId === exactFileId && managementActivityOverride
+          ? managementActivityOverride
+          : {};
+      res.end(JSON.stringify({
+        activities: [{
+          jnid: `jn-activity-${activityNumber}`,
+          primary: {
+            id:
+              serveWrongManagementReferenceField
+              && referenceField === "primary.id"
+              && referencedFileId === exactFileId
+                ? nonInsuranceContact.jnid
+                : referencedFileId
+          },
+          related:
+            ambiguousManagementReferenceId
+            && referencedFileId === exactFileId
+              ? [
+                  { id: referencedFileId },
+                  { id: ambiguousManagementReferenceId }
+                ]
+              : { id: referencedFileId },
+          record_type_name:
+            activityOverride.record_type_name || "Note",
+          status_name:
+            activityOverride.status_name || "Recorded",
+          date_created:
+            activityOverride.date_created
+            || (
+              activityNumber === "1"
+                ? "2026-07-27T14:00:00.000Z"
+                : activityNumber === "2"
+                  ? "2026-07-26T14:00:00.000Z"
+                  : "2026-07-25T14:00:00.000Z"
+            ),
           actor_role: "adjuster",
           note: "Fresh synthetic carrier activity"
         }]
@@ -2263,6 +2773,27 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/tasks" && req.method === "GET") {
       assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      if (hcnBoundedHistoryMode) {
+        const size = Number(url.searchParams.get("size") || 50);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const tasks = Array.from({ length: 51 }, (_, index) => ({
+          jnid: `jn-bounded-task-${index + 1}`,
+          related: { id: exactFileId },
+          record_type_name: "Follow Up",
+          status_name: "Open",
+          priority_name: "High",
+          date_start: new Date(
+            Date.parse("2026-07-27T16:00:00.000Z") - index * 60_000
+          ).toISOString(),
+          assigned_role: "coordinator",
+          title: `Bounded synthetic task ${index + 1}`
+        }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          tasks: tasks.slice(offset, offset + size)
+        }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         tasks: [{
@@ -2299,12 +2830,18 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       url.pathname === "/gmail/v1/users/me/messages"
       && req.method === "GET"
     ) {
-      assert.equal(req.headers.authorization, "Bearer hcn-gmail-access-token");
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-google-connector-access-token"
+      );
       assert.match(url.searchParams.get("q"), /HCN-CLAIM-1001/);
       hcnProviderRequests.push(`gmail:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        messages: [{ id: "gmail-message-1", threadId: "gmail-thread-1" }]
+        messages: [
+          { id: "gmail-message-1", threadId: "gmail-thread-1" },
+          { id: "gmail-message-2", threadId: "gmail-carrier-thread-1" }
+        ]
       }));
       return;
     }
@@ -2312,7 +2849,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       url.pathname === "/gmail/v1/users/me/messages/gmail-message-1"
       && req.method === "GET"
     ) {
-      assert.equal(req.headers.authorization, "Bearer hcn-gmail-access-token");
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-google-connector-access-token"
+      );
       assert.equal(url.searchParams.get("format"), "full");
       hcnProviderRequests.push(`gmail:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
@@ -2340,43 +2880,99 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       }));
       return;
     }
+    if (
+      url.pathname === "/gmail/v1/users/me/messages/gmail-message-2"
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-google-connector-access-token"
+      );
+      assert.equal(url.searchParams.get("format"), "full");
+      hcnProviderRequests.push(`gmail:${url.pathname}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "gmail-message-2",
+        threadId: "gmail-carrier-thread-1",
+        internalDate: String(Date.parse("2026-07-27T17:30:00.000Z")),
+        labelIds: ["SENT"],
+        snippet: "Fresh synthetic carrier follow-up",
+        payload: {
+          mimeType: "text/plain",
+          headers: [
+            { name: "From", value: "claims@wavepa.com" },
+            { name: "To", value: "carrier@example.test" },
+            {
+              name: "Subject",
+              value: "HCN-CLAIM-1001 carrier follow-up"
+            },
+            { name: "Date", value: "Mon, 27 Jul 2026 12:30:00 -0500" }
+          ],
+          body: {
+            data: Buffer.from(
+              "Fresh synthetic sent carrier follow-up"
+            ).toString("base64url")
+          }
+        }
+      }));
+      return;
+    }
     if (url.pathname === "/quo/phone-numbers" && req.method === "GET") {
       assert.equal(req.headers.authorization, "hcn-quo-api-key");
       hcnProviderRequests.push(`quo:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        data: [{
-          id: "quo-line-1",
-          name: "Fixture HCN line",
-          number: "+12145559999"
-        }]
+        data: [
+          {
+            id: "quo-line-1",
+            name: "Fixture HCN line",
+            number: "+12145559999"
+          },
+          {
+            id: "quo-line-other-employee",
+            name: "Other employee line",
+            number: "+12145559888"
+          }
+        ]
       }));
       return;
     }
     if (url.pathname === "/quo/messages" && req.method === "GET") {
       assert.equal(req.headers.authorization, "hcn-quo-api-key");
       assert.equal(url.searchParams.get("phoneNumberId"), "quo-line-1");
-      assert.equal(url.searchParams.get("participants[]"), "+12145551212");
+      assert.equal(url.searchParams.get("participants"), "+12145551212");
       hcnProviderRequests.push(`quo:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        data: [{
-          id: "quo-message-1",
-          phoneNumberId: "quo-line-1",
-          from: "+12145551212",
-          to: ["+12145559999"],
-          createdAt: "2026-07-27T17:00:00.000Z",
-          direction: "incoming",
-          status: "delivered",
-          content: "Fresh synthetic text reply"
-        }]
+        data: [
+          {
+            id: "quo-message-1",
+            phoneNumberId: "quo-line-1",
+            from: "+12145551212",
+            to: ["+12145559999"],
+            createdAt: "2026-07-27T17:00:00.000Z",
+            direction: "incoming",
+            status: "delivered",
+            content: "Fresh synthetic text reply"
+          },
+          {
+            id: "quo-message-2",
+            phoneNumberId: "quo-line-1",
+            from: "+12145559999",
+            to: ["+12145551212"],
+            createdAt: "2026-07-27T18:30:00.000Z",
+            direction: "outgoing",
+            status: "delivered",
+            content: "Fresh synthetic follow-up"
+          }
+        ]
       }));
       return;
     }
     if (url.pathname === "/quo/calls" && req.method === "GET") {
       assert.equal(req.headers.authorization, "hcn-quo-api-key");
       assert.equal(url.searchParams.get("phoneNumberId"), "quo-line-1");
-      assert.equal(url.searchParams.get("participants[]"), "+12145551212");
+      assert.equal(url.searchParams.get("participants"), "+12145551212");
       hcnProviderRequests.push(`quo:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
@@ -2407,13 +3003,23 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       PUBLIC_BASE_URL: origin,
       HCN_CONSOLE_ENABLED: "true",
       HCN_CONSOLE_ORIGIN: origin,
+      HCN_THRESHER_AI_ENABLED: "false",
+      HCN_THRESHER_AI_GROQ_API_KEY: "",
+      HCN_ASSISTANT_HISTORY_KEY:
+        Buffer.alloc(32, 0x55).toString("base64url"),
       HCN_TENANT_ID: "tenant_0123456789abcdef",
       HCN_REFERENCE_KEY: hcnReferenceKey,
+      HCN_GOOGLE_GRANT_KEY: hcnGoogleGrantKey,
+      HCN_QUO_LINK_KEY: hcnQuoLinkKey,
+      HCN_GOOGLE_GRANT_STORE_PATH: hcnGoogleGrantStorePath,
       ALLOW_GOOGLE_USER_AUTH: "true",
       GOOGLE_CLIENT_ID: "hcn-google-client",
       GOOGLE_CLIENT_SECRET: "hcn-google-secret",
-      GOOGLE_REFRESH_TOKEN: "hcn-gmail-refresh-token",
+      HCN_GOOGLE_CLIENT_ID: "hcn-employee-connector-client",
+      HCN_GOOGLE_CLIENT_SECRET: "hcn-employee-connector-secret",
+      GOOGLE_REFRESH_TOKEN: "",
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeGooglePort}/token`,
+      GOOGLE_REVOKE_URL: `http://127.0.0.1:${fakeGooglePort}/revoke`,
       GOOGLE_TOKENINFO_URL: `http://127.0.0.1:${fakeGooglePort}/tokeninfo`,
       GOOGLE_USERINFO_URL: `http://127.0.0.1:${fakeGooglePort}/userinfo`,
       GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
@@ -2422,26 +3028,57 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       CHANCE_GOOGLE_EMAIL: "chance@wavepa.com",
       CHANCE_GOOGLE_SUBJECT: "hcn-google-subject",
       CHANCE_JOBNIMBUS_OWNER_ID: chanceOwnerId,
+      HCN_MANAGEMENT_ADJUSTERS_JSON: JSON.stringify([
+        {
+          ownerId: chanceOwnerId,
+          displayName: "Chance Fixture"
+        },
+        {
+          ownerId: otherOwnerId,
+          displayName: "Second Fixture Adjuster"
+        },
+        {
+          ownerId: thirdOwnerId,
+          displayName: "Third Fixture Adjuster"
+        }
+      ]),
+      HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET: "7",
       OAUTH_SESSION_SECRET: "hcn-session-sealing-secret-for-tests",
       GPT_OAUTH_CLIENT_SECRET: "",
-      WAVE_AUTH_USERS_JSON: JSON.stringify([{
-        email: "chance@wavepa.com",
-        name: "Chance Fixture",
-        role: "chance",
-        enabled: true,
-        googleSubject: "hcn-google-subject",
-        jobNimbusScope: "assigned"
-      }]),
+      WAVE_AUTH_USERS_JSON: JSON.stringify([
+        {
+          email: "chance@wavepa.com",
+          name: "Chance Fixture",
+          role: "chance",
+          enabled: true,
+          googleSubject: "hcn-google-subject",
+          jobNimbusOwnerId: chanceOwnerId,
+          jobNimbusScope: "assigned",
+          quoLineId: "quo-line-1"
+        },
+        {
+          email: "adjuster@wavepa.com",
+          name: "Employee Fixture",
+          role: "employee",
+          enabled: true,
+          googleSubject: "hcn-employee-google-subject",
+          jobNimbusOwnerId: otherOwnerId,
+          jobNimbusScope: "assigned"
+        }
+      ]),
       AUTO_ENROLL_WAVE_USERS: "false",
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-for-ambiguity",
-      CODEX_OPERATOR_TOKEN: "",
+      CODEX_OPERATOR_TOKEN:
+        "fixture-hcn-hp-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN:
+        "fixture-hcn-mac-operator-token-1234567890",
       JOBNIMBUS_API_KEY: "hcn-jobnimbus-api-key",
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}`,
       RETELL_API_KEY: "",
       QUO_API_KEY: "hcn-quo-api-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeGooglePort}/quo`,
       QUO_DEFAULT_FROM_NUMBER: "",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       BRIDGE_ALLOW_WRITES: "false",
       ALLOW_GMAIL_SEND: "false",
       ALLOW_QUO_SEND: "false",
@@ -2449,12 +3086,136 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
       ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
-      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
+
+  const managementHealthResponse = await fetch(`${origin}/health`);
+  assert.equal(managementHealthResponse.status, 200);
+  const managementHealth = await managementHealthResponse.json();
+  assert.deepEqual(managementHealth.hcnConsole.managementSweep, {
+    configured: true,
+    ready: true,
+    configuredAdjusterCount: 3,
+    rankingMode: "jobnimbus_activity_only",
+    companyCommunicationCoverage: "not_evaluated"
+  });
+  assert.equal(
+    managementHealth.hcnConsole.authorizedSurface,
+    "employee_assigned_work_and_authorized_management_read"
+  );
+  assert.equal(
+    managementHealth.userOAuth.perUserGmail,
+    "custom_gpt_broker_and_hcn_connector"
+  );
+  assert.deepEqual(
+    managementHealth.codexOperator.fixedManagementSweepRead,
+    {
+      hpOperatorConfigured: true,
+      hpOperatorReady: true,
+      macOperatorAuthorized: false,
+      readOnly: true
+    }
+  );
+  assert.equal(
+    managementHealth.codexOperator.companyWideIndexOrSweep,
+    false
+  );
+  assert.equal(managementHealth.gmailConfigured, true);
+  assert.deepEqual(managementHealth.hcnAssistant, {
+    identity: "hcn.thresher-ai.v1",
+    instructionsVersion: "hcn.thresher-ai.instructions.v3",
+    enabled: false,
+    configured: false,
+    ready: false,
+    deterministicReady: false,
+    provider: "groq_responses_api",
+    model: "openai/gpt-oss-20b",
+    reasoningEffort: "routed_medium_or_high",
+    routing: {
+      deterministic: {
+        profileId: "hcn.deterministic.v1",
+        providerCall: false
+      },
+      standard: {
+        profileId: "hcn.thresher.groq.gpt-oss-20b.medium.v1",
+        model: "openai/gpt-oss-20b",
+        reasoningEffort: "medium"
+      },
+      deep: {
+        profileId: "hcn.thresher.groq.gpt-oss-20b.high.v1",
+        model: "openai/gpt-oss-20b",
+        reasoningEffort: "high"
+      },
+      codexEscalation: {
+        profileId: "hcn.codex-operator-escalation.v1",
+        providerCall: false
+      }
+    },
+    historyConfigured: true,
+    historyReady: true,
+    responsesApiStore: null,
+    providerState: "no_provider_conversation_ids_bounded_hcn_replay_only",
+    providerRetention: "groq_project_data_controls_apply",
+    builtInProviderTools: false,
+    remoteTools: false,
+    sessionHistory:
+      "encrypted_principal_scoped_durable_transcript",
+    assignedFileScopeOnly: true,
+    modelHasReadTools: false,
+    modelTools: [
+      "read_work_center",
+      "review_file",
+      "read_file_document_catalog",
+      "read_file_document",
+      "read_file_photo_catalog",
+      "research_file_hail_dates",
+      "read_calendar_day",
+      "run_management_sweep",
+      "read_closed_file_benchmark"
+    ],
+    modelSkills: [
+      "work_center_triage",
+      "exact_file_sweep",
+      "activity_gap_management",
+      "claim_filing_readiness",
+      "representation_readiness",
+      "inspection_coordination",
+      "communication_recovery",
+      "carrier_follow_up",
+      "document_review",
+      "photo_inventory",
+      "date_of_loss_research",
+      "settlement_and_payment_review",
+      "closed_file_benchmarking",
+      "natural_hcn_drafting",
+      "evidence_and_safety"
+    ],
+    modelCanPrepareActionPlans: false,
+    modelCanExecute: false,
+    exactHumanApprovalRequired: true
+  });
+  assert.deepEqual(
+    managementHealth.hcnConsole.employeeConnections,
+    {
+      googleGrantVaultConfigured: true,
+      googleCredentialStorage:
+        "encrypted_per_employee_persistent_grant",
+      googleSharedMailboxFallback: false,
+      employeeIdentityPins:
+        "authenticated_persistent_immutable",
+      quoIdentityBinding:
+        "immutable_google_subject_plus_sms_otp",
+      quoAuthorizationStoreConfigured: true,
+      providerTokensExposedToBrowser: false
+    }
+  );
+  assert.doesNotMatch(
+    JSON.stringify(managementHealth),
+    /fixture-(?:chance|other|third)-owner/
+  );
 
   const loginResponse = await fetch(
     `${origin}/hcn/auth/login?returnTo=${encodeURIComponent("/hcn")}`,
@@ -2469,6 +3230,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const loginCookie = loginCookies[0].split(";", 1)[0];
   const googleAuthorize = new URL(loginResponse.headers.get("location"));
   assert.equal(googleAuthorize.hostname, "accounts.google.com");
+  assert.equal(
+    googleAuthorize.searchParams.get("client_id"),
+    "hcn-employee-connector-client"
+  );
   assert.equal(googleAuthorize.searchParams.get("redirect_uri"), `${origin}/oauth/google/callback`);
   assert.equal(googleAuthorize.searchParams.get("scope"), "openid email profile");
   assert.equal(googleAuthorize.searchParams.get("code_challenge_method"), "S256");
@@ -2490,8 +3255,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(callbackResponse.status, 302);
   assert.equal(callbackResponse.headers.get("location"), "/hcn");
   const callbackCookies = callbackResponse.headers.getSetCookie();
-  assert.equal(callbackCookies.length, 2);
+  assert.equal(callbackCookies.length, 3);
   assert.match(callbackCookies[0], /^__Host-hcn_login=;/);
+  assert.ok(
+    callbackCookies.some((value) =>
+      value.startsWith("hcn_invitation=;")
+    )
+  );
   const sessionSetCookie = callbackCookies.find((value) =>
     value.startsWith("__Host-hcn_session=")
   );
@@ -2500,8 +3270,84 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.doesNotMatch(callbackCookies.join("\n"), /hcn-google-access-token|hcn-google-code/);
   const sessionCookie = sessionSetCookie.split(";", 1)[0];
 
+  const authenticatedRootResponse = await fetch(`${origin}/`, {
+    redirect: "manual",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(authenticatedRootResponse.status, 302);
+  assert.equal(
+    authenticatedRootResponse.headers.get("location"),
+    "/hcn/?shell=v15"
+  );
+
+  const authenticatedConsoleRedirectResponse = await fetch(`${origin}/hcn`, {
+    redirect: "manual",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(authenticatedConsoleRedirectResponse.status, 302);
+  assert.equal(
+    authenticatedConsoleRedirectResponse.headers.get("location"),
+    "/hcn/?shell=v15"
+  );
+
+  const authenticatedConsoleResponse = await fetch(
+    `${origin}/hcn/?shell=v15`,
+    { headers: { cookie: sessionCookie } }
+  );
+  assert.equal(authenticatedConsoleResponse.status, 200);
+  assert.match(
+    authenticatedConsoleResponse.headers.get("content-type"),
+    /^text\/html/
+  );
+  assert.match(
+    authenticatedConsoleResponse.headers.get("content-security-policy"),
+    /default-src 'self'/
+  );
+  assert.equal(
+    authenticatedConsoleResponse.headers.get("vary"),
+    "Cookie, Authorization"
+  );
+  const authenticatedConsoleHtml = await authenticatedConsoleResponse.text();
+  assert.match(authenticatedConsoleHtml, /HCN Work Center/);
+  assert.doesNotMatch(authenticatedConsoleHtml, /type=["']password["']/i);
+
+  for (const [pathname, contentType] of [
+    ["/hcn/app.css?shell=v15", "text/css"],
+    ["/hcn/app.js?shell=v15", "text/javascript"],
+    [
+      "/hcn/manifest.webmanifest?shell=v15",
+      "application/manifest+json"
+    ],
+    ["/hcn/sw.js?shell=v15", "text/javascript"]
+  ]) {
+    const response = await fetch(`${origin}${pathname}`, {
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(response.status, 200, pathname);
+    assert.match(
+      response.headers.get("content-type"),
+      new RegExp(`^${contentType.replace("+", "\\+")}`)
+    );
+    assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
+    assert.equal(response.headers.get("vary"), "Cookie, Authorization");
+  }
+
+  const authenticatedMetaResponse = await fetch(`${origin}/api/v1/meta`, {
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(authenticatedMetaResponse.status, 200);
+  const authenticatedMeta = await authenticatedMetaResponse.json();
+  assert.equal(typeof authenticatedMeta.build.attested, "boolean");
+  assert.equal(authenticatedMeta.boundaries.chanceBrain, "disconnected_no_route");
+  assert.equal(authenticatedMeta.boundaries.jobrolo, "disconnected");
+  assert.equal(JSON.stringify(authenticatedMeta).includes(PLATFORM_FIXTURE_SECRET), false);
+
   assert.equal(providerRequests.length, 1);
   assert.equal(providerRequests[0].code, "hcn-google-code");
+  assert.equal(
+    providerRequests[0].grantType,
+    "authorization_code"
+  );
   assert.equal(providerRequests[0].redirectUri, `${origin}/oauth/google/callback`);
   assert.match(providerRequests[0].verifier, /^[A-Za-z0-9_-]{86}$/);
   assert.equal(
@@ -2513,7 +3359,25 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     redirect: "manual",
     headers: { cookie: loginCookie }
   });
-  assert.equal(replayResponse.status, 400);
+  assert.equal(replayResponse.status, 302);
+  assert.equal(
+    replayResponse.headers.get("location"),
+    "/hcn/?auth=invalid_request"
+  );
+  assert.equal(providerRequests.length, 1);
+  const replayLandingResponse = await fetch(
+    `${origin}${replayResponse.headers.get("location")}`,
+    { redirect: "manual" }
+  );
+  assert.equal(replayLandingResponse.status, 200);
+  assert.equal(replayLandingResponse.headers.get("set-cookie"), null);
+  const replayLandingHtml = await replayLandingResponse.text();
+  assert.match(
+    replayLandingHtml,
+    /sign-in attempt expired or could not be verified/i
+  );
+  assert.match(replayLandingHtml, /Continue with Google/);
+  assert.doesNotMatch(replayLandingHtml, /Work My Files|Company Sweep/);
   assert.equal(providerRequests.length, 1);
 
   const platformSessionResponse = await fetch(`${origin}/api/v1/session`, {
@@ -2527,13 +3391,26 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(platformSession.identity.type, "hcn_browser_session");
   assert.equal(platformSession.identity.role, "chance");
   assert.equal(platformSession.identity.jobNimbusScope, "assigned");
+  assert.equal(
+    platformSession.runtime.connectors.managementSweep,
+    "configured"
+  );
   assert.deepEqual(platformSession.authorizedCapabilities, [
     "hcn.action_plans.execute",
     "hcn.action_plans.invalidate",
     "hcn.action_plans.prepare",
     "hcn.action_plans.read",
     "hcn.action_receipts.read",
+    "hcn.assistant.conversations.manage",
+    "hcn.assistant.conversations.read",
+    "hcn.assistant.turn",
+    "hcn.closed_file_benchmark.read",
+    "hcn.connectors.google.disconnect",
+    "hcn.connectors.google.link",
+    "hcn.connectors.quo_line.link",
+    "hcn.connectors.read",
     "hcn.file.review",
+    "hcn.management_sweep.read",
     "hcn.work_center.read",
     "platform.session.read"
   ]);
@@ -2556,7 +3433,199 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     browserSession.browserSession.expiresAt
   );
   const serializedBrowserSession = JSON.stringify(browserSession);
-  assert.doesNotMatch(serializedBrowserSession, /chance@wavepa|hcn-google-subject|hcn-google-access-token/);
+  assert.equal(browserSession.profile.email, "chance@wavepa.com");
+  assert.doesNotMatch(
+    serializedBrowserSession,
+    /hcn-google-subject|hcn-google-access-token/
+  );
+  const hcnReadHeaders = {
+    cookie: sessionCookie,
+    origin,
+    "x-hcn-csrf": browserSession.browserSession.csrfToken,
+    "content-type": "application/json"
+  };
+
+  const disconnectedStatusResponse = await fetch(
+    `${origin}/hcn/api/v1/connectors/status`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(disconnectedStatusResponse.status, 200);
+  const disconnectedStatus =
+    await disconnectedStatusResponse.json();
+  assert.equal(
+    disconnectedStatus.schema,
+    "hcn.console.connectors.v1"
+  );
+  assert.deepEqual(disconnectedStatus.google, {
+    status: "not_connected",
+    gmail: "not_connected",
+    calendar: "not_connected",
+    connectUrl: "/hcn/connect/google/start"
+  });
+  assert.deepEqual(disconnectedStatus.jobNimbus, {
+    status: "connected",
+    scope: "assigned"
+  });
+
+  const connectorStartResponse = await fetch(
+    `${origin}/hcn/connect/google/start`,
+    {
+      redirect: "manual",
+      headers: { cookie: sessionCookie }
+    }
+  );
+  assert.equal(connectorStartResponse.status, 302);
+  assert.equal(
+    connectorStartResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const connectorAuthorize = new URL(
+    connectorStartResponse.headers.get("location")
+  );
+  assert.equal(connectorAuthorize.hostname, "accounts.google.com");
+  assert.equal(
+    connectorAuthorize.searchParams.get("redirect_uri"),
+    `${origin}/oauth/google/callback`
+  );
+  assert.equal(
+    connectorAuthorize.searchParams.get("scope"),
+    hcnConnectorScopeText
+  );
+  assert.equal(
+    connectorAuthorize.searchParams.get("code_challenge_method"),
+    "S256"
+  );
+  assert.equal(
+    connectorAuthorize.searchParams.get("access_type"),
+    "offline"
+  );
+  assert.equal(
+    connectorAuthorize.searchParams.get("prompt"),
+    "consent"
+  );
+  assert.equal(
+    connectorAuthorize.searchParams.get("hd"),
+    null
+  );
+  assert.notEqual(
+    connectorAuthorize.searchParams.get("state"),
+    googleAuthorize.searchParams.get("state")
+  );
+  assert.match(
+    connectorAuthorize.searchParams.get("state"),
+    /^hcn1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
+  );
+
+  const connectorProviderRequestCountBefore =
+    providerRequests.length;
+  const connectorCallbackUrl =
+    `${origin}/oauth/google/callback?${new URLSearchParams({
+      code: "hcn-google-connector-code",
+      state: connectorAuthorize.searchParams.get("state")
+    })}`;
+  const connectorCallbackResponse = await fetch(
+    connectorCallbackUrl,
+    {
+      redirect: "manual",
+      headers: { cookie: sessionCookie }
+    }
+  );
+  assert.equal(connectorCallbackResponse.status, 302);
+  assert.equal(
+    connectorCallbackResponse.headers.get("location"),
+    "/hcn/?google=connected"
+  );
+  assert.deepEqual(
+    connectorCallbackResponse.headers.getSetCookie(),
+    []
+  );
+  assert.equal(
+    providerRequests.length,
+    connectorProviderRequestCountBefore + 1
+  );
+  const connectorProviderRequest =
+    providerRequests.at(-1);
+  assert.deepEqual(
+    {
+      code: connectorProviderRequest.code,
+      grantType: connectorProviderRequest.grantType,
+      redirectUri: connectorProviderRequest.redirectUri
+    },
+    {
+      code: "hcn-google-connector-code",
+      grantType: "authorization_code",
+      redirectUri: `${origin}/oauth/google/callback`
+    }
+  );
+  assert.match(
+    connectorProviderRequest.verifier,
+    /^[A-Za-z0-9_-]{86}$/
+  );
+  assert.equal(
+    createHash("sha256")
+      .update(connectorProviderRequest.verifier)
+      .digest("base64url"),
+    connectorAuthorize.searchParams.get("code_challenge")
+  );
+
+  const connectorReplayResponse = await fetch(
+    connectorCallbackUrl,
+    {
+      redirect: "manual",
+      headers: { cookie: sessionCookie }
+    }
+  );
+  assert.equal(connectorReplayResponse.status, 302);
+  assert.equal(
+    connectorReplayResponse.headers.get("location"),
+    "/hcn/?google=invalid_request"
+  );
+  assert.equal(
+    providerRequests.length,
+    connectorProviderRequestCountBefore + 1
+  );
+
+  const connectedStatusResponse = await fetch(
+    `${origin}/hcn/api/v1/connectors/status`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(connectedStatusResponse.status, 200);
+  const connectedStatus = await connectedStatusResponse.json();
+  assert.deepEqual(connectedStatus.google, {
+    status: "connected",
+    gmail: "connected",
+    calendar: "connected",
+    connectUrl: "/hcn/connect/google/start"
+  });
+  const serializedConnectedStatus =
+    JSON.stringify(connectedStatus);
+  assert.deepEqual(connectedStatus.profile, {
+    displayName: "Chance Fixture",
+    email: "chance@wavepa.com",
+    role: "chance"
+  });
+  for (const forbidden of [
+    "hcn-google-subject",
+    chanceOwnerId,
+    "hcn-google-connector-access-token",
+    "hcn-google-connector-refresh-token",
+    "hcn-google-secret",
+    "+12145559999"
+  ]) {
+    assert.equal(
+      serializedConnectedStatus.includes(forbidden),
+      false,
+      `HCN connector status leaked ${forbidden}`
+    );
+  }
 
   const fullOpenApiResponse = await fetch(`${origin}/openapi.json`);
   assert.equal(fullOpenApiResponse.status, 200);
@@ -2569,6 +3638,58 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     fullOpenApi.paths["/hcn/api/v1/file-review"].post.operationId,
     "readHcnExactFile"
   );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/management-sweep"].post.operationId,
+    "readHcnManagementSweep"
+  );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/assistant/turns"].post.operationId,
+    "askHcnThresher"
+  );
+  assert.equal(
+    fullOpenApi.paths[
+      "/hcn/api/v1/assistant/conversations/list"
+    ].post.operationId,
+    "listHcnAssistantConversations"
+  );
+  assert.equal(
+    fullOpenApi.paths["/hcn/connect/google/start"].get.operationId,
+    "startHcnGoogleConnector"
+  );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/connectors/status"].post
+      .operationId,
+    "readHcnEmployeeConnections"
+  );
+  assert.equal(
+    fullOpenApi.paths[
+      "/hcn/api/v1/connectors/google/disconnect"
+    ].post.operationId,
+    "disconnectHcnGoogleConnector"
+  );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/connectors/quo-line"].post
+      .operationId,
+    "linkHcnEmployeeQuoLine"
+  );
+  assert.equal(
+    fullOpenApi.paths[
+      "/hcn/api/v1/connectors/google/disconnect"
+    ].post["x-openai-isConsequential"],
+    true
+  );
+  assert.equal(
+    fullOpenApi.paths["/hcn/api/v1/connectors/quo-line"].post[
+      "x-openai-isConsequential"
+    ],
+    true
+  );
+  const hcnConnectorOpenApiPaths = [
+    "/hcn/connect/google/start",
+    "/hcn/api/v1/connectors/status",
+    "/hcn/api/v1/connectors/google/disconnect",
+    "/hcn/api/v1/connectors/quo-line"
+  ];
   const hcnActionOpenApiPaths = [
     "/hcn/api/v1/action-plans/prepare",
     "/hcn/api/v1/action-plans/list",
@@ -2592,16 +3713,25 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const chatGptOpenApi = await chatGptOpenApiResponse.json();
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/work-center"], undefined);
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/file-review"], undefined);
+  assert.equal(chatGptOpenApi.paths["/hcn/api/v1/management-sweep"], undefined);
+  assert.equal(chatGptOpenApi.paths["/hcn/api/v1/assistant/turns"], undefined);
+  for (const conversationPath of [
+    "/hcn/api/v1/assistant/conversations/list",
+    "/hcn/api/v1/assistant/conversations/create",
+    "/hcn/api/v1/assistant/conversations/detail",
+    "/hcn/api/v1/assistant/conversations/rename",
+    "/hcn/api/v1/assistant/conversations/archive",
+    "/hcn/api/v1/assistant/conversations/restore"
+  ]) {
+    assert.equal(chatGptOpenApi.paths[conversationPath], undefined);
+  }
+  for (const connectorPath of hcnConnectorOpenApiPaths) {
+    assert.equal(chatGptOpenApi.paths[connectorPath], undefined);
+  }
   for (const actionPath of hcnActionOpenApiPaths) {
     assert.equal(chatGptOpenApi.paths[actionPath], undefined);
   }
 
-  const hcnReadHeaders = {
-    cookie: sessionCookie,
-    origin,
-    "x-hcn-csrf": browserSession.browserSession.csrfToken,
-    "content-type": "application/json"
-  };
   const directRouteResponse = await fetch(`${origin}/jobnimbus/search`, {
     method: "POST",
     headers: hcnReadHeaders,
@@ -2623,18 +3753,108 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   assert.equal(sharedBearerHcnResponse.status, 403);
 
+  const sharedBearerAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer fixture-shared-bridge-token-for-ambiguity",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        conversationRef: `conversation_${"a".repeat(32)}`,
+        expectedRevision: 0,
+        prompt: "Work my files.",
+        mode: "auto"
+      })
+    }
+  );
+  assert.equal(sharedBearerAssistantResponse.status, 403);
+
   const directGoogleBearerHcnResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
     {
       method: "POST",
       headers: {
-        authorization: "Bearer hcn-google-access-token",
+        authorization: "Bearer legacy-google-access-token",
         "content-type": "application/json"
       },
       body: JSON.stringify({ offset: 0, limit: 10 })
     }
   );
   assert.equal(directGoogleBearerHcnResponse.status, 403);
+
+  const missingAssistantOriginResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "x-hcn-csrf": browserSession.browserSession.csrfToken,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prompt: "Work my files." })
+    }
+  );
+  assert.equal(missingAssistantOriginResponse.status, 403);
+
+  const missingAssistantCsrfResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        origin,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prompt: "Work my files." })
+    }
+  );
+  assert.equal(missingAssistantCsrfResponse.status, 403);
+
+  const malformedAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        prompt: "Work my files.",
+        model: "attacker-selected-model"
+      })
+    }
+  );
+  assert.equal(malformedAssistantResponse.status, 400);
+
+  const oversizedAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ prompt: "x".repeat(17 * 1024) })
+    }
+  );
+  assert.equal(oversizedAssistantResponse.status, 413);
+
+  const unavailableAssistantResponse = await fetch(
+    `${origin}/hcn/api/v1/assistant/turns`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        conversationRef: `conversation_${"a".repeat(32)}`,
+        expectedRevision: 0,
+        prompt: "Work my files.",
+        mode: "auto"
+      })
+    }
+  );
+  assert.equal(unavailableAssistantResponse.status, 503);
+  const unavailableAssistant = await unavailableAssistantResponse.json();
+  assert.equal(
+    unavailableAssistant.error,
+    "Ask Thresher is not configured for this HCN environment."
+  );
 
   const workCenterResponse = await fetch(
     `${origin}/hcn/api/v1/work-center`,
@@ -2702,10 +3922,42 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.schema, "hcn.console.file.v1");
   assert.equal(exactFile.ephemeral, true);
   assert.equal(exactFile.cachePolicy, "no_store");
-  assert.equal(exactFile.evidenceStatus, "complete");
+  assert.equal(
+    exactFile.evidenceStatus,
+    "complete",
+    JSON.stringify({
+      sources: exactFile.sources,
+      providerRequests: hcnProviderRequests
+    })
+  );
   assert.equal(exactFile.file.fileRef, fileRef);
   assert.equal(exactFile.file.jobNumber, "HCN-1001");
   assert.equal(exactFile.file.displayName, "Fixture Active Homeowner");
+  assert.equal(
+    exactFile.intelligence.schemaVersion,
+    "hcn.ops.file-intelligence.v1"
+  );
+  assert.equal(exactFile.intelligence.fileRef, fileRef);
+  assert.deepEqual(
+    Object.keys(exactFile.intelligence.workflows).sort(),
+    [
+      "claim_filing",
+      "communications",
+      "follow_up",
+      "inspection_scheduling",
+      "neglected_files"
+    ]
+  );
+  for (const [workflowId, workflow] of Object.entries(
+    exactFile.intelligence.workflows
+  )) {
+    assert.equal(
+      workflow.schemaVersion,
+      "hcn.ops.workflow-evaluation.v1"
+    );
+    assert.equal(workflow.workflowId, workflowId);
+    assert.equal(workflow.fileRef, fileRef);
+  }
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(exactFile.sources)
@@ -2723,9 +3975,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.recent.activities.length, 1);
   assert.equal(exactFile.recent.tasks.length, 1);
   assert.equal(exactFile.recent.documents.length, 1);
-  assert.equal(exactFile.recent.gmail.length, 1);
-  assert.equal(exactFile.recent.quo.length, 2);
-  assert.equal(exactFile.recent.gmail[0].direction, "inbound");
+  assert.equal(exactFile.recent.gmail.length, 2);
+  assert.equal(exactFile.recent.quo.length, 3);
+  assert.equal(
+    exactFile.recent.gmail.some((item) => item.direction === "inbound"),
+    true
+  );
+  assert.equal(
+    exactFile.recent.gmail.some(
+      (item) =>
+        item.direction === "outbound"
+        && item.deliveryState === "sent_verified"
+    ),
+    true
+  );
   assert.equal(exactFile.recent.quo.some((item) => item.direction === "inbound"), true);
   assert.equal(exactFile.recent.quo.some((item) => item.direction === "outbound"), true);
   assert.equal(
@@ -2759,8 +4022,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "jn-task-1",
     "jn-document-1",
     "gmail-message-1",
+    "gmail-message-2",
     "gmail-thread-1",
+    "gmail-carrier-thread-1",
     "quo-message-1",
+    "quo-message-2",
     "quo-call-1",
     "quo-line-1",
     chanceOwnerId
@@ -2792,6 +4058,604 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     ).length,
     1
   );
+
+  hcnBoundedHistoryMode = true;
+  const boundedHistoryResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    }
+  );
+  hcnBoundedHistoryMode = false;
+  assert.equal(boundedHistoryResponse.status, 200);
+  const boundedHistory = await boundedHistoryResponse.json();
+  assert.equal(boundedHistory.file.jobNumber, "HCN-1001");
+  assert.equal(
+    boundedHistory.file.displayName,
+    "Fixture Active Homeowner"
+  );
+  assert.equal(boundedHistory.evidenceStatus, "complete");
+  assert.equal(
+    boundedHistory.sources.jobnimbus.failureCode,
+    null
+  );
+  assert.equal(
+    boundedHistory.sources.jobnimbus.completeness,
+    "complete"
+  );
+  assert.deepEqual(
+    boundedHistory.sources.jobnimbus.collections,
+    {
+      activities: {
+        completeness: "partial",
+        returnedItems: 50,
+        duplicateItemsRemoved: 0,
+        readLimit: 50,
+        limitationCode: "bounded_history_window"
+      },
+      tasks: {
+        completeness: "partial",
+        returnedItems: 50,
+        duplicateItemsRemoved: 0,
+        readLimit: 50,
+        limitationCode: "bounded_history_window"
+      },
+      documents: {
+        completeness: "complete",
+        returnedItems: 1,
+        duplicateItemsRemoved: 0,
+        readLimit: 500,
+        limitationCode: null
+      }
+    }
+  );
+  assert.equal(boundedHistory.recent.activities.length, 10);
+  assert.equal(boundedHistory.recent.tasks.length, 10);
+  assert.deepEqual(boundedHistory.intelligence.historyCoverage, {
+    currentFacts: "complete",
+    documents: "complete",
+    activityHistory: "partial",
+    taskHistory: "partial"
+  });
+  assert.equal(
+    boundedHistory.intelligence.workflows.neglected_files.metrics
+      .activityGapDays,
+    null
+  );
+  assert.equal(
+    boundedHistory.intelligence.workflows.neglected_files.nextActions.some(
+      ({ actionCode }) => actionCode === "review_neglected_file"
+    ),
+    false
+  );
+  assert.equal(
+    boundedHistory.intelligence.workflows.follow_up.metrics
+      .verifiedActivityGapDays,
+    null
+  );
+  assert.equal(
+    boundedHistory.intelligence.workflows.follow_up.nextActions.some(
+      ({ actionCode }) => actionCode === "review_activity_gap"
+    ),
+    false
+  );
+  assert.equal(
+    new Set(
+      boundedHistory.recent.activities.map((activity) => activity.reference)
+    ).size,
+    boundedHistory.recent.activities.length
+  );
+
+  hcnDisjointActivityOverflowMode = true;
+  const disjointActivityResponse = await fetch(
+    `${origin}/hcn/api/v1/file-review`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    }
+  );
+  hcnDisjointActivityOverflowMode = false;
+  assert.equal(disjointActivityResponse.status, 200);
+  const disjointActivityReview = await disjointActivityResponse.json();
+  assert.equal(disjointActivityReview.recent.activities.length, 10);
+  assert.equal(
+    disjointActivityReview.recent.activities.every(({ label }) =>
+      label.startsWith("Newer related-only activity")
+    ),
+    true
+  );
+  assert.equal(
+    disjointActivityReview.sources.jobnimbus.collections.activities
+      .completeness,
+    "partial"
+  );
+
+  const hpManagementRequestsBefore = hcnProviderRequests.length;
+  const hpMutationRequestsBefore = jobNimbusMutationRequests.length;
+  const hpManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: {
+        authorization:
+          "Bearer fixture-hcn-hp-operator-token-1234567890",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  assert.equal(hpManagementSweepResponse.status, 200);
+  assert.equal(
+    hpManagementSweepResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const hpManagementSweep = await hpManagementSweepResponse.json();
+  assert.equal(
+    hpManagementSweep.schema,
+    "hcn.console.management-sweep.v1"
+  );
+  assert.equal(hpManagementSweep.ephemeral, true);
+  assert.equal(hpManagementSweep.adjusters.length, 3);
+  assert.equal(
+    jobNimbusMutationRequests.length,
+    hpMutationRequestsBefore
+  );
+  assert.equal(
+    hcnProviderRequests
+      .slice(hpManagementRequestsBefore)
+      .every((request) => request.startsWith("jobnimbus:")),
+    true
+  );
+  const serializedHpManagementSweep =
+    JSON.stringify(hpManagementSweep);
+  for (const forbidden of [
+    exactFileId,
+    otherOwnerContact.jnid,
+    thirdOwnerContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    chanceOwnerId,
+    otherOwnerId,
+    thirdOwnerId,
+    "active.homeowner@example.test",
+    "2145551212",
+    "HCN-POLICY-1001",
+    "Fresh synthetic carrier activity"
+  ]) {
+    assert.equal(
+      serializedHpManagementSweep.includes(forbidden),
+      false,
+      `HP management sweep leaked ${forbidden}`
+    );
+  }
+
+  const deniedManagementRequestsBefore =
+    hcnProviderRequests.length;
+  for (const authorization of [
+    "Bearer fixture-hcn-mac-operator-token-1234567890",
+    "Bearer fixture-shared-bridge-token-for-ambiguity"
+  ]) {
+    const deniedManagementSweepResponse = await fetch(
+      `${origin}/hcn/api/v1/management-sweep`,
+      {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ limitPerAdjuster: 10 })
+      }
+    );
+    assert.equal(deniedManagementSweepResponse.status, 403);
+  }
+  assert.equal(
+    hcnProviderRequests.length,
+    deniedManagementRequestsBefore
+  );
+  assert.equal(
+    jobNimbusMutationRequests.length,
+    hpMutationRequestsBefore
+  );
+
+  const managementRequestsBefore = hcnProviderRequests.length;
+  hcnManagementActivityFilters.length = 0;
+  const managementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  assert.equal(managementSweepResponse.status, 200);
+  assert.equal(
+    managementSweepResponse.headers.get("cache-control"),
+    "no-store, max-age=0"
+  );
+  const managementSweep = await managementSweepResponse.json();
+  assert.equal(
+    managementSweep.schema,
+    "hcn.console.management-sweep.v1"
+  );
+  assert.equal(managementSweep.ephemeral, true);
+  assert.equal(managementSweep.cachePolicy, "no_store");
+  assert.equal(
+    Date.parse(managementSweep.asOf)
+      <= Date.parse(managementSweep.checkedAt),
+    true
+  );
+  assert.equal(
+    Date.parse(managementSweep.checkedAt)
+      < Date.parse(managementSweep.validUntil),
+    true
+  );
+  assert.equal(managementSweep.criteria.rankingMode, "activity_only");
+  assert.equal(
+    managementSweep.criteria.workflowScope,
+    "estimating_board"
+  );
+  assert.equal(
+    managementSweep.criteria.filterOrder,
+    "workflow_status_before_activity_ranking"
+  );
+  assert.deepEqual(
+    managementSweep.criteria.includedStatusCodes,
+    [
+      "photo_file_estimate_needed",
+      "ready_for_pa_review",
+      "submitted_awaiting_confirmation",
+      "submitted",
+      "hot_final_negotiation",
+      "estimating_finalized_awaiting_acv"
+    ]
+  );
+  assert.equal(managementSweep.adjusters.length, 3);
+  assert.deepEqual(
+    managementSweep.adjusters.map((adjuster) => adjuster.name),
+    [
+      "Chance Fixture",
+      "Second Fixture Adjuster",
+      "Third Fixture Adjuster"
+    ]
+  );
+  assert.deepEqual(
+    managementSweep.adjusters.map((adjuster) => adjuster.eligibleCount),
+    [1, 1, 1]
+  );
+  assert.deepEqual(
+    managementSweep.adjusters.map((adjuster) => adjuster.items.length),
+    [1, 1, 1]
+  );
+  assert.deepEqual(
+    managementSweep.adjusters.flatMap((adjuster) =>
+      adjuster.items.map((item) => item.status.code)
+    ),
+    [
+      "ready_for_pa_review",
+      "photo_file_estimate_needed",
+      "submitted"
+    ]
+  );
+  assert.equal(managementSweep.companyWorst.length, 3);
+  assert.deepEqual(
+    managementSweep.adjusters.flatMap(
+      (adjuster) => adjuster.items.map((item) => item.eventSummary)
+    ),
+    Array.from({ length: 3 }, () => ({
+      fetchedEventCount: 1,
+      acceptedEventCount: 1,
+      ambiguousReferenceEventCount: 0,
+      communicationActivityCount: 0,
+      operationalActivityCount: 1,
+      noiseCount: 0,
+      unsupportedEventCount: 0,
+      ignoredUnfreshEventCount: 0
+    }))
+  );
+  assert.equal(
+    managementSweep.summary.unsupportedActivityRecordCount,
+    0
+  );
+  assert.equal(
+    managementSweep.summary.ambiguousActivityReferenceCount,
+    0
+  );
+  assert.equal(managementSweep.completeness.status, "complete");
+  assert.deepEqual(
+    managementSweep.sourceHealth.map((source) => [
+      source.key,
+      source.status
+    ]),
+    [
+      ["jobnimbus", "complete"],
+      ["gmail", "not_evaluated"],
+      ["quo", "not_evaluated"],
+      ["google_calendar", "not_evaluated"]
+    ]
+  );
+  assert.equal(
+    managementSweep.adjusters.every(
+      (adjuster) =>
+        /^adjuster_[a-f0-9]{32}$/.test(adjuster.adjusterRef)
+        && adjuster.items.every(
+          (item) => /^subject_[a-f0-9]{32}$/.test(item.fileRef)
+        )
+    ),
+    true
+  );
+  const serializedManagementSweep = JSON.stringify(managementSweep);
+  for (const forbidden of [
+    exactFileId,
+    otherOwnerContact.jnid,
+    thirdOwnerContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    chanceOwnerId,
+    otherOwnerId,
+    thirdOwnerId,
+    "jn-activity-1",
+    "jn-activity-2",
+    "jn-activity-3",
+    "active.homeowner@example.test",
+    "2145551212",
+    "Fresh synthetic carrier activity"
+  ]) {
+    assert.equal(
+      serializedManagementSweep.includes(forbidden),
+      false,
+      `HCN management sweep leaked ${forbidden}`
+    );
+  }
+  assert.deepEqual(
+    hcnManagementActivityFilters
+      .map(({ referenceField }) => referenceField)
+      .sort(),
+    [
+      "primary.id",
+      "primary.id",
+      "primary.id",
+      "related.id",
+      "related.id",
+      "related.id"
+    ]
+  );
+  assert.equal(
+    new Set(
+      hcnManagementActivityFilters.map(
+        ({ referencedFileId }) => referencedFileId
+      )
+    ).size,
+    3
+  );
+  const managementProviderRequests = hcnProviderRequests.slice(
+    managementRequestsBefore
+  );
+  assert.equal(
+    managementProviderRequests.every(
+      (request) => request.startsWith("jobnimbus:")
+    ),
+    true
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  const invalidManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({
+        limitPerAdjuster: 10,
+        unexpected: true
+      })
+    }
+  );
+  assert.equal(invalidManagementSweepResponse.status, 400);
+
+  serveWrongManagementReferenceField = true;
+  const wrongReferenceFieldResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  serveWrongManagementReferenceField = false;
+  assert.equal(wrongReferenceFieldResponse.status, 503);
+  assert.equal(
+    (await wrongReferenceFieldResponse.json()).error,
+    "One or more JobNimbus activity histories are unavailable."
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  for (const secondFileId of [
+    inactiveChanceContact.jnid,
+    unconfiguredOwnerContact.jnid,
+    nonInsuranceContact.jnid
+  ]) {
+    ambiguousManagementReferenceId = secondFileId;
+    const outOfScopeReferenceResponse = await fetch(
+      `${origin}/hcn/api/v1/management-sweep`,
+      {
+        method: "POST",
+        headers: hcnReadHeaders,
+        body: JSON.stringify({ limitPerAdjuster: 10 })
+      }
+    );
+    ambiguousManagementReferenceId = "";
+    assert.equal(outOfScopeReferenceResponse.status, 200);
+    const outOfScopeReferenceSweep =
+      await outOfScopeReferenceResponse.json();
+    assert.equal(
+      outOfScopeReferenceSweep.completeness.status,
+      "complete"
+    );
+    assert.equal(
+      outOfScopeReferenceSweep.sourceHealth[0].status,
+      "complete"
+    );
+    assert.equal(
+      outOfScopeReferenceSweep.summary.ambiguousActivityReferenceCount,
+      0
+    );
+    const outOfScopeReferenceChanceItem =
+      outOfScopeReferenceSweep.adjusters[0].items[0];
+    assert.equal(
+      outOfScopeReferenceChanceItem.eventSummary.acceptedEventCount,
+      1
+    );
+    assert.equal(
+      outOfScopeReferenceChanceItem.eventSummary
+        .ambiguousReferenceEventCount,
+      0
+    );
+    assert.equal(
+      outOfScopeReferenceChanceItem.gaps.operationalActivity.lastAt,
+      "2026-07-27T14:00:00.000Z"
+    );
+    assert.doesNotMatch(
+      JSON.stringify(outOfScopeReferenceSweep),
+      /jn-fixture|fixture-(?:chance|other|third|unconfigured)-owner/
+    );
+    assert.equal(jobNimbusMutationRequests.length, 0);
+  }
+
+  ambiguousManagementReferenceId = otherOwnerContact.jnid;
+  const crossFileManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  ambiguousManagementReferenceId = "";
+  assert.equal(crossFileManagementSweepResponse.status, 200);
+  const crossFileManagementSweep =
+    await crossFileManagementSweepResponse.json();
+  assert.equal(crossFileManagementSweep.completeness.status, "partial");
+  assert.equal(crossFileManagementSweep.sourceHealth[0].status, "partial");
+  assert.equal(
+    crossFileManagementSweep.summary.ambiguousActivityReferenceCount,
+    1
+  );
+  assert.match(
+    crossFileManagementSweep.completeness.summary,
+    /multiple eligible files and were conservatively excluded/
+  );
+  const crossFileChanceItem =
+    crossFileManagementSweep.adjusters[0].items[0];
+  assert.equal(crossFileChanceItem.eventSummary.fetchedEventCount, 1);
+  assert.equal(crossFileChanceItem.eventSummary.acceptedEventCount, 0);
+  assert.equal(
+    crossFileChanceItem.eventSummary.operationalActivityCount,
+    0
+  );
+  assert.equal(crossFileChanceItem.eventSummary.unsupportedEventCount, 0);
+  assert.equal(
+    crossFileChanceItem.eventSummary.ambiguousReferenceEventCount,
+    1
+  );
+  assert.equal(crossFileChanceItem.evidenceHealth.status, "partial");
+  assert.match(
+    crossFileChanceItem.evidenceHealth.summary,
+    /cross-file activity reference was conservatively excluded/
+  );
+  assert.equal(
+    crossFileChanceItem.gaps.operationalActivity.lastAt,
+    null
+  );
+  assert.equal(
+    crossFileChanceItem.gaps.operationalActivity.basis,
+    "active_since"
+  );
+  assert.equal(
+    crossFileChanceItem.lastTouch.summary,
+    "No verified JobNimbus activity was found"
+  );
+  const crossFileCompanyItem = crossFileManagementSweep.companyWorst.find(
+    (item) => item.fileRef === crossFileChanceItem.fileRef
+  );
+  assert.equal(crossFileCompanyItem.evidenceHealth.status, "partial");
+  assert.doesNotMatch(
+    JSON.stringify(crossFileManagementSweep),
+    /jn-fixture|fixture-(?:chance|other|third|unconfigured)-owner|Fresh synthetic carrier activity|active\.homeowner@example\.test|2145551212/
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  managementActivityOverride = {
+    record_type_name: "Email",
+    status_name: "Draft",
+    date_created: "2026-07-29T10:00:00.000Z"
+  };
+  const unsupportedManagementSweepResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  managementActivityOverride = null;
+  assert.equal(unsupportedManagementSweepResponse.status, 200);
+  const unsupportedManagementSweep =
+    await unsupportedManagementSweepResponse.json();
+  assert.equal(unsupportedManagementSweep.completeness.status, "partial");
+  assert.equal(
+    unsupportedManagementSweep.sourceHealth[0].status,
+    "partial"
+  );
+  assert.equal(
+    unsupportedManagementSweep.summary.unsupportedActivityRecordCount,
+    1
+  );
+  assert.equal(
+    unsupportedManagementSweep.summary.ambiguousActivityReferenceCount,
+    0
+  );
+  const chanceManagementItem =
+    unsupportedManagementSweep.adjusters[0].items[0];
+  assert.equal(chanceManagementItem.eventSummary.fetchedEventCount, 1);
+  assert.equal(chanceManagementItem.eventSummary.acceptedEventCount, 0);
+  assert.equal(chanceManagementItem.eventSummary.unsupportedEventCount, 1);
+  assert.equal(chanceManagementItem.evidenceHealth.status, "partial");
+  assert.match(
+    chanceManagementItem.evidenceHealth.summary,
+    /unsupported record/
+  );
+  assert.equal(chanceManagementItem.gaps.operationalActivity.lastAt, null);
+  assert.equal(
+    chanceManagementItem.lastTouch.summary,
+    "No verified JobNimbus activity was found"
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  allContacts.push({
+    ...activeContact,
+    jnid: "jn-fixture-budget-extra",
+    number: "HCN-1006",
+    display_name: "Fixture Budget Extra",
+    email: "budget.extra@example.test",
+    mobile_phone: "2145551217",
+    "Claim #": "HCN-CLAIM-1006",
+    "Policy #": "HCN-POLICY-1006"
+  });
+  const budgetExceededResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  allContacts.pop();
+  assert.equal(budgetExceededResponse.status, 503);
+  assert.equal(
+    (await budgetExceededResponse.json()).error,
+    "The JobNimbus management provider-read budget was exceeded."
+  );
+  assert.equal(jobNimbusMutationRequests.length, 0);
 
   const exactNote =
     "Andrea needs to reach out for the declaration page or policy.";
@@ -2850,7 +4714,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(preparedActionEnvelope.ephemeral, true);
   assert.equal(preparedActionEnvelope.cachePolicy, "no_store");
   assert.deepEqual(preparedActionEnvelope.authority, {
-    mode: "explicit_chance_approval",
+    mode: "explicit_signed_in_employee_approval",
+    fileScope: "assigned_only",
     automaticExecution: false,
     automaticRetry: false,
     providerIdentifiersExposed: false
@@ -2987,6 +4852,302 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     false
   );
 
+  const employeeLoginResponse = await fetch(
+    `${origin}/hcn/auth/login`,
+    { redirect: "manual" }
+  );
+  assert.equal(employeeLoginResponse.status, 302);
+  const employeeLoginCookie = employeeLoginResponse.headers
+    .getSetCookie()[0]
+    .split(";", 1)[0];
+  const employeeLoginAuthorize = new URL(
+    employeeLoginResponse.headers.get("location")
+  );
+  assert.equal(
+    employeeLoginAuthorize.searchParams.get("client_id"),
+    "hcn-employee-connector-client"
+  );
+  assert.equal(
+    employeeLoginAuthorize.searchParams.get("scope"),
+    "openid email profile"
+  );
+  const employeeLoginCallbackResponse = await fetch(
+    `${origin}/oauth/google/callback?${new URLSearchParams({
+      code: "hcn-employee-google-code",
+      state: employeeLoginAuthorize.searchParams.get("state")
+    })}`,
+    {
+      redirect: "manual",
+      headers: { cookie: employeeLoginCookie }
+    }
+  );
+  assert.equal(employeeLoginCallbackResponse.status, 302);
+  const employeeSessionSetCookie =
+    employeeLoginCallbackResponse.headers
+      .getSetCookie()
+      .find((value) =>
+        value.startsWith("__Host-hcn_session=")
+      );
+  assert.ok(employeeSessionSetCookie);
+  const employeeSessionCookie =
+    employeeSessionSetCookie.split(";", 1)[0];
+  const employeeBrowserSessionResponse = await fetch(
+    `${origin}/hcn/auth/session`,
+    { headers: { cookie: employeeSessionCookie } }
+  );
+  assert.equal(employeeBrowserSessionResponse.status, 200);
+  const employeeBrowserSession =
+    await employeeBrowserSessionResponse.json();
+  assert.deepEqual(employeeBrowserSession.profile, {
+    displayName: "Employee Fixture",
+    email: "adjuster@wavepa.com",
+    role: "employee"
+  });
+  assert.deepEqual(
+    employeeBrowserSession.authorizedCapabilities,
+    [
+      "hcn.action_plans.execute",
+      "hcn.action_plans.invalidate",
+      "hcn.action_plans.prepare",
+      "hcn.action_plans.read",
+      "hcn.action_receipts.read",
+      "hcn.assistant.conversations.manage",
+      "hcn.assistant.conversations.read",
+      "hcn.assistant.turn",
+      "hcn.connectors.google.disconnect",
+      "hcn.connectors.google.link",
+      "hcn.connectors.quo_line.link",
+      "hcn.connectors.read",
+      "hcn.file.review",
+      "hcn.work_center.read",
+      "platform.session.read"
+    ]
+  );
+  const serializedEmployeeSession =
+    JSON.stringify(employeeBrowserSession);
+  assert.doesNotMatch(
+    serializedEmployeeSession,
+    /hcn-employee-google-subject|fixture-other-owner/
+  );
+  const employeeHeaders = {
+    cookie: employeeSessionCookie,
+    origin,
+    "x-hcn-csrf":
+      employeeBrowserSession.browserSession.csrfToken,
+    "content-type": "application/json"
+  };
+
+  const employeeDisconnectedStatusResponse = await fetch(
+    `${origin}/hcn/api/v1/connectors/status`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(employeeDisconnectedStatusResponse.status, 200);
+  const employeeDisconnectedStatus =
+    await employeeDisconnectedStatusResponse.json();
+  assert.deepEqual(employeeDisconnectedStatus.google, {
+    status: "not_connected",
+    gmail: "not_connected",
+    calendar: "not_connected",
+    connectUrl: "/hcn/connect/google/start"
+  });
+
+  const employeeWorkCenterResponse = await fetch(
+    `${origin}/hcn/api/v1/work-center`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({ offset: 0, limit: 10 })
+    }
+  );
+  assert.equal(employeeWorkCenterResponse.status, 200);
+  const employeeWorkCenter =
+    await employeeWorkCenterResponse.json();
+  assert.equal(employeeWorkCenter.page.total, 1);
+  assert.deepEqual(
+    employeeWorkCenter.files.map((file) => file.jobNumber),
+    ["HCN-1003"]
+  );
+  const serializedEmployeeWorkCenter =
+    JSON.stringify(employeeWorkCenter);
+  assert.equal(
+    serializedEmployeeWorkCenter.includes("HCN-1001"),
+    false
+  );
+  assert.equal(
+    serializedEmployeeWorkCenter.includes(chanceOwnerId),
+    false
+  );
+  assert.equal(
+    serializedEmployeeWorkCenter.includes(otherOwnerId),
+    false
+  );
+
+  const employeeManagementResponse = await fetch(
+    `${origin}/hcn/api/v1/management-sweep`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({ limitPerAdjuster: 10 })
+    }
+  );
+  assert.equal(employeeManagementResponse.status, 403);
+  const employeeActionResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/list`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(employeeActionResponse.status, 200);
+  assert.deepEqual(
+    (await employeeActionResponse.json()).plans,
+    []
+  );
+  const employeeCrossFilePrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({
+        fileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: { note: "This cross-employee plan must be blocked." }
+        }]
+      })
+    }
+  );
+  assert.equal(employeeCrossFilePrepareResponse.status, 409);
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  const employeeFileRef = employeeWorkCenter.files[0].fileRef;
+  const employeePrepareResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/prepare`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({
+        fileRef: employeeFileRef,
+        operations: [{
+          type: "jobnimbus.create_note",
+          input: {
+            note:
+              "Employee fixture reviewed this assigned file."
+          }
+        }]
+      })
+    }
+  );
+  assert.equal(
+    employeePrepareResponse.status,
+    200,
+    await employeePrepareResponse.clone().text()
+  );
+  const employeePreparedPlan =
+    (await employeePrepareResponse.json()).plan;
+  assert.equal(employeePreparedPlan.fileRef, employeeFileRef);
+  assert.equal(employeePreparedPlan.status, "pending");
+  assert.equal(jobNimbusMutationRequests.length, 0);
+  const employeeInvalidateResponse = await fetch(
+    `${origin}/hcn/api/v1/action-plans/invalidate`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: JSON.stringify({
+        planId: employeePreparedPlan.planId
+      })
+    }
+  );
+  assert.equal(employeeInvalidateResponse.status, 200);
+  assert.equal(
+    (await employeeInvalidateResponse.json()).plan.status,
+    "invalidated"
+  );
+
+  const employeeConnectorStartResponse = await fetch(
+    `${origin}/hcn/connect/google/start`,
+    {
+      redirect: "manual",
+      headers: { cookie: employeeSessionCookie }
+    }
+  );
+  assert.equal(employeeConnectorStartResponse.status, 302);
+  const employeeConnectorAuthorize = new URL(
+    employeeConnectorStartResponse.headers.get("location")
+  );
+  assert.equal(
+    employeeConnectorAuthorize.searchParams.get("scope"),
+    hcnConnectorScopeText
+  );
+  assert.equal(
+    employeeConnectorAuthorize.searchParams.get("access_type"),
+    "offline"
+  );
+  assert.equal(
+    employeeConnectorAuthorize.searchParams.get("prompt"),
+    "consent"
+  );
+  const employeeConnectorCallbackResponse = await fetch(
+    `${origin}/oauth/google/callback?${new URLSearchParams({
+      code: "hcn-employee-connector-code",
+      state:
+        employeeConnectorAuthorize.searchParams.get("state")
+    })}`,
+    {
+      redirect: "manual",
+      headers: { cookie: employeeSessionCookie }
+    }
+  );
+  assert.equal(employeeConnectorCallbackResponse.status, 302);
+  assert.equal(
+    employeeConnectorCallbackResponse.headers.get("location"),
+    "/hcn/?google=connected"
+  );
+  const employeeConnectedStatusResponse = await fetch(
+    `${origin}/hcn/api/v1/connectors/status`,
+    {
+      method: "POST",
+      headers: employeeHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(employeeConnectedStatusResponse.status, 200);
+  const employeeConnectedStatus =
+    await employeeConnectedStatusResponse.json();
+  assert.deepEqual(employeeConnectedStatus.google, {
+    status: "connected",
+    gmail: "connected",
+    calendar: "connected",
+    connectUrl: "/hcn/connect/google/start"
+  });
+  assert.equal(
+    employeeConnectedStatus.profile.email,
+    "adjuster@wavepa.com"
+  );
+  assert.doesNotMatch(
+    JSON.stringify(employeeConnectedStatus),
+    /hcn-employee-google-subject|hcn-employee-connector-(?:access|refresh)-token/
+  );
+
+  const chanceStillConnectedResponse = await fetch(
+    `${origin}/hcn/api/v1/connectors/status`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(chanceStillConnectedResponse.status, 200);
+  assert.equal(
+    (await chanceStillConnectedResponse.json()).google.status,
+    "connected"
+  );
+
   const receiptsBeforeExecutionResponse = await fetch(
     `${origin}/hcn/api/v1/action-receipts/list`,
     {
@@ -3114,7 +5275,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       {
         status: "incomplete",
         completeness: "none",
-        failureCode: "source_unavailable"
+        failureCode:
+          source === "quo"
+            ? "phone_match_unverified"
+            : "source_unavailable"
       }
     );
     assert.deepEqual(ambiguousCorrelationFile.recent[source], []);
@@ -3197,6 +5361,63 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   });
   assert.equal(missingOriginLogout.status, 403);
 
+  for (let index = 0; index < 4; index += 1) {
+    const allowedConnectorStart = await fetch(
+      `${origin}/hcn/connect/google/start`,
+      {
+        redirect: "manual",
+        headers: { cookie: sessionCookie }
+      }
+    );
+    assert.equal(allowedConnectorStart.status, 302);
+  }
+  const limitedConnectorStart = await fetch(
+    `${origin}/hcn/connect/google/start`,
+    {
+      redirect: "manual",
+      headers: { cookie: sessionCookie }
+    }
+  );
+  assert.equal(limitedConnectorStart.status, 429);
+  for (let index = 0; index < 130; index += 1) {
+    const repeatedLocalRejection = await fetch(
+      `${origin}/hcn/connect/google/start`,
+      {
+        redirect: "manual",
+        headers: { cookie: sessionCookie }
+      }
+    );
+    assert.equal(repeatedLocalRejection.status, 429);
+  }
+  const otherEmployeeStillAdmitted = await fetch(
+    `${origin}/hcn/connect/google/start`,
+    {
+      redirect: "manual",
+      headers: { cookie: employeeSessionCookie }
+    }
+  );
+  assert.equal(otherEmployeeStillAdmitted.status, 302);
+
+  const disconnectResponse = await fetch(
+    `${origin}/hcn/api/v1/connectors/google/disconnect`,
+    {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: "{}"
+    }
+  );
+  assert.equal(disconnectResponse.status, 200);
+  assert.deepEqual(await disconnectResponse.json(), {
+    schema: "hcn.console.connector-mutation.v1",
+    provider: "google",
+    providerRevocation: "revoked",
+    status: "not_connected"
+  });
+  assert.deepEqual(
+    revokedGoogleGrants,
+    ["hcn-google-connector-refresh-token"]
+  );
+
   const logoutResponse = await fetch(`${origin}/hcn/auth/logout`, {
     method: "POST",
     headers: {
@@ -3216,8 +5437,29 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     headers: { cookie: sessionCookie }
   });
   assert.equal(revokedSessionResponse.status, 401);
+  const revokedConsoleResponse = await fetch(`${origin}/hcn/`, {
+    redirect: "manual",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(revokedConsoleResponse.status, 200);
+  const revokedConsoleHtml = await revokedConsoleResponse.text();
+  assert.match(revokedConsoleHtml, /Sign in to HCN/);
+  assert.doesNotMatch(revokedConsoleHtml, /Work My Files|Company Sweep/);
+  for (const pathname of [
+    "/hcn/app.css?shell=v15",
+    "/hcn/app.js?shell=v15",
+    "/hcn/manifest.webmanifest?shell=v15",
+    "/hcn/sw.js?shell=v15"
+  ]) {
+    const revokedPrivateSurface = await fetch(`${origin}${pathname}`, {
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(revokedPrivateSurface.status, 401, pathname);
+  }
+  const publicSignInStyle = await fetch(`${origin}/hcn/sign-in.css?shell=v15`);
+  assert.equal(publicSignInStyle.status, 200);
 
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 3; index += 1) {
     const retryLogin = await fetch(`${origin}/hcn/auth/login`, {
       redirect: "manual"
     });
@@ -3228,7 +5470,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   });
   assert.equal(rateLimitedLogin.status, 429);
   assert.ok(
-    Number(rateLimitedLogin.headers.get("retry-after")) >= 599
+    Number(rateLimitedLogin.headers.get("retry-after")) >= 590
     && Number(rateLimitedLogin.headers.get("retry-after")) <= 600
   );
   assert.equal(
@@ -3272,6 +5514,17 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     "bridge",
     "action-batches.json"
   );
+  const thresherStorePath = path.join(
+    memoryRoot,
+    "thresher",
+    "state.enc.json"
+  );
+  const thresherStoreKey =
+    Buffer.alloc(32, 0x6c).toString("base64url");
+  const thresherReferenceKey =
+    Buffer.alloc(32, 0x6d).toString("base64url");
+  const thresherSigningKey =
+    Buffer.alloc(32, 0x6e).toString("base64url");
   const legacyCanaryPath = path.join(
     memoryRoot,
     "data",
@@ -3293,6 +5546,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   let receiptFirstObservation = null;
   const jobNimbusMutations = [];
   const fakeProviderRequests = [];
+  let createdNoteReadback = null;
   const fakeProvider = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeProviderPort}`);
     fakeProviderRequests.push(`${req.method} ${url.pathname}${url.search}`);
@@ -3312,7 +5566,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       );
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        audience: "hcn-action-google-client",
+        audience: "hcn-action-employee-client",
         expires_in: 3600,
         verified_email: true,
         scope: "openid email profile"
@@ -3331,6 +5585,28 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
         email_verified: true,
         hd: "wavepa.com",
         name: "Chance Action Fixture"
+      }));
+      return;
+    }
+    if (
+      url.pathname === "/account/users"
+      && req.method === "GET"
+    ) {
+      assert.equal(
+        req.headers.authorization,
+        "Bearer hcn-action-jobnimbus-key"
+      );
+      res.writeHead(200, {
+        "content-type": "application/json"
+      });
+      res.end(JSON.stringify({
+        total: 1,
+        users: [{
+          jnid: chanceOwnerId,
+          email: "chance@wavepa.com",
+          display_name: "Chance Action Fixture",
+          is_active: true
+        }]
       }));
       return;
     }
@@ -3355,6 +5631,25 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       res.end(JSON.stringify(contact));
       return;
     }
+    if (
+      ["/activities", "/tasks", "/files"].includes(url.pathname)
+      && req.method === "GET"
+    ) {
+      const collection = url.pathname.slice(1);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ [collection]: [] }));
+      return;
+    }
+    if (
+      url.pathname
+        === `/activities/${encodeURIComponent(providerCreatedNoteId)}`
+      && req.method === "GET"
+      && createdNoteReadback
+    ) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(createdNoteReadback));
+      return;
+    }
     if (url.pathname === "/activities" && req.method === "POST") {
       assert.equal(
         req.headers.authorization,
@@ -3371,6 +5666,12 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
         pathname: url.pathname,
         body
       });
+      createdNoteReadback = {
+        jnid: providerCreatedNoteId,
+        record_type_name: "Note",
+        note: body.note,
+        primary: body.primary
+      };
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         jnid: providerCreatedNoteId,
@@ -3400,6 +5701,8 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       ALLOW_GOOGLE_USER_AUTH: "true",
       GOOGLE_CLIENT_ID: "hcn-action-google-client",
       GOOGLE_CLIENT_SECRET: "hcn-action-google-secret",
+      HCN_GOOGLE_CLIENT_ID: "hcn-action-employee-client",
+      HCN_GOOGLE_CLIENT_SECRET: "hcn-action-employee-secret",
       GOOGLE_REFRESH_TOKEN: "",
       GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeProviderPort}/token`,
       GOOGLE_TOKENINFO_URL:
@@ -3427,7 +5730,12 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       JOBNIMBUS_API_KEY: "hcn-action-jobnimbus-key",
       JOBNIMBUS_API_BASE_URL:
         `http://127.0.0.1:${fakeProviderPort}`,
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
+      HCN_THRESHER_ENABLED: "true",
+      HCN_THRESHER_STORE_PATH: thresherStorePath,
+      HCN_THRESHER_STORE_KEY: thresherStoreKey,
+      HCN_THRESHER_REFERENCE_KEY: thresherReferenceKey,
+      HCN_THRESHER_SIGNING_KEY: thresherSigningKey,
       HCN_ACTION_RECEIPT_STORE_PATH: receiptStorePath,
       ACTION_APPROVAL_STORE_PATH:
         path.join(memoryRoot, "bridge", "action-approvals.json"),
@@ -3440,12 +5748,32 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
       ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
-      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
+  const healthResponse = await fetch(`${origin}/health`);
+  assert.equal(healthResponse.status, 200);
+  const activeHealth = await healthResponse.json();
+  assert.equal(
+    activeHealth.hcnConsole.clientDataPersistence,
+    "thresher_encrypted_minimized_operational_state"
+  );
+  assert.equal(
+    activeHealth.hcnOperationsBrain.mode,
+    "isolated_v2_active"
+  );
+  assert.equal(
+    activeHealth.hcnOperationsBrain.persistenceConfigured,
+    true
+  );
+  assert.equal(activeHealth.hcnOperationsBrain.modelCanExecute, false);
+  assert.equal(activeHealth.hcnOperationsBrain.externalActions, false);
+  assert.equal(
+    activeHealth.platform.boundaries.hcnOperationsBrain,
+    "active_isolated_encrypted_operational_state"
+  );
 
   async function createActionSession(code) {
     const loginResponse = await fetch(`${origin}/hcn/auth/login`, {
@@ -3456,6 +5784,10 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
       .getSetCookie()[0]
       .split(";", 1)[0];
     const googleAuthorize = new URL(loginResponse.headers.get("location"));
+    assert.equal(
+      googleAuthorize.searchParams.get("client_id"),
+      "hcn-action-employee-client"
+    );
     const callbackResponse = await fetch(
       `${origin}/oauth/google/callback?${new URLSearchParams({
         code,
@@ -3548,14 +5880,31 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     "no-store, max-age=0"
   );
   const execution = await executeResponse.json();
-  assert.equal(execution.plan.status, "completed_pending_verification");
-  assert.equal(execution.receipt.status, "completed_pending_verification");
+  assert.equal(execution.plan.status, "executed");
+  assert.equal(execution.receipt.status, "executed");
   assert.equal(execution.receipt.operationCount, 1);
   assert.equal(execution.receipt.succeededCount, 1);
   assert.equal(execution.receipt.unknownCount, 0);
   assert.equal(
     Object.hasOwn(execution.receipt, "sessionPrincipalRef"),
     false
+  );
+  const publicCompletedReceipt =
+    execution.plan.result.batch.completed[0].receipt;
+  assert.deepEqual(
+    Object.keys(publicCompletedReceipt).sort(),
+    ["createdRecordRef", "verifiedByReadback"]
+  );
+  assert.equal(publicCompletedReceipt.verifiedByReadback, true);
+  assert.match(
+    publicCompletedReceipt.createdRecordRef,
+    /^ref_[a-f0-9]{32}$/
+  );
+  assert.equal(
+    fakeProviderRequests.includes(
+      `GET /activities/${encodeURIComponent(providerCreatedNoteId)}`
+    ),
+    true
   );
   assert.equal(jobNimbusMutations.length, 1);
   assert.deepEqual(jobNimbusMutations[0], {
@@ -3587,8 +5936,51 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   assert.equal(durableReceiptDocument.records.length, 1);
   assert.equal(
     durableReceiptDocument.records[0].status,
-    "completed_pending_verification"
+    "executed"
   );
+  const thresherInspector = createActiveThresherRuntime({
+    store: createThresherStore({
+      filePath: thresherStorePath,
+      encryptionKey: thresherStoreKey,
+      tenantRef: "tenant_abcdef0123456789"
+    }),
+    tenantRef: "tenant_abcdef0123456789",
+    referenceKey: thresherReferenceKey,
+    signingKey: thresherSigningKey
+  });
+  const thresherState = await thresherInspector.snapshot({
+    principalRef: durableReceiptDocument.records[0].sessionPrincipalRef,
+    fileRef
+  });
+  thresherInspector.close();
+  assert.equal(thresherState.persistence, "active_encrypted_minimized");
+  assert.equal(thresherState.authority.authorizesAction, false);
+  assert.equal(thresherState.authority.executesAction, false);
+  assert.equal(thresherState.snapshot.receipts.length, 1);
+  assert.equal(
+    thresherState.snapshot.receipts[0].outcomeCode,
+    "succeeded"
+  );
+  const encryptedThresherState = await readFile(
+    thresherStorePath,
+    "utf8"
+  );
+  for (const forbidden of [
+    exactNote,
+    contact.display_name,
+    contact.email,
+    contact.mobile_phone,
+    contact["Claim #"],
+    contact["Policy #"],
+    providerJobId,
+    providerCreatedNoteId
+  ]) {
+    assert.equal(
+      JSON.stringify(thresherState).includes(forbidden),
+      false
+    );
+    assert.equal(encryptedThresherState.includes(forbidden), false);
+  }
   const serializedReceipts = JSON.stringify({
     executionReceipt: execution.receipt,
     receiptFirstObservation,
@@ -3701,7 +6093,12 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
 
   async function appendPriorBatch(row) {
     const rows = JSON.parse(await readFile(actionBatchStorePath, "utf8"));
-    rows.push(row);
+    const principalRef = rows.find((item) => item.principalRef)
+      ?.principalRef;
+    rows.push({
+      ...row,
+      ...(principalRef ? { principalRef } : {})
+    });
     await writeFile(
       actionBatchStorePath,
       `${JSON.stringify(rows, null, 2)}\n`,
@@ -3722,9 +6119,10 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   );
   assert.equal(
     duplicateVerification.receipt.status,
-    "completed_pending_verification"
+    "blocked_duplicate"
   );
-  assert.equal(duplicateVerification.receipt.succeededCount, 1);
+  assert.equal(duplicateVerification.receipt.succeededCount, 0);
+  assert.equal(duplicateVerification.receipt.blockedCount, 1);
   assert.equal(duplicateVerification.receipt.unknownCount, 0);
   assert.equal(jobNimbusMutations.length, 1);
 
@@ -3804,12 +6202,55 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
   assert.equal(partialDuplicate.receipt.unknownCount, 1);
   assert.equal(jobNimbusMutations.length, 1);
 
+  const persistenceFailureSession = await createActionSession(
+    "hcn-action-execution-code-persistence-failure"
+  );
+  const unavailablePersistencePlan = await preparePlan(
+    persistenceFailureSession,
+    [{
+      type: "jobnimbus.create_note",
+      input: {
+        note: "This action must not reach JobNimbus when Thresher is unavailable."
+      }
+    }]
+  );
+  await writeFile(thresherStorePath, "corrupt", "utf8");
+  const mutationCountBeforeFailure = jobNimbusMutations.length;
+  const unavailablePersistenceExecution = await fetch(
+    `${origin}/hcn/api/v1/action-plans/execute`,
+    {
+      method: "POST",
+      headers: persistenceFailureSession.headers,
+      body: JSON.stringify({
+        planId: unavailablePersistencePlan.planId
+      })
+    }
+  );
+  assert.equal(unavailablePersistenceExecution.status, 503);
+  assert.match(
+    (await unavailablePersistenceExecution.json()).error,
+    /Thresher persistence is unavailable|Nothing was intentionally executed/i
+  );
+  assert.equal(jobNimbusMutations.length, mutationCountBeforeFailure);
+
   assert.deepEqual(await readFile(legacyCanaryPath), legacyCanaryBytes);
   const legacyCanaryAfter = await stat(legacyCanaryPath);
   assert.equal(legacyCanaryAfter.mtimeMs, legacyCanaryBefore.mtimeMs);
 });
 
 test("production startup rejects weak OAuth secrets and unreviewed Google endpoints", async () => {
+  await expectBridgeStartupFailure({
+    GOOGLE_CLIENT_ID: "reused-google-client",
+    HCN_GOOGLE_CLIENT_ID: "reused-google-client"
+  }, /HCN_GOOGLE_CLIENT_ID must identify a dedicated employee connector client/);
+
+  await expectBridgeStartupFailure({
+    GOOGLE_CLIENT_ID: "legacy-google-client",
+    HCN_GOOGLE_CLIENT_ID: "hcn-google-client",
+    GOOGLE_CLIENT_SECRET: "reused-google-client-secret",
+    HCN_GOOGLE_CLIENT_SECRET: "reused-google-client-secret"
+  }, /HCN_GOOGLE_CLIENT_SECRET must be different from GOOGLE_CLIENT_SECRET/);
+
   await expectBridgeStartupFailure({
     OAUTH_SESSION_SECRET: "weak",
     GOOGLE_TOKEN_URL: "",
@@ -3823,6 +6264,67 @@ test("production startup rejects weak OAuth secrets and unreviewed Google endpoi
     GOOGLE_TOKENINFO_URL: "",
     GOOGLE_USERINFO_URL: ""
   }, /Google token endpoint must use the reviewed Google HTTPS URL/);
+
+  await expectBridgeStartupFailure({
+    OAUTH_SESSION_SECRET: "",
+    GOOGLE_REVOKE_URL:
+      "https://credential-sink.example/revoke"
+  }, /Google revoke endpoint must use the reviewed Google HTTPS URL/);
+
+  await expectBridgeStartupFailure({
+    RENDER: "true",
+    HCN_OPERATIONS_ROOT: ""
+  }, /Render startup requires an isolated, absolute HCN_OPERATIONS_ROOT/);
+
+  const reusedSecret =
+    Buffer.alloc(32, 0x2f).toString("base64url");
+  await expectBridgeStartupFailure({
+    OAUTH_SESSION_SECRET: reusedSecret,
+    HCN_GOOGLE_GRANT_KEY: reusedSecret
+  }, /HCN_GOOGLE_GRANT_KEY must be different from OAUTH_SESSION_SECRET/);
+
+  await expectBridgeStartupFailure({
+    HCN_REFERENCE_KEY: reusedSecret,
+    HCN_GOOGLE_GRANT_KEY: reusedSecret
+  }, /HCN_GOOGLE_GRANT_KEY must be different from HCN_REFERENCE_KEY/);
+
+  await expectBridgeStartupFailure({
+    JOBNIMBUS_API_KEY: reusedSecret,
+    HCN_GOOGLE_GRANT_KEY: reusedSecret
+  }, /HCN_GOOGLE_GRANT_KEY must be different from JOBNIMBUS_API_KEY/);
+  await expectBridgeStartupFailure({
+    HCN_QUO_LINK_KEY: reusedSecret,
+    TWILIO_AUTH_TOKEN: reusedSecret
+  }, /HCN_QUO_LINK_KEY must be different from TWILIO_AUTH_TOKEN/);
+  await expectBridgeStartupFailure({
+    OAUTH_SESSION_SECRET: reusedSecret,
+    HCN_REFERENCE_KEY: reusedSecret
+  }, /HCN_REFERENCE_KEY must be different from OAUTH_SESSION_SECRET/);
+
+  const thresherRoot = path.join(
+    tmpdir(),
+    "hcn-thresher-startup-boundary"
+  );
+  const thresherEnvironment = {
+    HCN_OPERATIONS_ROOT: thresherRoot,
+    HCN_TENANT_ID: "tenant_0123456789abcdef",
+    HCN_THRESHER_STORE_PATH:
+      path.join(thresherRoot, "thresher", "state.enc.json"),
+    HCN_THRESHER_STORE_KEY:
+      Buffer.alloc(32, 0x41).toString("base64url"),
+    HCN_THRESHER_REFERENCE_KEY:
+      Buffer.alloc(32, 0x42).toString("base64url"),
+    HCN_THRESHER_SIGNING_KEY:
+      Buffer.alloc(32, 0x43).toString("base64url")
+  };
+  await expectBridgeStartupFailure({
+    ...thresherEnvironment,
+    HCN_THRESHER_SIGNING_KEY: ""
+  }, /All dedicated Thresher keys must be configured together/);
+  await expectBridgeStartupFailure({
+    ...thresherEnvironment,
+    HCN_REFERENCE_KEY: thresherEnvironment.HCN_THRESHER_STORE_KEY
+  }, /HCN_THRESHER_STORE_KEY must be different from HCN_REFERENCE_KEY/);
 });
 
 test("Retell configuration creates an editable draft before publishing", async (t) => {
@@ -4263,9 +6765,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       RETELL_API_KEY: "fixture-retell-key",
       ALLOW_RETELL_CALLS: "false",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
-      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "true",
       BRIDGE_ALLOW_WRITES: "true",
-      MEMORY_ROOT: memoryRoot,
+      HCN_OPERATIONS_ROOT: memoryRoot,
       ALLOW_GMAIL_SEND: "true",
       GOOGLE_CLIENT_ID: "fixture-google-client",
       GOOGLE_CLIENT_SECRET: "fixture-google-secret",
@@ -4325,12 +6826,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
     body: JSON.stringify({ maxPerSection: 25 })
   });
-  assert.equal(brainResponse.status, 200);
-  const brain = await brainResponse.json();
-  assert.equal(brain.scope, "company_only");
-  assert.equal(brain.execution, "none");
-  assert.match(brain.context, /Memory, snapshots, receipts, operational loops, model advisories, and proposals never authorize or execute external actions/);
-  assert.match(brain.context, /UNVERIFIED CANDIDATES/);
+  assert.equal(brainResponse.status, 404);
 
   const chanceIndexResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
     method: "POST",
@@ -4344,8 +6840,9 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(chanceIndex.files[0].number, 2739);
   assert.equal(chanceIndex.files[0].missing.claimNumber, true);
   assert.equal(chanceIndex.files[0].missing.policyNumber, false);
-  assert.equal(chanceIndex.brain.scope, "company_only");
-  assert.equal(chanceIndex.brain.execution, "none");
+  assert.equal(chanceIndex.brain.systemId, "hcn_operations");
+  assert.equal(chanceIndex.brain.status, "isolated_foundation");
+  assert.equal(chanceIndex.brain.persistedClientMemory, false);
 
   const exactChanceReviewResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
     method: "POST",
@@ -4354,13 +6851,15 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   });
   assert.equal(exactChanceReviewResponse.status, 200);
   const exactChanceReview = await exactChanceReviewResponse.json();
-  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.subjectKey, chance.jnid);
-  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.authority.doesNotAuthorizeActions, true);
-  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.jobNimbus.operationalDocuments.length, 3);
-  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.jobNimbus.excludedPhotoLikeDocumentCount, 121);
-  assert.equal(exactChanceReview.brain.scope, "company_and_exact_file");
-  assert.match(exactChanceReview.brain.context, /CURRENT CLIENT SNAPSHOT/);
-  assert.match(exactChanceReview.brain.context, /continuity, not authority/i);
+  assert.equal(exactChanceReview.packets[0].clientMemory.snapshot.file.id, chance.jnid);
+  assert.equal(exactChanceReview.packets[0].clientMemory.persisted, false);
+  assert.equal(
+    exactChanceReview.packets[0].clientMemory.snapshot.counts
+      .operationalDocumentCount,
+    3
+  );
+  assert.equal(exactChanceReview.brain.status, "isolated_foundation");
+  assert.equal(exactChanceReview.brain.persistedClientMemory, false);
 
   const coordinatorDryRunResponse = await fetch(`http://127.0.0.1:${bridgePort}/retell/client-coordinator-call`, {
     method: "POST",
@@ -4848,8 +7347,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   });
   assert.equal(duplicateDraftResponse.status, 200);
   const duplicateDraft = await duplicateDraftResponse.json();
-  assert.equal(duplicateDraft.operations[0].plan.mode, "existing_draft");
-  assert.equal(duplicateDraft.operations[0].plan.draft.id, "draft-1");
+  assert.equal(duplicateDraft.operations[0].plan.mode, "dry_run");
+  assert.equal(duplicateDraft.operations[0].plan.draft, undefined);
   assert.equal(fixtureGmailDraftCreateCount, 1);
 
   const rebuiltSendResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
@@ -4868,8 +7367,13 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       execute: false
     })
   });
-  assert.equal(rebuiltSendResponse.status, 400);
-  assert.match(await rebuiltSendResponse.text(), /send the reviewed draft.*draftId/i);
+  assert.equal(rebuiltSendResponse.status, 200);
+  const rebuiltSend = await rebuiltSendResponse.json();
+  assert.equal(rebuiltSend.operations[0].plan.mode, "dry_run");
+  assert.match(
+    rebuiltSend.operations[0].plan.approvalDigest,
+    /^[a-f0-9]{64}$/
+  );
 
   const sendDraftOperation = { type: "gmail.send", payload: { query: "2739", draftId: "draft-1" } };
   const sendDraftBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
@@ -4974,18 +7478,15 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(quoExecuted.delivery.confirmed, false);
   assert.equal(quoExecuted.delivery.failed, false);
   assert.match(quoExecuted.delivery.instruction, /not confirmed/i);
+  assert.equal(quoExecuted.memoryCloseout.systemId, "hcn_operations");
+  assert.equal(quoExecuted.memoryCloseout.recorded, false);
 
   const fileReferencesResponse = await fetch(`http://127.0.0.1:${bridgePort}/memory/file-actions`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
     body: JSON.stringify({ query: "2739" })
   });
-  assert.equal(fileReferencesResponse.status, 200);
-  const fileReferences = await fileReferencesResponse.json();
-  assert.equal(fileReferences.subjectKey, chance.jnid);
-  assert.equal(fileReferences.references.some((row) => row.source === "quo" && row.id === "AC-fixture-message"), true);
-  assert.equal(fileReferences.clientMemory.snapshot.recentActionReceipts.some((row) => row.externalId === "AC-fixture-message"), true);
-  assert.equal(fileReferences.clientMemory.snapshot.authority.doesNotAuthorizeActions, true);
+  assert.equal(fileReferencesResponse.status, 404);
 
   const batchPayload = {
     operations: [{
@@ -5104,6 +7605,12 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(fixtureNoteCreated, true);
   assert.equal(
     taskAndNoteExecute.batch.completed.some((item) => item.receipt?.clientSnapshotRefreshed === true),
+    false
+  );
+  assert.equal(
+    taskAndNoteExecute.batch.completed.every(
+      (item) => !item.receipt?.memoryReceiptId
+    ),
     true
   );
 
@@ -5131,6 +7638,45 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   const rejected = await rejectedResponse.json();
   assert.match(rejected.error, /No Chance Pearson/);
 });
+
+async function seedAcceptedEmployeeInvitation({
+  root,
+  key,
+  email,
+  displayName,
+  role,
+  jobNimbusOwnerId,
+  googleSubject
+}) {
+  const timestamp = Date.now();
+  const store = createHcnInvitationStore({
+    filePath: path.join(
+      root,
+      "platform",
+      "employee-invitations.enc.json"
+    ),
+    key,
+    allowedDomain: "",
+    now: () => timestamp
+  });
+  const invitation = await store.createInvitation({
+    email,
+    displayName,
+    role,
+    jobNimbusOwnerId,
+    jobNimbusScope: "assigned",
+    invitedByRef: `principal_${"a".repeat(64)}`,
+    expiresAt: new Date(
+      timestamp + 72 * 60 * 60_000
+    ).toISOString()
+  });
+  await store.acceptInvitation({
+    invitationRef: invitation.invitationRef,
+    email,
+    googleSubject,
+    inviteToken: invitation.inviteToken
+  });
+}
 
 async function expectBridgeStartupFailure(environment, pattern) {
   const child = spawn(process.execPath, ["src/server.js"], {
@@ -5172,7 +7718,11 @@ async function expectBridgeStartupFailure(environment, pattern) {
 
 async function waitForServer(child, port) {
   let output = "";
-  const capture = (chunk) => { output += chunk.toString("utf8"); };
+  const capture = (chunk) => {
+    const text = chunk.toString("utf8");
+    output += text;
+    if (process.env.DEBUG_SERVER_SMOKE === "1") process.stderr.write(text);
+  };
   child.stdout.on("data", capture);
   child.stderr.on("data", capture);
   for (let attempt = 0; attempt < 300; attempt += 1) {

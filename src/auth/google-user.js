@@ -5,8 +5,30 @@ import {
 
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
-  administrator: { allRoutes: true },
-  employee: { allRoutes: true },
+  administrator: {
+    allowedRoutes: [
+      "GET /auth/whoami",
+      "GET /api/v1/session",
+      "POST /auth/quo-line",
+      "POST /jobnimbus/search",
+      "POST /jobnimbus/document-review",
+      "POST /jobnimbus/document-file",
+      "POST /jobnimbus/photo-review",
+      "POST /gmail/search",
+      "POST /gmail/thread",
+      "POST /gmail/attachment-review",
+      "POST /scheduling/availability",
+      "POST /quo/history",
+      "POST /quo/transcript"
+    ]
+  },
+  employee: {
+    allowedRoutes: [
+      "GET /auth/whoami",
+      "GET /api/v1/session",
+      "POST /auth/quo-line"
+    ]
+  },
   onboarding: {
     allowedRoutes: [
       "GET /auth/whoami",
@@ -19,8 +41,6 @@ export const WAVE_ROLE_POLICIES = {
       "GET /auth/whoami",
       "GET /api/v1/session",
       "POST /auth/quo-line",
-      "POST /brain/context",
-      "POST /memory/file-actions",
       "POST /jobnimbus/search",
       "POST /jobnimbus/document-review",
       "POST /jobnimbus/document-file",
@@ -40,8 +60,6 @@ export const WAVE_ROLE_POLICIES = {
       "GET /auth/whoami",
       "GET /api/v1/session",
       "POST /auth/quo-line",
-      "POST /brain/context",
-      "POST /memory/file-actions",
       "POST /jobnimbus/search",
       "POST /jobnimbus/document-review",
       "POST /jobnimbus/document-file",
@@ -76,24 +94,111 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /quo/transcript"
 ]);
 
+export const CODEX_HP_OPERATOR_SUBJECT = "codex-hp-operator";
+export const CODEX_HP_MANAGEMENT_SWEEP_SCOPE =
+  "management_sweep:read";
+const HCN_MANAGEMENT_SWEEP_ROUTE =
+  "POST /hcn/api/v1/management-sweep";
+const HCN_CLOSED_FILE_BENCHMARK_ROUTE =
+  "POST /hcn/api/v1/closed-file-benchmark";
+const HCN_FIXED_MANAGEMENT_READ_ROUTES = new Set([
+  HCN_MANAGEMENT_SWEEP_ROUTE,
+  HCN_CLOSED_FILE_BENCHMARK_ROUTE
+]);
+
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
   "GET /api/v1/session",
   "GET /hcn/auth/session",
   "POST /hcn/auth/logout",
+  "GET /hcn/connect/google/start",
+  "POST /hcn/api/v1/connectors/status",
+  "POST /hcn/api/v1/connectors/google/disconnect",
+  "POST /hcn/api/v1/connectors/quo-line",
   "POST /hcn/api/v1/work-center",
+  "POST /hcn/api/v1/management-sweep",
+  "POST /hcn/api/v1/closed-file-benchmark",
   "POST /hcn/api/v1/file-review",
+  "POST /hcn/api/v1/assistant/conversations/list",
+  "POST /hcn/api/v1/assistant/conversations/create",
+  "POST /hcn/api/v1/assistant/conversations/detail",
+  "POST /hcn/api/v1/assistant/conversations/rename",
+  "POST /hcn/api/v1/assistant/conversations/archive",
+  "POST /hcn/api/v1/assistant/conversations/restore",
+  "POST /hcn/api/v1/assistant/turns",
+  "POST /hcn/api/v1/claim-filings/status",
+  "POST /hcn/api/v1/claim-filings/prepare",
+  "POST /hcn/api/v1/claim-filings/execute",
+  "POST /hcn/api/v1/claim-filings/result",
+  "POST /hcn/api/v1/claim-filings/writeback/prepare",
+  "POST /hcn/api/v1/claim-filings/writeback/execute",
   "POST /hcn/api/v1/action-plans/prepare",
   "POST /hcn/api/v1/action-plans/list",
   "POST /hcn/api/v1/action-plans/detail",
   "POST /hcn/api/v1/action-plans/execute",
   "POST /hcn/api/v1/action-plans/invalidate",
   "POST /hcn/api/v1/action-receipts/list",
-  "POST /hcn/api/v1/action-receipts/detail"
+  "POST /hcn/api/v1/action-receipts/detail",
+  "POST /hcn/api/v1/team/invitations/list",
+  "POST /hcn/api/v1/team/invitations/prepare",
+  "POST /hcn/api/v1/team/invitations/create",
+  "POST /hcn/api/v1/team/invitations/revoke"
 ]);
 
-export const HCN_BROWSER_CHANCE_ONLY_ROUTES = new Set([
-  "POST /hcn/api/v1/work-center",
-  "POST /hcn/api/v1/file-review",
+const HCN_ASSIGNED_WORK_ROLES = new Set([
+  "chance",
+  "administrator",
+  "employee",
+  "client_coordinator",
+  "manager"
+]);
+const HCN_CONNECTION_ROLES = new Set([
+  ...HCN_ASSIGNED_WORK_ROLES,
+  "onboarding"
+]);
+const HCN_MANAGEMENT_ROLES = new Set([
+  "chance",
+  "administrator",
+  "manager"
+]);
+const HCN_ASSIGNED_ACTION_ROLES = HCN_ASSIGNED_WORK_ROLES;
+const HCN_TEAM_INVITATION_ROLES = new Set(["chance"]);
+
+export const HCN_BROWSER_ROUTE_ROLES = new Map([
+  ["GET /hcn/connect/google/start", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/connectors/status", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/connectors/google/disconnect", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/connectors/quo-line", HCN_CONNECTION_ROLES],
+  ["POST /hcn/api/v1/work-center", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/file-review", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/management-sweep", HCN_MANAGEMENT_ROLES],
+  ["POST /hcn/api/v1/closed-file-benchmark", HCN_MANAGEMENT_ROLES],
+  ["POST /hcn/api/v1/assistant/conversations/list", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/assistant/conversations/create", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/assistant/conversations/detail", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/assistant/conversations/rename", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/assistant/conversations/archive", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/assistant/conversations/restore", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/assistant/turns", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/claim-filings/status", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/claim-filings/prepare", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/claim-filings/execute", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/claim-filings/result", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/claim-filings/writeback/prepare", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/claim-filings/writeback/execute", HCN_ASSIGNED_WORK_ROLES],
+  ["POST /hcn/api/v1/action-plans/prepare", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/list", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/detail", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/execute", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-plans/invalidate", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-receipts/list", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/action-receipts/detail", HCN_ASSIGNED_ACTION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/list", HCN_TEAM_INVITATION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/prepare", HCN_TEAM_INVITATION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/create", HCN_TEAM_INVITATION_ROLES],
+  ["POST /hcn/api/v1/team/invitations/revoke", HCN_TEAM_INVITATION_ROLES]
+]);
+
+export const HCN_BROWSER_ASSIGNED_ACTION_ROUTES = new Set([
   "POST /hcn/api/v1/action-plans/prepare",
   "POST /hcn/api/v1/action-plans/list",
   "POST /hcn/api/v1/action-plans/detail",
@@ -216,22 +321,56 @@ export async function authenticateGoogleAccessToken({
     throw authError("Google account is outside the approved Workspace domain", 403);
   }
 
-  let user = users instanceof Map ? users.get(email) : null;
-  if (!user && typeof resolveUser === "function") {
-    user = await resolveUser({ email, name: String(profile.name || email).trim(), subject, hostedDomain });
+  const existingUser = users instanceof Map ? users.get(email) : null;
+  if (existingUser?.enabled === false) {
+    throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   }
-  if (!user || user.enabled === false) throw authError("This Google account is not approved for the Wave Ops bridge", 403);
-  const role = String(user.role || "").trim().toLowerCase();
-  if (!WAVE_ROLE_POLICIES[role]) throw authError("This employee has an unsupported Wave Ops role", 403);
+
+  let user = existingUser;
   let approvedGoogleSubject;
   try {
-    approvedGoogleSubject = configuredGoogleSubject(user);
+    approvedGoogleSubject = user
+      ? configuredGoogleSubject(user)
+      : "";
   } catch {
     throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   }
   if (approvedGoogleSubject && approvedGoogleSubject !== subject) {
     throw authError("This Google account is not approved for the Wave Ops bridge", 403);
   }
+
+  if (!approvedGoogleSubject) {
+    if (typeof resolveUser !== "function") {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+    user = await resolveUser({
+      email,
+      name: String(profile.name || email).trim(),
+      subject,
+      hostedDomain,
+      existingUser
+    });
+    if (!user || user.enabled === false) {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+    const resolvedEmail = String(user.email || "").trim().toLowerCase();
+    try {
+      approvedGoogleSubject = configuredGoogleSubject(user);
+    } catch {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+    if (
+      resolvedEmail !== email
+      || !approvedGoogleSubject
+      || approvedGoogleSubject !== subject
+    ) {
+      throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+    }
+  }
+
+  if (!user || user.enabled === false) throw authError("This Google account is not approved for the Wave Ops bridge", 403);
+  const role = String(user.role || "").trim().toLowerCase();
+  if (!WAVE_ROLE_POLICIES[role]) throw authError("This employee has an unsupported Wave Ops role", 403);
 
   return {
     type: "google_oauth",
@@ -252,8 +391,15 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
-  if (HCN_BROWSER_CHANCE_ONLY_ROUTES.has(route)) {
-    return identity.type === "hcn_browser_session" && identity.role === "chance";
+  const hcnRoles = HCN_BROWSER_ROUTE_ROLES.get(route);
+  if (hcnRoles) {
+    return (
+      identity.type === "hcn_browser_session"
+      && hcnRoles.has(identity.role)
+    ) || (
+      HCN_FIXED_MANAGEMENT_READ_ROUTES.has(route)
+      && isCodexHpManagementSweepIdentity(identity)
+    );
   }
   if (identity.type === "bridge_token") {
     return route !== "GET /api/v1/session";
@@ -270,6 +416,17 @@ export function routeAllowed(identity, method, pathname) {
   if (!policy) return false;
   if (policy.allRoutes) return true;
   return policy.allowedRoutes.includes(route);
+}
+
+export function isCodexHpManagementSweepIdentity(identity) {
+  return Boolean(
+    identity
+    && identity.type === "codex_operator_token"
+    && identity.subject === CODEX_HP_OPERATOR_SUBJECT
+    && identity.role === "codex_operator"
+    && Array.isArray(identity.scopes)
+    && identity.scopes.includes(CODEX_HP_MANAGEMENT_SWEEP_SCOPE)
+  );
 }
 
 export function publicIdentity(identity) {
@@ -296,14 +453,25 @@ function addUser(users, entry = {}) {
   const existing = users.get(email);
   const hasConfiguredSubject = Object.hasOwn(entry, "googleSubject")
     || Object.hasOwn(entry, "subject");
+  const hasJobNimbusOwnerId = Object.hasOwn(entry, "jobNimbusOwnerId");
+  const hasJobNimbusScope = Object.hasOwn(entry, "jobNimbusScope");
+  const hasQuoLineId = Object.hasOwn(entry, "quoLineId");
   users.set(email, {
     email,
-    name: String(entry.name || email).trim(),
+    name: String(entry.name || existing?.name || email).trim(),
     role,
     enabled: entry.enabled !== false,
-    jobNimbusOwnerId: String(entry.jobNimbusOwnerId || "").trim(),
-    jobNimbusScope: String(entry.jobNimbusScope || defaultJobNimbusScope(role)).trim(),
-    quoLineId: String(entry.quoLineId || "").trim(),
+    jobNimbusOwnerId: hasJobNimbusOwnerId
+      ? String(entry.jobNimbusOwnerId || "").trim()
+      : String(existing?.jobNimbusOwnerId || "").trim(),
+    jobNimbusScope: hasJobNimbusScope
+      ? String(entry.jobNimbusScope || "").trim()
+      : String(
+          existing?.jobNimbusScope || defaultJobNimbusScope(role)
+        ).trim(),
+    quoLineId: hasQuoLineId
+      ? String(entry.quoLineId || "").trim()
+      : String(existing?.quoLineId || "").trim(),
     googleSubject: hasConfiguredSubject
       ? configuredGoogleSubject(entry)
       : String(existing?.googleSubject || "")
@@ -337,7 +505,7 @@ function normalizeConfiguredGoogleSubject(value) {
 }
 
 function defaultJobNimbusScope(role) {
-  return role === "chance" ? "assigned" : "company";
+  return WAVE_ROLE_POLICIES[role] ? "assigned" : "none";
 }
 
 function authError(message, statusCode) {

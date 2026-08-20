@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CODEX_HP_MANAGEMENT_SWEEP_SCOPE,
+  CODEX_HP_OPERATOR_SUBJECT,
   CODEX_OPERATOR_ALLOWED_ROUTES,
+  HCN_BROWSER_ASSIGNED_ACTION_ROUTES,
   HCN_BROWSER_ALLOWED_ROUTES,
-  HCN_BROWSER_CHANCE_ONLY_ROUTES,
   authenticateGoogleAccessToken,
   hcnConsoleChanceUserConfigured,
   hcnConsoleSessionMatchesApprovedUser,
@@ -17,11 +19,13 @@ const users = parseWaveUsers("", [{
   email: "cpearson@wavepa.com",
   name: "Chance Pearson",
   role: "chance",
-  jobNimbusOwnerId: "chance-owner"
+  jobNimbusOwnerId: "chance-owner",
+  googleSubject: "google-subject-1"
 }, {
   email: "andrea@wavepa.com",
   name: "Andrea Ramirez",
-  role: "client_coordinator"
+  role: "client_coordinator",
+  googleSubject: "google-subject-1"
 }]);
 
 test("valid Google token maps an explicitly approved employee", async () => {
@@ -34,7 +38,7 @@ test("valid Google token maps an explicitly approved employee", async () => {
   });
   assert.equal(identity.role, "client_coordinator");
   assert.equal(identity.email, "andrea@wavepa.com");
-  assert.equal(identity.jobNimbusScope, "company");
+  assert.equal(identity.jobNimbusScope, "assigned");
   assert.equal(identity.googleAccessToken, "access-token");
 });
 
@@ -69,6 +73,37 @@ test("approved users preserve a strictly validated immutable Google subject", ()
   assert.equal(
     inherited.get("chance@wavepa.com").googleSubject,
     "default-google-subject"
+  );
+});
+
+test("an override preserves omitted trusted default employee bindings", () => {
+  const configured = parseWaveUsers(JSON.stringify([{
+    email: "chance@wavepa.com",
+    role: "chance",
+    googleSubject: "pinned-google-subject"
+  }]), [{
+    email: "chance@wavepa.com",
+    name: "Chance Pearson",
+    role: "chance",
+    jobNimbusOwnerId: "chance-owner",
+    jobNimbusScope: "assigned",
+    quoLineId: "chance-quo-line"
+  }]);
+  assert.deepEqual(
+    {
+      name: configured.get("chance@wavepa.com").name,
+      jobNimbusOwnerId:
+        configured.get("chance@wavepa.com").jobNimbusOwnerId,
+      jobNimbusScope:
+        configured.get("chance@wavepa.com").jobNimbusScope,
+      quoLineId: configured.get("chance@wavepa.com").quoLineId
+    },
+    {
+      name: "Chance Pearson",
+      jobNimbusOwnerId: "chance-owner",
+      jobNimbusScope: "assigned",
+      quoLineId: "chance-quo-line"
+    }
   );
 });
 
@@ -124,7 +159,7 @@ test("an existing HCN session is invalid after its configured subject pin change
   }), false);
 });
 
-test("an explicit Google subject pin is enforced without changing unpinned GPT users", async () => {
+test("an explicit Google subject pin is enforced", async () => {
   const pinned = parseWaveUsers("", [{
     email: "andrea@wavepa.com",
     role: "client_coordinator",
@@ -140,6 +175,125 @@ test("an explicit Google subject pin is enforced without changing unpinned GPT u
       roleDomain: "wavepa.com"
     })
   }), /not approved/i);
+});
+
+test("a configured unpinned employee can be securely pinned on first use", async () => {
+  const configured = parseWaveUsers("", [{
+    email: "andrea@wavepa.com",
+    name: "Andrea Ramirez",
+    role: "client_coordinator",
+    jobNimbusOwnerId: "andrea-owner"
+  }]);
+  const existingUser = configured.get("andrea@wavepa.com");
+  let resolverCandidate;
+
+  const identity = await authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: configured,
+    resolveUser: async (candidate) => {
+      resolverCandidate = candidate;
+      const pinnedUser = {
+        ...candidate.existingUser,
+        googleSubject: candidate.subject
+      };
+      configured.set(candidate.email, pinnedUser);
+      return pinnedUser;
+    },
+    fetchImpl: fixtureFetch({
+      email: "andrea@wavepa.com",
+      roleDomain: "wavepa.com"
+    })
+  });
+
+  assert.equal(resolverCandidate.email, "andrea@wavepa.com");
+  assert.equal(resolverCandidate.subject, "google-subject-1");
+  assert.equal(resolverCandidate.hostedDomain, "wavepa.com");
+  assert.equal(resolverCandidate.existingUser, existingUser);
+  assert.equal(identity.subject, "google-subject-1");
+  assert.equal(identity.role, "client_coordinator");
+});
+
+test("a configured unpinned employee is denied when first-use pinning is refused", async () => {
+  const configured = parseWaveUsers("", [{
+    email: "andrea@wavepa.com",
+    role: "client_coordinator"
+  }]);
+
+  await assert.rejects(() => authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: configured,
+    resolveUser: async () => null,
+    fetchImpl: fixtureFetch({
+      email: "andrea@wavepa.com",
+      roleDomain: "wavepa.com"
+    })
+  }), /not approved/i);
+
+  await assert.rejects(() => authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: configured,
+    resolveUser: async ({ existingUser }) => existingUser,
+    fetchImpl: fixtureFetch({
+      email: "andrea@wavepa.com",
+      roleDomain: "wavepa.com"
+    })
+  }), /not approved/i);
+});
+
+test("a disabled configured employee is denied without invoking first-use resolution", async () => {
+  const configured = parseWaveUsers("", [{
+    email: "andrea@wavepa.com",
+    role: "client_coordinator",
+    enabled: false
+  }]);
+  let resolverCalled = false;
+
+  await assert.rejects(() => authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: configured,
+    resolveUser: async () => {
+      resolverCalled = true;
+      return null;
+    },
+    fetchImpl: fixtureFetch({
+      email: "andrea@wavepa.com",
+      roleDomain: "wavepa.com"
+    })
+  }), /not approved/i);
+  assert.equal(resolverCalled, false);
+});
+
+test("a pinned subject mismatch is denied without invoking first-use resolution", async () => {
+  const configured = parseWaveUsers("", [{
+    email: "andrea@wavepa.com",
+    role: "client_coordinator",
+    googleSubject: "different-google-subject"
+  }]);
+  let resolverCalled = false;
+
+  await assert.rejects(() => authenticateGoogleAccessToken({
+    token: "access-token",
+    clientId,
+    allowedDomain: "wavepa.com",
+    users: configured,
+    resolveUser: async () => {
+      resolverCalled = true;
+      return null;
+    },
+    fetchImpl: fixtureFetch({
+      email: "andrea@wavepa.com",
+      roleDomain: "wavepa.com"
+    })
+  }), /not approved/i);
+  assert.equal(resolverCalled, false);
 });
 
 test("token issued to another OAuth client is rejected", async () => {
@@ -176,8 +330,8 @@ test("verified Workspace employee can be resolved for first-use onboarding", asy
     clientId,
     allowedDomain: "wavepa.com",
     users: autoUsers,
-    resolveUser: async ({ email, name }) => {
-      const user = { email, name, role: "onboarding", enabled: true, jobNimbusOwnerId: "owner-1", jobNimbusScope: "company", quoLineId: "" };
+    resolveUser: async ({ email, name, subject }) => {
+      const user = { email, name, role: "onboarding", enabled: true, jobNimbusOwnerId: "owner-1", jobNimbusScope: "company", quoLineId: "", googleSubject: subject };
       autoUsers.set(email, user);
       return user;
     },
@@ -198,7 +352,33 @@ test("coordinator routes are read-focused while Google roles cannot use HCN brow
   assert.equal(routeAllowed(coordinator, "POST", "/claim-filing/call"), false);
   assert.equal(routeAllowed(coordinator, "POST", "/quo/send"), false);
   assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), true);
-  assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), true);
+  assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), false);
+  for (const role of [
+    "administrator",
+    "employee",
+    "onboarding",
+    "client_coordinator",
+    "manager"
+  ]) {
+    assert.equal(
+      routeAllowed(
+        { type: "google_oauth", role },
+        "POST",
+        "/brain/context"
+      ),
+      false,
+      `${role} must not cross into Chance Brain`
+    );
+    assert.equal(
+      routeAllowed(
+        { type: "google_oauth", role },
+        "POST",
+        "/memory/file-actions"
+      ),
+      false,
+      `${role} must not read Chance client memory`
+    );
+  }
   for (const role of [
     "chance",
     "administrator",
@@ -286,6 +466,78 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
   assert.equal(routeAllowed({ type: "codex_operator_token", role: "chance" }, "POST", "/ops/action-batch"), false);
 });
 
+test("fixed management sweep admits only the exact scoped HP operator or an existing management browser role", () => {
+  const routes = [
+    "/hcn/api/v1/management-sweep",
+    "/hcn/api/v1/closed-file-benchmark"
+  ];
+  const hpOperator = {
+    type: "codex_operator_token",
+    subject: CODEX_HP_OPERATOR_SUBJECT,
+    role: "codex_operator",
+    scopes: [
+      "client_evidence:read",
+      CODEX_HP_MANAGEMENT_SWEEP_SCOPE
+    ]
+  };
+
+  for (const route of routes) {
+    assert.equal(routeAllowed(hpOperator, "POST", route), true);
+    assert.equal(
+      CODEX_OPERATOR_ALLOWED_ROUTES.has(`POST ${route}`),
+      false,
+      "a fixed report must not broaden the generic Codex operator route set"
+    );
+  }
+
+  for (const identity of [
+    { ...hpOperator, subject: "codex-mac-operator" },
+    { ...hpOperator, subject: "codex-other-operator" },
+    {
+      ...hpOperator,
+      scopes: ["client_evidence:read"]
+    },
+    { ...hpOperator, role: "chance" },
+    { ...hpOperator, type: "bridge_token" },
+    { type: "codex_operator_token", role: "codex_operator" },
+    { type: "google_oauth", role: "chance" },
+    { type: "hcn_browser_session", role: "employee" }
+  ]) {
+    for (const route of routes) {
+      assert.equal(routeAllowed(identity, "POST", route), false);
+    }
+  }
+
+  for (const role of ["chance", "administrator", "manager"]) {
+    for (const route of routes) {
+      assert.equal(
+        routeAllowed(
+          { type: "hcn_browser_session", role },
+          "POST",
+          route
+        ),
+        true,
+        `${role} ${route}`
+      );
+    }
+  }
+
+  for (const effectRoute of [
+    "POST /jobnimbus/create-note",
+    "POST /jobnimbus/create-task",
+    "POST /gmail/send",
+    "POST /quo/send",
+    "POST /voice/outbound-call"
+  ]) {
+    const [method, pathname] = effectRoute.split(" ");
+    assert.equal(
+      routeAllowed(hpOperator, method, pathname),
+      false,
+      effectRoute
+    );
+  }
+});
+
 test("shared bridge token preserves legacy routes but cannot read scoped session metadata", () => {
   const shared = { type: "bridge_token", role: "chance" };
   assert.equal(
@@ -312,15 +564,38 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     "GET /api/v1/session",
     "GET /hcn/auth/session",
     "POST /hcn/auth/logout",
+    "GET /hcn/connect/google/start",
+    "POST /hcn/api/v1/connectors/status",
+    "POST /hcn/api/v1/connectors/google/disconnect",
+    "POST /hcn/api/v1/connectors/quo-line",
     "POST /hcn/api/v1/work-center",
+    "POST /hcn/api/v1/management-sweep",
+    "POST /hcn/api/v1/closed-file-benchmark",
     "POST /hcn/api/v1/file-review",
+    "POST /hcn/api/v1/assistant/conversations/list",
+    "POST /hcn/api/v1/assistant/conversations/create",
+    "POST /hcn/api/v1/assistant/conversations/detail",
+    "POST /hcn/api/v1/assistant/conversations/rename",
+    "POST /hcn/api/v1/assistant/conversations/archive",
+    "POST /hcn/api/v1/assistant/conversations/restore",
+    "POST /hcn/api/v1/assistant/turns",
+    "POST /hcn/api/v1/claim-filings/status",
+    "POST /hcn/api/v1/claim-filings/prepare",
+    "POST /hcn/api/v1/claim-filings/execute",
+    "POST /hcn/api/v1/claim-filings/result",
+    "POST /hcn/api/v1/claim-filings/writeback/prepare",
+    "POST /hcn/api/v1/claim-filings/writeback/execute",
     "POST /hcn/api/v1/action-plans/prepare",
     "POST /hcn/api/v1/action-plans/list",
     "POST /hcn/api/v1/action-plans/detail",
     "POST /hcn/api/v1/action-plans/execute",
     "POST /hcn/api/v1/action-plans/invalidate",
     "POST /hcn/api/v1/action-receipts/list",
-    "POST /hcn/api/v1/action-receipts/detail"
+    "POST /hcn/api/v1/action-receipts/detail",
+    "POST /hcn/api/v1/team/invitations/list",
+    "POST /hcn/api/v1/team/invitations/prepare",
+    "POST /hcn/api/v1/team/invitations/create",
+    "POST /hcn/api/v1/team/invitations/revoke"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(routeAllowed(browser, method, pathname), true, route);
@@ -343,18 +618,16 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     false
   );
 
-  assert.deepEqual([...HCN_BROWSER_CHANCE_ONLY_ROUTES].sort(), [
+  assert.deepEqual([...HCN_BROWSER_ASSIGNED_ACTION_ROUTES].sort(), [
     "POST /hcn/api/v1/action-plans/detail",
     "POST /hcn/api/v1/action-plans/execute",
     "POST /hcn/api/v1/action-plans/invalidate",
     "POST /hcn/api/v1/action-plans/list",
     "POST /hcn/api/v1/action-plans/prepare",
     "POST /hcn/api/v1/action-receipts/detail",
-    "POST /hcn/api/v1/action-receipts/list",
-    "POST /hcn/api/v1/file-review",
-    "POST /hcn/api/v1/work-center"
+    "POST /hcn/api/v1/action-receipts/list"
   ]);
-  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 12);
+  assert.equal(HCN_BROWSER_ALLOWED_ROUTES.size, 35);
 
   for (const role of [
     "administrator",
@@ -367,9 +640,83 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
     assert.equal(routeAllowed(otherBrowser, "GET", "/api/v1/session"), true, role);
     assert.equal(routeAllowed(otherBrowser, "GET", "/hcn/auth/session"), true, role);
     assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/auth/logout"), true, role);
-    assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/api/v1/work-center"), false, role);
-    assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/api/v1/file-review"), false, role);
-    assert.equal(routeAllowed(otherBrowser, "POST", "/hcn/api/v1/action-plans/execute"), false, role);
+    assert.equal(
+      routeAllowed(otherBrowser, "POST", "/hcn/api/v1/connectors/status"),
+      true,
+      role
+    );
+    assert.equal(
+      routeAllowed(otherBrowser, "POST", "/hcn/api/v1/work-center"),
+      role !== "onboarding",
+      role
+    );
+    assert.equal(
+      routeAllowed(otherBrowser, "POST", "/hcn/api/v1/file-review"),
+      role !== "onboarding",
+      role
+    );
+    assert.equal(
+      routeAllowed(otherBrowser, "POST", "/hcn/api/v1/assistant/turns"),
+      role !== "onboarding",
+      role
+    );
+    assert.equal(
+      routeAllowed(
+        otherBrowser,
+        "POST",
+        "/hcn/api/v1/claim-filings/prepare"
+      ),
+      role !== "onboarding",
+      role
+    );
+    for (const pathname of [
+      "/hcn/api/v1/claim-filings/status",
+      "/hcn/api/v1/claim-filings/execute",
+      "/hcn/api/v1/claim-filings/result",
+      "/hcn/api/v1/claim-filings/writeback/prepare",
+      "/hcn/api/v1/claim-filings/writeback/execute"
+    ]) {
+      assert.equal(
+        routeAllowed(otherBrowser, "POST", pathname),
+        role !== "onboarding",
+        `${role} ${pathname}`
+      );
+    }
+    assert.equal(
+      routeAllowed(
+        otherBrowser,
+        "POST",
+        "/hcn/api/v1/assistant/conversations/list"
+      ),
+      role !== "onboarding",
+      role
+    );
+    for (const pathname of [
+      "/hcn/api/v1/team/invitations/list",
+      "/hcn/api/v1/team/invitations/prepare",
+      "/hcn/api/v1/team/invitations/create",
+      "/hcn/api/v1/team/invitations/revoke"
+    ]) {
+      assert.equal(
+        routeAllowed(otherBrowser, "POST", pathname),
+        false,
+        `${role} ${pathname}`
+      );
+    }
+    assert.equal(
+      routeAllowed(otherBrowser, "POST", "/hcn/api/v1/management-sweep"),
+      role === "administrator" || role === "manager",
+      role
+    );
+    assert.equal(
+      routeAllowed(
+        otherBrowser,
+        "POST",
+        "/hcn/api/v1/action-plans/execute"
+      ),
+      role !== "onboarding",
+      role
+    );
   }
 
   for (const otherIdentity of [
@@ -378,6 +725,15 @@ test("HCN browser sessions receive only the reviewed console surface", () => {
   ]) {
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/work-center"), false);
     assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/file-review"), false);
+    assert.equal(
+      routeAllowed(
+        otherIdentity,
+        "POST",
+        "/hcn/api/v1/assistant/conversations/list"
+      ),
+      false
+    );
+    assert.equal(routeAllowed(otherIdentity, "POST", "/hcn/api/v1/assistant/turns"), false);
   }
 });
 

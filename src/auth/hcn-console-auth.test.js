@@ -21,6 +21,7 @@ import {
 const START = Date.parse("2026-07-28T18:00:00.000Z");
 const GOOGLE_ACCESS_SECRET = "provider-access-token-secret";
 const GOOGLE_CLIENT_SECRET = "provider-client-secret";
+const AUTHORIZATION_VERSION = `authz_v1_${"a".repeat(64)}`;
 
 test("authorization uses the shared callback, minimal scopes, and S256 PKCE", async () => {
   const fixture = createFixture();
@@ -81,12 +82,66 @@ test("callback consumes the transaction, exchanges with its verifier, and create
   assert.deepEqual(fixture.sessionInputs, [{
     subject: "chance@wavepa.com",
     googleSubject: "google-subject-1",
-    role: "chance"
+    role: "chance",
+    authorizationVersion: AUTHORIZATION_VERSION
   }]);
   assert.match(completed.setCookies[0],
     new RegExp(`^${HCN_LOGIN_COOKIE_NAME}=;`));
   assert.match(completed.setCookies[1],
     new RegExp(`^${HCN_SESSION_COOKIE_NAME}=[A-Za-z0-9_-]{43};`));
+});
+
+test("exact-email approval supports Google accounts without a hosted-domain claim", async () => {
+  const externalEmail = "manager@outside.example";
+  const externalSubject = "external-google-subject";
+  const fixture = createFixture({
+    googleAllowedDomain: "",
+    resolveApprovedUser: async () => ({
+      email: externalEmail,
+      name: "External Manager",
+      role: "manager",
+      enabled: true,
+      googleSubject: externalSubject,
+      authorizationVersion: AUTHORIZATION_VERSION
+    }),
+    authenticateGoogleAccessToken: async (options) => {
+      const candidate = {
+        subject: externalSubject,
+        email: externalEmail,
+        name: "External Manager",
+        hostedDomain: ""
+      };
+      const approved = await options.resolveUser(candidate);
+      return {
+        type: "google_oauth",
+        ...candidate,
+        role: approved.role,
+        googleAccessToken: options.token
+      };
+    }
+  });
+  const begin = await fixture.coordinator.beginAuthorization({
+    returnTo: "/hcn/"
+  });
+  const authorizationUrl = new URL(begin.redirectUrl);
+  assert.equal(authorizationUrl.searchParams.has("hd"), false);
+
+  const completed = await fixture.coordinator.completeCallback({
+    state: authorizationUrl.searchParams.get("state"),
+    code: "external-google-code",
+    loginBinding: cookieValue(
+      begin.setCookies[0],
+      HCN_LOGIN_COOKIE_NAME
+    )
+  });
+
+  assert.equal(completed.redirectPath, "/hcn/");
+  assert.deepEqual(fixture.sessionInputs, [{
+    subject: externalEmail,
+    googleSubject: externalSubject,
+    role: "manager",
+    authorizationVersion: AUTHORIZATION_VERSION
+  }]);
 });
 
 test("return paths are confined to the HCN console", async () => {
@@ -298,7 +353,7 @@ test("callback results and session records do not serialize provider or PKCE sec
   );
   assert.equal(serialized.includes("chance@wavepa.com"), true);
   assert.deepEqual(Object.keys(fixture.sessionInputs[0]),
-    ["subject", "googleSubject", "role"]);
+    ["subject", "googleSubject", "role", "authorizationVersion"]);
 });
 
 function createFixture({
@@ -307,9 +362,11 @@ function createFixture({
     name: "Chance",
     role: "chance",
     enabled: true,
-    googleSubject: "google-subject-1"
+    googleSubject: "google-subject-1",
+    authorizationVersion: AUTHORIZATION_VERSION
   }),
-  authenticateGoogleAccessToken = defaultAuthenticator
+  authenticateGoogleAccessToken = defaultAuthenticator,
+  googleAllowedDomain = "wavepa.com"
 } = {}) {
   let timestamp = START;
   let randomCounter = 0;
@@ -362,7 +419,7 @@ function createFixture({
     google: {
       clientId: "google-client-id",
       clientSecret: GOOGLE_CLIENT_SECRET,
-      allowedDomain: "wavepa.com"
+      allowedDomain: googleAllowedDomain
     }
   });
   return {

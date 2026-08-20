@@ -1,0 +1,36 @@
+name: HCN platform check
+
+on:
+  pull_request:
+    branches:
+      - jobnimbus-bridge
+  push:
+    branches:
+      - codex/hcn-platform-foundation
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hcn-platform-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run HCN safety and test suite
+        run: npm run check

@@ -62,7 +62,27 @@ export async function readQuoHistoryStrict(config, input = {}) {
   } catch {
     throw quoHistoryProviderFailure();
   }
-  const numbers = lineInventory.numbers;
+  const requestedLineId = String(input.lineId || "").trim();
+  const requestedLineNumberRaw = String(input.lineNumber || "").trim();
+  const requestedLineNumber = toE164(requestedLineNumberRaw);
+  if (
+    (requestedLineId && !/^[A-Za-z0-9._~-]{1,255}$/.test(requestedLineId))
+    || (requestedLineNumberRaw && !requestedLineNumber)
+  ) {
+    throw quoHistoryProviderFailure();
+  }
+  const numbers = requestedLineId || requestedLineNumber
+    ? lineInventory.numbers.filter((line) =>
+        (!requestedLineId || line.id === requestedLineId)
+        && (
+          !requestedLineNumber
+          || toE164(line.number) === requestedLineNumber
+        )
+      )
+    : lineInventory.numbers;
+  if (numbers.length !== 1 && (requestedLineId || requestedLineNumber)) {
+    throw quoHistoryProviderFailure();
+  }
 
   const nameById = Object.fromEntries(numbers.map((row) => [row.id, row.name || row.number]));
   const byId = new Map();
@@ -70,6 +90,8 @@ export async function readQuoHistoryStrict(config, input = {}) {
   let pagesScanned = 0;
   let restrictedStreamCount = 0;
   let duplicatesDropped = 0;
+  let rejectedOffTargetCount = 0;
+  let rejectedUnverifiableCount = 0;
 
   for (const line of numbers) {
     for (const kind of ["messages", "calls"]) {
@@ -80,7 +102,7 @@ export async function readQuoHistoryStrict(config, input = {}) {
           phoneNumberId: line.id,
           maxResults: String(maxResults)
         });
-        query.append("participants[]", phone);
+        query.append("participants", phone);
         if (pageToken) query.set("pageToken", pageToken);
 
         let payload;
@@ -104,15 +126,26 @@ export async function readQuoHistoryStrict(config, input = {}) {
         }
 
         for (const row of payload.data) {
-          if (!row || typeof row !== "object" || Array.isArray(row)) {
-            throw quoHistoryProviderFailure();
+          const scopeVerdict = strictTimelineScopeVerdict(
+            row,
+            line,
+            kind,
+            phone
+          );
+          if (scopeVerdict !== "valid") {
+            if (scopeVerdict === "off-target") {
+              rejectedOffTargetCount += 1;
+            } else {
+              rejectedUnverifiableCount += 1;
+            }
+            incompleteReasons.add("provider_filter_mismatch");
+            continue;
           }
           const item = strictTimelineItem(
             row,
             line,
             nameById,
-            kind,
-            phone
+            kind
           );
           const key = `${kind}:${item.id}`;
           if (byId.has(key)) {
@@ -124,13 +157,11 @@ export async function readQuoHistoryStrict(config, input = {}) {
 
         const next = strictNextPageToken(payload);
         if (next.malformed) {
-          incompleteReasons.add("malformed_pagination");
-          break;
+          throw quoHistoryProviderFailure();
         }
         if (!next.value) break;
         if (seenPageTokens.has(next.value)) {
-          incompleteReasons.add("malformed_pagination");
-          break;
+          throw quoHistoryProviderFailure();
         }
         seenPageTokens.add(next.value);
         if (page + 1 >= maxPages) {
@@ -149,9 +180,8 @@ export async function readQuoHistoryStrict(config, input = {}) {
   const reasons = [
     "restricted_line",
     "line_inventory_ceiling",
-    "malformed_line_pagination",
     "pagination_ceiling",
-    "malformed_pagination",
+    "provider_filter_mismatch",
     "result_truncated"
   ].filter((reason) => incompleteReasons.has(reason));
 
@@ -172,7 +202,9 @@ export async function readQuoHistoryStrict(config, input = {}) {
       resultLimit: maxResults,
       matchedCount: matchedTimeline.length,
       returnedCount: timeline.length,
-      duplicatesDropped
+      duplicatesDropped,
+      rejectedOffTargetCount,
+      rejectedUnverifiableCount
     }
   };
 }
@@ -317,7 +349,7 @@ async function listConversationActivity(config, { kind, phoneNumberId, participa
       createdAfter,
       maxResults: "100"
     });
-    query.append("participants[]", participant);
+    query.append("participants", participant);
     if (pageToken) query.set("pageToken", pageToken);
     const payload = await request(config, "GET", `/${kind}?${query}`);
     rows.push(...(Array.isArray(payload.data) ? payload.data : []));
@@ -335,7 +367,7 @@ async function listRecentConversations(config, numbers, updatedAfter, maxResults
       updatedAfter,
       maxResults: "100"
     });
-    for (const line of numbers) query.append("phoneNumbers[]", line.id);
+    for (const line of numbers) query.append("phoneNumbers", line.id);
     if (pageToken) query.set("pageToken", pageToken);
     const payload = await request(config, "GET", `/conversations?${query}`);
     for (const row of Array.isArray(payload.data) ? payload.data : []) {
@@ -389,7 +421,7 @@ async function collectAcrossLines(config, numbers, nameById, phone, kind, maxRes
   const byId = new Map();
   for (const line of numbers) {
     try {
-      const endpoint = `/${kind}?phoneNumberId=${encodeURIComponent(line.id)}&participants[]=${encodeURIComponent(phone)}&maxResults=${maxResults}`;
+      const endpoint = `/${kind}?phoneNumberId=${encodeURIComponent(line.id)}&participants=${encodeURIComponent(phone)}&maxResults=${maxResults}`;
       const payload = await request(config, "GET", endpoint);
       for (const row of Array.isArray(payload.data) ? payload.data : []) {
         const id = row.id || `${line.id}:${row.createdAt}:${kind}`;
@@ -424,8 +456,7 @@ async function collectAcrossLines(config, numbers, nameById, phone, kind, maxRes
   return [...byId.values()].sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)));
 }
 
-function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
-  assertStrictTimelineScope(row, line, kind, expectedPhone);
+function strictTimelineItem(row, line, nameById, kind) {
   const atUtc = String(row.createdAt || row.startedAt || "");
   const id = String(row.id || `${line.id}:${atUtc}:${kind}`);
   if (kind === "messages") {
@@ -453,21 +484,37 @@ function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
   };
 }
 
-function assertStrictTimelineScope(row, line, kind, expectedPhone) {
-  const providerLineId = String(row.phoneNumberId || "");
-  if (!providerLineId || providerLineId !== line.id) {
-    throw quoHistoryProviderFailure();
+function strictTimelineScopeVerdict(row, line, kind, expectedPhone) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return "unverifiable";
   }
+  const rawProviderLineId = row.phoneNumberId;
+  if (
+    typeof rawProviderLineId !== "string"
+    && typeof rawProviderLineId !== "number"
+  ) {
+    return "unverifiable";
+  }
+  const providerLineId = String(rawProviderLineId).trim();
+  if (
+    !providerLineId
+    || providerLineId.length > 512
+    || /[\s\x00-\x1f\x7f]/.test(providerLineId)
+  ) {
+    return "unverifiable";
+  }
+  if (providerLineId !== line.id) return "off-target";
 
   if (kind === "calls") {
     if (
       !Array.isArray(row.participants)
       || row.participants.length !== 1
-      || toE164(row.participants[0]) !== expectedPhone
     ) {
-      throw quoHistoryProviderFailure();
+      return "unverifiable";
     }
-    return;
+    const participant = toE164(row.participants[0]);
+    if (!participant) return "unverifiable";
+    return participant === expectedPhone ? "valid" : "off-target";
   }
 
   const providerLineNumber = toE164(line.number || "");
@@ -481,18 +528,15 @@ function assertStrictTimelineScope(row, line, kind, expectedPhone) {
     || !to.length
     || to.some((value) => !value)
   ) {
-    throw quoHistoryProviderFailure();
+    return "unverifiable";
   }
+  if (![from, ...to].includes(providerLineNumber)) return "off-target";
   const participants = new Set(
     [from, ...to].filter((value) => value !== providerLineNumber)
   );
-  if (
-    ![from, ...to].includes(providerLineNumber)
-    || participants.size !== 1
-    || !participants.has(expectedPhone)
-  ) {
-    throw quoHistoryProviderFailure();
-  }
+  return participants.size === 1 && participants.has(expectedPhone)
+    ? "valid"
+    : "off-target";
 }
 
 function strictNextPageToken(payload) {
@@ -575,13 +619,11 @@ async function listQuoNumbersStrict(
 
     const next = strictNextPageToken(payload);
     if (next.malformed) {
-      incompleteReasons.add("malformed_line_pagination");
-      break;
+      throw quoHistoryProviderFailure();
     }
     if (!next.value) break;
     if (seenPageTokens.has(next.value)) {
-      incompleteReasons.add("malformed_line_pagination");
-      break;
+      throw quoHistoryProviderFailure();
     }
     seenPageTokens.add(next.value);
     if (page + 1 >= boundedPages) {

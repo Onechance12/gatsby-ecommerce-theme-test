@@ -5,11 +5,15 @@ import path from "node:path";
 const CONSOLE_ROOT = fileURLToPath(new URL("./", import.meta.url));
 const ASSETS = Object.freeze({
   "/hcn/": ["index.html", "text/html; charset=utf-8"],
+  "/hcn/sign-in.css": ["sign-in.css", "text/css; charset=utf-8"],
   "/hcn/app.css": ["app.css", "text/css; charset=utf-8"],
   "/hcn/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/hcn/manifest.webmanifest": ["manifest.webmanifest", "application/manifest+json; charset=utf-8"],
   "/hcn/sw.js": ["sw.js", "text/javascript; charset=utf-8"]
 });
+const PUBLIC_ASSETS = Object.freeze([
+  "/hcn/sign-in.css"
+]);
 
 export const HCN_CONSOLE_SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store, max-age=0",
@@ -32,6 +36,10 @@ export function hcnConsoleAssetDescriptor(pathname) {
     filename: descriptor[0],
     contentType: descriptor[1]
   });
+}
+
+export function isPublicHcnConsoleAsset(pathname) {
+  return PUBLIC_ASSETS.includes(String(pathname || ""));
 }
 
 export async function readHcnConsoleAsset(pathname) {

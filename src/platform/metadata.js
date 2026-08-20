@@ -17,6 +17,10 @@ export function buildPlatformMeta({
   now = () => new Date()
 } = {}) {
   const build = getBuildInfo({ env, runtime: nodeRuntime });
+  const thresherActive =
+    runtime?.hcnOperationsBrain?.persistenceConfigured === true;
+  const jobroloAdapterReady =
+    runtime?.jobroloAdapter?.ready === true;
   return {
     schemaVersion: PLATFORM_META_SCHEMA_VERSION,
     generatedAt: now().toISOString(),
@@ -30,11 +34,15 @@ export function buildPlatformMeta({
     },
     runtime: buildRuntimeStatus(runtime),
     boundaries: {
-      chanceBrain: "legacy_read_only_non_operator_paths",
-      hcnV2ChanceBrainDataFlow: "disconnected",
-      jobrolo: "disconnected",
-      hcnOperationsBrain: "v2_foundation",
-      legacyClientMemory: "migration_required"
+      chanceBrain: "disconnected_no_route",
+      hcnChanceBrainDataFlow: "none",
+      jobrolo: jobroloAdapterReady
+        ? "narrow_signed_thresher_adapter"
+        : "disconnected",
+      hcnOperationsBrain: thresherActive
+        ? "active_isolated_encrypted_operational_state"
+        : "foundation_persistence_pending",
+      legacyClientMemory: "quarantined_unreachable"
     }
   };
 }

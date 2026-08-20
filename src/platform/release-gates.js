@@ -1,20 +1,19 @@
 const DEFAULTS = {
-  BRIDGE_ALLOW_WRITES: false,
-  ALLOW_GMAIL_SEND: false,
-  ALLOW_QUO_SEND: false,
+  BRIDGE_ALLOW_WRITES: true,
+  ALLOW_GMAIL_SEND: true,
+  ALLOW_QUO_SEND: true,
   ALLOW_VOICE_CALLS: false,
   ALLOW_RETELL_CALLS: true,
   ALLOW_CLIENT_COORDINATOR_CALLS: false,
-  ALLOW_CARRIER_FOLLOWUP_CALLS: true,
-  ALLOW_LEGACY_CLIENT_MEMORY_WRITES: false,
-  HCN_ACTION_EXECUTION_ENABLED: false
+  ALLOW_CARRIER_FOLLOWUP_CALLS: false,
+  HCN_ACTION_EXECUTION_ENABLED: true
 };
 
 /**
- * Checked-in production defaults for every release-critical effect gate.
+ * Reviewed production profile for every release-critical effect gate.
  *
- * Keep this list synchronized with render.yaml. The legacy client-memory gate
- * is intentionally fail-closed.
+ * Keep this list synchronized with render.yaml. Missing or malformed runtime
+ * environment values still fail closed in readReleaseGates().
  */
 export const RELEASE_GATE_DEFAULTS = Object.freeze(DEFAULTS);
 
