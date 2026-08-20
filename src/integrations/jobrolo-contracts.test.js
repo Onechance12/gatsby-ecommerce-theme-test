@@ -8,14 +8,18 @@ import {
   validateJobroloAssistantTurnInput
 } from "./jobrolo-contracts.js";
 
-test("exact Quo phone history is read-only and truthfully all-line scoped", () => {
+test("exact Quo history is read-only, assigned-file bound, and all-line scoped", () => {
   const response = jobroloHcnResponse(
     `request_${"a".repeat(32)}`,
     { schema: "hcn.console.quo-phone-history.v1" }
   );
-  assert.equal(response.authority.fileScope, "fixed_principal_all_team_lines");
+  assert.equal(
+    response.authority.fileScope,
+    "fixed_principal_all_team_lines"
+  );
   assert.equal(response.authority.exactApprovalRequired, false);
   assert.equal(response.authority.automaticExecution, false);
+  assert.equal(response.authority.providerCredentialsExposed, false);
 });
 
 test("assistant input binds general and file scopes exactly", () => {
