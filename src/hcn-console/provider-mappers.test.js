@@ -215,6 +215,34 @@ test('document transfer mapper requires a complete exact-file non-photo collecti
     fileName: 'Carrier estimate.pdf',
   }]);
   assert.equal(result.collectionCoverage.completeness, 'complete');
+  const withPhotos = mapJobNimbusDocumentCollection({
+    documentsComplete: true,
+    documents: [{
+      jnid: 'document-one',
+      filename: 'Carrier estimate.pdf',
+      content_type: 'application/pdf',
+      status_name: 'New',
+      created_at: '2026-07-28T17:50:00.000Z',
+      related: { id: FILE_ID },
+    }, {
+      jnid: 'photo-one',
+      filename: 'Roof photo.jpg',
+      content_type: 'image/jpeg',
+      status_name: 'New',
+      created_at: '2026-07-28T17:51:00.000Z',
+      related: { id: FILE_ID },
+    }],
+  }, {
+    expectedProviderFileId: FILE_ID,
+    knownProviderFileIds: [FILE_ID],
+    requireExactContactReferences: true,
+    includePhotoDocuments: true,
+  });
+  assert.deepEqual(withPhotos.documents.map(document => document.providerRecordId), [
+    'document-one',
+    'photo-one',
+  ]);
+  assert.equal(withPhotos.documents[1].kind, 'document');
   assert.throws(() => mapJobNimbusDocumentCollection({
     documentsComplete: false,
     documents: [],
@@ -443,6 +471,38 @@ test('exact JobNimbus file maps aliases, bounds presentation text, and excludes 
   ]) {
     assert.equal(serialized.includes(forbidden), false);
   }
+});
+
+test('exact JobNimbus import opt-in includes scoped photo manifests without bytes', () => {
+  const result = mapJobNimbusFileEnvelope({
+    ...FRESHNESS,
+    activitiesComplete: true,
+    tasksComplete: true,
+    documentsComplete: true,
+    contact: contact(),
+    activities: [],
+    tasks: [],
+    documents: [scoped({
+      fileId: 'photo-provider-id',
+      filename: 'roof.jpg',
+      contentType: 'image/jpeg',
+      type: 'Photo',
+      uploadedAt: '2026-07-28T17:31:00.000Z',
+      bytes: 'DO-NOT-EMIT',
+      downloadUrl: 'https://provider.invalid/photo',
+    })],
+  }, {
+    chanceOwnerId: CHANCE_ID,
+    expectedProviderFileId: FILE_ID,
+    includePhotoDocuments: true,
+  });
+
+  assert.equal(result.data.documents.length, 1);
+  assert.equal(result.data.documents[0].providerRecordId, 'photo-provider-id');
+  assert.equal(result.data.documents[0].fileName, 'roof.jpg');
+  assert.equal(result.data.documents[0].kind, 'photo');
+  assert.equal(JSON.stringify(result).includes('DO-NOT-EMIT'), false);
+  assert.equal(JSON.stringify(result).includes('provider.invalid'), false);
 });
 
 test('exact JobNimbus file preserves bounded activity/task history but fails closed on document pagination and conflicting IDs', () => {

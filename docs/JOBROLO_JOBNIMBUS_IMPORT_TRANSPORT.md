@@ -2,7 +2,7 @@
 
 This is a dormant, read-only HCN-to-Jobrolo transport for previewing exact
 JobNimbus files assigned to one fixed HCN principal and, after a separate
-Jobrolo owner approval, transferring one exact non-photo document. It is a
+Jobrolo owner approval, transferring one exact document or photo. It is a
 separate service authentication domain from the existing Jobrolo/Thresher
 adapter and confers no assistant, approval-plan, execution, provider-write,
 database, or credential access.
@@ -91,7 +91,10 @@ timestamp; content type; exact length; and SHA-256 of the raw bytes. The route
 rebuilds the complete assigned catalog and complete exact-file document list,
 requires one opaque-ref match, and recomputes the same manifest before any byte
 request. It constructs the provider URL server-side from the fixed base and
-the transient provider id. Redirects and compressed bodies are rejected.
+the transient provider id. The import-only mapper includes image manifests
+while ordinary HCN file reviews continue to omit photo-heavy rows. Redirects
+and compressed bodies are rejected. Jobrolo remains responsible for malware
+scanning, magic-byte validation, and canonical document/photo promotion.
 
 ## Bounds
 

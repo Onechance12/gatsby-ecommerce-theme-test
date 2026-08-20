@@ -19750,6 +19750,7 @@ async function resolveJobroloImportDocumentContent({
     expectedProviderFileId: providerFileId,
     knownProviderFileIds: files.map((file) => file.providerFileId),
     knownProviderUserIds,
+    includePhotoDocuments: true,
     requireExactContactReferences: true
   });
   const matches = mapped.data.documents.map((document) => ({
@@ -20017,6 +20018,7 @@ async function loadJobroloImportExactFile({
     expectedProviderFileId: id,
     knownProviderFileIds,
     knownProviderUserIds,
+    includePhotoDocuments: true,
     // This import-only boundary may disclose mapped activity/task/document
     // labels. Require every provider contact-typed reference to identify the
     // selected assigned file. Only ids from the complete account-user
