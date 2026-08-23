@@ -36,6 +36,15 @@ test("Codex operator descriptor names exactly the existing least-privilege route
     "scheduling.availability.review"
   ]);
 
+  const macCapabilities = capabilitiesForIdentity({
+    type: "codex_operator_token",
+    role: "codex_operator",
+    subject: "codex-mac-operator"
+  });
+  assert.equal(macCapabilities.includes("operations.run_policy.read"), true);
+  assert.equal(macCapabilities.includes("operations.action_batch_receipts.read"), true);
+  assert.equal(macCapabilities.includes("operations.action_batch_receipts.reconcile"), true);
+
   const descriptor = buildCapabilityDescriptor({
     identity: { type: "codex_operator_token", role: "codex_operator" }
   });

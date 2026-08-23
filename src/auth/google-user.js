@@ -59,9 +59,12 @@ export const WAVE_ROLE_POLICIES = {
 export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "GET /auth/whoami",
   "GET /api/v1/session",
+  "GET /ops/run-policy",
   "POST /ops/start-session",
   "POST /ops/review-chance-files",
   "POST /ops/action-batch",
+  "POST /ops/action-batch-receipts",
+  "POST /ops/action-batch-reconcile",
   "POST /scheduling/availability",
   "POST /jobnimbus/search",
   "POST /jobnimbus/review-file",
@@ -74,6 +77,12 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /quo/numbers",
   "POST /quo/history",
   "POST /quo/transcript"
+]);
+
+const CODEX_MAC_OPERATOR_ONLY_ROUTES = new Set([
+  "GET /ops/run-policy",
+  "POST /ops/action-batch-receipts",
+  "POST /ops/action-batch-reconcile"
 ]);
 
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
@@ -260,7 +269,11 @@ export function routeAllowed(identity, method, pathname) {
   }
   if (identity.type === "codex_operator_token") {
     return identity.role === "codex_operator"
-      && CODEX_OPERATOR_ALLOWED_ROUTES.has(route);
+      && CODEX_OPERATOR_ALLOWED_ROUTES.has(route)
+      && (
+        !CODEX_MAC_OPERATOR_ONLY_ROUTES.has(route)
+        || identity.subject === "codex-mac-operator"
+      );
   }
   if (identity.type === "hcn_browser_session") {
     return Boolean(WAVE_ROLE_POLICIES[identity.role])

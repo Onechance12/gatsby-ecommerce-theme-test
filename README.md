@@ -142,6 +142,7 @@ CLAIM_CALL_STORE_PATH=/var/data/bridge/claim-call-ledger.json
 ACTION_BATCH_STORE_PATH=/var/data/bridge/action-batches.json
 ACTION_APPROVAL_STORE_PATH=/var/data/bridge/action-approvals.json
 ACTION_APPROVAL_TTL_SECONDS=900
+CHANCE_OPERATOR_RUN_MANIFEST_JSON=
 OUTBOUND_SEND_STORE_PATH=/var/data/bridge/outbound-sends.json
 OPENAI_API_KEY=
 OPENAI_OPERATIONAL_MODEL=gpt-5.6-luna
@@ -258,8 +259,9 @@ explicit legacy opt-in while HCN Operations Brain v2 is built from fresh
 evidence in its own isolated domain.
 
 The dedicated Codex operator is a stricter exception: it never reads or
-writes Chance Brain client snapshots, episodes, operational state, or action
-receipts, and it cannot request a model advisory. Exact-file reviews return
+writes Chance Brain client snapshots, episodes, or operational state, and it
+cannot request a model advisory. It may read only its own minimized action-batch
+security receipts for restart/reconciliation continuity. Exact-file reviews return
 fresh source evidence plus ephemeral metadata only. Query-less indexes omit
 contact details, claim/policy values, addresses, phone numbers, email addresses,
 and adjuster details. Legacy Brain client snapshots remain outside this
@@ -273,12 +275,13 @@ schema-v2 migration.
    and the returned `approvalDigest` plus the short-lived, single-use
    `approvalChallenge` before `approvalExpiresAt`.
 
-The dedicated Mac operator may group field corrections and stage moves across
-at most five distinct Chance-assigned files in one approval batch. The grouped
-mode permits only `jobnimbus.update_contact` and `jobnimbus.update_status`, uses
-exact JobNimbus file numbers, and binds every operation to its freshly resolved
-provider file. Company scope, browser-session actions, the HP operator, and all
-other action types remain single-file. Live execution is ordered, stops on the
+The dedicated Mac operator is pinned to an immutable, expiring 58-file manifest;
+JobNimbus #2628 is excluded. It may group one contact correction, one forward
+Thresher stage move, and one marked current-control task per file across at most
+five manifest files, ordered contact → status → task. Gmail drafts remain
+single-file and require the exact live claim number as subject. Sends, calls,
+notes, task completion, calendar writes, company mutations, backward moves, and
+nonmanifest files are blocked. Live execution is ordered, stops on the
 first failure, does not roll back earlier verified changes, and records later
 operations as not attempted.
 

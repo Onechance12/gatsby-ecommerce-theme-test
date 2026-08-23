@@ -221,7 +221,8 @@ test("coordinator routes are read-focused while Google roles cannot use HCN brow
 });
 
 test("dedicated Codex operator is a fail-closed non-Google role", () => {
-  const operator = { type: "codex_operator_token", role: "codex_operator" };
+  const operator = { type: "codex_operator_token", role: "codex_operator", subject: "codex-hp-operator" };
+  const macOperator = { type: "codex_operator_token", role: "codex_operator", subject: "codex-mac-operator" };
   const spoofedGoogleOperator = { type: "google_oauth", role: "codex_operator" };
 
   for (const route of [
@@ -247,7 +248,17 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
     assert.equal(routeAllowed(operator, method, pathname), true, route);
   }
-  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 17);
+  for (const route of [
+    "GET /ops/run-policy",
+    "POST /ops/action-batch-receipts",
+    "POST /ops/action-batch-reconcile"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
+    assert.equal(routeAllowed(operator, method, pathname), false, route);
+    assert.equal(routeAllowed(macOperator, method, pathname), true, route);
+  }
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 20);
 
   for (const route of [
     "POST /auth/quo-line",

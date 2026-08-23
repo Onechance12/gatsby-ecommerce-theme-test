@@ -146,6 +146,8 @@ services:
         value: "72"
       - key: CHANCE_JOBNIMBUS_OWNER_ID
         value: fc95a213f70e4c9daddc5fa366be9941
+      - key: CHANCE_OPERATOR_RUN_MANIFEST_JSON
+        sync: false
       - key: CLAIM_CALL_STORE_PATH
         value: /var/data/bridge/claim-call-ledger.json
       - key: ACTION_BATCH_STORE_PATH

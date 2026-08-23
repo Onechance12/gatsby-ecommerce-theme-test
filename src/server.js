@@ -73,6 +73,16 @@ import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } fro
 import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
 import { buildCommunicationRecoveryQueue } from "./operations/communication-recovery.js";
 import {
+  CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
+  CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS,
+  chanceManifestFileBinding,
+  chanceOperatorRunManifestSummary,
+  loadChanceOperatorRunManifest,
+  resolveChanceOperatorRunPolicy,
+  validateThresherTransition
+} from "./operations/thresher-policy.js";
+import {
   authenticateGoogleAccessToken,
   hcnConsoleChanceUserConfigured,
   hcnConsoleSessionMatchesApprovedUser,
@@ -262,16 +272,27 @@ const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c
 const CLAIM_CALL_STORE_PATH = process.env.CLAIM_CALL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "claim-call-ledger.json");
 const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-batches.json");
 const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-approvals.json");
+const BRIDGE_BOOT_ID = randomUUID();
 const HCN_ACTION_RECEIPT_STORE_PATH = process.env.HCN_ACTION_RECEIPT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "hcn-action-receipts.json");
 const ACTION_APPROVAL_TTL_SECONDS = Math.max(1, Math.min(positiveIntegerEnv("ACTION_APPROVAL_TTL_SECONDS", 900), 3600));
 const ACTION_BATCH_LEDGER_TEST_FAIL_AT = process.env.NODE_ENV === "test"
   ? Number(process.env.ACTION_BATCH_LEDGER_TEST_FAIL_AT || 0)
   : 0;
+const REQUIRE_CHANCE_RUN_POLICY = process.env.REQUIRE_CHANCE_RUN_POLICY === "true"
+  || (
+    process.env.REQUIRE_CHANCE_RUN_POLICY !== "false"
+    && process.env.NODE_ENV !== "test"
+  );
+const CHANCE_OPERATOR_RUN_MANIFEST_STATE = initializeChanceOperatorRunManifest();
+const CHANCE_OPERATOR_RUN_MANIFEST = CHANCE_OPERATOR_RUN_MANIFEST_STATE.manifest;
 const CODEX_MAC_ASSIGNED_BATCH_MAX_FILES = 5;
 const CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES = new Set([
   "jobnimbus.update_contact",
-  "jobnimbus.update_status"
+  "jobnimbus.update_status",
+  "jobnimbus.ensure_current_task"
 ]);
+const CHANCE_OPERATOR_EXCLUDED_FILES = new Set(CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS);
+const CURRENT_CONTROL_TASK_MARKER = "[HCN_CURRENT_CONTROL_V1]";
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
 const QUO_LINE_LINK_STORE_PATH = process.env.QUO_LINE_LINK_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-links.json");
 const QUO_LINE_CHALLENGE_STORE_PATH = process.env.QUO_LINE_CHALLENGE_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-challenges.json");
@@ -294,6 +315,23 @@ const SCHEDULING_WORKDAY_START = process.env.SCHEDULING_WORKDAY_START || "08:00"
 const SCHEDULING_WORKDAY_END = process.env.SCHEDULING_WORKDAY_END || "18:00";
 const CENSUS_GEOCODER_URL = process.env.CENSUS_GEOCODER_URL || "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress";
 const HAIL_REPORTS_URL = process.env.HAIL_REPORTS_URL || "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py";
+
+function initializeChanceOperatorRunManifest() {
+  const raw = String(process.env.CHANCE_OPERATOR_RUN_MANIFEST_JSON || "").trim();
+  if (!raw) {
+    return {
+      manifest: null,
+      error: REQUIRE_CHANCE_RUN_POLICY
+        ? "CHANCE_OPERATOR_RUN_MANIFEST_JSON is not configured."
+        : ""
+    };
+  }
+  try {
+    return { manifest: loadChanceOperatorRunManifest(raw), error: "" };
+  } catch (error) {
+    return { manifest: null, error: String(error?.message || error) };
+  }
+}
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
 const voiceCallLogs = new Map();
 const claimScopeTextCache = new Map();
@@ -309,6 +347,7 @@ const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
 const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
+const GMAIL_FILE_COMPANY_CONTACTS = Symbol("gmailFileCompanyContacts");
 const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
@@ -346,6 +385,11 @@ let actionBatchMutationQueue = Promise.resolve();
 let actionBatchLedgerWriteCount = 0;
 let actionApprovalMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
+const ACTION_RECEIPT_RECOVERY_STATE = {
+  status: "pending",
+  lastStartupRecoveryAt: "",
+  error: ""
+};
 
 for (const [name, token] of [
   ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
@@ -407,6 +451,9 @@ const routes = new Map([
   ["POST /ops/start-session", startThresherOperationalSession],
   ["POST /ops/recover-scheduling-communications", recoverSchedulingCommunications],
   ["POST /ops/review-chance-files", reviewChanceFiles],
+  ["GET /ops/run-policy", operatorRunPolicy],
+  ["POST /ops/action-batch-receipts", actionBatchReceipts],
+  ["POST /ops/action-batch-reconcile", actionBatchReconcile],
   ["POST /ops/action-batch", processActionBatch],
   ["POST /scheduling/availability", schedulingAvailability],
   ["POST /jobnimbus/search", searchContacts],
@@ -455,6 +502,7 @@ const routes = new Map([
 ]);
 
 await hydrateAutoEnrolledWaveUsers();
+await initializeOperatorReceiptBoundary();
 
 const server = createServer(async (req, res) => {
   try {
@@ -659,6 +707,8 @@ function health() {
       macAssignedBatchMaxFiles: CODEX_MAC_ASSIGNED_BATCH_MAX_FILES,
       macAssignedMultiFileActionTypes: [...CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES],
       macAssignedMultiFileExecution: "sequential_fail_stop_no_rollback",
+      chanceRunPolicy: chanceOperatorRunManifestSummary(CHANCE_OPERATOR_RUN_MANIFEST),
+      actionReceiptRecovery: { ...ACTION_RECEIPT_RECOVERY_STATE },
       companyBatchMaxFiles: 1,
       gmailReadsRequireExactAssignedFile: true,
       quoReadsRequireExactAssignedFile: true,
@@ -1250,6 +1300,14 @@ async function authWhoAmI() {
             identity.subject === "codex-mac-operator"
               ? "sequential_fail_stop_no_rollback"
               : "unavailable",
+          chanceRunPolicy:
+            identity.subject === "codex-mac-operator"
+              ? chanceOperatorRunManifestSummary(CHANCE_OPERATOR_RUN_MANIFEST)
+              : { available: false, enforced: false },
+          actionReceiptRecovery:
+            identity.subject === "codex-mac-operator"
+              ? { ...ACTION_RECEIPT_RECOVERY_STATE }
+              : { status: "unavailable", lastStartupRecoveryAt: "", error: "" },
           companyBatchMaxFiles: 1,
           actionPath: "approval_batch_only"
         }
@@ -2962,6 +3020,7 @@ async function searchContacts(input) {
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 10) });
   const eligible = contacts
     .filter(isInsuranceFile)
+    .filter(chanceOperatorContactAllowed)
     .filter((contact) => (
       operatorCompanyScopeActive()
       || assignedTo(contact, CHANCE_OWNER_ID)
@@ -3001,14 +3060,34 @@ async function searchContacts(input) {
 async function reviewFile(input) {
   const query = required(input.query, "query");
   const { contact, alternatives } = await findChanceContact(query);
-  const activities = await listRelated("/activities", contact.jnid, 30);
-  const tasks = await listRelated("/tasks", contact.jnid, 30);
-  const documents = await listRelated("/files", contact.jnid, 1000);
-  const file = compactContact(contact);
-  const sortedActivities = [...activities].sort((a, b) => Number(b.date_created || 0) - Number(a.date_created || 0));
-  const openTasks = tasks.filter((task) => !task.is_completed).sort((a, b) => Number(a.date_start || a.date_end || 0) - Number(b.date_start || b.date_end || 0));
-  const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
   const operatorRequest = isCodexOperatorRequest();
+  const evidenceInventoryLimit = operatorRequest ? 5000 : 1000;
+  const activities = await listRelated(
+    "/activities",
+    contact.jnid,
+    operatorRequest ? 5000 : 30
+  );
+  const tasks = await listRelated(
+    "/tasks",
+    contact.jnid,
+    operatorRequest ? 5000 : 30
+  );
+  const documents = await listRelated(
+    "/files",
+    contact.jnid,
+    evidenceInventoryLimit
+  );
+  const file = compactContact(contact);
+  const sortedActivities = [...activities].sort(
+    (a, b) => providerTimeMs(b.date_created) - providerTimeMs(a.date_created)
+  );
+  const openTasks = tasks
+    .filter((task) => !providerFlagTrue(task.is_completed))
+    .sort(
+      (a, b) => providerTimeMs(a.date_start || a.date_end)
+        - providerTimeMs(b.date_start || b.date_end)
+    );
+  const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
   const actionReceipts = operatorRequest
     ? []
     : latestActionReceipts(MEMORY_CONFIG, 20, { subjectKey: file.id });
@@ -3018,8 +3097,8 @@ async function reviewFile(input) {
     quo: { status: "not_requested", at: new Date().toISOString() }
   };
   const liveJobNimbus = {
-    recentActivities: sortedActivities.map(compactActivity),
-    openTasks: openTasks.map(compactTask),
+    recentActivities: sortedActivities.slice(0, 30).map(compactActivity),
+    openTasks: openTasks.slice(0, 30).map(compactTask),
     operationalDocuments: operationalDocuments.slice(0, 60).map(compactDocument),
     excludedPhotoLikeDocumentCount: documents.length - operationalDocuments.length,
     assistantRead: buildAssistantRead(contact, activities, tasks, operationalDocuments)
@@ -3075,6 +3154,7 @@ async function assignedFiles(input = {}) {
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 25) });
   const files = contacts
     .filter((contact) => isInsuranceFile(contact))
+    .filter(chanceOperatorContactAllowed)
     .filter((contact) => assignedTo(contact, ownerId))
     .filter((contact) => !activeOnly || isOpenActive(contact))
     .sort(fileSort)
@@ -3094,6 +3174,7 @@ async function assignedCounts(input = {}) {
   const contacts = await listContacts({ maxPages: Number(input.maxPages || 25) });
   const assigned = contacts
     .filter((contact) => isInsuranceFile(contact))
+    .filter(chanceOperatorContactAllowed)
     .filter((contact) => assignedTo(contact, ownerId));
   const active = assigned.filter(isOpenActive);
   return {
@@ -5083,12 +5164,26 @@ async function updateContact(input) {
       Object.prototype.hasOwnProperty.call(contact, key) ? contact[key] : null
     ])
   );
+  if (
+    Object.prototype.hasOwnProperty.call(input, "expectedBeforeFields")
+    && !recordMatchesFields(contact, input.expectedBeforeFields || {})
+  ) {
+    conflictError("One or more JobNimbus fields changed after approval. Nothing was written; prepare and approve a fresh plan.");
+  }
   const plan = {
     endpoint: `/contacts/${contact.jnid}`,
     before,
     fields: normalizedFields
   };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
+  if (recordMatchesFields(contact, normalizedFields)) {
+    return {
+      mode: "verified_noop",
+      verifiedByReadback: true,
+      file: compactContact(contact),
+      plan
+    };
+  }
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: normalizedFields });
   const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
   assertOperatorContactScope(refreshedContact);
@@ -5110,14 +5205,54 @@ async function updateStatus(input) {
     expectedFileId: input.expectedFileId
   });
   const status = resolveWorkflowStatusName(requestedStatus, knownStatusNames);
+  const currentStatus = String(contact.status_name || "").trim();
+  const hasExpectedBeforeStatus = Object.prototype.hasOwnProperty.call(input, "expectedBeforeStatus");
+  const expectedBeforeStatus = String(input.expectedBeforeStatus ?? "").trim();
+  if (hasExpectedBeforeStatus && currentStatus !== expectedBeforeStatus) {
+    conflictError(
+      `The JobNimbus stage changed after approval. Expected ${expectedBeforeStatus || "(blank)"}; found ${currentStatus || "(blank)"}. Nothing was written.`
+    );
+  }
+  const verifiedTransitionEvidence = input.enforceThresher === true
+    ? await verifyThresherTransitionEvidence(contact, input.transitionEvidence)
+    : null;
+  const thresherTransition = input.enforceThresher === true
+      ? validateThresherTransition({
+          currentStatus,
+          targetStatus: status,
+          evidence: verifiedTransitionEvidence,
+          fileId: contact.jnid
+        })
+      : null;
+  if (
+    input.execute === true
+    && input.enforceThresher === true
+    && Object.prototype.hasOwnProperty.call(input, "expectedThresherTransition")
+    && digest({ version: 1, transition: thresherTransition }) !== digest({
+      version: 1,
+      transition: input.expectedThresherTransition
+    })
+  ) {
+    conflictError("The provider evidence supporting this Thresher stage move changed after approval. Nothing was written; prepare and approve a fresh plan.");
+  }
   const body = { status_name: status };
   const plan = {
     endpoint: `/contacts/${contact.jnid}`,
+    before: { status_name: currentStatus || null },
     body,
     requestedStatus,
-    resolvedStatus: status
+    resolvedStatus: status,
+    ...(thresherTransition ? { thresherTransition } : {})
   };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
+  if (currentStatus === status) {
+    return {
+      mode: "verified_noop",
+      verifiedByReadback: true,
+      file: compactContact(contact),
+      plan
+    };
+  }
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body });
   const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
   assertOperatorContactScope(refreshedContact);
@@ -5127,6 +5262,147 @@ async function updateStatus(input) {
   const file = compactContact(refreshedContact);
   const memoryCloseout = await closeoutJobNimbusAction(file, "update_status", result, `Moved JobNimbus file to ${status}.`);
   return { mode: "executed", verifiedByReadback: true, file, result, memoryCloseout };
+}
+
+async function verifyThresherTransitionEvidence(contact, evidence = {}) {
+  const references = Array.isArray(evidence?.references) ? evidence.references : [];
+  if (!references.length) return { ...evidence, references: [] };
+  const file = compactContact(contact);
+  let scopedCommunicationFile = null;
+  let quoTimeline = null;
+  const verified = [];
+  for (const reference of references) {
+    const source = String(reference?.source || "").trim();
+    const id = String(reference?.id || "").trim();
+    const gate = String(reference?.gate || "").trim();
+    if (!id || !gate) continue;
+    let providerRecord;
+    if (source === "jobnimbus_activity") {
+      providerRecord = await jobNimbus(`/activities/${encodeURIComponent(id)}`);
+      if (!referencesContact(providerRecord, contact.jnid)) {
+        badRequest("A Thresher JobNimbus activity reference does not belong to this exact file.");
+      }
+      if (String(providerRecord?.record_type_name || "").trim().toLowerCase() !== "note") {
+        badRequest("A Thresher JobNimbus activity reference must be an exact file-related Note; events and appointments cannot prove a completed stage gate.");
+      }
+      const noteInactive = ["is_active", "isActive", "active"].some((key) => (
+        Object.prototype.hasOwnProperty.call(providerRecord, key)
+        && providerFlagFalse(providerRecord[key])
+      ));
+      const noteRemoved = [
+        "is_deleted",
+        "isDeleted",
+        "deleted",
+        "is_archived",
+        "isArchived",
+        "archived"
+      ].some((key) => providerFlagTrue(providerRecord[key]));
+      if (noteInactive || noteRemoved) {
+        badRequest("A deleted, archived, or explicitly inactive JobNimbus Note cannot prove a completed Thresher stage gate.");
+      }
+    } else if (source === "gmail_message") {
+      scopedCommunicationFile ||= await operatorCommunicationFile({ fileQuery: String(file.number) }, "Thresher Gmail evidence");
+      providerRecord = compactGmailFullMessage(await gmailApi(
+        `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(id)}?format=full`
+      ));
+      const blockedLabels = new Set(["DRAFT", "TRASH", "SPAM"]);
+      if (providerRecord.labelIds.some((label) => blockedLabels.has(String(label || "").toUpperCase()))) {
+        badRequest("A Thresher Gmail reference must be an actual sent or inbound message; drafts, trash, and spam cannot prove a completed stage gate.");
+      }
+      if (!gmailMessageMatchesFile(providerRecord, scopedCommunicationFile)) {
+        badRequest("A Thresher Gmail reference is not strongly correlated to this exact file.");
+      }
+    } else if (source === "quo_message") {
+      if (!quoTimeline) {
+        await assertUniqueChanceFilePhone(file, "Thresher Quo evidence");
+        const history = await readQuoHistoryStrict(quoConfig(), {
+          phone: file.phone,
+          maxResults: 100,
+          maxPages: 10
+        });
+        if (history?.completeness?.complete !== true) {
+          const error = new Error("Quo evidence pagination is incomplete, so the Thresher stage move is blocked.");
+          error.statusCode = 503;
+          throw error;
+        }
+        quoTimeline = Array.isArray(history.timeline) ? history.timeline : [];
+      }
+      providerRecord = quoTimeline.find((item) => (
+        String(item.id || "") === id
+        && String(item.type || "") === "text"
+      ));
+      if (!providerRecord) {
+        badRequest("A Thresher Quo reference is not present in the complete current history for this exact file.");
+      }
+      const quoDirection = String(providerRecord.direction || "").trim().toLowerCase();
+      const quoStatus = String(providerRecord.status || "").trim().toLowerCase();
+      const inboundCompleted = new Set(["incoming", "inbound", "received"]).has(quoDirection)
+        && new Set(["received", "delivered"]).has(quoStatus);
+      const outboundCompleted = new Set(["outgoing", "outbound", "sent"]).has(quoDirection)
+        && new Set(["sent", "delivered", "completed"]).has(quoStatus);
+      if (!inboundCompleted && !outboundCompleted) {
+        badRequest("A Thresher Quo message must be an inbound/received or outbound sent/delivered communication; queued, failed, canceled, and unknown messages cannot prove a completed stage gate.");
+      }
+    } else {
+      badRequest(`Unsupported Thresher evidence source: ${source || "(blank)"}.`);
+    }
+    verified.push({
+      source,
+      id,
+      gate,
+      fileId: contact.jnid,
+      fact: thresherProviderEvidenceFact(source, providerRecord),
+      providerDigest: digest({ source, id, providerRecord })
+    });
+  }
+  return { ...evidence, references: verified, gates: undefined };
+}
+
+function thresherProviderEvidenceFact(source, record = {}) {
+  const candidateValues = source === "gmail_message"
+    ? [
+        record?.headers?.subject,
+        record?.subject,
+        record?.snippet,
+        record?.plainText,
+        record?.headers?.from,
+        record?.from,
+        record?.headers?.date,
+        record?.date
+      ]
+    : source === "quo_message"
+      ? [
+          record?.summary,
+          record?.text,
+          record?.body,
+          record?.snippet,
+          record?.status,
+          record?.direction,
+          record?.createdAt,
+          record?.date
+        ]
+      : [
+          record?.title,
+          record?.subject,
+          record?.description,
+          record?.note,
+          record?.filename,
+          record?.name,
+          record?.record_type_name,
+          record?.date_created,
+          record?.date_updated
+        ];
+  const summary = candidateValues
+    .flatMap((value) => Array.isArray(value) ? value : [value])
+    .map((value) => typeof value === "string" || typeof value === "number" ? String(value).trim() : "")
+    .filter(Boolean)
+    .join(" | ")
+    .replace(/\s+/g, " ")
+    .slice(0, 1_000);
+  if (!summary) {
+    badRequest(`The ${source} record does not contain enough provider text to support a Thresher gate.`);
+  }
+  return summary;
 }
 
 async function processUpdate(input) {
@@ -5499,6 +5775,279 @@ async function createTask(input) {
   return { mode: "executed", file, result, memoryCloseout };
 }
 
+async function listCompleteRelatedTasks(contactId) {
+  const pageSize = 500;
+  const maxTasksPerRelation = 5_000;
+  const byId = new Map();
+  for (const field of ["related.id", "primary.id"]) {
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { [field]: contactId } }] }));
+    let from = 0;
+    while (from < maxTasksPerRelation) {
+      const payload = await jobNimbus(`/tasks?size=${pageSize}&from=${from}&filter=${filter}`);
+      const page = unwrapList(payload, "tasks");
+      for (const task of page) {
+        if (!referencesContact(task, contactId)) continue;
+        const id = taskRecordId(task);
+        if (!id) {
+          const error = new Error("JobNimbus returned a related task without an exact task ID. Nothing was changed.");
+          error.statusCode = 503;
+          throw error;
+        }
+        byId.set(id, task);
+      }
+      const declaredTotalRaw = payload?.total ?? payload?.count ?? payload?.meta?.total;
+      const hasDeclaredTotal = declaredTotalRaw !== undefined && declaredTotalRaw !== null && declaredTotalRaw !== "";
+      const declaredTotal = hasDeclaredTotal ? Number(declaredTotalRaw) : NaN;
+      if (hasDeclaredTotal) {
+        if (
+          !Number.isSafeInteger(declaredTotal)
+          || declaredTotal < 0
+          || declaredTotal > maxTasksPerRelation
+          || from + page.length > declaredTotal
+        ) {
+          const error = new Error("JobNimbus returned an invalid task total, so the current-control task inventory may be incomplete. Nothing was changed.");
+          error.statusCode = 503;
+          throw error;
+        }
+        if (from + page.length >= declaredTotal) break;
+        if (!page.length) {
+          const error = new Error("JobNimbus task pagination stopped before its declared total, so the current-control task inventory may be incomplete. Nothing was changed.");
+          error.statusCode = 503;
+          throw error;
+        }
+        from += page.length;
+        continue;
+      }
+      if (!page.length) break;
+      from += page.length;
+    }
+    if (from >= maxTasksPerRelation) {
+      const probe = unwrapList(
+        await jobNimbus(`/tasks?size=1&from=${from}&filter=${filter}`),
+        "tasks"
+      );
+      if (probe.length) {
+        const error = new Error("JobNimbus task pagination reached the 5,000-record safety ceiling, so the current-control task inventory may be incomplete. Nothing was changed.");
+        error.statusCode = 503;
+        throw error;
+      }
+    }
+  }
+  return [...byId.values()];
+}
+
+function taskRecordId(task) {
+  return String(task?.jnid || task?.id || "").trim();
+}
+
+function taskContainsCurrentControlMarker(task) {
+  return [task?.description, task?.note, task?.title, task?.subject]
+    .some((value) => String(value || "").includes(CURRENT_CONTROL_TASK_MARKER));
+}
+
+function taskIsOpenActive(task) {
+  return !providerFlagTrue(task?.is_completed)
+    && !providerFlagTrue(task?.is_archived)
+    && !providerFlagTrue(task?.is_deleted)
+    && !providerFlagFalse(task?.is_active);
+}
+
+function providerFlagTrue(value) {
+  return value === true || value === 1 || ["true", "1", "yes"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function providerFlagFalse(value) {
+  return value === false || value === 0 || ["false", "0", "no"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function taskOwnedByChance(task) {
+  return assignedTo(task, CHANCE_OWNER_ID);
+}
+
+function currentControlTaskSnapshot(task) {
+  if (!task) return null;
+  return {
+    id: taskRecordId(task),
+    title: String(task.title || task.subject || ""),
+    subject: String(task.subject || task.title || ""),
+    description: String(task.description || task.note || ""),
+    note: String(task.note || task.description || ""),
+    date_start: Number(task.date_start || 0),
+    date_end: Number(task.date_end || 0),
+    is_completed: providerFlagTrue(task.is_completed),
+    is_active: !providerFlagFalse(task.is_active),
+    is_archived: providerFlagTrue(task.is_archived),
+    owners: (Array.isArray(task.owners) ? task.owners : [])
+      .map((owner) => String(owner?.id || owner?.jnid || owner || ""))
+      .filter(Boolean)
+      .sort()
+  };
+}
+
+function currentControlTaskInventory(tasks, selectedTask = null) {
+  const markerTasks = tasks.filter(taskContainsCurrentControlMarker);
+  const state = {
+    markers: markerTasks.map(currentControlTaskSnapshot).sort((left, right) => left.id.localeCompare(right.id)),
+    selected: currentControlTaskSnapshot(selectedTask)
+  };
+  return {
+    markerTasks,
+    digest: digest({ version: 1, state })
+  };
+}
+
+function requireCurrentControlTaskText(input) {
+  const title = required(input.title || input.subject, "title");
+  const description = required(input.description || input.note, "description");
+  if (!/(?:^|\n)Do:\s*\S/i.test(description) || !/(?:^|\n)Waiting on:\s*\S/i.test(description)) {
+    badRequest("A current-control task description must include separate 'Do:' and 'Waiting on:' lines.");
+  }
+  const dueDate = required(input.dueDate || input.dateStart, "dueDate");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+    badRequest("dueDate must use YYYY-MM-DD for a current-control task.");
+  }
+  return { title, description, dueDate };
+}
+
+function assertUsableCurrentControlTask(task, contact) {
+  assertOperatorRelatedRecord(task, contact, "current-control task", ["task"]);
+  if (!taskIsOpenActive(task)) {
+    conflictError("The selected current-control task is completed, archived, deleted, or inactive. Nothing was changed.");
+  }
+  if (!taskOwnedByChance(task)) {
+    conflictError("The selected current-control task is not assigned to Chance. Nothing was changed.");
+  }
+}
+
+async function ensureCurrentTask(input) {
+  if (input.execute === true && !ALLOW_WRITES) {
+    badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to create or update current-control tasks.");
+  }
+  if (taskCompletionRequested(input)) {
+    badRequest("Current-control task actions cannot contain any completion-state field.");
+  }
+  const query = required(input.query, "query");
+  const desired = requireCurrentControlTaskText(input);
+  const { contact } = await findChanceContact(query, { expectedFileId: input.expectedFileId });
+  const tasks = await listCompleteRelatedTasks(contact.jnid);
+  const requestedTaskId = String(input.taskId || "").trim();
+  const markerTasks = tasks.filter(taskContainsCurrentControlMarker);
+  if (markerTasks.length > 1) {
+    conflictError("More than one HCN current-control task marker exists on this file. Reconcile them manually before any task write.");
+  }
+
+  let selectedTask = null;
+  if (requestedTaskId) {
+    selectedTask = tasks.find((task) => taskRecordId(task) === requestedTaskId) || null;
+    if (!selectedTask) conflictError("The selected task is not related to this exact JobNimbus file.");
+    assertUsableCurrentControlTask(selectedTask, contact);
+    if (markerTasks.length === 1 && taskRecordId(markerTasks[0]) !== requestedTaskId) {
+      conflictError("A different HCN current-control task already exists on this file. Nothing was changed.");
+    }
+  } else if (markerTasks.length === 1) {
+    selectedTask = markerTasks[0];
+    assertUsableCurrentControlTask(selectedTask, contact);
+  }
+
+  const dateStart = toUnixSeconds(desired.dueDate);
+  const dateEnd = toUnixSeconds(desired.dueDate);
+  const note = `${CURRENT_CONTROL_TASK_MARKER}\n${desired.description}`;
+  const updateBody = {
+    title: desired.title,
+    subject: desired.title,
+    description: desired.description,
+    note,
+    date_start: dateStart,
+    date_end: dateEnd
+  };
+  const createBody = {
+    ...updateBody,
+    is_completed: false,
+    record_type_name: "Task",
+    owners: [{ id: CHANCE_OWNER_ID }],
+    primary: { id: contact.jnid },
+    related: [{ id: contact.jnid }]
+  };
+  validateDateRange(dateStart, dateEnd);
+  const inventory = currentControlTaskInventory(tasks, selectedTask);
+  const decision = selectedTask
+    ? recordMatchesFields(selectedTask, updateBody) ? "noop" : "update"
+    : "create";
+  const plan = {
+    decision,
+    selectedTaskId: selectedTask ? taskRecordId(selectedTask) : null,
+    before: currentControlTaskSnapshot(selectedTask),
+    after: selectedTask ? updateBody : createBody,
+    markerTaskIds: markerTasks.map(taskRecordId),
+    otherOpenTaskCount: tasks.filter((task) => taskIsOpenActive(task) && task !== selectedTask).length,
+    controlInventoryDigest: inventory.digest,
+    schedule: centralSchedulePreview(dateStart, dateEnd)
+  };
+  if (input.execute !== true) {
+    return { mode: "dry_run", file: compactContact(contact), plan };
+  }
+  if (!input.expectedPlan || digest(input.expectedPlan) !== digest(plan)) {
+    conflictError("The current-control task inventory or desired task changed after approval. Nothing was written; prepare a fresh plan.");
+  }
+  if (decision === "noop") {
+    return {
+      mode: "verified_noop",
+      verifiedByReadback: true,
+      changed: false,
+      decision,
+      taskId: taskRecordId(selectedTask),
+      file: compactContact(contact),
+      result: selectedTask,
+      plan
+    };
+  }
+
+  let providerResult;
+  if (decision === "create") {
+    providerResult = await jobNimbus("/tasks", { method: "POST", body: createBody });
+  } else {
+    try {
+      providerResult = await jobNimbus(`/tasks/${encodeURIComponent(taskRecordId(selectedTask))}`, {
+        method: "PUT",
+        body: updateBody
+      });
+    } catch (error) {
+      if (!isAmbiguousTaskUpdateError(error)) throw error;
+      const task = await jobNimbus(`/tasks/${encodeURIComponent(taskRecordId(selectedTask))}`);
+      if (!recordMatchesFields(task, updateBody)) throw error;
+      providerResult = task;
+    }
+  }
+
+  const refreshedTasks = await listCompleteRelatedTasks(contact.jnid);
+  const refreshedMarkers = refreshedTasks.filter(taskContainsCurrentControlMarker);
+  if (refreshedMarkers.length !== 1) {
+    conflictError("JobNimbus did not read back exactly one open HCN current-control task. Reconciliation is required before any retry.");
+  }
+  const refreshedTask = refreshedMarkers[0];
+  assertUsableCurrentControlTask(refreshedTask, contact);
+  if (!recordMatchesFields(refreshedTask, updateBody) || providerFlagTrue(refreshedTask.is_completed)) {
+    conflictError("JobNimbus accepted the task request, but a fresh read did not confirm the exact open current-control task state.");
+  }
+  const taskId = taskRecordId(refreshedTask);
+  const memoryCloseout = await closeoutJobNimbusAction(
+    compactContact(contact),
+    "ensure_current_task",
+    providerResult,
+    `${decision === "create" ? "Created" : "Updated"} the approved current-control task ${taskId}.`
+  );
+  return {
+    mode: "executed",
+    verifiedByReadback: true,
+    changed: true,
+    decision,
+    taskId,
+    file: compactContact(contact),
+    result: refreshedTask,
+    memoryCloseout
+  };
+}
+
 async function uploadJobNimbusFile(input) {
   if (input.execute === true && !ALLOW_WRITES) {
     badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to execute file uploads.");
@@ -5787,8 +6336,15 @@ async function gmailThread(input) {
   const threadId = required(input.threadId, "threadId");
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
   const messages = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
-  if (operatorFile && !messages.some((message) => gmailMessageMatchesFile(message, operatorFile))) {
-    operatorScopeError(`That Gmail thread is not strongly correlated to the resolved ${operatorFileDescription()}.`);
+  if (operatorFile) {
+    const correlations = messages.map((message) => gmailMessageFileCorrelation(message, operatorFile));
+    if (
+      !correlations.length
+      || correlations.some((item) => !item.complete || item.conflictingFileIds.length > 0)
+      || !correlations.some((item) => item.targetMatch)
+    ) {
+      operatorScopeError(`That Gmail thread is not exclusively correlated to the resolved ${operatorFileDescription()}.`);
+    }
   }
   return {
     id: thread.id || threadId,
@@ -5881,53 +6437,65 @@ async function operatorCommunicationFile(input, label) {
   const file = internalFile?.id
     ? internalFile
     : compactContact((await findChanceContact(required(input?.fileQuery, `${label} fileQuery`))).contact);
+  let companyIndex = null;
+  if (
+    file[GMAIL_FILE_EMAIL_UNIQUE] === undefined
+    || file[GMAIL_FILE_CLAIM_UNIQUE] === undefined
+    || file[GMAIL_FILE_COMPANY_CONTACTS] === undefined
+  ) {
+    companyIndex = await hcnCachedContactIndex({ maxRecords: 5000 });
+    if (!companyIndex.complete) {
+      const error = new Error("The complete company communication index is unavailable.");
+      error.statusCode = 503;
+      throw error;
+    }
+    if (file[GMAIL_FILE_COMPANY_CONTACTS] === undefined) {
+      Object.defineProperty(file, GMAIL_FILE_COMPANY_CONTACTS, {
+        value: companyIndex.rows,
+        enumerable: false
+      });
+    }
+  }
   if (
     file[GMAIL_FILE_EMAIL_UNIQUE] === undefined
     || file[GMAIL_FILE_CLAIM_UNIQUE] === undefined
   ) {
-    const email = String(file.email || "").trim().toLowerCase();
-    const claimNumber = normalizeCompare(file.claimNumber);
-    const contacts =
-      email || claimNumber.length >= 6
-        ? await listContacts({ maxPages: 25 })
-        : [];
-    const matchingEmailFiles = email
-      ? contacts.filter(
-          (contact) =>
-            String(compactContact(contact).email || "")
-              .trim()
-              .toLowerCase() === email
-        )
-      : [];
-    const matchingClaimFiles = claimNumber.length >= 6
-      ? contacts.filter(
-          (contact) =>
-            normalizeCompare(compactContact(contact).claimNumber)
-              === claimNumber
-        )
-      : [];
+    const email = hcnNormalizeCorrelationEmail(file.email);
+    const claimNumber = hcnNormalizeCorrelationClaim(file.claimNumber);
+    const emailCorrelation = hcnGlobalScalarCorrelation(
+      companyIndex.rows,
+      email,
+      HCN_CONTACT_EMAIL_KEYS,
+      hcnNormalizeCorrelationEmail
+    );
+    const claimCorrelation = hcnGlobalScalarCorrelation(
+      companyIndex.rows,
+      claimNumber,
+      HCN_CONTACT_CLAIM_KEYS,
+      hcnNormalizeCorrelationClaim
+    );
     Object.defineProperty(file, GMAIL_FILE_EMAIL_UNIQUE, {
       value:
         Boolean(email)
-        && matchingEmailFiles.length === 1
-        && String(
-          matchingEmailFiles[0]?.jnid
-            || matchingEmailFiles[0]?.id
-            || ""
-        ) === String(file.id || ""),
+        && emailCorrelation.complete
+        && emailCorrelation.matches.length === 1
+        && String(emailCorrelation.matches[0]?.jnid || emailCorrelation.matches[0]?.id || "") === String(file.id || ""),
       enumerable: false
     });
     Object.defineProperty(file, GMAIL_FILE_CLAIM_UNIQUE, {
       value:
         claimNumber.length >= 6
-        && matchingClaimFiles.length === 1
-        && String(
-          matchingClaimFiles[0]?.jnid
-            || matchingClaimFiles[0]?.id
-            || ""
-        ) === String(file.id || ""),
+        && claimCorrelation.complete
+        && claimCorrelation.matches.length === 1
+        && String(claimCorrelation.matches[0]?.jnid || claimCorrelation.matches[0]?.id || "") === String(file.id || ""),
       enumerable: false
     });
+  }
+  if (
+    file[GMAIL_FILE_EMAIL_UNIQUE] !== true
+    && file[GMAIL_FILE_CLAIM_UNIQUE] !== true
+  ) {
+    badRequest(`The resolved ${operatorFileDescription()} has neither a company-unique client email nor a company-unique claim number, so ${label} is ambiguous and blocked.`);
   }
   return file;
 }
@@ -5944,7 +6512,7 @@ function operatorScopeError(message) {
   throw error;
 }
 
-function gmailMessageMatchesFile(message, file) {
+function gmailMessageFileCorrelation(message, file) {
   const headerText = [
     message.from,
     message.to,
@@ -5957,8 +6525,6 @@ function gmailMessageMatchesFile(message, file) {
     [...headerText.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)]
       .map((match) => String(match[0] || "").toLowerCase())
   );
-  if (file[GMAIL_FILE_EMAIL_UNIQUE] === true && clientEmail && headerAddresses.has(clientEmail)) return true;
-
   const content = [
     headerText,
     message.plainText,
@@ -5967,9 +6533,78 @@ function gmailMessageMatchesFile(message, file) {
     ...(Array.isArray(message.attachments) ? message.attachments.map((row) => row.filename) : [])
   ].map((value) => String(value || "")).join("\n");
   const claimNumber = String(file.claimNumber || "").trim();
-  return file[GMAIL_FILE_CLAIM_UNIQUE] === true
-    && normalizeCompare(claimNumber).length >= 6
-    && contentContainsExactIdentifier(content, claimNumber);
+  const targetMatch = Boolean(
+    (
+      file[GMAIL_FILE_EMAIL_UNIQUE] === true
+      && clientEmail
+      && headerAddresses.has(clientEmail)
+    )
+    || (
+      file[GMAIL_FILE_CLAIM_UNIQUE] === true
+      && normalizeCompare(claimNumber).length >= 6
+      && contentContainsExactIdentifier(content, claimNumber)
+    )
+  );
+  const companyContacts = file[GMAIL_FILE_COMPANY_CONTACTS];
+  if (!Array.isArray(companyContacts)) {
+    return { complete: false, targetMatch: false, conflictingFileIds: [] };
+  }
+  const conflictingFileIds = [];
+  for (const contact of companyContacts) {
+    const contactId = String(contact?.jnid || contact?.id || "");
+    if (!contactId) return { complete: false, targetMatch: false, conflictingFileIds: [] };
+    const emailInventory = hcnContactScalarInventory(
+      contact,
+      HCN_CONTACT_EMAIL_KEYS,
+      hcnNormalizeCorrelationEmail
+    );
+    const claimInventory = hcnContactScalarInventory(
+      contact,
+      HCN_CONTACT_CLAIM_KEYS,
+      hcnNormalizeCorrelationClaim
+    );
+    if (!emailInventory.complete || !claimInventory.complete) {
+      return { complete: false, targetMatch: false, conflictingFileIds: [] };
+    }
+    const emailMatch = [...emailInventory.values]
+      .some((email) => headerAddresses.has(email));
+    const claimMatch = [...claimInventory.values]
+      .some((claim) => claim.length >= 6 && contentContainsExactIdentifier(content, claim));
+    if ((emailMatch || claimMatch) && contactId !== String(file.id || "")) {
+      conflictingFileIds.push(contactId);
+    }
+  }
+  return {
+    complete: true,
+    targetMatch,
+    conflictingFileIds: [...new Set(conflictingFileIds)]
+  };
+}
+
+function gmailMessageMatchesFile(message, file) {
+  const correlation = gmailMessageFileCorrelation(message, file);
+  return correlation.complete
+    && correlation.targetMatch
+    && correlation.conflictingFileIds.length === 0;
+}
+
+function gmailDraftReconciliationShape(value = {}) {
+  return {
+    to: String(value.to || "").trim(),
+    cc: String(value.cc || "").trim(),
+    bcc: String(value.bcc || "").trim(),
+    subject: String(value.subject || "").trim(),
+    body: normalizeEmailBody(value.body || ""),
+    attachments: (Array.isArray(value.attachments) ? value.attachments : []).map((attachment) => ({
+      filename: String(attachment?.filename || ""),
+      bytes: Number(attachment?.bytes || 0),
+      sha256: String(attachment?.sha256 || "").toLowerCase()
+    }))
+  };
+}
+
+function gmailDraftReconciliationDigest(value = {}) {
+  return digest({ version: 1, draft: gmailDraftReconciliationShape(value) });
 }
 
 function contentContainsExactIdentifier(content, identifier) {
@@ -5985,6 +6620,20 @@ async function gmailDraft(input) {
   const operatorFile = await operatorGmailActionFile(input, "Gmail draft");
   const to = validateEmailAddressList(required(input.to, "to"), "to", { required: true });
   const subject = validateEmailHeaderValue(required(input.subject, "subject"), "subject");
+  if (
+    operatorFile
+    && isMacCodexOperatorRequest()
+    && !operatorCompanyScopeActive()
+    && input.insuranceClaimEmail === true
+  ) {
+    const claimNumber = String(operatorFile.claimNumber || "").trim();
+    if (!claimNumber) {
+      badRequest("The exact JobNimbus file has no verified claim number, so a carrier Gmail draft cannot be created in the locked Chance run.");
+    }
+    if (subject.trim() !== claimNumber) {
+      badRequest(`Carrier Gmail draft subject must be exactly the live JobNimbus claim number: ${claimNumber}.`);
+    }
+  }
   const cc = validateEmailAddressList(input.cc, "cc");
   const bcc = validateEmailAddressList(input.bcc, "bcc");
   const threadId = String(input.threadId || "").trim();
@@ -5993,11 +6642,23 @@ async function gmailDraft(input) {
     : input);
   const resolvedMessage = await resolveGmailMessageBody(input, attachments);
   const body = resolvedMessage.body;
-  const reusable = operatorFile ? null : await reusableGmailDraft(input, subject);
+  const reusable = await reusableGmailDraft(input, subject);
   if (reusable) {
     const bodyMatches = normalizeEmailBody(reusable.snapshot.body) === normalizeEmailBody(body);
+    if (input.execute === true) {
+      conflictError(
+        bodyMatches
+          ? "A Gmail draft for this exact file and claim subject appeared after approval. Nothing new was created; reconcile and review that draft before any retry."
+          : "A different Gmail draft for this exact file and claim subject appeared after approval. Nothing new was created; reconcile the mismatch before any retry."
+      );
+    }
     return {
       mode: "existing_draft",
+      fileScope: {
+        id: reusable.file.id,
+        number: reusable.file.number,
+        name: reusable.file.name
+      },
       draft: reusable.snapshot,
       bodyTemplate: resolvedMessage.template,
       bodyMatches,
@@ -6042,7 +6703,13 @@ async function gmailDraft(input) {
   }
   requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail draft");
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to create Gmail drafts.");
-  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, { to, subject });
+  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, {
+    to,
+    subject,
+    sourceKey: operatorFile
+      ? `claim-draft:${operatorFile.id}:${subject.trim()}`
+      : ""
+  });
   let result;
   try {
     result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts`, {
@@ -6289,13 +6956,117 @@ async function reusableGmailDraft(input, subject) {
   if (!file) return null;
   const receipt = latestActionReceipts(MEMORY_CONFIG, 40, { subjectKey: file.id })
     .find((row) => row.channel === "gmail" && row.action === "create_draft" && row.status === "drafted" && row.externalId && row.summary.includes(`subject ${subject}`));
-  if (!receipt) return null;
+  let draftId = String(receipt?.externalId || "").trim();
+  if (!draftId) {
+    const sourceKeyHash = createHash("sha256")
+      .update(`claim-draft:${file.id}:${String(subject || "").trim()}`, "utf8")
+      .digest("hex");
+    const outbound = (await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger"))
+      .find((row) => (
+        row.channel === "gmail_draft"
+        && row.sourceKeyHash === sourceKeyHash
+        && row.status === "completed"
+        && row.externalId
+      ));
+    draftId = String(outbound?.externalId || "").trim();
+  }
+  if (!draftId) return null;
   try {
-    return { file, receipt, snapshot: await gmailDraftSnapshot(receipt.externalId) };
+    return { file, receipt: receipt || null, snapshot: await gmailDraftSnapshot(draftId) };
   } catch (error) {
     if (error?.statusCode === 404) return null;
     throw error;
   }
+}
+
+async function reconcileGmailDraftIntent(intent) {
+  const expected = intent?.reconciliation || {};
+  const subject = String(expected.subject || "").trim();
+  const expectedDigest = String(expected.contentDigest || "").trim();
+  const sourceKeyHash = String(expected.sourceKeyHash || "").trim();
+  const channelApprovalDigest = String(expected.channelApprovalDigest || "").trim();
+  if (!subject || !expectedDigest || !sourceKeyHash || !channelApprovalDigest) {
+    conflictError("The interrupted Gmail draft intent is incomplete. Manual reconciliation is required.");
+  }
+  const contact = await jobNimbus(`/contacts/${encodeURIComponent(intent.fileId)}`);
+  assertOperatorContactScope(contact);
+  if (String(compactContact(contact).claimNumber || "").trim() !== subject) {
+    conflictError("The file claim number changed after the interrupted Gmail draft. Manual reconciliation is required.");
+  }
+
+  const outbound = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+  const candidates = outbound.filter((row) => (
+    row.channel === "gmail_draft"
+    && row.sourceKeyHash === sourceKeyHash
+    && row.approvalDigest === channelApprovalDigest
+    && row.status !== "verified_not_applied"
+  ));
+  if (candidates.length > 1) {
+    conflictError("More than one Gmail draft reservation exists for this exact file and claim subject. Manual reconciliation is required.");
+  }
+  const reservation = candidates[0] || null;
+  if (!reservation) {
+    return { applied: false, externalId: "", reservationId: "", verifiedByReadback: true };
+  }
+
+  let snapshots = [];
+  const recordedDraftId = String(reservation.externalId || "").trim();
+  if (recordedDraftId) {
+    try {
+      snapshots = [await gmailDraftSnapshot(recordedDraftId)];
+    } catch (error) {
+      if (Number(error?.statusCode) !== 404) throw error;
+    }
+  } else {
+    let pageToken = "";
+    for (let page = 0; page < 5; page += 1) {
+      const params = new URLSearchParams({
+        maxResults: "100",
+        q: `in:drafts subject:\"${subject.replace(/["\\]/g, " ")}\"`
+      });
+      if (pageToken) params.set("pageToken", pageToken);
+      const listed = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts?${params.toString()}`);
+      for (const draft of Array.isArray(listed?.drafts) ? listed.drafts : []) {
+        const draftId = String(draft?.id || "").trim();
+        if (!draftId) continue;
+        const snapshot = await gmailDraftSnapshot(draftId);
+        if (snapshot.subject === subject) snapshots.push(snapshot);
+      }
+      pageToken = String(listed?.nextPageToken || "").trim();
+      if (!pageToken) break;
+      if (page === 4) {
+        const error = new Error("Gmail draft reconciliation exceeded 500 candidate drafts and cannot prove a complete result.");
+        error.statusCode = 503;
+        throw error;
+      }
+    }
+  }
+
+  const matches = snapshots.filter((snapshot) => (
+    gmailDraftReconciliationDigest(snapshot) === expectedDigest
+    && (!expected.threadId || String(snapshot.threadId || "") === String(expected.threadId))
+  ));
+  if (matches.length > 1) {
+    conflictError("Multiple Gmail drafts exactly match the interrupted approved intent. Manual reconciliation is required.");
+  }
+  const applied = matches.length === 1;
+  const externalId = applied ? String(matches[0].id || "") : "";
+  await withOutboundSendMutation(async () => {
+    const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+    const row = ledger.find((item) => item.id === reservation.id);
+    if (!row) conflictError("The Gmail draft reservation changed during reconciliation.");
+    row.status = applied ? "completed" : "verified_not_applied";
+    row.externalId = externalId;
+    row.reconciledAt = new Date().toISOString();
+    row.updatedAt = row.reconciledAt;
+    await writeOutboundSendLedger(ledger);
+  });
+  return {
+    applied,
+    externalId,
+    reservationId: reservation.id,
+    verifiedByReadback: true
+  };
 }
 
 async function assertOperatorDraftProvenance(file, draftId) {
@@ -6489,17 +7260,43 @@ async function quoNumbers() {
 async function assertUniqueChanceFilePhone(file, label) {
   const phone = normalizePhone(file?.phone);
   if (!phone) badRequest(`The resolved ${operatorFileDescription()} has no phone number for ${label}.`);
-  const contacts = await listContacts({ maxPages: 25 });
-  const matchingFiles = contacts
-    .filter(isInsuranceFile)
-    .filter((contact) => (
-      operatorCompanyScopeActive()
-      || assignedTo(contact, CHANCE_OWNER_ID)
-    ))
-    .filter((contact) => normalizePhone(compactContact(contact).phone) === phone);
-  if (matchingFiles.length !== 1 || String(compactContact(matchingFiles[0]).id) !== String(file.id)) {
-    badRequest(`The resolved phone is shared across multiple files in the authorized scope, so ${label} is ambiguous and blocked.`);
+  const index = await hcnCachedContactIndex({ maxRecords: 5000 });
+  if (!index.complete) {
+    badRequest(`The complete company insurance-file phone index is unavailable, so ${label} is blocked.`);
   }
+  const correlation = hcnGlobalPhoneCorrelation(
+    index.rows.filter(isInsuranceFile),
+    phone
+  );
+  if (
+    !correlation.complete
+    || correlation.matches.length !== 1
+    || String(correlation.matches[0]?.jnid || correlation.matches[0]?.id || "") !== String(file.id)
+  ) {
+    badRequest(`The resolved phone is shared across multiple company insurance files, so ${label} is ambiguous and blocked.`);
+  }
+}
+
+async function readExactOperatorQuoHistory(file, input = {}) {
+  const history = await readQuoHistoryStrict(quoConfig(), {
+    phone: file.phone,
+    maxResults: clamp(Number(input.maxResults || 25), 1, 50),
+    maxPages: clamp(Number(input.maxPages || 10), 1, 10)
+  });
+  const transcripts = [];
+  if (input.includeTranscripts === true) {
+    const recentCalls = history.timeline
+      .filter((item) => item.type === "call")
+      .sort((left, right) => String(right.atUtc).localeCompare(String(left.atUtc)))
+      .slice(0, 3);
+    for (const call of recentCalls) {
+      const transcript = await readQuoTranscript(quoConfig(), call.id, {
+        allowMissing: true
+      });
+      if (transcript) transcripts.push(transcript);
+    }
+  }
+  return { ...history, transcripts };
 }
 
 async function quoHistory(input = {}) {
@@ -6517,11 +7314,13 @@ async function quoHistory(input = {}) {
     phone ||= file.phone;
   }
   if (!phone) badRequest("phone or a Chance file query with a phone number is required");
-  const history = await readQuoHistory(quoConfig(), {
-    phone,
-    maxResults: input.maxResults,
-    includeTranscripts: input.includeTranscripts === true
-  });
+  const history = isCodexOperatorRequest()
+    ? await readExactOperatorQuoHistory(file, input)
+    : await readQuoHistory(quoConfig(), {
+        phone,
+        maxResults: input.maxResults,
+        includeTranscripts: input.includeTranscripts === true
+      });
   return {
     generatedAt: new Date().toISOString(),
     file,
@@ -6538,8 +7337,7 @@ async function quoTranscript(input = {}) {
   const query = required(input.query, "query");
   const file = compactContact((await findChanceContact(query)).contact);
   await assertUniqueChanceFilePhone(file, "Quo transcript verification");
-  const history = await readQuoHistory(quoConfig(), {
-    phone: file.phone,
+  const history = await readExactOperatorQuoHistory(file, {
     maxResults: 50,
     includeTranscripts: false
   });
@@ -6953,6 +7751,7 @@ async function reviewChanceFiles(input = {}) {
   } else {
     contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
       .filter(isInsuranceFile)
+      .filter(chanceOperatorContactAllowed)
       .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
       .filter((contact) => input.activeOnly === false || isOpenActive(contact))
       .sort(fileSort);
@@ -7096,6 +7895,7 @@ async function startCommunicationRecoveryReview(input, identity) {
   const days = clamp(Number(input.communicationDays || 30), 1, 90);
   const contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
     .filter(isInsuranceFile)
+    .filter(chanceOperatorContactAllowed)
     .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
     .filter(isOpenActive);
   const files = contacts.map(compactContact);
@@ -7187,6 +7987,7 @@ function communicationSourceStatus(result, count, detail = null) {
 async function startTodaysInspectionReview(input, identity) {
   const contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
     .filter(isInsuranceFile)
+    .filter(chanceOperatorContactAllowed)
     .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
     .filter(isOpenActive);
   const taskRows = [];
@@ -7327,9 +8128,9 @@ async function buildChanceEvidencePacket(contact, input) {
   const operatorRequest = isCodexOperatorRequest();
   const file = compactContact(contact);
   const [activities, tasks, documents] = await Promise.all([
-    listRelated("/activities", contact.jnid, 60),
-    listRelated("/tasks", contact.jnid, 60),
-    listRelated("/files", contact.jnid, 1000)
+    listRelated("/activities", contact.jnid, operatorRequest ? 5000 : 60),
+    listRelated("/tasks", contact.jnid, operatorRequest ? 5000 : 60),
+    listRelated("/files", contact.jnid, operatorRequest ? 5000 : 1000)
   ]);
   const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
   const sourceStatus = { jobNimbus: { status: "fresh", at: new Date().toISOString() } };
@@ -7372,12 +8173,23 @@ async function buildChanceEvidencePacket(contact, input) {
     } else {
       try {
         if (operatorRequest) await assertUniqueChanceFilePhone(file, "Quo evidence review");
-        const history = await readQuoHistory(quoConfig(), {
-          phone: file.phone,
-          maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
-          includeTranscripts: input.includeQuoTranscripts === true
-        });
-        quo = { status: "fresh", ...history, timeline: history.timeline.slice(-30).reverse() };
+        const history = operatorRequest
+          ? await readExactOperatorQuoHistory(file, {
+              maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
+              includeTranscripts: input.includeQuoTranscripts === true
+            })
+          : await readQuoHistory(quoConfig(), {
+              phone: file.phone,
+              maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
+              includeTranscripts: input.includeQuoTranscripts === true
+            });
+        const historyComplete = !operatorRequest
+          || history?.completeness?.complete === true;
+        quo = {
+          status: historyComplete ? "fresh" : "partial",
+          ...history,
+          timeline: history.timeline.slice(-30).reverse()
+        };
       } catch (error) {
         quo = { status: "error", error: redactSensitiveText(error.message), timeline: [], transcripts: [] };
       }
@@ -7385,9 +8197,17 @@ async function buildChanceEvidencePacket(contact, input) {
   }
   sourceStatus.quo = { status: quo.status, at: new Date().toISOString() };
 
-  const sortedActivities = [...activities].sort((a, b) => Number(b.date_created || 0) - Number(a.date_created || 0));
-  const openTasks = tasks.filter((task) => !task.is_completed).sort((a, b) => Number(a.date_start || a.date_end || 0) - Number(b.date_start || b.date_end || 0));
-  const requestedSourcesComplete = [gmail.status, quo.status].every((status) => !["unavailable", "error"].includes(status));
+  const sortedActivities = [...activities].sort(
+    (a, b) => providerTimeMs(b.date_created) - providerTimeMs(a.date_created)
+  );
+  const openTasks = tasks
+    .filter((task) => !providerFlagTrue(task.is_completed))
+    .sort(
+      (a, b) => providerTimeMs(a.date_start || a.date_end)
+        - providerTimeMs(b.date_start || b.date_end)
+    );
+  const requestedSourcesComplete = [gmail.status, quo.status]
+    .every((status) => !["unavailable", "error", "partial"].includes(status));
   const packet = {
     complete: requestedSourcesComplete,
     file,
@@ -7468,9 +8288,428 @@ async function buildChanceEvidencePacket(contact, input) {
   };
 }
 
+async function operatorRunPolicy() {
+  if (!isMacCodexOperatorRequest()) {
+    const error = new Error("The locked Chance run-policy attestation is available only to the dedicated Mac operator.");
+    error.statusCode = 403;
+    throw error;
+  }
+  const policy = chanceOperatorRunManifestSummary(CHANCE_OPERATOR_RUN_MANIFEST);
+  const ledger = await readActionBatchLedger();
+  const principalHash = actionApprovalIdentityHash();
+  const attentionStatuses = new Set([
+    "in_progress",
+    "partial_failure",
+    "reconciliation_required",
+    "legacy_quarantined",
+    "manual_quarantined",
+    "completed_pending_verification"
+  ]);
+  const manifestFileIds = new Set(
+    (CHANCE_OPERATOR_RUN_MANIFEST?.files || [])
+      .map((file) => String(file.fileId || ""))
+      .filter(Boolean)
+  );
+  const isAttentionRow = (row) => (
+    attentionStatuses.has(String(row.status || ""))
+    || Boolean(row.current)
+  );
+  const own = ledger.filter((row) => row.principalHash === principalHash);
+  const unownedAttention = ledger.filter((row) => (
+    !validActionBatchPrincipalHash(row.principalHash)
+    && isAttentionRow(row)
+  ));
+  const foreignAttention = ledger.filter((row) => {
+    if (
+      row.principalHash === principalHash
+      || !validActionBatchPrincipalHash(row.principalHash)
+      || !isAttentionRow(row)
+    ) return false;
+    const lockScope = actionBatchResourceLockScope(row);
+    return lockScope.global
+      || lockScope.files.some((file) => manifestFileIds.has(file.id));
+  });
+  const visible = [
+    ...own,
+    ...unownedAttention.filter((row) => !own.includes(row)),
+    ...foreignAttention.filter(
+      (row) => !own.includes(row) && !unownedAttention.includes(row)
+    )
+  ];
+  const attention = visible.filter(isAttentionRow);
+  const unresolved = attention.filter((row) => {
+    if (!validActionBatchPrincipalHash(row.principalHash)) return true;
+    if (row.principalHash !== principalHash) {
+      return actionBatchResourceLockScope(row).global;
+    }
+    return ["in_progress", "reconciliation_required"]
+      .includes(String(row.status || ""))
+      || (
+        row.status === "legacy_quarantined"
+        && row.recovery?.fileScopedQuarantine !== true
+      )
+      || (
+        row.status === "manual_quarantined"
+        && row.recovery?.fileScopedQuarantine !== true
+      )
+      || (
+        row.status === "completed_pending_verification"
+        && validatedQuarantineFileScope(row).length === 0
+      )
+      || Boolean(row.current);
+  });
+  const reconciliationEligible = unresolved.filter((row) => (
+    row.principalHash === principalHash
+    &&
+    row.current?.status === "reconciliation_required"
+  ));
+  const reconciliationEligibleIds = new Set(reconciliationEligible.map((row) => row.id));
+  const hardBlocked = unresolved.filter((row) => !reconciliationEligibleIds.has(row.id));
+  return {
+    mode: "read_only",
+    bridgeBootId: BRIDGE_BOOT_ID,
+    recoveryBoundary: { ...ACTION_RECEIPT_RECOVERY_STATE },
+    runPolicy: {
+      ...policy,
+      loadError: policy.available ? "" : CHANCE_OPERATOR_RUN_MANIFEST_STATE.error
+    },
+    receipts: {
+      total: visible.length,
+      unresolvedCount: unresolved.length,
+      unresolvedBatchIds: unresolved.map((row) => row.id),
+      reconciliationEligibleCount: reconciliationEligible.length,
+      reconciliationEligibleBatchIds: reconciliationEligible.map((row) => row.id),
+      hardBlockedCount: hardBlocked.length,
+      hardBlockedBatchIds: hardBlocked.map((row) => row.id),
+      attentionCount: attention.length,
+      attentionBatchIds: attention.map((row) => row.id)
+    },
+    ready: policy.available
+      && ACTION_RECEIPT_RECOVERY_STATE.status === "ready"
+      && unresolved.length === 0,
+    instruction: "Verify this manifest ID/hash/count/expiry against the local plugin before any action plan. Reconcile every unresolved batch before retrying its actions."
+  };
+}
+
+function minimizedActionBatchReceipt(row, options = {}) {
+  const detail = options.detail === true;
+  const files = (Array.isArray(row.files) ? row.files : []).map((file) => ({
+    number: String(file.number || ""),
+    operationIndexes: Array.isArray(file.operationIndexes) ? file.operationIndexes : [],
+    operationTypes: Array.isArray(file.operationTypes) ? file.operationTypes : []
+  }));
+  const completed = Array.isArray(row.completed) ? row.completed : [];
+  const base = {
+    batchId: row.id,
+    status: row.status,
+    batchMode: row.batchMode || "",
+    operatorScope: row.operatorScope || "assigned",
+    runPolicyId: row.runPolicyId || "",
+    runPolicySha256: row.runPolicySha256 || "",
+    approvalDigest: row.approvalDigest || "",
+    operationCount: Number(row.operationCount || 0),
+    fileCount: Number(row.fileCount || files.length),
+    files,
+    completedCount: completed.length,
+    createdAt: row.createdAt || "",
+    updatedAt: row.updatedAt || "",
+    completedAt: row.completedAt || ""
+  };
+  if (!detail) return base;
+  return {
+    ...base,
+    intents: (Array.isArray(row.intents) ? row.intents : []).map((intent) => ({
+      index: intent.index,
+      type: intent.type,
+      fileNumber: intent.fileNumber || "",
+      intentDigest: intent.intentDigest || ""
+    })),
+    completed: completed.map((item) => ({
+      index: item.index,
+      type: item.type,
+      status: item.status,
+      receipt: cleanObject({
+        mode: item.receipt?.mode || "",
+        fileNumber: item.receipt?.fileNumber || "",
+        externalId: item.receipt?.externalId || "",
+        verifiedByReadback: item.receipt?.verifiedByReadback,
+        deliveryStatus: item.receipt?.deliveryStatus || "",
+        deliveryConfirmed: item.receipt?.deliveryConfirmed,
+        manualVerificationRequired: item.receipt?.manualVerificationRequired
+      })
+    })),
+    current: row.current ? {
+      index: row.current.index,
+      type: row.current.type,
+      fileNumber: row.current.fileNumber || "",
+      status: row.current.status || "",
+      reason: redactSensitiveText(String(row.current.reason || "")).slice(0, 500)
+    } : null,
+    failedAt: row.failedAt,
+    notAttempted: (Array.isArray(row.notAttempted) ? row.notAttempted : []).map((item) => ({
+      index: item.index,
+      type: item.type,
+      fileNumber: item.fileNumber || "",
+      status: item.status || "not_attempted"
+    })),
+    error: redactSensitiveText(String(row.error || "")).slice(0, 500),
+    manualQuarantine: row.manualQuarantine ? {
+      index: row.manualQuarantine.index,
+      type: row.manualQuarantine.type,
+      fileNumber: row.manualQuarantine.fileNumber || "",
+      fileNumbers: Array.isArray(row.manualQuarantine.fileNumbers)
+        ? row.manualQuarantine.fileNumbers.map(String)
+        : [],
+      scope: row.manualQuarantine.scope || "",
+      reasonCode: row.manualQuarantine.reasonCode || "",
+      reason: redactSensitiveText(String(row.manualQuarantine.reason || "")).slice(0, 500),
+      quarantinedAt: row.manualQuarantine.quarantinedAt || ""
+    } : null,
+    automaticRetryAllowed: false,
+    freshApprovalRequired: !["completed", "completed_pending_verification", "manual_quarantined"].includes(String(row.status || ""))
+  };
+}
+
+async function actionBatchReceipts(input = {}) {
+  if (!isMacCodexOperatorRequest() || operatorCompanyScopeActive()) {
+    const error = new Error("Assigned operator action-batch receipts are available only to the dedicated Mac assigned-file lane.");
+    error.statusCode = 403;
+    throw error;
+  }
+  const batchId = String(input.batchId || "").trim();
+  const fileNumber = String(input.fileNumber || "").trim().replace(/^#/, "");
+  if (fileNumber && !/^\d+$/.test(fileNumber)) badRequest("fileNumber must be an exact numeric JobNimbus number.");
+  const statuses = Array.isArray(input.statuses)
+    ? input.statuses.map((status) => String(status || "").trim()).filter(Boolean)
+    : [];
+  const limit = clamp(Number(input.limit || 25), 1, 50);
+  const principalHash = actionApprovalIdentityHash();
+  const own = (await readActionBatchLedger()).filter((row) => (
+    row.principalHash === principalHash
+    && row.operatorScope !== "company"
+  ));
+  if (batchId) {
+    const row = own.find((item) => item.id === batchId);
+    if (!row) {
+      const error = new Error("No action-batch receipt was found.");
+      error.statusCode = 404;
+      throw error;
+    }
+    return {
+      mode: "receipt_detail",
+      generatedAt: new Date().toISOString(),
+      recoveryBoundary: { ...ACTION_RECEIPT_RECOVERY_STATE },
+      receipt: minimizedActionBatchReceipt(row, { detail: true })
+    };
+  }
+  const rows = own
+    .filter((row) => !fileNumber || (row.files || []).some((file) => String(file.number || "").replace(/^#/, "") === fileNumber))
+    .filter((row) => !statuses.length || statuses.includes(String(row.status || "")))
+    .sort((left, right) => Date.parse(right.createdAt || 0) - Date.parse(left.createdAt || 0))
+    .slice(0, limit);
+  return {
+    mode: "receipt_list",
+    generatedAt: new Date().toISOString(),
+    recoveryBoundary: { ...ACTION_RECEIPT_RECOVERY_STATE },
+    count: rows.length,
+    receipts: rows.map((row) => minimizedActionBatchReceipt(row))
+  };
+}
+
+async function actionBatchReconcile(input = {}) {
+  if (!isMacCodexOperatorRequest() || operatorCompanyScopeActive()) {
+    const error = new Error("Assigned operator reconciliation is available only to the dedicated Mac assigned-file lane.");
+    error.statusCode = 403;
+    throw error;
+  }
+  assertOperatorReceiptBoundaryReady();
+  const batchId = required(input.batchId, "batchId");
+  return withActionBatchMutation(async () => {
+    const ledger = await readActionBatchLedger();
+    const principalHash = actionApprovalIdentityHash();
+    const row = ledger.find((item) => (
+      item.id === batchId
+      && item.principalHash === principalHash
+      && item.operatorScope !== "company"
+    ));
+    if (!row) {
+      const error = new Error("No action-batch receipt was found.");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (!row.current || row.current.status !== "reconciliation_required") {
+      return {
+        mode: "verified_noop",
+        receipt: minimizedActionBatchReceipt(row, { detail: true }),
+        instruction: "This batch has no provider-uncertain current operation. Review its completed and not-attempted indexes before preparing any fresh work."
+      };
+    }
+    const index = Number(row.current.index);
+    const currentDescriptor = {
+      index,
+      type: String(row.current.type || ""),
+      fileId: String(row.current.fileId || ""),
+      fileNumber: String(row.current.fileNumber || "")
+    };
+    const batchDescriptors = actionBatchOperationDescriptors(row);
+    const expectedDescriptor = batchDescriptors?.[index] || null;
+    const validatedBatchFiles = validatedQuarantineFileScope(row);
+    const currentDescriptorBound = Boolean(
+      expectedDescriptor
+      && expectedDescriptor.type === currentDescriptor.type
+      && expectedDescriptor.fileId === currentDescriptor.fileId
+      && expectedDescriptor.fileNumber === currentDescriptor.fileNumber
+      && validatedBatchFiles.some((file) => (
+        file.id === expectedDescriptor.fileId
+        && file.number === expectedDescriptor.fileNumber
+      ))
+    );
+    const descriptor = currentDescriptorBound ? expectedDescriptor : currentDescriptor;
+    const quarantineFiles = currentDescriptorBound
+      ? [{ id: expectedDescriptor.fileId, number: expectedDescriptor.fileNumber }]
+      : validatedBatchFiles;
+    const quarantineCurrent = async (error, reasonCode = "provider_state_unprovable") => {
+      const quarantinedAt = new Date().toISOString();
+      const fileIds = [...new Set(quarantineFiles.map((file) => String(file.id || "")).filter(Boolean))];
+      const fileNumbers = [...new Set(quarantineFiles.map((file) => String(file.number || "")).filter(Boolean))];
+      row.status = "manual_quarantined";
+      row.failedAt = index;
+      row.manualQuarantine = {
+        index,
+        type: currentDescriptorBound ? descriptor.type : "unknown",
+        fileId: currentDescriptorBound ? descriptor.fileId : "",
+        fileNumber: currentDescriptorBound ? descriptor.fileNumber : "",
+        fileIds,
+        fileNumbers,
+        scope: fileIds.length === 0 ? "global" : fileIds.length === 1 ? "file" : "files",
+        reasonCode,
+        reason: redactSensitiveText(error?.message || String(error)),
+        quarantinedAt
+      };
+      row.recovery = {
+        ...(row.recovery || {}),
+        resolvedAt: quarantinedAt,
+        resolvedOutcome: "unknown_file_quarantined",
+        fileScopedQuarantine: fileIds.length > 0,
+        automaticRetryAllowed: false,
+        freshApprovalRequired: false
+      };
+      row.updatedAt = quarantinedAt;
+      delete row.current;
+      const ledgerIndex = ledger.findIndex((item) => item.id === row.id);
+      ledger[ledgerIndex] = row;
+      await writeActionBatchLedger(ledger);
+      return {
+        mode: "manual_quarantined",
+        outcome: "unknown_file_quarantined",
+        receipt: minimizedActionBatchReceipt(row, { detail: true }),
+        instruction: fileIds.length
+          ? `${fileIds.length === 1 ? "The exact affected file is" : "The affected files are"} quarantined from further actions, while unrelated files may continue. Never retry the uncertain action.`
+          : "The affected file scope cannot be proven, so all locked-run actions remain blocked pending manual ledger recovery. Never retry the uncertain action."
+      };
+    };
+    const intent = currentDescriptorBound
+      ? validActionBatchIntent(row, descriptor)
+      : null;
+    if (!intent) {
+      return quarantineCurrent(
+        new Error("The interrupted batch does not contain a complete immutable operation intent."),
+        "immutable_intent_invalid"
+      );
+    }
+    let applied = false;
+    let externalId = "";
+    try {
+      if (intent.type === "jobnimbus.update_contact" || intent.type === "jobnimbus.update_status") {
+        const contact = await jobNimbus(`/contacts/${encodeURIComponent(intent.fileId)}`);
+        const after = intent.reconciliation?.after || {};
+        applied = recordMatchesFields(contact, after);
+        externalId = String(contact.jnid || contact.id || "");
+      } else if (intent.type === "jobnimbus.ensure_current_task") {
+        const tasks = await listCompleteRelatedTasks(intent.fileId);
+        const markers = tasks.filter(taskContainsCurrentControlMarker);
+        const expected = intent.reconciliation?.after || {};
+        const matched = markers.filter((task) => (
+          taskIsOpenActive(task)
+          && taskOwnedByChance(task)
+          && recordMatchesFields(task, expected)
+        ));
+        if (markers.length > 1) {
+          conflictError("More than one current-control task marker exists. Reconcile the duplicate tasks manually before retrying.");
+        }
+        applied = matched.length === 1;
+        externalId = matched.length === 1 ? taskRecordId(matched[0]) : "";
+      } else if (intent.type === "gmail.create_draft") {
+        const draftReconciliation = await reconcileGmailDraftIntent(intent);
+        applied = draftReconciliation.applied;
+        externalId = draftReconciliation.externalId;
+      } else {
+        conflictError("This interrupted operation requires channel-specific reconciliation and cannot be automatically retried or closed.");
+      }
+    } catch (error) {
+      const statusCode = Number(error?.statusCode || 0);
+      if (![400, 403, 404, 409].includes(statusCode)) throw error;
+      return quarantineCurrent(error);
+    }
+
+    const reconciledAt = new Date().toISOString();
+    if (applied) {
+      row.completed = (Array.isArray(row.completed) ? row.completed : []).filter((item) => Number(item.index) !== index);
+      row.completed.push({
+        index,
+        type: intent.type,
+        status: "executed",
+        receipt: {
+          mode: "recovered_verified",
+          fileId: intent.fileId,
+          fileNumber: intent.fileNumber,
+          externalId,
+          verifiedByReadback: true
+        }
+      });
+      row.completed.sort((left, right) => Number(left.index) - Number(right.index));
+    } else {
+      row.failedAt = index;
+      row.verifiedNotApplied = {
+        index,
+        type: intent.type,
+        fileId: intent.fileId,
+        fileNumber: intent.fileNumber,
+        verifiedAt: reconciledAt
+      };
+    }
+    delete row.current;
+    row.status = (row.notAttempted || []).length || !applied
+      ? "partial_failure"
+      : actionBatchTerminalStatus(row.completed || []);
+    row.recovery = {
+      ...(row.recovery || {}),
+      resolvedAt: reconciledAt,
+      resolvedOutcome: applied ? "applied_verified" : "not_applied_verified",
+      automaticRetryAllowed: false,
+      freshApprovalRequired: row.status === "partial_failure"
+    };
+    row.updatedAt = reconciledAt;
+    const ledgerIndex = ledger.findIndex((item) => item.id === row.id);
+    ledger[ledgerIndex] = row;
+    await writeActionBatchLedger(ledger);
+    return {
+      mode: "reconciled",
+      outcome: applied ? "applied_verified" : "not_applied_verified",
+      receipt: minimizedActionBatchReceipt(row, { detail: true }),
+      instruction: applied
+        ? "The provider state matches the approved intent. Never retry this operation."
+        : "The provider state does not match the approved intent. Any still-needed action requires a fresh exact-file review, dry run, and approval."
+    };
+  });
+}
+
 async function processActionBatch(input = {}) {
-  const preparedBatch = await prepareCanonicalActionBatch(input.operations);
+  assertOperatorReceiptBoundaryReady();
+  const runPolicy = actionBatchRunPolicy(input);
+  const preparedBatch = await prepareCanonicalActionBatch(input.operations, { runPolicy });
   const { operations, plans, approvalDigest, batchScope } = preparedBatch;
+  await assertNoUnresolvedBatchOverlap(batchScope);
   if (input.execute !== true) {
     const approval = await issueActionApprovalChallenge(
       approvalDigest,
@@ -7483,6 +8722,7 @@ async function processActionBatch(input = {}) {
       fileCount: batchScope.fileCount,
       operationCount: operations.length,
       files: batchScope.files,
+      runPolicy: stableRunPolicy(runPolicy),
       operations: plans,
       displayComplete: true,
       executionSemantics: "sequential_fail_stop_no_rollback",
@@ -7500,7 +8740,9 @@ async function processActionBatch(input = {}) {
     approval.id,
     approvalDigest,
     operations.length,
-    batchScope
+    batchScope,
+    operations,
+    plans
   );
   if (reservation.existing) {
     return {
@@ -7564,37 +8806,139 @@ async function processActionBatch(input = {}) {
       };
     }
   }
-  batch.status = batch.completed.some((item) => item.receipt?.manualVerificationRequired === true)
-    ? "completed_pending_verification"
-    : "completed";
+  batch.status = actionBatchTerminalStatus(batch.completed);
   batch.notAttempted = [];
   batch.completedAt = new Date().toISOString();
   await updateActionBatch(batch);
   return { mode: "executed", batch };
 }
 
-async function prepareCanonicalActionBatch(operationsInput) {
+async function assertNoUnresolvedBatchOverlap(batchScope) {
+  const blocking = findUnresolvedBatchOverlap(
+    await readActionBatchLedger(),
+    batchScope
+  );
+  if (!blocking) return;
+  throwUnresolvedBatchOverlap(blocking);
+}
+
+function findUnresolvedBatchOverlap(ledger, batchScope) {
+  const desiredFileIds = new Set((batchScope?.files || []).map((file) => String(file.id || "")));
+  if (!desiredFileIds.size) return null;
+  return ledger.find((row) => {
+    const status = String(row.status || "");
+    const blocks = [
+      "in_progress",
+      "reconciliation_required",
+      "legacy_quarantined",
+      "manual_quarantined",
+      "completed_pending_verification"
+    ].includes(status) || Boolean(row.current);
+    if (!blocks) return false;
+    if (!validActionBatchPrincipalHash(row.principalHash)) return true;
+    const lockScope = actionBatchResourceLockScope(row);
+    return lockScope.global
+      || lockScope.files.some((file) => desiredFileIds.has(file.id));
+  });
+}
+
+function throwUnresolvedBatchOverlap(blocking) {
+  const error = new Error(
+    `Action batch ${blocking.id} still requires receipt reconciliation for one of these exact files. Review that receipt before preparing overlapping work.`
+  );
+  error.statusCode = 409;
+  throw error;
+}
+
+async function prepareCanonicalActionBatch(operationsInput, options = {}) {
   const operations = normalizeActionOperations(operationsInput);
+  const runPolicy = options.runPolicy || null;
+  if (runPolicy?.enforced) {
+    if (
+      operations.some((operation) => operation.type === "gmail.create_draft")
+      && (operations.length !== 1 || operations[0].type !== "gmail.create_draft")
+    ) {
+      badRequest("A locked-run Gmail draft must be the only operation in its action batch.");
+    }
+    for (const [index, operation] of operations.entries()) {
+      if (!runPolicy.allowedActionTypes.includes(operation.type)) {
+        badRequest(
+          `The ${runPolicy.id} run policy blocks operations[${index}] (${operation.type}). Allowed actions: ${runPolicy.allowedActionTypes.join(", ")}.`
+        );
+      }
+      if (!/^#?\d+$/.test(String(operation.payload?.query || operation.payload?.fileQuery || "").trim())) {
+        badRequest(`operations[${index}] requires the exact JobNimbus file number under ${runPolicy.id}.`);
+      }
+      if (taskCompletionRequested(operation.payload)) {
+        badRequest(`The ${runPolicy.id} run policy forbids completing tasks.`);
+      }
+      if (operation.type === "gmail.create_draft" && operation.payload?.insuranceClaimEmail !== true) {
+        badRequest("Chance work-file Gmail drafts must declare insuranceClaimEmail:true so the claim-only subject rule is enforced.");
+      }
+    }
+  }
   const plans = [];
   for (const operation of operations) {
-    plans.push(await prepareActionOperation(operation));
+    plans.push(await prepareActionOperation(operation, { runPolicy }));
   }
-  const batchScope = await operatorBatchScope(operations, plans);
+  const batchScope = await operatorBatchScope(operations, plans, { runPolicy });
   return {
     operations,
     plans,
     batchScope,
     approvalDigest: digest({
-      version: 3,
+      version: 4,
+      runPolicy: stableRunPolicy(runPolicy),
       batchScope: stableApprovalBatchScope(batchScope),
       plans: stableApprovalPlans(plans)
     })
   };
 }
 
+function actionBatchRunPolicy(input = {}) {
+  if (
+    !isMacCodexOperatorRequest()
+    || isHcnRestrictedEffectRequest()
+  ) {
+    return null;
+  }
+  if (
+    operatorCompanyScopeActive()
+    && (REQUIRE_CHANCE_RUN_POLICY || CHANCE_OPERATOR_RUN_MANIFEST)
+  ) {
+    badRequest("Company-scope action batches are disabled during the locked Chance 58-file run. Read-only exact-file company review remains available.");
+  }
+  if (!input.runPolicy && !REQUIRE_CHANCE_RUN_POLICY) return null;
+  try {
+    return resolveChanceOperatorRunPolicy(input.runPolicy, CHANCE_OPERATOR_RUN_MANIFEST);
+  } catch (error) {
+    const unavailable = new Error(error.message);
+    unavailable.statusCode = CHANCE_OPERATOR_RUN_MANIFEST ? 409 : 503;
+    throw unavailable;
+  }
+}
+
+function stableRunPolicy(runPolicy) {
+  if (!runPolicy) return { enforced: false };
+  return chanceOperatorRunManifestSummary(runPolicy.manifest);
+}
+
+function taskCompletionRequested(payload = {}) {
+  const fields = payload.fields && typeof payload.fields === "object"
+    ? payload.fields
+    : {};
+  return ["completed", "isCompleted", "is_completed"].some((key) => (
+    Object.prototype.hasOwnProperty.call(payload, key)
+    || Object.prototype.hasOwnProperty.call(fields, key)
+  ));
+}
+
 function stableApprovalBatchScope(batchScope) {
   return {
     mode: batchScope?.mode || "",
+    runPolicyId: batchScope?.runPolicyId || "",
+    runPolicySha256: batchScope?.runPolicySha256 || "",
+    runPolicyExpiresAt: batchScope?.runPolicyExpiresAt || "",
     fileCount: Number(batchScope?.fileCount || 0),
     files: (batchScope?.files || []).map((file) => ({
       id: file.id,
@@ -7620,6 +8964,7 @@ async function findChanceContact(query, options = {}) {
   const companyScope = operatorCompanyScopeActive();
   const matches = contacts
     .filter(isInsuranceFile)
+    .filter(chanceOperatorContactAllowed)
     .filter((contact) => (
       companyScope
       || assignedTo(contact, CHANCE_OWNER_ID)
@@ -7655,6 +9000,13 @@ async function findChanceContact(query, options = {}) {
   if (
     !isInsuranceFile(contact)
     || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
+    || (!companyScope && !chanceOperatorContactAllowed(contact))
+    || (
+      isMacCodexOperatorRequest()
+      && !companyScope
+      && isRestrictedEffectRequest()
+      && !isExplicitlyOpenActive(contact)
+    )
     || (
       isHcnRestrictedEffectRequest()
       && !hcnContactIsExplicitlyActive(contact)
@@ -8060,6 +9412,10 @@ async function buildHcnExactCommunicationScope(providerFileId) {
     throw new Error("Exact communication scope is unavailable.");
   }
   const file = compactContact(contact);
+  Object.defineProperty(file, GMAIL_FILE_COMPANY_CONTACTS, {
+    value: index.rows,
+    enumerable: false
+  });
 
   const email = hcnNormalizeCorrelationEmail(
     fieldValue(contact, [
@@ -8309,6 +9665,7 @@ async function listHcnResourceComplete(
     : "";
   const rows = [];
   let offset = 0;
+  let declaredTotal = null;
   while (offset < maximum) {
     const size = Math.min(500, maximum - offset);
     const payload = await hcnJobNimbus(
@@ -8356,8 +9713,33 @@ async function listHcnResourceComplete(
     ) {
       throw new Error("JobNimbus exact-file pagination is unavailable.");
     }
+    const pageTotalRaw = payload?.total ?? payload?.count ?? payload?.meta?.total;
+    const hasPageTotal = pageTotalRaw !== undefined && pageTotalRaw !== null && pageTotalRaw !== "";
+    if (hasPageTotal) {
+      const pageTotal = Number(pageTotalRaw);
+      if (
+        !Number.isSafeInteger(pageTotal)
+        || pageTotal < 0
+        || offset + batch.length > pageTotal
+        || (declaredTotal !== null && declaredTotal !== pageTotal)
+      ) {
+        throw new Error("JobNimbus pagination total is unavailable or inconsistent.");
+      }
+      declaredTotal = pageTotal;
+    } else if (declaredTotal !== null) {
+      throw new Error("JobNimbus pagination total disappeared before the inventory was complete.");
+    }
     rows.push(...batch);
-    if (batch.length < size) {
+    if (declaredTotal !== null && offset + batch.length >= declaredTotal) {
+      return {
+        rows,
+        complete: true
+      };
+    }
+    if (!batch.length) {
+      if (declaredTotal !== null) {
+        throw new Error("JobNimbus pagination stopped before its declared total.");
+      }
       return {
         rows,
         complete: true
@@ -8366,6 +9748,12 @@ async function listHcnResourceComplete(
     offset += batch.length;
   }
 
+  if (declaredTotal !== null) {
+    return {
+      rows,
+      complete: offset >= declaredTotal
+    };
+  }
   const probe = unwrapHcnList(
     await hcnJobNimbus(
       hcnPagedEndpoint(endpoint, {
@@ -8436,26 +9824,100 @@ function unwrapHcnList(payload, name) {
   return payload[present[0]];
 }
 
-async function listResourcePages(endpoint, maxPages = 10) {
-  const all = [];
-  const pageSize = 1000;
-  const name = endpoint.replace(/^\//, "").split("?")[0];
-  for (let page = 0; page < maxPages; page += 1) {
-    const offset = page * pageSize;
-    const separator = endpoint.includes("?") ? "&" : "?";
-    const batch = await jobNimbus(`${endpoint}${separator}size=${pageSize}&from=${offset}`);
-    const rows = unwrapList(batch, name);
-    all.push(...rows);
-    if (rows.length < pageSize) break;
+async function listResourcePages(endpoint, maxPages = 10, options = {}) {
+  const pageLimit = Number(maxPages);
+  if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > 25) {
+    throw new Error("JobNimbus pagination bound is unavailable.");
   }
-  return all;
+  const maximum = Number(options.maxRecords ?? pageLimit * 1000);
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 25000) {
+    throw new Error("JobNimbus pagination bound is unavailable.");
+  }
+  const filter = String(options.filter || "").trim();
+  const name = endpoint.replace(/^\//, "").split("?")[0];
+  const rows = [];
+  let offset = 0;
+  let declaredTotal = null;
+  const maxRequests = Math.min(maximum + 1, pageLimit * 20);
+  let requestCount = 0;
+  while (offset < maximum && requestCount < maxRequests) {
+    const size = Math.min(1000, maximum - offset);
+    const payload = await jobNimbus(hcnPagedEndpoint(endpoint, {
+      size,
+      offset,
+      filter
+    }));
+    requestCount += 1;
+    const batch = unwrapHcnList(payload, name);
+    if (batch.length > size) {
+      throw new Error("JobNimbus pagination is unavailable.");
+    }
+    const pageTotalRaw = payload?.total ?? payload?.count ?? payload?.meta?.total;
+    const hasPageTotal = pageTotalRaw !== undefined
+      && pageTotalRaw !== null
+      && pageTotalRaw !== "";
+    if (hasPageTotal) {
+      const pageTotal = Number(pageTotalRaw);
+      if (
+        !Number.isSafeInteger(pageTotal)
+        || pageTotal < 0
+        || pageTotal > maximum
+        || offset + batch.length > pageTotal
+        || (declaredTotal !== null && declaredTotal !== pageTotal)
+      ) {
+        throw new Error("JobNimbus pagination total is unavailable or inconsistent.");
+      }
+      declaredTotal = pageTotal;
+    } else if (declaredTotal !== null) {
+      throw new Error("JobNimbus pagination total disappeared before the inventory was complete.");
+    }
+    rows.push(...batch);
+    if (declaredTotal !== null && offset + batch.length >= declaredTotal) return rows;
+    if (!batch.length) {
+      if (declaredTotal !== null) {
+        throw new Error("JobNimbus pagination stopped before its declared total.");
+      }
+      return rows;
+    }
+    offset += batch.length;
+  }
+  const probe = unwrapHcnList(await jobNimbus(hcnPagedEndpoint(endpoint, {
+    size: 1,
+    offset,
+    filter
+  })), name);
+  if (probe.length) {
+    throw new Error("JobNimbus pagination is incomplete at the reviewed bound.");
+  }
+  return rows;
 }
 
 async function listRelated(endpoint, contactId, limit) {
-  const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { "related.id": contactId } }] }));
-  const rows = await jobNimbus(`${endpoint}?size=1000&from=0&filter=${filter}`);
-  const list = unwrapList(rows, endpoint.replace("/", ""));
-  return list.filter((item) => referencesContact(item, contactId)).slice(0, limit);
+  const exactContactId = String(contactId || "").trim();
+  const resultLimit = Number(limit);
+  if (!exactContactId || !Number.isSafeInteger(resultLimit) || resultLimit < 1 || resultLimit > 5000) {
+    throw new Error("JobNimbus exact-file pagination bound is unavailable.");
+  }
+  const filters = ["related.id", "primary.id"].map((field) => JSON.stringify({
+    must: [{ term: { [field]: exactContactId } }]
+  }));
+  const inventories = await Promise.all(filters.map((filter) => listResourcePages(
+    endpoint,
+    5,
+    { filter, maxRecords: 5000 }
+  )));
+  const records = new Map();
+  for (const item of inventories.flat()) {
+    if (!referencesContact(item, exactContactId)) {
+      throw new Error("JobNimbus exact-file pagination returned another file's record.");
+    }
+    const id = String(item?.jnid || item?.id || "").trim();
+    if (!id) {
+      throw new Error("JobNimbus exact-file pagination returned a record without an id.");
+    }
+    if (!records.has(id)) records.set(id, item);
+  }
+  return [...records.values()].slice(0, resultLimit);
 }
 
 function unwrapList(payload, name) {
@@ -9119,7 +10581,16 @@ function operatorActionOwnerId(contact) {
 }
 
 function isOpenActive(contact) {
-  return contact.is_active !== false && contact.is_archived !== true && contact.is_closed !== true;
+  const status = String(contact?.status_name || "").trim();
+  return !providerFlagFalse(contact?.is_active)
+    && !providerFlagTrue(contact?.is_archived)
+    && !providerFlagTrue(contact?.is_closed)
+    && !providerFlagTrue(contact?.is_deleted)
+    && !/\b(closed|cancelled|canceled|archived|dead)\b/i.test(status);
+}
+
+function isExplicitlyOpenActive(contact) {
+  return providerFlagTrue(contact?.is_active) && isOpenActive(contact);
 }
 
 function fileSort(a, b) {
@@ -9308,7 +10779,7 @@ function preparedActionFile(prepared, index = 0) {
   };
 }
 
-async function operatorBatchScope(operations, plans) {
+async function operatorBatchScope(operations, plans, options = {}) {
   if (!isRestrictedEffectRequest()) {
     return {
       mode: "unrestricted_legacy_v1",
@@ -9338,6 +10809,38 @@ async function operatorBatchScope(operations, plans) {
   }
 
   const uniqueFileCount = orderedFiles.length;
+  const runPolicy = options.runPolicy || null;
+  if (runPolicy?.enforced) {
+    for (const file of orderedFiles) {
+      if (runPolicy.excludedFileNumbers.includes(String(file.number || "").replace(/^#/, ""))) {
+        badRequest(`JobNimbus file #${file.number} is excluded from the ${runPolicy.id} Chance work-file run.`);
+      }
+      if (!chanceManifestFileBinding(runPolicy.manifest, file.number, file.id)) {
+        badRequest(`JobNimbus file #${file.number || file.id} is not bound to the current ${runPolicy.id} 58-file manifest.`);
+      }
+    }
+    for (const [index, operation] of operations.entries()) {
+      const requestedFileNumber = String(
+        operation.payload?.query || operation.payload?.fileQuery || ""
+      ).trim().replace(/^#/, "");
+      const resolvedFileNumber = String(operationFiles[index]?.number || "")
+        .trim()
+        .replace(/^#/, "");
+      if (requestedFileNumber !== resolvedFileNumber) {
+        badRequest(
+          `operations[${index}] query must equal the resolved JobNimbus file number under ${runPolicy.id}; numeric claim or policy lookups are not accepted.`
+        );
+      }
+      if (operation.type !== "jobnimbus.update_contact") continue;
+      const fields = plans[index]?.plan?.plan?.fields || {};
+      const unsupported = Object.keys(fields).filter((key) => (
+        !runPolicy.allowedContactFields.includes(key)
+      ));
+      if (unsupported.length) {
+        badRequest(`The locked Chance run does not allow contact field(s): ${unsupported.join(", ")}.`);
+      }
+    }
+  }
   const macAssignedBatch = isMacCodexOperatorRequest()
     && !operatorCompanyScopeActive()
     && !isHcnRestrictedEffectRequest();
@@ -9357,7 +10860,7 @@ async function operatorBatchScope(operations, plans) {
     for (const [index, operation] of operations.entries()) {
       if (!CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES.has(operation.type)) {
         badRequest(
-          `Multi-file Mac batches allow only jobnimbus.update_contact and jobnimbus.update_status; operations[${index}] is ${operation.type}.`
+          `Multi-file Mac batches allow only contact corrections, forward stage moves, and current-control tasks; operations[${index}] is ${operation.type}.`
         );
       }
       if (!/^#?\d+$/.test(String(operation.payload?.query || "").trim())) {
@@ -9378,6 +10881,16 @@ async function operatorBatchScope(operations, plans) {
     }
 
     for (const file of orderedFiles) {
+      const current = await jobNimbus(`/contacts/${encodeURIComponent(file.id)}`);
+      assertOperatorContactScope(current);
+      if (!isExplicitlyOpenActive(current)) {
+        badRequest(`JobNimbus file ${file.number || file.id} is inactive, archived, or closed and cannot enter a multi-file batch.`);
+      }
+    }
+  }
+
+  if (uniqueFileCount > 1 || runPolicy?.enforced) {
+    for (const file of orderedFiles) {
       const typeCounts = file.operationTypes.reduce((counts, type) => {
         counts[type] = (counts[type] || 0) + 1;
         return counts;
@@ -9385,19 +10898,19 @@ async function operatorBatchScope(operations, plans) {
       if (
         Number(typeCounts["jobnimbus.update_contact"] || 0) > 1
         || Number(typeCounts["jobnimbus.update_status"] || 0) > 1
+        || Number(typeCounts["jobnimbus.ensure_current_task"] || 0) > 1
       ) {
-        badRequest("A multi-file batch may contain at most one contact update and one status update per file.");
+        badRequest("A batch may contain at most one contact update, one status update, and one current-control task per file.");
       }
-      if (
-        file.operationTypes.length === 2
-        && file.operationTypes[0] !== "jobnimbus.update_contact"
-      ) {
-        badRequest("When a file has both updates, its contact fields must be listed before its status change.");
-      }
-      const current = await jobNimbus(`/contacts/${encodeURIComponent(file.id)}`);
-      assertOperatorContactScope(current);
-      if (!isOpenActive(current)) {
-        badRequest(`JobNimbus file ${file.number || file.id} is inactive, archived, or closed and cannot enter a multi-file batch.`);
+      const actionOrder = {
+        "jobnimbus.update_contact": 1,
+        "jobnimbus.update_status": 2,
+        "jobnimbus.ensure_current_task": 3
+      };
+      for (let index = 1; index < file.operationTypes.length; index += 1) {
+        if (actionOrder[file.operationTypes[index]] < actionOrder[file.operationTypes[index - 1]]) {
+          badRequest("Per-file multi-file operations must be ordered contact update, status move, then current-control task.");
+        }
       }
     }
   }
@@ -9410,6 +10923,9 @@ async function operatorBatchScope(operations, plans) {
         : "assigned_single_file_v2",
     fileCount: uniqueFileCount,
     maxFiles,
+    runPolicyId: runPolicy?.id || "",
+    runPolicySha256: runPolicy?.sha256 || "",
+    runPolicyExpiresAt: runPolicy?.expiresAt || "",
     files: orderedFiles,
     operationFiles
   };
@@ -9447,6 +10963,313 @@ async function writeSecurityLedger(filePath, rows) {
   const temporary = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(temporary, `${JSON.stringify(rows, null, 2)}\n`, "utf8");
   await rename(temporary, filePath);
+}
+
+function actionBatchOperationDescriptors(row) {
+  const operationCount = Number(row?.operationCount || 0);
+  if (!Number.isSafeInteger(operationCount) || operationCount < 1 || operationCount > 15) return null;
+  const descriptors = Array.from({ length: operationCount }, (_, index) => ({ index }));
+  for (const file of Array.isArray(row?.files) ? row.files : []) {
+    const indexes = Array.isArray(file?.operationIndexes) ? file.operationIndexes : [];
+    const types = Array.isArray(file?.operationTypes) ? file.operationTypes : [];
+    if (indexes.length !== types.length) return null;
+    for (let offset = 0; offset < indexes.length; offset += 1) {
+      const index = Number(indexes[offset]);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= operationCount) return null;
+      if (descriptors[index].type) return null;
+      descriptors[index] = {
+        index,
+        type: String(types[offset] || ""),
+        fileId: String(file.id || ""),
+        fileNumber: String(file.number || "")
+      };
+    }
+  }
+  return descriptors.every((descriptor) => descriptor.type && descriptor.fileId)
+    ? descriptors
+    : null;
+}
+
+function validatedActionBatchFileScope(row) {
+  const files = Array.isArray(row?.files) ? row.files : [];
+  if (!files.length) return [];
+  const seenIds = new Set();
+  const seenNumbers = new Set();
+  const normalized = [];
+  for (const file of files) {
+    const id = String(file?.id || "").trim();
+    const number = String(file?.number || "").trim().replace(/^#/, "");
+    if (
+      !/^[a-zA-Z0-9_-]{8,100}$/.test(id)
+      || !/^[a-zA-Z0-9_-]{1,100}$/.test(number)
+      || seenIds.has(id)
+      || seenNumbers.has(number)
+    ) return [];
+    seenIds.add(id);
+    seenNumbers.add(number);
+    normalized.push({ id, number });
+  }
+  return normalized;
+}
+
+function validatedQuarantineFileScope(row) {
+  const normalized = validatedActionBatchFileScope(row);
+  if (
+    CHANCE_OPERATOR_RUN_MANIFEST
+    && normalized.some(
+      (file) => !chanceManifestFileBinding(
+        CHANCE_OPERATOR_RUN_MANIFEST,
+        file.number,
+        file.id
+      )
+    )
+  ) return [];
+  return normalized;
+}
+
+function actionBatchResourceLockScope(row) {
+  const files = validatedActionBatchFileScope(row);
+  if (!files.length) return { global: true, files: [] };
+
+  const runPolicyId = String(row?.runPolicyId || "").trim();
+  const runPolicySha256 = String(row?.runPolicySha256 || "").trim().toLowerCase();
+  if (runPolicyId || runPolicySha256) {
+    if (
+      !CHANCE_OPERATOR_RUN_MANIFEST
+      || runPolicyId !== CHANCE_OPERATOR_RUN_MANIFEST.id
+      || runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST.sha256
+      || files.some(
+        (file) => !chanceManifestFileBinding(
+          CHANCE_OPERATOR_RUN_MANIFEST,
+          file.number,
+          file.id
+        )
+      )
+    ) return { global: true, files: [] };
+  }
+
+  const status = String(row?.status || "");
+  if (
+    ["manual_quarantined", "legacy_quarantined"].includes(status)
+    && row?.recovery?.fileScopedQuarantine !== true
+  ) return { global: true, files: [] };
+
+  if (status === "manual_quarantined") {
+    const manualIds = [...new Set(
+      (Array.isArray(row?.manualQuarantine?.fileIds)
+        ? row.manualQuarantine.fileIds
+        : [row?.manualQuarantine?.fileId || ""])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    )];
+    const byId = new Map(files.map((file) => [file.id, file]));
+    if (!manualIds.length || manualIds.some((id) => !byId.has(id))) {
+      return { global: true, files: [] };
+    }
+    return { global: false, files: manualIds.map((id) => byId.get(id)) };
+  }
+
+  return { global: false, files };
+}
+
+function actionBatchTerminalStatus(completed = []) {
+  return completed.some((item) => item?.receipt?.manualVerificationRequired === true)
+    ? "completed_pending_verification"
+    : "completed";
+}
+
+function recoveredNotAttempted(descriptors, completedIndexes, currentIndex = -1) {
+  return descriptors
+    .filter((descriptor) => !completedIndexes.has(descriptor.index) && descriptor.index !== currentIndex)
+    .map((descriptor) => ({ ...descriptor, status: "not_attempted" }));
+}
+
+function validActionBatchIntent(row, descriptor) {
+  if (!descriptor) return null;
+  const intent = (Array.isArray(row?.intents) ? row.intents : []).find((item) => (
+    Number(item?.index) === Number(descriptor.index)
+  ));
+  if (
+    !intent
+    || String(intent.type || "") !== String(descriptor.type || "")
+    || String(intent.fileId || "") !== String(descriptor.fileId || "")
+    || String(intent.fileNumber || "") !== String(descriptor.fileNumber || "")
+    || !intent.reconciliation
+    || typeof intent.reconciliation !== "object"
+    || Array.isArray(intent.reconciliation)
+  ) return null;
+  const stable = {
+    index: Number(intent.index),
+    type: String(intent.type),
+    fileId: String(intent.fileId),
+    fileNumber: String(intent.fileNumber),
+    reconciliation: intent.reconciliation
+  };
+  return digest({ version: 1, stable }) === String(intent.intentDigest || "")
+    ? intent
+    : null;
+}
+
+async function initializeOperatorReceiptBoundary() {
+  const recoveredAt = new Date().toISOString();
+  try {
+    const approvals = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
+    const batches = await readSecurityLedger(ACTION_BATCH_STORE_PATH, "Action batch ledger");
+    const outbound = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+    let approvalsChanged = false;
+    let batchesChanged = false;
+    let outboundChanged = false;
+    const now = Date.now();
+
+    for (const row of approvals) {
+      if (row.status !== "active") continue;
+      if (Number(row.expiresAtMs || 0) <= now) {
+        row.status = "expired";
+        row.expiredAt = recoveredAt;
+      } else {
+        row.status = "revoked";
+        row.revokedAt = recoveredAt;
+        row.revokedReason = "bridge_restart";
+      }
+      approvalsChanged = true;
+    }
+
+    for (const row of batches) {
+      if (row.status !== "in_progress" && !row.current) continue;
+      row.bootIdRecoveredFrom = String(row.bootId || "");
+      row.recoveredAt = recoveredAt;
+      row.updatedAt = recoveredAt;
+      if (!validActionBatchPrincipalHash(row.principalHash)) {
+        row.status = "legacy_quarantined";
+        delete row.current;
+        row.recovery = {
+          interrupted: true,
+          phase: "legacy_principal_unbound",
+          reasonCode: "legacy_principal_unbound",
+          fileScopedQuarantine: false,
+          quarantinedFileIds: [],
+          automaticRetryAllowed: false,
+          freshApprovalRequired: true,
+          recoveredAt
+        };
+        batchesChanged = true;
+        continue;
+      }
+      const descriptors = actionBatchOperationDescriptors(row);
+      const completed = Array.isArray(row.completed) ? row.completed : [];
+      const completedIndexes = new Set(completed.map((item) => Number(item?.index)));
+      const validCompleted = descriptors
+        && completed.every((item) => (
+          Number.isSafeInteger(Number(item?.index))
+          && descriptors[Number(item.index)]?.type === String(item.type || "")
+        ))
+        && completedIndexes.size === completed.length;
+      if (!descriptors || !validCompleted) {
+        const quarantinedFiles = validatedQuarantineFileScope(row);
+        row.status = "legacy_quarantined";
+        delete row.current;
+        row.recovery = {
+          interrupted: true,
+          phase: "invalid_or_legacy_manifest",
+          reasonCode: "legacy_manifest_incomplete",
+          fileScopedQuarantine: quarantinedFiles.length > 0,
+          quarantinedFileIds: quarantinedFiles.map((file) => file.id),
+          automaticRetryAllowed: false,
+          freshApprovalRequired: true,
+          recoveredAt
+        };
+      } else if (row.current) {
+        const currentIndex = Number(row.current.index);
+        const currentDescriptor = descriptors[currentIndex];
+        const currentIntent = validActionBatchIntent(row, currentDescriptor);
+        if (!currentIntent) {
+          const quarantinedFiles = validatedQuarantineFileScope(row);
+          row.status = "legacy_quarantined";
+          row.notAttempted = recoveredNotAttempted(descriptors, completedIndexes, currentIndex);
+          row.recovery = {
+            interrupted: true,
+            phase: "provider_window_missing_immutable_intent",
+            reasonCode: "legacy_intent_unavailable",
+            fileScopedQuarantine: quarantinedFiles.length > 0,
+            quarantinedFileIds: quarantinedFiles.map((file) => file.id),
+            automaticRetryAllowed: false,
+            freshApprovalRequired: true,
+            recoveredAt
+          };
+          delete row.current;
+        } else {
+          row.status = "reconciliation_required";
+          row.current = {
+            ...currentDescriptor,
+            ...row.current,
+            status: "reconciliation_required",
+            reasonCode: "bridge_restart_during_provider_window",
+            reason: "The bridge restarted after this operation entered its provider window. Fresh-read this exact file before any retry."
+          };
+          row.notAttempted = recoveredNotAttempted(descriptors, completedIndexes, currentIndex);
+          row.recovery = {
+            interrupted: true,
+            phase: "provider_window",
+            unknownOperationIndexes: [currentIndex],
+            automaticRetryAllowed: false,
+            freshApprovalRequired: true,
+            recoveredAt
+          };
+        }
+      } else if (completed.length === descriptors.length) {
+        row.status = actionBatchTerminalStatus(completed);
+        row.notAttempted = [];
+        row.completedAt = row.completedAt || recoveredAt;
+        row.recovery = {
+          interrupted: true,
+          phase: "after_final_receipt",
+          unknownOperationIndexes: [],
+          automaticRetryAllowed: false,
+          freshApprovalRequired: false,
+          recoveredAt
+        };
+      } else {
+        row.status = "partial_failure";
+        row.notAttempted = recoveredNotAttempted(descriptors, completedIndexes);
+        row.recovery = {
+          interrupted: true,
+          phase: completed.length ? "between_operations" : "before_first_operation",
+          unknownOperationIndexes: [],
+          automaticRetryAllowed: false,
+          freshApprovalRequired: true,
+          recoveredAt
+        };
+      }
+      batchesChanged = true;
+    }
+
+    for (const row of outbound) {
+      if (row.status !== "in_progress") continue;
+      row.status = "reconciliation_required";
+      row.reasonCode = "bridge_restart_during_provider_window";
+      row.updatedAt = recoveredAt;
+      row.recoveredAt = recoveredAt;
+      outboundChanged = true;
+    }
+
+    if (approvalsChanged) await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, approvals);
+    if (batchesChanged) await writeActionBatchLedger(batches);
+    if (outboundChanged) await writeSecurityLedger(OUTBOUND_SEND_STORE_PATH, outbound);
+    ACTION_RECEIPT_RECOVERY_STATE.status = "ready";
+    ACTION_RECEIPT_RECOVERY_STATE.lastStartupRecoveryAt = recoveredAt;
+    ACTION_RECEIPT_RECOVERY_STATE.error = "";
+  } catch (error) {
+    ACTION_RECEIPT_RECOVERY_STATE.status = "blocked";
+    ACTION_RECEIPT_RECOVERY_STATE.lastStartupRecoveryAt = recoveredAt;
+    ACTION_RECEIPT_RECOVERY_STATE.error = redactSensitiveText(error?.message || String(error));
+  }
+}
+
+function assertOperatorReceiptBoundaryReady() {
+  if (ACTION_RECEIPT_RECOVERY_STATE.status === "ready") return;
+  const error = new Error("The operator receipt recovery boundary is not ready. Read-only file review remains available; no action may be planned or executed.");
+  error.statusCode = 503;
+  throw error;
 }
 
 function normalizeUploadId(value) {
@@ -9673,6 +11496,9 @@ function compactGmailMessage(message) {
     id: message.id || "",
     threadId: message.threadId || "",
     historyId: message.historyId || "",
+    labelIds: Array.isArray(message.labelIds)
+      ? message.labelIds.map((label) => String(label || "")).filter(Boolean)
+      : [],
     internalDate: message.internalDate || "",
     date: headers.date || "",
     from: headers.from || "",
@@ -10234,8 +12060,25 @@ function compactContact(contact) {
   };
 }
 
+function chanceOperatorContactAllowed(contact) {
+  if (!isMacCodexOperatorRequest() || operatorCompanyScopeActive()) return true;
+  const number = String(contact?.number || contact?.recid || "").trim().replace(/^#/, "");
+  if (CHANCE_OPERATOR_EXCLUDED_FILES.has(number)) return false;
+  if (CHANCE_OPERATOR_RUN_MANIFEST) {
+    return Boolean(chanceManifestFileBinding(
+      CHANCE_OPERATOR_RUN_MANIFEST,
+      number,
+      contact?.jnid || contact?.id
+    ));
+  }
+  return !REQUIRE_CHANCE_RUN_POLICY;
+}
+
 const HCN_CONTACT_PHONE_KEYS = new Set([
+  "adjusterphone",
+  "carrierdacontact",
   "cellphone",
+  "cfstring8",
   "homephone",
   "mobilephone",
   "phone",
@@ -10248,6 +12091,9 @@ const HCN_CONTACT_PHONE_KEYS = new Set([
   "workphone"
 ]);
 const HCN_CONTACT_EMAIL_KEYS = new Set([
+  "adjusteremail",
+  "carrierdaemail",
+  "cfstring9",
   "email",
   "primaryemail"
 ]);
@@ -10519,6 +12365,8 @@ function assertOperatorContactScope(contact) {
   if (
     !isInsuranceFile(contact)
     || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
+    || (!companyScope && !chanceOperatorContactAllowed(contact))
+    || (!companyScope && isMacCodexOperatorRequest() && !isExplicitlyOpenActive(contact))
     || (
       isHcnRestrictedEffectRequest()
       && !hcnContactIsExplicitlyActive(contact)
@@ -10536,7 +12384,9 @@ function recordMatchesFields(record, fields) {
   if (!record || typeof record !== "object") return false;
   return Object.entries(fields).every(([key, expected]) => {
     const actual = record[key];
-    if (typeof expected === "boolean") return Boolean(actual) === expected;
+    if (typeof expected === "boolean") {
+      return expected ? providerFlagTrue(actual) : providerFlagFalse(actual);
+    }
     if (typeof expected === "number") return Number(actual) === expected;
     return String(actual ?? "") === String(expected ?? "");
   });
@@ -10707,9 +12557,19 @@ function toIsoTimestamp(value) {
   return Number.isNaN(parsed) ? "" : new Date(parsed).toISOString();
 }
 
+function providerTimeMs(value) {
+  const timestamp = toIsoTimestamp(value);
+  return timestamp ? Date.parse(timestamp) : 0;
+}
+
 function normalizeActionOperations(value) {
   if (!Array.isArray(value) || !value.length) badRequest("operations must be a non-empty array");
-  if (value.length > 12) badRequest("An approval batch may contain at most 12 actions.");
+  const maxActions = isMacCodexOperatorRequest()
+    && !operatorCompanyScopeActive()
+    && !isHcnRestrictedEffectRequest()
+    ? 15
+    : 12;
+  if (value.length > maxActions) badRequest(`An approval batch may contain at most ${maxActions} actions.`);
   return value.map((operation, index) => {
     if (!operation || typeof operation !== "object" || Array.isArray(operation)) badRequest(`operations[${index}] must be an object`);
     const unsupportedOperationField = Object.keys(operation).find((key) => !["type", "payload"].includes(key));
@@ -10753,6 +12613,7 @@ const ACTION_OPERATION_TYPES = new Set([
   "jobnimbus.create_note",
   "jobnimbus.create_task",
   "jobnimbus.update_task",
+  "jobnimbus.ensure_current_task",
   "jobnimbus.create_calendar_event",
   "jobnimbus.update_calendar_event",
   "gmail.create_draft",
@@ -10760,16 +12621,20 @@ const ACTION_OPERATION_TYPES = new Set([
   "quo.send_text"
 ]);
 
-async function prepareActionOperation(operation) {
+async function prepareActionOperation(operation, options = {}) {
   const input = { ...operation.payload, execute: false };
   let plan;
   switch (operation.type) {
     case "jobnimbus.update_contact": plan = await updateContact(input); break;
-    case "jobnimbus.update_status": plan = await updateStatus(input); break;
+    case "jobnimbus.update_status": plan = await updateStatus({
+      ...input,
+      enforceThresher: options.runPolicy?.enforced === true
+    }); break;
     case "jobnimbus.process_update": plan = await processUpdate(input); break;
     case "jobnimbus.create_note": plan = await createNote(input); break;
     case "jobnimbus.create_task": plan = await createTask(input); break;
     case "jobnimbus.update_task": plan = await updateTask(input); break;
+    case "jobnimbus.ensure_current_task": plan = await ensureCurrentTask(input); break;
     case "jobnimbus.create_calendar_event": plan = await createCalendarEvent(input); break;
     case "jobnimbus.update_calendar_event": plan = await updateCalendarEvent(input); break;
     case "gmail.create_draft": plan = await gmailDraft(input); break;
@@ -10785,16 +12650,25 @@ async function executeActionOperation(operation, prepared) {
   switch (operation.type) {
     case "jobnimbus.update_contact": return updateContact({
       ...input,
-      expectedFileId: preparedActionFile(prepared).id
+      expectedFileId: preparedActionFile(prepared).id,
+      expectedBeforeFields: prepared.plan.plan.before
     });
     case "jobnimbus.update_status": return updateStatus({
       ...input,
-      expectedFileId: preparedActionFile(prepared).id
+      expectedFileId: preparedActionFile(prepared).id,
+      expectedBeforeStatus: prepared.plan.plan.before?.status_name,
+      enforceThresher: prepared.plan.plan.thresherTransition !== undefined,
+      expectedThresherTransition: prepared.plan.plan.thresherTransition
     });
     case "jobnimbus.process_update": return processUpdate(input);
     case "jobnimbus.create_note": return createNote(input);
     case "jobnimbus.create_task": return createTask(input);
     case "jobnimbus.update_task": return updateTask(input);
+    case "jobnimbus.ensure_current_task": return ensureCurrentTask({
+      ...input,
+      expectedFileId: preparedActionFile(prepared).id,
+      expectedPlan: prepared.plan.plan
+    });
     case "jobnimbus.create_calendar_event": return createCalendarEvent(input);
     case "jobnimbus.update_calendar_event": return updateCalendarEvent(input);
     case "gmail.create_draft": return gmailDraft({ ...input, approvalDigest: prepared.plan.approvalDigest });
@@ -10847,6 +12721,10 @@ function actionApprovalIdentityHash() {
     .digest("hex");
 }
 
+function validActionBatchPrincipalHash(value) {
+  return /^[a-f0-9]{64}$/i.test(String(value || "").trim());
+}
+
 async function issueActionApprovalChallenge(approvalDigest, operationCount, batchScope = {}) {
   return withActionApprovalMutation(async () => {
     const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
@@ -10870,6 +12748,9 @@ async function issueActionApprovalChallenge(approvalDigest, operationCount, batc
       approvalDigest,
       operationCount,
       batchMode: batchScope.mode || "",
+      runPolicyId: batchScope.runPolicyId || "",
+      runPolicySha256: batchScope.runPolicySha256 || "",
+      runPolicyExpiresAt: batchScope.runPolicyExpiresAt || "",
       fileCount: Number(batchScope.fileCount || 0),
       fileManifestHash: digest(stableApprovalBatchScope(batchScope)),
       status: "active",
@@ -10940,22 +12821,76 @@ function withActionBatchMutation(callback) {
   return run;
 }
 
-async function reserveActionBatch(approvalId, approvalDigest, operationCount, batchScope = {}) {
+function actionBatchIntent(operation, prepared, file, index) {
+  const plan = prepared?.plan?.plan || {};
+  let reconciliation = null;
+  if (operation.type === "jobnimbus.update_contact") {
+    reconciliation = { before: plan.before || {}, after: plan.fields || {} };
+  } else if (operation.type === "jobnimbus.update_status") {
+    reconciliation = { before: plan.before || {}, after: plan.body || {} };
+  } else if (operation.type === "jobnimbus.ensure_current_task") {
+    reconciliation = {
+      decision: plan.decision || "",
+      selectedTaskId: plan.selectedTaskId || null,
+      before: plan.before || null,
+      after: plan.after || {},
+      controlInventoryDigest: plan.controlInventoryDigest || ""
+    };
+  } else if (operation.type === "gmail.create_draft") {
+    const subject = String(plan.subject || "").trim();
+    reconciliation = {
+      subject,
+      subjectHash: createHash("sha256").update(subject, "utf8").digest("hex"),
+      sourceKeyHash: createHash("sha256")
+        .update(`claim-draft:${String(file?.id || "")}:${subject}`, "utf8")
+        .digest("hex"),
+      channelApprovalDigest: String(prepared?.plan?.approvalDigest || ""),
+      threadId: String(plan.threadId || "").trim(),
+      contentDigest: gmailDraftReconciliationDigest(plan)
+    };
+  }
+  const stable = {
+    index,
+    type: operation.type,
+    fileId: String(file?.id || ""),
+    fileNumber: String(file?.number || ""),
+    reconciliation
+  };
+  return { ...stable, intentDigest: digest({ version: 1, stable }) };
+}
+
+async function reserveActionBatch(
+  approvalId,
+  approvalDigest,
+  operationCount,
+  batchScope = {},
+  operations = [],
+  plans = []
+) {
   return withActionBatchMutation(async () => {
     const ledger = await readActionBatchLedger();
     const existing = ledger.find((row) => (
       row.approvalId === approvalId || row.approvalDigest === approvalDigest
     ));
     if (existing) return { existing };
+    const blocking = findUnresolvedBatchOverlap(ledger, batchScope);
+    if (blocking) throwUnresolvedBatchOverlap(blocking);
 
     const batch = {
+      schemaVersion: 2,
       id: randomUUID(),
       approvalId,
       approvalDigest,
+      principalHash: actionApprovalIdentityHash(),
+      operatorScope: currentOperatorScope(),
+      bootId: BRIDGE_BOOT_ID,
       status: "in_progress",
       createdAt: new Date().toISOString(),
       operationCount,
       batchMode: batchScope.mode || "",
+      runPolicyId: batchScope.runPolicyId || "",
+      runPolicySha256: batchScope.runPolicySha256 || "",
+      runPolicyExpiresAt: batchScope.runPolicyExpiresAt || "",
       fileCount: Number(batchScope.fileCount || 0),
       files: (batchScope.files || []).map((file) => ({
         id: file.id,
@@ -10963,6 +12898,12 @@ async function reserveActionBatch(approvalId, approvalDigest, operationCount, ba
         operationIndexes: file.operationIndexes,
         operationTypes: file.operationTypes
       })),
+      intents: operations.map((operation, index) => actionBatchIntent(
+        operation,
+        plans[index],
+        batchScope.operationFiles?.[index],
+        index
+      )),
       completed: []
     };
     ledger.push(batch);
@@ -11010,6 +12951,7 @@ async function reserveOutboundSend(channel, approvalDigest, metadata = {}) {
       : "";
     const existing = ledger.find((row) => (
       row.channel === channel
+      && row.status !== "verified_not_applied"
       && (
         row.approvalDigest === approvalDigest
         || (sourceKeyHash && row.sourceKeyHash === sourceKeyHash)
@@ -12319,6 +14261,12 @@ function badRequest(message) {
   throw error;
 }
 
+function conflictError(message) {
+  const error = new Error(message);
+  error.statusCode = 409;
+  throw error;
+}
+
 function httpResponse(status, body, headers = {}) {
   return {
     [HTTP_RESPONSE]: true,
@@ -13212,6 +15160,7 @@ const OPENAPI = {
             enum: [
               "jobnimbus.update_contact", "jobnimbus.update_status", "jobnimbus.process_update",
               "jobnimbus.create_note", "jobnimbus.create_task", "jobnimbus.update_task",
+              "jobnimbus.ensure_current_task",
               "jobnimbus.create_calendar_event", "jobnimbus.update_calendar_event",
               "gmail.create_draft", "gmail.send", "quo.send_text"
             ]
@@ -13233,18 +15182,46 @@ const OPENAPI = {
             default: "assigned",
             description: "Dedicated Mac operator only. Defaults to assigned. Company batches require this top-level value plus matching company scope on every operation payload and remain limited to one exact company file."
           },
+          runPolicy: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string" },
+              sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }
+            },
+            required: ["id", "sha256"],
+            description: "Pinned by the local Mac plugin. The model must not choose or alter this value."
+          },
           operations: {
             type: "array",
             minItems: 1,
-            maxItems: 12,
+            maxItems: 15,
             items: { $ref: "#/components/schemas/ActionOperation" },
-            description: "Every exact approved action. The dedicated Mac operator may group operations across at most five distinct Chance-assigned files only when every multi-file operation is jobnimbus.update_contact or jobnimbus.update_status; company scope, browser sessions, the HP operator, and every other effect remain single-file. For task completion use type jobnimbus.update_task with payload {query:'EXACT_FILE',taskId:'TASK_ID',completed:true} so ownership is verified. The dry run returns every canonical JobNimbus body before anything executes."
+            description: "Every exact approved action. The dedicated Mac assigned-file lane may group contact corrections, forward stage moves, and one protected current-control task across at most five exact manifest files, ordered contact then status then task per file. Gmail drafts remain single-file. Task completion, notes, sends, calls, calendar writes, backward stages, company mutation scope, and every other effect are blocked by the locked run policy."
           },
           approvalDigest: { type: "string", description: "Required for execution. Must match the immediately preceding unchanged batch dry run." },
           approvalChallenge: { type: "string", description: "Single-use, short-lived server challenge returned by the immediately preceding dry run. The local operator wrapper retains and forwards it; do not copy it into chat." },
           execute: { type: "boolean", default: false, description: "False prepares the exact batch and issues a short-lived challenge. True consumes that challenge once after Chance approves the exact plan. Duplicate execution is blocked." }
         },
         required: ["operations"]
+      },
+      ActionBatchReceiptRequest: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          batchId: { type: "string", format: "uuid" },
+          fileNumber: { type: "string", pattern: "^#?\\d+$" },
+          statuses: { type: "array", items: { type: "string" } },
+          limit: { type: "integer", minimum: 1, maximum: 50, default: 25 }
+        }
+      },
+      ActionBatchReconcileRequest: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          batchId: { type: "string", format: "uuid" }
+        },
+        required: ["batchId"]
       },
       ClaimFilingPrepareRequest: {
         type: "object",
@@ -14085,6 +16062,30 @@ const OPENAPI = {
         operationId: "reviewChanceFilesForApproval",
         requestBody: jsonBody("ChanceReviewRequest"),
         responses: { "200": { description: "Loads company rules, gathers fresh Chance-only JobNimbus/Gmail/Quo evidence, refreshes each private client snapshot, and returns approval-ready context. It never authorizes or executes actions." } }
+      }
+    },
+    "/ops/run-policy": {
+      get: {
+        operationId: "readChanceRunPolicy",
+        description: "Read-only attestation for the exact 58-file Mac operator manifest, bridge boot, and unresolved batch boundary.",
+        responses: { "200": { description: "Locked Chance run-policy attestation." } }
+      }
+    },
+    "/ops/action-batch-receipts": {
+      post: {
+        operationId: "readMacActionBatchReceipts",
+        description: "Read the dedicated Mac operator's own minimized action-batch receipts. Never retries or executes an operation.",
+        requestBody: jsonBody("ActionBatchReceiptRequest"),
+        responses: { "200": { description: "Minimized receipt list or exact batch detail." } }
+      }
+    },
+    "/ops/action-batch-reconcile": {
+      post: {
+        operationId: "reconcileMacActionBatchReceipt",
+        description: "Fresh-read the exact JobNimbus state for one provider-uncertain contact, status, or current-control task operation. Never retries or resumes an action.",
+        "x-openai-isConsequential": true,
+        requestBody: jsonBody("ActionBatchReconcileRequest"),
+        responses: { "200": { description: "Verified applied/not-applied reconciliation result and minimized receipt." } }
       }
     },
     "/ops/action-batch": {

@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-07-28.3";
+export const CAPABILITY_VERSION = "2026-08-23.1";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -44,7 +44,10 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("operations.session.start", "POST /ops/start-session"),
   capability("operations.scheduling.recover", "POST /ops/recover-scheduling-communications"),
   capability("operations.files.review", "POST /ops/review-chance-files"),
+  capability("operations.run_policy.read", "GET /ops/run-policy"),
   capability("operations.action_batch.process", "POST /ops/action-batch"),
+  capability("operations.action_batch_receipts.read", "POST /ops/action-batch-receipts"),
+  capability("operations.action_batch_receipts.reconcile", "POST /ops/action-batch-reconcile"),
   capability("scheduling.availability.review", "POST /scheduling/availability"),
   capability("jobnimbus.contacts.search", "POST /jobnimbus/search"),
   capability("jobnimbus.files.review", "POST /jobnimbus/review-file"),
@@ -92,11 +95,12 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
 
 export function buildCapabilityDescriptor({ identity, runtime = {} } = {}) {
   const safeIdentity = normalizeIdentity(identity);
+  const { subject: _routingSubject, ...publicIdentity } = safeIdentity;
   const descriptor = {
     schema: CAPABILITY_SCHEMA,
     schemaVersion: CAPABILITY_SCHEMA_VERSION,
     capabilityVersion: CAPABILITY_VERSION,
-    identity: safeIdentity,
+    identity: publicIdentity,
     authorizedCapabilities: capabilitiesForIdentity(identity),
     runtime: buildRuntimeStatus(runtime)
   };
@@ -112,7 +116,11 @@ export function capabilitiesForIdentity(identity) {
   if (safeIdentity.authentication !== "authenticated") return [];
 
   const policyIdentity = safeIdentity.type === "codex_operator"
-    ? { type: "codex_operator_token", role: "codex_operator" }
+    ? {
+        type: "codex_operator_token",
+        role: "codex_operator",
+        subject: safeIdentity.subject || ""
+      }
     : safeIdentity.type === "hcn_browser_session"
       ? { type: "hcn_browser_session", role: safeIdentity.role }
       : { type: "google_oauth", role: safeIdentity.role };
@@ -235,6 +243,7 @@ function normalizeIdentity(identity) {
       authentication: "authenticated",
       type: "codex_operator",
       role: "codex_operator",
+      subject: String(candidate.subject || ""),
       jobNimbusScope: "assigned",
       gmailMode: "exact_assigned_file_evidence"
     };

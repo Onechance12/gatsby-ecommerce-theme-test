@@ -7,9 +7,52 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { digest } from "./claim-filing-adapter.js";
+import {
+  CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
+  loadChanceOperatorRunManifest
+} from "./operations/thresher-policy.js";
 
 const PHASE_ZERO_BUILD_SHA = "810802542c35625327662e97fd21f7208532b371";
 const PLATFORM_FIXTURE_SECRET = "platform-fixture-secret-must-not-leak";
+
+function lockedOperatorManifestFixture() {
+  const input = {
+    schemaVersion: 1,
+    id: "chance-58-files-v1",
+    operatorScope: "assigned",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    files: [
+      { number: "2739", fileId: "contact-chance" },
+      { number: "2741", fileId: "contact-chance-second" },
+      ...Array.from({ length: 56 }, (_, index) => ({
+        number: String(4000 + index),
+        fileId: `manifest-file-${String(index + 1).padStart(2, "0")}`
+      }))
+    ],
+    excludedFileNumbers: ["2628"],
+    allowedActionTypes: [...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES],
+    allowedContactFields: [...CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS]
+  };
+  const manifest = loadChanceOperatorRunManifest(input);
+  return {
+    input,
+    runPolicy: { id: manifest.id, sha256: manifest.sha256 },
+    summary: manifest
+  };
+}
+
+function actionBatchIntentFixture({ index, type, fileId, fileNumber, reconciliation }) {
+  const stable = {
+    index,
+    type,
+    fileId: String(fileId),
+    fileNumber: String(fileNumber),
+    reconciliation
+  };
+  return { ...stable, intentDigest: digest({ version: 1, stable }) };
+}
 
 async function startOperatorJobNimbusFixture(t, port, options = {}) {
   const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
@@ -17,12 +60,17 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     jnid: "contact-chance",
     number: 2739,
     record_type_name: "Insurance",
+    is_active: options.chanceIsActive ?? true,
+    is_archived: options.chanceIsArchived ?? false,
+    is_closed: options.chanceIsClosed ?? false,
+    is_deleted: options.chanceIsDeleted ?? false,
     owners: [{ id: chanceOwnerId }],
     display_name: "Fixture Homeowner",
-    status_name: "Active",
+    status_name: options.chanceStatus || "Active",
     email: "client@example.test",
     mobile_phone: "2145551212",
-    cf_string_2: options.communicationScope ? "ABC-123" : "ABC123"
+    cf_string_2: options.chanceClaimNumber || (options.communicationScope ? "ABC-123" : "ABC123"),
+    ...(options.initialCity ? { city: options.initialCity } : {})
   };
   const duplicate = {
     ...chance,
@@ -37,7 +85,12 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     display_name: "Second Fixture Homeowner",
     email: options.duplicateEmail ? chance.email : "second@example.test",
     mobile_phone: options.duplicatePhone ? chance.mobile_phone : "2145553434",
-    cf_string_2: "XYZ-999"
+    cf_string_2: "XYZ-999",
+    status_name: options.secondStatus || chance.status_name,
+    is_active: options.secondIsActive ?? chance.is_active,
+    is_archived: options.secondIsArchived ?? chance.is_archived,
+    is_closed: options.secondIsClosed ?? chance.is_closed,
+    is_deleted: options.secondIsDeleted ?? chance.is_deleted
   };
   const additionalAssigned = Array.from(
     { length: Number(options.additionalAssigned || 0) },
@@ -51,6 +104,9 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       cf_string_2: `EXTRA-${index + 1}`,
       ...(Number(options.additionalAssignedInactiveIndex) === index + 1
         ? { is_active: false }
+        : {}),
+      ...(Array.isArray(options.additionalAssignedOverrides)
+        ? options.additionalAssignedOverrides[index] || {}
         : {})
     })
   );
@@ -60,25 +116,131 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     number: 3901,
     owners: [{ id: "richard-owner-id" }],
     display_name: "Richard Fixture Homeowner",
-    email: "company-client@example.test",
-    mobile_phone: "2145559090",
-    cf_string_2: "COMP-321"
+    email: options.companyOtherEmail || "company-client@example.test",
+    mobile_phone: options.companyOtherMobilePhone || "2145559090",
+    ...(options.companyOtherHomePhone
+      ? { home_phone: options.companyOtherHomePhone }
+      : {}),
+    cf_string_2: options.companyOtherClaimNumber || "COMP-321",
+    ...(options.companyOtherAdjusterPhone
+      ? { cf_string_8: options.companyOtherAdjusterPhone }
+      : {}),
+    ...(options.companyOtherAdjusterEmail
+      ? { cf_string_9: options.companyOtherAdjusterEmail }
+      : {})
   };
   let taskUpdateCount = 0;
   let companyNoteCreateCount = 0;
   let contactUpdateCount = 0;
   let taskCompleted = false;
+  let currentTaskCreateCount = 0;
+  let currentTaskUpdateCount = 0;
+  let thresherEvidenceReadCount = 0;
+  let quoHistoryReadCount = 0;
+  let gmailEvidenceReadCount = 0;
+  const taskQueryFields = [];
+  const taskPageRequests = [];
+  const activityPageRequests = [];
+  const filePageRequests = [];
+  const contactPageRequests = [];
+  const currentTasks = (Array.isArray(options.currentTasks) ? options.currentTasks : [])
+    .map((task) => structuredClone(task));
+  const thresherActivities = (Array.isArray(options.thresherActivities)
+    ? options.thresherActivities
+    : []).map((activity) => structuredClone(activity));
+  const reviewActivities = (Array.isArray(options.reviewActivities)
+    ? options.reviewActivities
+    : []).map((activity) => structuredClone(activity));
+  const reviewDocuments = (Array.isArray(options.reviewDocuments)
+    ? options.reviewDocuments
+    : []).map((document) => structuredClone(document));
+  const gmailDrafts = new Map((Array.isArray(options.gmailDrafts) ? options.gmailDrafts : [])
+    .map((draft) => [String(draft?.id || ""), structuredClone(draft)]));
+  const gmailMessages = new Map((Array.isArray(options.gmailMessages) ? options.gmailMessages : [])
+    .map((message) => [String(message?.id || ""), structuredClone(message)]));
+  const gmailThreads = new Map((Array.isArray(options.gmailThreads) ? options.gmailThreads : [])
+    .map((thread) => [String(thread?.id || ""), structuredClone(thread)]));
+  let gmailDraftCreateCount = 0;
+  const fixtureRelationField = (url) => {
+    try {
+      const filter = JSON.parse(url.searchParams.get("filter") || "{}");
+      return Object.keys(filter?.must?.[0]?.term || {})[0] || "";
+    } catch {
+      return "";
+    }
+  };
+  const fixtureMatchesRelation = (record, relationField) => {
+    if (relationField === "primary.id") {
+      return String(record?.primary?.id || record?.primary || "") === chance.jnid;
+    }
+    if (relationField === "related.id") {
+      return (Array.isArray(record?.related) ? record.related : [record?.related])
+        .some((relation) => String(relation?.id || relation || "") === chance.jnid);
+    }
+    return true;
+  };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    if (options.communicationScope && url.pathname.startsWith("/gmail/")) {
+      gmailEvidenceReadCount += 1;
+    }
     if (options.communicationScope && url.pathname === "/oauth-token") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ access_token: "fixture-google-token", expires_in: 3600 }));
+      return;
+    }
+    if (
+      options.communicationScope
+      && url.pathname === "/gmail/v1/users/me/drafts"
+      && req.method === "GET"
+    ) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        drafts: [...gmailDrafts.values()].map((draft) => ({
+          id: draft.id,
+          message: { id: draft.message?.id || "", threadId: draft.message?.threadId || "" }
+        }))
+      }));
+      return;
+    }
+    if (
+      options.communicationScope
+      && url.pathname === "/gmail/v1/users/me/drafts"
+      && req.method === "POST"
+    ) {
+      gmailDraftCreateCount += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: `draft-created-${gmailDraftCreateCount}`,
+        message: {
+          id: `draft-created-message-${gmailDraftCreateCount}`,
+          threadId: ""
+        }
+      }));
+      return;
+    }
+    const gmailDraftMatch = options.communicationScope
+      ? url.pathname.match(/^\/gmail\/v1\/users\/me\/drafts\/([^/]+)$/)
+      : null;
+    if (gmailDraftMatch && req.method === "GET") {
+      const draft = gmailDrafts.get(decodeURIComponent(gmailDraftMatch[1]));
+      if (!draft) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Draft not found" } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(draft));
       return;
     }
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         messages: [
+          ...[...gmailMessages.values()].map((message) => ({
+            id: message.id,
+            threadId: message.threadId || ""
+          })),
           { id: "client-message", threadId: "client-thread" },
           { id: "claim-exact-message", threadId: "claim-exact-thread" },
           { id: "email-prefix-message", threadId: "email-prefix-thread" },
@@ -91,6 +253,17 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
         ]
       }));
       return;
+    }
+    const gmailMessageMatch = options.communicationScope
+      ? url.pathname.match(/^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/)
+      : null;
+    if (gmailMessageMatch && req.method === "GET") {
+      const message = gmailMessages.get(decodeURIComponent(gmailMessageMatch[1]));
+      if (message) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(message));
+        return;
+      }
     }
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages/claim-exact-message" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -218,6 +391,17 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       }));
       return;
     }
+    const gmailThreadMatch = options.communicationScope
+      ? url.pathname.match(/^\/gmail\/v1\/users\/me\/threads\/([^/]+)$/)
+      : null;
+    if (gmailThreadMatch && req.method === "GET") {
+      const thread = gmailThreads.get(decodeURIComponent(gmailThreadMatch[1]));
+      if (thread) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(thread));
+        return;
+      }
+    }
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/threads/unrelated-thread" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
@@ -261,26 +445,34 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       return;
     }
     if (options.communicationScope && url.pathname === "/phone-numbers" && req.method === "GET") {
+      quoHistoryReadCount += 1;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ data: [{ id: "line-1", name: "Chance", number: "+19725550100" }] }));
       return;
     }
     if (options.communicationScope && url.pathname === "/messages" && req.method === "GET") {
+      quoHistoryReadCount += 1;
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ data: [] }));
+      res.end(JSON.stringify({
+        data: Array.isArray(options.quoMessages) ? options.quoMessages : []
+      }));
       return;
     }
     if (options.communicationScope && url.pathname === "/calls" && req.method === "GET") {
+      quoHistoryReadCount += 1;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        data: [{
-          id: "client-call",
-          phoneNumberId: "line-1",
-          createdAt: "2026-07-20T12:00:00Z",
-          direction: "incoming",
-          status: "completed",
-          duration: 60
-        }]
+        data: Array.isArray(options.quoCalls)
+          ? options.quoCalls
+            : [{
+              id: "client-call",
+              phoneNumberId: "line-1",
+              participants: ["+12145551212"],
+              createdAt: "2026-07-20T12:00:00Z",
+              direction: "incoming",
+              status: "completed",
+              duration: 60
+            }]
       }));
       return;
     }
@@ -301,6 +493,9 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
         res.end(JSON.stringify({ error: "fixture contact update failure" }));
         return;
       }
+      if (Number(options.contactUpdateDelayMs || 0) > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Number(options.contactUpdateDelayMs)));
+      }
       Object.assign(exactContact, body);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(exactContact));
@@ -308,14 +503,39 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     }
     if (url.pathname === "/contacts") {
       res.writeHead(200, { "content-type": "application/json" });
-      const contacts = [
+      const contactRows = [
         chance,
         ...(options.duplicateName ? [duplicate] : []),
         ...(options.secondAssigned ? [secondAssigned] : []),
         ...additionalAssigned,
         ...(options.companyOther ? [companyOther] : [])
       ];
-      res.end(JSON.stringify({ contacts }));
+      const contacts = options.chanceContactPageTwo
+        ? [
+            ...contactRows.filter((contact) => contact !== chance).slice(0, 1),
+            chance,
+            ...contactRows.filter((contact) => contact !== chance).slice(1)
+          ]
+        : contactRows;
+      const requestedSize = Math.max(1, Number(url.searchParams.get("size") || contacts.length || 1));
+      const from = Math.max(0, Number(url.searchParams.get("from") || 0));
+      const configuredCap = Number(options.contactPageCap || 0);
+      const responseSize = configuredCap > 0
+        ? Math.min(requestedSize, configuredCap)
+        : requestedSize;
+      const page = contacts.slice(from, from + responseSize);
+      contactPageRequests.push({
+        requestedSize,
+        from,
+        returnedCount: page.length,
+        total: options.omitContactTotal ? undefined : contacts.length,
+        totalIncluded: options.omitContactTotal !== true,
+        contactIds: page.map((contact) => String(contact.jnid || contact.id || ""))
+      });
+      res.end(JSON.stringify({
+        contacts: page,
+        ...(options.omitContactTotal ? {} : { total: contacts.length })
+      }));
       return;
     }
     if (url.pathname === "/contacts/contact-chance") {
@@ -365,19 +585,143 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       }));
       return;
     }
-    if (url.pathname === "/activities" && req.method === "GET") {
+    const thresherActivity = thresherActivities.find(
+      (activity) => url.pathname === `/activities/${activity.jnid || activity.id}`
+    );
+    if (thresherActivity && req.method === "GET") {
+      thresherEvidenceReadCount += 1;
+      const responseActivity = (
+        Number(options.thresherActivityMutateAtRead) === thresherEvidenceReadCount
+        && options.thresherActivityMutation
+      )
+        ? { ...thresherActivity, ...structuredClone(options.thresherActivityMutation) }
+        : thresherActivity;
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ activities: [] }));
+      res.end(JSON.stringify(responseActivity));
+      return;
+    }
+    if (url.pathname === "/activities" && req.method === "GET") {
+      const relationField = fixtureRelationField(url);
+      const activities = reviewActivities.filter((activity) => (
+        fixtureMatchesRelation(activity, relationField)
+      ));
+      const requestedSize = Math.max(1, Number(url.searchParams.get("size") || activities.length || 1));
+      const from = Math.max(0, Number(url.searchParams.get("from") || 0));
+      const configuredCap = Number(options.activityPageCap || options.relatedPageCap || 0);
+      const responseSize = configuredCap > 0
+        ? Math.min(requestedSize, configuredCap)
+        : requestedSize;
+      const page = activities.slice(from, from + responseSize);
+      activityPageRequests.push({
+        relationField,
+        requestedSize,
+        from,
+        returnedCount: page.length,
+        total: activities.length,
+        activityIds: page.map((activity) => String(activity.jnid || activity.id || ""))
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ activities: page, total: activities.length }));
       return;
     }
     if (url.pathname === "/tasks" && req.method === "GET") {
+      let relationField = "";
+      try {
+        const filter = JSON.parse(url.searchParams.get("filter") || "{}");
+        relationField = Object.keys(filter?.must?.[0]?.term || {})[0] || "";
+      } catch {
+        relationField = "";
+      }
+      if (relationField) taskQueryFields.push(relationField);
+      const tasks = currentTasks.filter((task) => {
+        if (relationField === "primary.id") {
+          return String(task?.primary?.id || "") === chance.jnid;
+        }
+        if (relationField === "related.id") {
+          return (Array.isArray(task?.related) ? task.related : [task?.related])
+            .some((relation) => String(relation?.id || relation || "") === chance.jnid);
+        }
+        return true;
+      });
+      const requestedSize = Math.max(1, Number(url.searchParams.get("size") || tasks.length || 1));
+      const from = Math.max(0, Number(url.searchParams.get("from") || 0));
+      const configuredCap = Number(options.taskPageCap || 0);
+      const responseSize = configuredCap > 0
+        ? Math.min(requestedSize, configuredCap)
+        : requestedSize;
+      const page = tasks.slice(from, from + responseSize);
+      taskPageRequests.push({
+        relationField,
+        requestedSize,
+        from,
+        returnedCount: page.length,
+        total: options.omitTaskTotal ? undefined : tasks.length,
+        totalIncluded: options.omitTaskTotal !== true,
+        taskIds: page.map((task) => String(task.jnid || task.id || ""))
+      });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ tasks: [] }));
+      res.end(JSON.stringify({
+        tasks: page,
+        ...(options.omitTaskTotal ? {} : { total: tasks.length })
+      }));
+      return;
+    }
+    if (url.pathname === "/tasks" && req.method === "POST" && options.currentTasks) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      currentTaskCreateCount += 1;
+      const created = {
+        ...body,
+        jnid: `current-task-created-${currentTaskCreateCount}`,
+        is_active: body.is_active ?? true,
+        is_completed: body.is_completed ?? false
+      };
+      currentTasks.push(created);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(created));
       return;
     }
     if (url.pathname === "/files" && req.method === "GET") {
+      const relationField = fixtureRelationField(url);
+      const documents = reviewDocuments.filter((document) => (
+        fixtureMatchesRelation(document, relationField)
+      ));
+      const requestedSize = Math.max(1, Number(url.searchParams.get("size") || documents.length || 1));
+      const from = Math.max(0, Number(url.searchParams.get("from") || 0));
+      const configuredCap = Number(options.filePageCap || options.relatedPageCap || 0);
+      const responseSize = configuredCap > 0
+        ? Math.min(requestedSize, configuredCap)
+        : requestedSize;
+      const page = documents.slice(from, from + responseSize);
+      filePageRequests.push({
+        relationField,
+        requestedSize,
+        from,
+        returnedCount: page.length,
+        total: documents.length,
+        documentIds: page.map((document) => String(document.jnid || document.id || ""))
+      });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ files: [] }));
+      res.end(JSON.stringify({ files: page, total: documents.length }));
+      return;
+    }
+    const currentTask = currentTasks.find(
+      (task) => url.pathname === `/tasks/${task.jnid || task.id}`
+    );
+    if (currentTask && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(currentTask));
+      return;
+    }
+    if (currentTask && req.method === "PUT") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      currentTaskUpdateCount += 1;
+      Object.assign(currentTask, body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(currentTask));
       return;
     }
     if (url.pathname === "/tasks/fixture-task" && req.method === "GET") {
@@ -424,6 +768,19 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     getTaskUpdateCount: () => taskUpdateCount,
     getCompanyNoteCreateCount: () => companyNoteCreateCount,
     getContactUpdateCount: () => contactUpdateCount,
+    getCurrentTaskCreateCount: () => currentTaskCreateCount,
+    getCurrentTaskUpdateCount: () => currentTaskUpdateCount,
+    getThresherEvidenceReadCount: () => thresherEvidenceReadCount,
+    getQuoHistoryReadCount: () => quoHistoryReadCount,
+    getGmailEvidenceReadCount: () => gmailEvidenceReadCount,
+    getContactPageRequests: () => structuredClone(contactPageRequests),
+    getGmailDraftCreateCount: () => gmailDraftCreateCount,
+    addGmailDraft: (draft) => gmailDrafts.set(String(draft?.id || ""), structuredClone(draft)),
+    getTaskQueryFields: () => [...taskQueryFields],
+    getTaskPageRequests: () => structuredClone(taskPageRequests),
+    getActivityPageRequests: () => structuredClone(activityPageRequests),
+    getFilePageRequests: () => structuredClone(filePageRequests),
+    getCurrentTasks: () => structuredClone(currentTasks),
     getContact: (id) => [chance, duplicate, secondAssigned, ...additionalAssigned, companyOther]
       .find((contact) => contact.jnid === id)
   };
@@ -451,6 +808,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
       ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false",
       ALLOW_QUO_SEND: "false",
       BRIDGE_ALLOW_WRITES: "false",
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       RENDER_GIT_COMMIT: PHASE_ZERO_BUILD_SHA,
       PLATFORM_FIXTURE_SECRET
     },
@@ -768,6 +1126,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
       ALLOW_GMAIL_SEND: "false",
       ALLOW_QUO_SEND: "false",
       BRIDGE_ALLOW_WRITES: "false",
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       RENDER_GIT_COMMIT: PHASE_ZERO_BUILD_SHA,
       PLATFORM_FIXTURE_SECRET
     },
@@ -821,7 +1180,8 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(macIdentity.operatorAccess.assignedBatchMaxFiles, 5);
   assert.deepEqual(macIdentity.operatorAccess.assignedMultiFileActionTypes, [
     "jobnimbus.update_contact",
-    "jobnimbus.update_status"
+    "jobnimbus.update_status",
+    "jobnimbus.ensure_current_task"
   ]);
   assert.equal(macIdentity.operatorAccess.assignedMultiFileExecution, "sequential_fail_stop_no_rollback");
   assert.equal(macIdentity.operatorAccess.companyBatchMaxFiles, 1);
@@ -844,7 +1204,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(platformSession.authorizedCapabilities.some((capability) => capability.startsWith("brain.")), false);
   const serializedPlatformSession = JSON.stringify(platformSession);
   assert.equal(serializedPlatformSession.includes(PLATFORM_FIXTURE_SECRET), false);
-  assert.equal(serializedPlatformSession.includes('"subject"'), false);
+  assert.equal(Object.hasOwn(platformSession.identity, "subject"), false);
   assert.equal(serializedPlatformSession.includes('"email"'), false);
   assert.equal(serializedPlatformSession.includes('"token"'), false);
 
@@ -1261,7 +1621,10 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     })
   });
   assert.equal(macMultiFileNoteResponse.status, 400);
-  assert.match((await macMultiFileNoteResponse.json()).error, /allow only jobnimbus\.update_contact and jobnimbus\.update_status/i);
+  assert.match(
+    (await macMultiFileNoteResponse.json()).error,
+    /allow only contact corrections, forward stage moves, and current-control tasks/i
+  );
 
   const macMultiFileNameQueryResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",
@@ -1296,7 +1659,10 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     })
   });
   assert.equal(macDuplicateFileMutationResponse.status, 400);
-  assert.match((await macDuplicateFileMutationResponse.json()).error, /at most one contact update and one status update per file/i);
+  assert.match(
+    (await macDuplicateFileMutationResponse.json()).error,
+    /at most one contact update, one status update, and one current-control task per file/i
+  );
 
   const macInterleavedFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",
@@ -1396,7 +1762,16 @@ test("Mac operator supports one explicit company file while HP and broad company
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
     companyOther: true,
-    communicationScope: true
+    communicationScope: true,
+    quoCalls: [{
+      id: "company-client-call",
+      phoneNumberId: "line-1",
+      participants: ["+12145559090"],
+      createdAt: "2026-07-20T12:00:00Z",
+      direction: "incoming",
+      status: "completed",
+      duration: 60
+    }]
   });
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
@@ -1498,7 +1873,7 @@ test("Mac operator supports one explicit company file while HP and broad company
   );
   assert.deepEqual(
     companyReview.packets[0].quo.timeline.map((row) => row.id),
-    ["client-call"]
+    ["company-client-call"]
   );
 
   const payloadOnlyCompanyScopeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
@@ -1793,6 +2168,7 @@ test("Mac operator executes one verified restricted batch across exact assigned 
       ALLOW_GOOGLE_USER_AUTH: "false",
       QUO_API_KEY: "",
       MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       BRIDGE_ALLOW_WRITES: "true"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -1882,7 +2258,7 @@ test("Mac operator executes one verified restricted batch across exact assigned 
     ]
   );
   assert.equal(executed.batch.completed.every((item) => item.receipt.verifiedByReadback === true), true);
-  assert.equal(fixtureApi.getContactUpdateCount(), 10);
+  assert.equal(fixtureApi.getContactUpdateCount(), 5);
   assert.equal(fixtureApi.getContact("contact-chance").city, "Dallas");
   assert.equal(fixtureApi.getContact("contact-chance-second").city, "Garland");
   assert.equal(fixtureApi.getContact("contact-chance-extra-1").city, "Irving");
@@ -1915,6 +2291,7 @@ test("Mac operator multi-file batch stops after an uncertain provider failure", 
       ALLOW_GOOGLE_USER_AUTH: "false",
       QUO_API_KEY: "",
       MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       BRIDGE_ALLOW_WRITES: "true"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -2082,6 +2459,7 @@ test("Mac operator rejects an inactive file before issuing a multi-file approval
       ALLOW_GOOGLE_USER_AUTH: "false",
       QUO_API_KEY: "",
       MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       BRIDGE_ALLOW_WRITES: "true"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -2104,7 +2482,7 @@ test("Mac operator rejects an inactive file before issuing a multi-file approval
     })
   });
   assert.equal(response.status, 400);
-  assert.match((await response.json()).error, /inactive, archived, or closed/i);
+  assert.match((await response.json()).error, /not a Chance Pearson insurance file/i);
   assert.equal(fixtureApi.getContactUpdateCount(), 0);
 });
 
@@ -2213,29 +2591,30 @@ test("Codex operator security ledgers fail closed on corrupted JSON", async (t) 
     body: JSON.stringify({ operations, execute: false })
   });
   assert.equal(blockedPlanResponse.status, 503);
-  assert.match((await blockedPlanResponse.json()).error, /Action approval ledger is corrupted/i);
+  assert.match(
+    (await blockedPlanResponse.json()).error,
+    /operator receipt recovery boundary is not ready/i
+  );
+  const healthResponse = await fetch(`http://127.0.0.1:${bridgePort}/health`);
+  assert.equal(healthResponse.status, 200);
+  const health = await healthResponse.json();
+  assert.equal(health.codexOperator.actionReceiptRecovery.status, "blocked");
+  assert.match(
+    health.codexOperator.actionReceiptRecovery.error,
+    /Action approval ledger is corrupted/i
+  );
 
   await writeFile(path.join(bridgeData, "action-approvals.json"), "[]\n", "utf8");
-  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+  const stillBlockedResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",
     headers,
     body: JSON.stringify({ operations, execute: false })
   });
-  assert.equal(planResponse.status, 200);
-  const plan = await planResponse.json();
-  await writeFile(path.join(bridgeData, "action-batches.json"), "{corrupt", "utf8");
-  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      operations,
-      execute: true,
-      approvalDigest: plan.approvalDigest,
-      approvalChallenge: plan.approvalChallenge
-    })
-  });
-  assert.equal(executeResponse.status, 503);
-  assert.match((await executeResponse.json()).error, /Action batch ledger is corrupted/i);
+  assert.equal(stillBlockedResponse.status, 503);
+  assert.match(
+    (await stillBlockedResponse.json()).error,
+    /operator receipt recovery boundary is not ready/i
+  );
   assert.equal(fixtureApi.getTaskUpdateCount(), 0);
 });
 
@@ -2326,6 +2705,238 @@ test("Chance file resolution fails closed on tied exact names", async (t) => {
   assert.match((await response.json()).error, /ambiguous Chance file query/i);
 });
 
+test("Mac exact-file resolution follows provider-capped contact pages to a page-two target", async (t) => {
+  async function runCase(caseTest, {
+    bridgePort,
+    fakeApiPort,
+    omitContactTotal
+  }) {
+    const memoryRoot = await mkdtemp(path.join(
+      tmpdir(),
+      omitContactTotal ? "codex-contact-page-two-no-total-" : "codex-contact-page-two-total-"
+    ));
+    caseTest.after(() => rm(memoryRoot, { recursive: true, force: true }));
+    const fixtureApi = await startOperatorJobNimbusFixture(caseTest, fakeApiPort, {
+      secondAssigned: true,
+      chanceContactPageTwo: true,
+      contactPageCap: 1,
+      omitContactTotal
+    });
+    const child = spawn(process.execPath, ["src/server.js"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        PORT: String(bridgePort),
+        JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+        CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+        JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+        JOBNIMBUS_API_KEY: "fixture-key",
+        GOOGLE_CLIENT_ID: "",
+        GOOGLE_CLIENT_SECRET: "",
+        GOOGLE_REFRESH_TOKEN: "",
+        ALLOW_GOOGLE_USER_AUTH: "false",
+        QUO_API_KEY: "",
+        MEMORY_ROOT: memoryRoot,
+        REQUIRE_CHANCE_RUN_POLICY: "false",
+        BRIDGE_ALLOW_WRITES: "false"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    caseTest.after(() => child.kill("SIGTERM"));
+    await waitForServer(child, bridgePort);
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/review-file`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ query: "2739" })
+    });
+    assert.equal(response.status, 200);
+    const review = await response.json();
+    assert.equal(review.file.id, "contact-chance");
+    assert.equal(String(review.file.number), "2739");
+    assert.equal(review.rawContact.jnid, "contact-chance");
+    assert.equal(review.scope, "chance_assigned_file");
+
+    const pages = fixtureApi.getContactPageRequests();
+    assert.deepEqual(
+      pages.map((page) => page.from),
+      omitContactTotal ? [0, 1, 2] : [0, 1]
+    );
+    assert.deepEqual(
+      pages.map((page) => page.contactIds),
+      omitContactTotal
+        ? [["contact-chance-second"], ["contact-chance"], []]
+        : [["contact-chance-second"], ["contact-chance"]]
+    );
+    assert.equal(
+      pages.every((page) => page.totalIncluded === !omitContactTotal),
+      true
+    );
+  }
+
+  await t.test("trustworthy declared total", async (caseTest) => {
+    await runCase(caseTest, {
+      bridgePort: 19138,
+      fakeApiPort: 19139,
+      omitContactTotal: false
+    });
+  });
+  await t.test("no total requires an empty probe", async (caseTest) => {
+    await runCase(caseTest, {
+      bridgePort: 19140,
+      fakeApiPort: 19141,
+      omitContactTotal: true
+    });
+  });
+});
+
+test("Mac exact-file review unions complete primary and related resource pages without duplicates", async (t) => {
+  const bridgePort = 19142;
+  const fakeApiPort = 19143;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-review-primary-related-pages-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const sharedActivityId = "review-note-shared-link";
+  const primaryActivityId = "review-note-primary-page-two";
+  const sharedTaskId = "review-task-shared-link";
+  const primaryTaskId = "review-task-primary-page-two";
+  const sharedDocumentId = "review-document-shared-link";
+  const primaryDocumentId = "review-document-primary-page-two";
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    relatedPageCap: 1,
+    taskPageCap: 1,
+    reviewActivities: [{
+      jnid: sharedActivityId,
+      record_type_name: "Note",
+      primary: { id: "contact-chance" },
+      related: [{ id: "contact-chance" }],
+      note: "Shared-link note should appear once.",
+      date_created: 1_776_000_000
+    }, {
+      jnid: primaryActivityId,
+      record_type_name: "Note",
+      primary: { id: "contact-chance" },
+      note: "Primary-only page-two note must be included.",
+      date_created: 1_777_000_000
+    }],
+    currentTasks: [{
+      jnid: sharedTaskId,
+      record_type_name: "Task",
+      primary: { id: "contact-chance" },
+      related: [{ id: "contact-chance" }],
+      title: "Shared-link task should appear once",
+      is_completed: false,
+      is_active: true,
+      date_start: 1_776_000_000
+    }, {
+      jnid: primaryTaskId,
+      record_type_name: "Task",
+      primary: { id: "contact-chance" },
+      title: "Primary-only page-two task must be included",
+      is_completed: false,
+      is_active: true,
+      date_start: 1_777_000_000
+    }],
+    reviewDocuments: [{
+      jnid: sharedDocumentId,
+      record_type_name: "Document",
+      primary: { id: "contact-chance" },
+      related: [{ id: "contact-chance" }],
+      name: "Shared Evidence.pdf",
+      content_type: "application/pdf"
+    }, {
+      jnid: primaryDocumentId,
+      record_type_name: "Document",
+      primary: { id: "contact-chance" },
+      name: "Primary Page Two Evidence.pdf",
+      content_type: "application/pdf"
+    }]
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const response = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/review-file`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ query: "2739" })
+  });
+  const review = await response.json();
+  assert.equal(response.status, 200, review.error || "exact-file review failed");
+  assert.equal(review.file.id, "contact-chance");
+  assert.equal(review.recentActivities.length, 2);
+  assert.deepEqual(
+    new Set(review.recentActivities.map((activity) => activity.id)),
+    new Set([sharedActivityId, primaryActivityId])
+  );
+  assert.equal(review.openTasks.length, 2);
+  assert.deepEqual(
+    new Set(review.openTasks.map((task) => task.id)),
+    new Set([sharedTaskId, primaryTaskId])
+  );
+  assert.equal(review.documents.length, 2);
+  assert.deepEqual(
+    new Set(review.documents.map((document) => document.id)),
+    new Set([sharedDocumentId, primaryDocumentId])
+  );
+  assert.equal(review.operationalDocuments.length, 2);
+
+  const assertUnionPages = (requests, idKey, sharedId, primaryId) => {
+    const primaryPages = requests.filter((page) => page.relationField === "primary.id");
+    assert.deepEqual(primaryPages.map((page) => page.from), [0, 1]);
+    assert.deepEqual(primaryPages.map((page) => page[idKey]), [[sharedId], [primaryId]]);
+    assert.equal(primaryPages.every((page) => page.total === 2), true);
+    const relatedPages = requests.filter((page) => page.relationField === "related.id");
+    assert.deepEqual(relatedPages.map((page) => page.from), [0]);
+    assert.deepEqual(relatedPages.map((page) => page[idKey]), [[sharedId]]);
+    assert.equal(relatedPages.every((page) => page.total === 1), true);
+  };
+  assertUnionPages(
+    fixtureApi.getActivityPageRequests(),
+    "activityIds",
+    sharedActivityId,
+    primaryActivityId
+  );
+  assertUnionPages(
+    fixtureApi.getTaskPageRequests(),
+    "taskIds",
+    sharedTaskId,
+    primaryTaskId
+  );
+  assertUnionPages(
+    fixtureApi.getFilePageRequests(),
+    "documentIds",
+    sharedDocumentId,
+    primaryDocumentId
+  );
+});
+
 test("Codex operator communication reads stay bound to one exact Chance file", async (t) => {
   const bridgePort = 18893;
   const fakeApiPort = 18894;
@@ -2392,15 +3003,15 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
     body: JSON.stringify({ fileQuery: "2739", threadId: "unrelated-thread" })
   });
   assert.equal(unrelatedThreadResponse.status, 403);
-  assert.match((await unrelatedThreadResponse.json()).error, /not strongly correlated/i);
+  assert.match((await unrelatedThreadResponse.json()).error, /not exclusively correlated/i);
 
   const quoHistoryResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/history`, {
     method: "POST",
     headers,
     body: JSON.stringify({ query: "2739" })
   });
-  assert.equal(quoHistoryResponse.status, 200);
   const quoHistory = await quoHistoryResponse.json();
+  assert.equal(quoHistoryResponse.status, 200, quoHistory.error || "Quo history failed");
   assert.equal(quoHistory.file.id, "contact-chance");
   assert.deepEqual(quoHistory.timeline.map((row) => row.id), ["client-call"]);
 
@@ -2411,6 +3022,303 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   });
   assert.equal(unrelatedTranscriptResponse.status, 403);
   assert.match((await unrelatedTranscriptResponse.json()).error, /not present in the current history/i);
+});
+
+test("Gmail exact-file reads reject mixed company claims while allowing identifier-less replies only in an exclusive target thread", async (t) => {
+  const bridgePort = 19124;
+  const fakeApiPort = 19125;
+  const gmailTextMessage = ({ id, threadId, subject, body, to = "claims@wavepa.com" }) => ({
+    id,
+    threadId,
+    snippet: body,
+    labelIds: ["INBOX"],
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "carrier@example.test" },
+        { name: "To", value: to },
+        { name: "Subject", value: subject }
+      ],
+      body: { data: Buffer.from(body).toString("base64url") }
+    }
+  });
+  const mixedMessage = gmailTextMessage({
+    id: "mixed-claim-message",
+    threadId: "mixed-message-thread",
+    subject: "Claims ABC-123 and COMP-321",
+    body: "This message references target claim ABC-123 and another company claim COMP-321."
+  });
+  const targetThreadMessage = gmailTextMessage({
+    id: "target-thread-message",
+    threadId: "exclusive-target-thread",
+    subject: "Claim ABC-123",
+    body: "Carrier update for claim ABC-123."
+  });
+  const identifierlessReply = gmailTextMessage({
+    id: "identifierless-reply",
+    threadId: "exclusive-target-thread",
+    subject: "Re: carrier update",
+    body: "Thank you. We received this update."
+  });
+  const foreignThreadMessage = gmailTextMessage({
+    id: "foreign-thread-message",
+    threadId: "mixed-company-thread",
+    subject: "Claim COMP-321",
+    body: "Carrier update for company claim COMP-321."
+  });
+  const mixedThreadTargetMessage = gmailTextMessage({
+    id: "mixed-thread-target-message",
+    threadId: "mixed-company-thread",
+    subject: "Claim ABC-123",
+    body: "Carrier update for target claim ABC-123."
+  });
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    companyOther: true,
+    gmailMessages: [mixedMessage],
+    gmailThreads: [{
+      id: "exclusive-target-thread",
+      messages: [targetThreadMessage, identifierlessReply]
+    }, {
+      id: "mixed-company-thread",
+      messages: [mixedThreadTargetMessage, foreignThreadMessage]
+    }]
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const searchResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", limit: 10 })
+  });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.equal(search.messages.some((message) => message.id === mixedMessage.id), false);
+  assert.equal(search.messages.some((message) => message.id === "claim-exact-message"), true);
+
+  const mixedThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", threadId: "mixed-company-thread" })
+  });
+  assert.equal(mixedThreadResponse.status, 403);
+  assert.match((await mixedThreadResponse.json()).error, /not exclusively correlated/i);
+
+  const exclusiveThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", threadId: "exclusive-target-thread" })
+  });
+  assert.equal(exclusiveThreadResponse.status, 200);
+  const exclusiveThread = await exclusiveThreadResponse.json();
+  assert.deepEqual(
+    exclusiveThread.messages.map((message) => message.id),
+    [targetThreadMessage.id, identifierlessReply.id]
+  );
+  assert.match(exclusiveThread.messages[1].plainText, /received this update/i);
+});
+
+test("Quo exact-file reads fail closed on a company home-phone collision hidden by a different mobile phone", async (t) => {
+  const bridgePort = 19098;
+  const fakeApiPort = 19099;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-quo-company-phone-collision-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    companyOther: true,
+    companyOtherMobilePhone: "2145559090",
+    companyOtherHomePhone: "2145551212"
+  });
+  const chanceFile = fixtureApi.getContact("contact-chance");
+  const companyFile = fixtureApi.getContact("contact-company-other");
+  assert.equal(companyFile.record_type_name, "Insurance");
+  assert.equal(companyFile.owners.some((owner) => owner.id === chanceFile.owners[0].id), false);
+  assert.equal(companyFile.home_phone, chanceFile.mobile_phone);
+  assert.notEqual(companyFile.mobile_phone, chanceFile.mobile_phone);
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const historyResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/history`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ query: "2739" })
+  });
+  assert.equal(historyResponse.status, 400);
+  assert.match(
+    (await historyResponse.json()).error,
+    /phone is shared across multiple company insurance files.*Quo history.*ambiguous and blocked/i
+  );
+  assert.equal(fixtureApi.getQuoHistoryReadCount(), 0);
+
+  const evidenceResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      query: "2739",
+      includeGmail: false,
+      includeQuo: true
+    })
+  });
+  assert.equal(evidenceResponse.status, 200);
+  const evidence = await evidenceResponse.json();
+  assert.equal(evidence.packets[0].file.id, "contact-chance");
+  assert.equal(evidence.packets[0].quo.status, "error");
+  assert.match(
+    evidence.packets[0].quo.error,
+    /phone is shared across multiple company insurance files.*Quo evidence review.*ambiguous and blocked/i
+  );
+  assert.deepEqual(evidence.packets[0].quo.timeline, []);
+  assert.equal(fixtureApi.getQuoHistoryReadCount(), 0);
+});
+
+test("Capped company contact pagination finds page-two adjuster-field Gmail and Quo collisions before downstream reads", async (t) => {
+  const bridgePort = 19108;
+  const fakeApiPort = 19109;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-capped-contact-correlation-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    contactPageCap: 1,
+    companyOther: true,
+    companyOtherClaimNumber: "ABC-123",
+    companyOtherMobilePhone: "2145559090",
+    companyOtherAdjusterPhone: "2145551212",
+    companyOtherAdjusterEmail: "client@example.test"
+  });
+  const chanceFile = fixtureApi.getContact("contact-chance");
+  const companyFile = fixtureApi.getContact("contact-company-other");
+  assert.equal(companyFile.record_type_name, "Insurance");
+  assert.equal(companyFile.owners.some((owner) => owner.id === chanceFile.owners[0].id), false);
+  assert.notEqual(companyFile.email, chanceFile.email);
+  assert.equal(companyFile.cf_string_2, chanceFile.cf_string_2);
+  assert.notEqual(companyFile.mobile_phone, chanceFile.mobile_phone);
+  assert.equal(companyFile.cf_string_8, chanceFile.mobile_phone);
+  assert.equal(companyFile.cf_string_9, chanceFile.email);
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const gmailResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", limit: 10 })
+  });
+  assert.equal([400, 403, 409, 503].includes(gmailResponse.status), true);
+  assert.match(
+    (await gmailResponse.json()).error,
+    /(?:unique|ambiguous|strongly correlated|communication scope)/i
+  );
+  assert.equal(fixtureApi.getGmailEvidenceReadCount(), 0);
+
+  const quoResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/history`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ query: "2739" })
+  });
+  assert.equal(quoResponse.status, 400);
+  assert.match(
+    (await quoResponse.json()).error,
+    /phone is shared across multiple company insurance files.*Quo history.*ambiguous and blocked/i
+  );
+  assert.equal(fixtureApi.getQuoHistoryReadCount(), 0);
+
+  const contactPages = fixtureApi.getContactPageRequests();
+  assert.equal(contactPages.length >= 4, true);
+  assert.equal(contactPages.every((page) => page.returnedCount === 1), true);
+  assert.equal(contactPages.every((page) => page.total === 2), true);
+  assert.equal(contactPages.some((page) => (
+    page.from === 0
+    && page.contactIds.length === 1
+    && page.contactIds[0] === "contact-chance"
+  )), true);
+  assert.equal(contactPages.some((page) => (
+    page.from === 1
+    && page.contactIds.length === 1
+    && page.contactIds[0] === "contact-company-other"
+  )), true);
 });
 
 test("employee Google OAuth keeps Gmail identity isolated and enforces the employee role", async (t) => {
@@ -2776,7 +3684,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       res.end(JSON.stringify(
         serveUnknownContactsWrapper
           ? { unknownWrapper: allContacts }
-          : { contacts: allContacts }
+          : { contacts: allContacts, total: allContacts.length }
       ));
       return;
     }
@@ -2812,7 +3720,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
           date_created: "2026-07-27T14:00:00.000Z",
           actor_role: "adjuster",
           note: "Fresh synthetic carrier activity"
-        }]
+        }],
+        total: 1
       }));
       return;
     }
@@ -2830,7 +3739,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
           date_start: "2020-01-02T15:00:00.000Z",
           assigned_role: "coordinator",
           title: "Fresh synthetic overdue task"
-        }]
+        }],
+        total: 1
       }));
       return;
     }
@@ -2847,7 +3757,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
           content_type: "application/pdf",
           status_name: "New",
           date_created: "2026-07-27T13:00:00.000Z"
-        }]
+        }],
+        total: 1
       }));
       return;
     }
@@ -3896,7 +4807,7 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
         "Bearer hcn-action-jobnimbus-key"
       );
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ contacts: [contact] }));
+      res.end(JSON.stringify({ contacts: [contact], total: 1 }));
       return;
     }
     if (
@@ -4277,11 +5188,15 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     duplicateVerificationPlan.planId
   );
   assert.equal(
-    duplicateVerification.receipt.status,
-    "completed_pending_verification"
+    duplicateVerification.plan.status,
+    "reconciliation_required"
   );
-  assert.equal(duplicateVerification.receipt.succeededCount, 1);
-  assert.equal(duplicateVerification.receipt.unknownCount, 0);
+  assert.equal(
+    duplicateVerification.receipt.status,
+    "reconciliation_required"
+  );
+  assert.equal(duplicateVerification.receipt.succeededCount, 0);
+  assert.equal(duplicateVerification.receipt.unknownCount, 1);
   assert.equal(jobNimbusMutations.length, 1);
 
   const inProgressPlan = await preparePlan(
@@ -4356,8 +5271,8 @@ test("HCN action execution is receipt-first, metadata-only, durable across Chanc
     partialDuplicate.receipt.status,
     "reconciliation_required"
   );
-  assert.equal(partialDuplicate.receipt.succeededCount, 1);
-  assert.equal(partialDuplicate.receipt.unknownCount, 1);
+  assert.equal(partialDuplicate.receipt.succeededCount, 0);
+  assert.equal(partialDuplicate.receipt.unknownCount, 2);
   assert.equal(jobNimbusMutations.length, 1);
 
   assert.deepEqual(await readFile(legacyCanaryPath), legacyCanaryBytes);
@@ -4794,6 +5709,41 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       { jnid: "file-hidden", primary: { id: hidden.jnid }, filename: "Hidden Owne\u0301r - TDI .pdf", content_type: "application/pdf" }
     ] };
     else { res.writeHead(404); res.end("not found"); return; }
+    const listKey = {
+      "/contacts": "contacts",
+      "/activities": "activities",
+      "/tasks": "tasks",
+      "/files": "files"
+    }[url.pathname];
+    if (listKey && Array.isArray(body[listKey])) {
+      let rows = body[listKey];
+      let relationField = "";
+      let relationId = "";
+      try {
+        const term = JSON.parse(
+          url.searchParams.get("filter") || "{}"
+        )?.must?.[0]?.term || {};
+        relationField = Object.keys(term)[0] || "";
+        relationId = String(term[relationField] || "");
+      } catch {
+        relationField = "";
+        relationId = "";
+      }
+      if (["primary.id", "related.id"].includes(relationField)) {
+        rows = rows.filter((row) => (
+          relationField === "primary.id"
+            ? String(row?.primary?.id || "") === relationId
+            : (Array.isArray(row?.related) ? row.related : [row?.related])
+              .some((relation) => String(relation?.id || relation || "") === relationId)
+        ));
+      }
+      const from = Math.max(0, Number(url.searchParams.get("from") || 0));
+      const size = Math.max(1, Number(url.searchParams.get("size") || rows.length || 1));
+      body = {
+        [listKey]: rows.slice(from, from + size),
+        total: rows.length
+      };
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   });
@@ -5319,6 +6269,30 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(retryChangingDraftExecute.batch.status, "partial_failure");
   assert.equal(fixtureGmailDraftCreateCount, 0);
 
+  // The next assertions exercise an independent legacy send-plan surface.
+  // Remove this deliberately uncertain fixture receipt so the file-global
+  // production lock does not correctly quarantine the remainder of this
+  // broad smoke test.
+  const broadActionBatchStorePath = path.join(
+    memoryRoot,
+    "bridge",
+    "action-batches.json"
+  );
+  const broadActionBatches = JSON.parse(
+    await readFile(broadActionBatchStorePath, "utf8")
+  );
+  await writeFile(
+    broadActionBatchStorePath,
+    `${JSON.stringify(
+      broadActionBatches.filter(
+        (row) => row.approvalDigest !== changingDraftBatch.approvalDigest
+      ),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
   const createDraftOperation = {
     type: "gmail.create_draft",
     payload: {
@@ -5362,7 +6336,11 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     headers: operatorDraftHeaders,
     body: JSON.stringify({ operations: [operatorDraftSendOperation], execute: false })
   });
-  assert.equal(inlineAttachmentDraftResponse.status, 200);
+  assert.equal(
+    inlineAttachmentDraftResponse.status,
+    200,
+    await inlineAttachmentDraftResponse.clone().text()
+  );
   const inlineAttachmentDraft = await inlineAttachmentDraftResponse.json();
   const inlineAttachmentPlan = inlineAttachmentDraft.operations[0].plan.plan;
   assert.equal(inlineAttachmentPlan.attachments[0].filename, "small-inline.pdf");
@@ -5686,6 +6664,2913 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(rejectedResponse.status, 400);
   const rejected = await rejectedResponse.json();
   assert.match(rejected.error, /No Chance Pearson/);
+});
+
+test("Mac operator ensures one existing primary-linked current task without completing other tasks", async (t) => {
+  const bridgePort = 19080;
+  const fakeApiPort = 19081;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-current-task-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    currentTasks: [
+      {
+        jnid: "current-task-primary",
+        record_type_name: "Task",
+        primary: { id: "contact-chance" },
+        owners: [{ id: chanceOwnerId }],
+        title: "Old next step",
+        subject: "Old next step",
+        description: "Do: Review old file state\nWaiting on: old carrier response",
+        note: "[HCN_CURRENT_CONTROL_V1]\nDo: Review old file state\nWaiting on: old carrier response",
+        date_start: 1_700_000_000,
+        date_end: 1_700_000_000,
+        is_completed: "false",
+        is_active: "true",
+        is_archived: "false"
+      },
+      {
+        jnid: "other-related-task",
+        record_type_name: "Task",
+        related: [{ id: "contact-chance" }],
+        owners: [{ id: chanceOwnerId }],
+        title: "Preserve this other open task",
+        subject: "Preserve this other open task",
+        is_completed: false,
+        is_active: true
+      }
+    ]
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operation = {
+    type: "jobnimbus.ensure_current_task",
+    payload: {
+      query: "2739",
+      taskId: "current-task-primary",
+      title: "Carrier follow-up",
+      description: "Do: Call the carrier for the missing confirmation\nWaiting on: Carrier confirmation",
+      dueDate: "2026-08-25"
+    }
+  };
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ operations: [operation], execute: false })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  assert.equal(plan.operations[0].plan.plan.decision, "update");
+  assert.equal(plan.operations[0].plan.plan.selectedTaskId, "current-task-primary");
+  assert.equal(plan.operations[0].plan.plan.otherOpenTaskCount, 1);
+  assert.deepEqual(
+    [...new Set(fixtureApi.getTaskQueryFields())].sort(),
+    ["primary.id", "related.id"]
+  );
+
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations: [operation],
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const executed = await executeResponse.json();
+  assert.equal(executed.mode, "executed");
+  assert.equal(executed.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(fixtureApi.getCurrentTaskUpdateCount(), 1);
+  assert.equal(fixtureApi.getCurrentTaskCreateCount(), 0);
+  const tasks = fixtureApi.getCurrentTasks();
+  const current = tasks.find((task) => task.jnid === "current-task-primary");
+  const preserved = tasks.find((task) => task.jnid === "other-related-task");
+  assert.equal(current.title, "Carrier follow-up");
+  assert.match(current.note, /^\[HCN_CURRENT_CONTROL_V1\]/);
+  assert.equal(current.is_completed, "false");
+  assert.equal(preserved.is_completed, false);
+
+  const noopPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ operations: [operation], execute: false })
+  });
+  assert.equal(noopPlanResponse.status, 200);
+  const noopPlan = await noopPlanResponse.json();
+  assert.equal(noopPlan.operations[0].plan.plan.decision, "noop");
+  const noopExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations: [operation],
+      execute: true,
+      approvalDigest: noopPlan.approvalDigest,
+      approvalChallenge: noopPlan.approvalChallenge
+    })
+  });
+  assert.equal(noopExecuteResponse.status, 200);
+  const noopExecuted = await noopExecuteResponse.json();
+  assert.equal(noopExecuted.batch.completed[0].receipt.mode, "verified_noop");
+  assert.equal(fixtureApi.getCurrentTaskUpdateCount(), 1);
+
+  const completionResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations: [{
+        ...operation,
+        payload: { ...operation.payload, completed: false }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(completionResponse.status, 400);
+  assert.match((await completionResponse.json()).error, /cannot contain any completion-state field/i);
+  assert.equal(fixtureApi.getCurrentTaskUpdateCount(), 1);
+});
+
+test("Mac current-task inventory follows capped provider pages to a marker on page two", async (t) => {
+  const bridgePort = 19106;
+  const fakeApiPort = 19107;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-current-task-capped-pages-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
+  const markerTaskId = "page-two-current-marker";
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    taskPageCap: 1,
+    currentTasks: [
+      {
+        jnid: "page-one-other-task",
+        record_type_name: "Task",
+        primary: { id: "contact-chance" },
+        related: [{ id: "contact-chance" }],
+        owners: [{ id: chanceOwnerId }],
+        title: "Preserve this page-one task",
+        subject: "Preserve this page-one task",
+        description: "An unrelated open task without the control marker.",
+        is_completed: "false",
+        is_active: "true",
+        is_archived: "false"
+      },
+      {
+        jnid: markerTaskId,
+        record_type_name: "Task",
+        primary: { id: "contact-chance" },
+        related: [{ id: "contact-chance" }],
+        owners: [{ id: chanceOwnerId }],
+        title: "Old page-two next step",
+        subject: "Old page-two next step",
+        description: "Do: Review old file state\nWaiting on: Old carrier response",
+        note: "[HCN_CURRENT_CONTROL_V1]\nDo: Review old file state\nWaiting on: Old carrier response",
+        date_start: 1_700_000_000,
+        date_end: 1_700_000_000,
+        is_completed: "false",
+        is_active: "true",
+        is_archived: "false"
+      }
+    ]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operation = {
+    type: "jobnimbus.ensure_current_task",
+    payload: {
+      query: "2739",
+      title: "Carrier follow-up",
+      description: "Do: Call the carrier for the missing confirmation\nWaiting on: Carrier confirmation",
+      dueDate: "2026-08-25"
+    }
+  };
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: false
+    })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  assert.equal(plan.operations[0].plan.plan.decision, "update");
+  assert.equal(plan.operations[0].plan.plan.selectedTaskId, markerTaskId);
+  assert.deepEqual(plan.operations[0].plan.plan.markerTaskIds, [markerTaskId]);
+  assert.equal(plan.operations[0].plan.plan.otherOpenTaskCount, 1);
+  assert.equal(fixtureApi.getCurrentTaskCreateCount(), 0);
+
+  const initialPages = fixtureApi.getTaskPageRequests();
+  for (const relationField of ["related.id", "primary.id"]) {
+    const pages = initialPages.filter((page) => page.relationField === relationField);
+    assert.deepEqual(pages.map((page) => page.from), [0, 1]);
+    assert.deepEqual(pages.map((page) => page.taskIds), [
+      ["page-one-other-task"],
+      [markerTaskId]
+    ]);
+    assert.equal(pages.every((page) => page.requestedSize === 500), true);
+    assert.equal(pages.every((page) => page.returnedCount === 1), true);
+    assert.equal(pages.every((page) => page.total === 2), true);
+  }
+
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const executed = await executeResponse.json();
+  assert.equal(executed.mode, "executed");
+  assert.equal(executed.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(fixtureApi.getCurrentTaskUpdateCount(), 1);
+  assert.equal(fixtureApi.getCurrentTaskCreateCount(), 0);
+  const tasks = fixtureApi.getCurrentTasks();
+  const markerTasks = tasks.filter((task) => [
+    task.description,
+    task.note,
+    task.title,
+    task.subject
+  ].some((value) => String(value || "").includes("[HCN_CURRENT_CONTROL_V1]")));
+  assert.equal(markerTasks.length, 1);
+  assert.equal(markerTasks[0].jnid, markerTaskId);
+  assert.equal(markerTasks[0].title, "Carrier follow-up");
+  assert.equal(tasks.find((task) => task.jnid === "page-one-other-task").title, "Preserve this page-one task");
+});
+
+test("Mac current-task inventory probes capped provider pages without totals before updating a page-two marker", async (t) => {
+  const bridgePort = 19128;
+  const fakeApiPort = 19129;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-current-task-capped-no-total-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
+  const markerTaskId = "no-total-page-two-current-marker";
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    taskPageCap: 1,
+    omitTaskTotal: true,
+    currentTasks: [{
+      jnid: "no-total-page-one-other-task",
+      record_type_name: "Task",
+      primary: { id: "contact-chance" },
+      related: [{ id: "contact-chance" }],
+      owners: [{ id: chanceOwnerId }],
+      title: "Preserve this no-total page-one task",
+      subject: "Preserve this no-total page-one task",
+      description: "An unrelated open task without the control marker.",
+      is_completed: "false",
+      is_active: "true",
+      is_archived: "false"
+    }, {
+      jnid: markerTaskId,
+      record_type_name: "Task",
+      primary: { id: "contact-chance" },
+      related: [{ id: "contact-chance" }],
+      owners: [{ id: chanceOwnerId }],
+      title: "Old no-total page-two next step",
+      subject: "Old no-total page-two next step",
+      description: "Do: Review old file state\nWaiting on: Old carrier response",
+      note: "[HCN_CURRENT_CONTROL_V1]\nDo: Review old file state\nWaiting on: Old carrier response",
+      date_start: 1_700_000_000,
+      date_end: 1_700_000_000,
+      is_completed: "false",
+      is_active: "true",
+      is_archived: "false"
+    }]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operation = {
+    type: "jobnimbus.ensure_current_task",
+    payload: {
+      query: "2739",
+      title: "Carrier follow-up without total",
+      description: "Do: Call the carrier for the missing confirmation\nWaiting on: Carrier confirmation",
+      dueDate: "2026-08-25"
+    }
+  };
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: false
+    })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  assert.equal(plan.operations[0].plan.plan.decision, "update");
+  assert.equal(plan.operations[0].plan.plan.selectedTaskId, markerTaskId);
+  assert.deepEqual(plan.operations[0].plan.plan.markerTaskIds, [markerTaskId]);
+  assert.equal(fixtureApi.getCurrentTaskCreateCount(), 0);
+
+  const initialPages = fixtureApi.getTaskPageRequests();
+  for (const relationField of ["related.id", "primary.id"]) {
+    const pages = initialPages.filter((page) => page.relationField === relationField);
+    assert.deepEqual(pages.map((page) => page.from), [0, 1, 2]);
+    assert.deepEqual(pages.map((page) => page.taskIds), [
+      ["no-total-page-one-other-task"],
+      [markerTaskId],
+      []
+    ]);
+    assert.equal(pages.every((page) => page.totalIncluded === false), true);
+    assert.equal(pages.every((page) => page.total === undefined), true);
+  }
+
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const executed = await executeResponse.json();
+  assert.equal(executed.mode, "executed");
+  assert.equal(executed.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(fixtureApi.getCurrentTaskUpdateCount(), 1);
+  assert.equal(fixtureApi.getCurrentTaskCreateCount(), 0);
+  const tasks = fixtureApi.getCurrentTasks();
+  const markerTasks = tasks.filter((task) => [
+    task.description,
+    task.note,
+    task.title,
+    task.subject
+  ].some((value) => String(value || "").includes("[HCN_CURRENT_CONTROL_V1]")));
+  assert.equal(markerTasks.length, 1);
+  assert.equal(markerTasks[0].jnid, markerTaskId);
+  assert.equal(markerTasks[0].title, "Carrier follow-up without total");
+  assert.equal(
+    tasks.find((task) => task.jnid === "no-total-page-one-other-task").title,
+    "Preserve this no-total page-one task"
+  );
+});
+
+test("Mac batch reservation atomically blocks concurrently approved same-file contact updates", async (t) => {
+  const bridgePort = 19130;
+  const fakeApiPort = 19131;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-same-file-reservation-race-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    contactUpdateDelayMs: 150
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operations = ["Dallas", "Fort Worth"].map((city) => ({
+    type: "jobnimbus.update_contact",
+    payload: { query: "2739", fields: { city } }
+  }));
+  const plans = [];
+  for (const operation of operations) {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [operation],
+        execute: false
+      })
+    });
+    assert.equal(response.status, 200);
+    plans.push(await response.json());
+  }
+  assert.notEqual(plans[0].approvalDigest, plans[1].approvalDigest);
+
+  const approvalStorePath = path.join(bridgeData, "action-approvals.json");
+  const approvalRows = JSON.parse(await readFile(approvalStorePath, "utf8"));
+  const plannedDigests = new Set(plans.map((plan) => plan.approvalDigest));
+  const planApprovals = approvalRows.filter((row) => plannedDigests.has(row.approvalDigest));
+  assert.equal(planApprovals.length, 2);
+  assert.equal(new Set(planApprovals.map((row) => row.id)).size, 2);
+  for (const row of planApprovals) {
+    row.status = "active";
+    delete row.supersededAt;
+  }
+  await writeFile(approvalStorePath, `${JSON.stringify(approvalRows, null, 2)}\n`, "utf8");
+
+  const responses = await Promise.all(operations.map((operation, index) => fetch(
+    `http://127.0.0.1:${bridgePort}/ops/action-batch`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [operation],
+        execute: true,
+        approvalDigest: plans[index].approvalDigest,
+        approvalChallenge: plans[index].approvalChallenge
+      })
+    }
+  )));
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+  const payloads = await Promise.all(responses.map((response) => response.json()));
+  assert.equal(payloads.filter((payload) => payload.mode === "executed").length, 1);
+  const blocked = payloads.find((payload) => payload.error);
+  assert.match(blocked.error, /receipt reconciliation.*overlapping work/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 1);
+  assert.equal(["Dallas", "Fort Worth"].includes(fixtureApi.getContact("contact-chance").city), true);
+
+  const batches = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].status, "completed");
+  assert.equal(batches[0].completed.length, 1);
+});
+
+test("Mac plans honor a valid foreign-principal unresolved lock only on its exact file", async (t) => {
+  const bridgePort = 19134;
+  const fakeApiPort = 19135;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-foreign-principal-file-lock-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const foreignPrincipalHash = createHash("sha256")
+    .update("codex_operator_token|codex-hp-operator||codex_operator", "utf8")
+    .digest("hex");
+  const foreignBatchId = "foreign-principal-contact-chance-window";
+  const foreignIntent = actionBatchIntentFixture({
+    index: 0,
+    type: "jobnimbus.update_contact",
+    fileId: "contact-chance",
+    fileNumber: "2739",
+    reconciliation: { before: {}, after: { city: "Foreign Pending City" } }
+  });
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([{
+    schemaVersion: 2,
+    id: foreignBatchId,
+    approvalId: "foreign-principal-approval",
+    approvalDigest: "c".repeat(64),
+    principalHash: foreignPrincipalHash,
+    operatorScope: "assigned",
+    bootId: "foreign-principal-old-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v2",
+    fileCount: 1,
+    files: [{
+      id: "contact-chance",
+      number: "2739",
+      operationIndexes: [0],
+      operationTypes: ["jobnimbus.update_contact"]
+    }],
+    intents: [foreignIntent],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      status: "executing"
+    }
+  }], null, 2)}\n`, "utf8");
+
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-hp-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const planContactUpdate = (query, city) => fetch(
+    `http://127.0.0.1:${bridgePort}/ops/action-batch`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [{
+          type: "jobnimbus.update_contact",
+          payload: { query, fields: { city } }
+        }],
+        execute: false
+      })
+    }
+  );
+
+  const persisted = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(persisted[0].principalHash, foreignPrincipalHash);
+  assert.equal(persisted[0].status, "reconciliation_required");
+  assert.equal(persisted[0].current.status, "reconciliation_required");
+
+  const policyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(policyResponse.status, 200);
+  const policy = await policyResponse.json();
+  assert.equal(policy.ready, true);
+  assert.equal(policy.receipts.unresolvedCount, 0);
+  assert.deepEqual(policy.receipts.unresolvedBatchIds, []);
+  assert.equal(policy.receipts.hardBlockedCount, 0);
+  assert.deepEqual(policy.receipts.hardBlockedBatchIds, []);
+
+  const sameFileResponse = await planContactUpdate("2739", "Must Stay Blocked");
+  assert.equal(sameFileResponse.status, 409);
+  assert.match((await sameFileResponse.json()).error, /requires receipt reconciliation/i);
+
+  const unrelatedFileResponse = await planContactUpdate("2741", "Garland");
+  assert.equal(unrelatedFileResponse.status, 200);
+  assert.equal((await unrelatedFileResponse.json()).mode, "dry_run");
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+});
+
+test("A Mac reservation blocks a second valid principal from mutating the same file", async (t) => {
+  const bridgePort = 19136;
+  const fakeApiPort = 19137;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-reverse-principal-file-lock-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    contactUpdateDelayMs: 500
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-hp-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const macHeaders = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const foreignHeaders = {
+    authorization: "Bearer fixture-codex-hp-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const macOperation = {
+    type: "jobnimbus.update_contact",
+    payload: { query: "2739", fields: { city: "Mac Reserved City" } }
+  };
+  const foreignOperation = {
+    type: "jobnimbus.update_contact",
+    payload: { query: "2739", fields: { city: "Foreign Must Not Win" } }
+  };
+  const plan = async (headers, operation, runPolicy) => {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...(runPolicy ? { runPolicy } : {}),
+        operations: [operation],
+        execute: false
+      })
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const foreignPlan = await plan(foreignHeaders, foreignOperation);
+  const macPlan = await plan(macHeaders, macOperation, manifest.runPolicy);
+  assert.notEqual(macPlan.approvalDigest, foreignPlan.approvalDigest);
+
+  const macExecutePromise = fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [macOperation],
+      execute: true,
+      approvalDigest: macPlan.approvalDigest,
+      approvalChallenge: macPlan.approvalChallenge
+    })
+  });
+  const providerDeadline = Date.now() + 2_000;
+  while (fixtureApi.getContactUpdateCount() === 0 && Date.now() < providerDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(fixtureApi.getContactUpdateCount(), 1);
+
+  const foreignExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: foreignHeaders,
+    body: JSON.stringify({
+      operations: [foreignOperation],
+      execute: true,
+      approvalDigest: foreignPlan.approvalDigest,
+      approvalChallenge: foreignPlan.approvalChallenge
+    })
+  });
+  assert.equal(foreignExecuteResponse.status, 409);
+  assert.match((await foreignExecuteResponse.json()).error, /requires receipt reconciliation/i);
+
+  const macExecuteResponse = await macExecutePromise;
+  assert.equal(macExecuteResponse.status, 200);
+  assert.equal((await macExecuteResponse.json()).mode, "executed");
+  assert.equal(fixtureApi.getContactUpdateCount(), 1);
+  assert.equal(fixtureApi.getContact("contact-chance").city, "Mac Reserved City");
+  const batches = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].status, "completed");
+});
+
+test("Mac status approval digest stays stable while Thresher facts are re-fetched from the provider", async (t) => {
+  const bridgePort = 19084;
+  const fakeApiPort = 19085;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-thresher-status-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    chanceStatus: "Ready for PA Review",
+    secondAssigned: true,
+    secondStatus: "Submitted",
+    thresherActivities: [{
+      jnid: "evidence-claim-filed",
+      record_type_name: "Note",
+      primary: { id: "contact-chance" },
+      note: "Carrier confirmed the claim was filed and assigned claim number ABC123.",
+      date_updated: 1_777_000_000
+    }]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operation = {
+    type: "jobnimbus.update_status",
+    payload: {
+      query: "2739",
+      status: "Submitted",
+      transitionEvidence: {
+        reason: "The carrier activity confirms the claim was filed.",
+        gates: { claimFiled: true },
+        references: [{
+          source: "jobnimbus_activity",
+          id: "evidence-claim-filed",
+          gate: "claimFiled",
+          fileId: "caller-supplied-wrong-file",
+          fact: "Caller supplied claim fact that must be ignored."
+        }]
+      }
+    }
+  };
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: false
+    })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  const evidence = plan.operations[0].plan.plan.thresherTransition.references[0];
+  assert.equal(evidence.fileId, "contact-chance");
+  assert.match(evidence.fact, /Carrier confirmed the claim was filed/i);
+  assert.doesNotMatch(evidence.fact, /Caller supplied claim fact/i);
+  assert.match(evidence.providerDigest, /^[a-f0-9]{64}$/);
+  assert.equal(fixtureApi.getThresherEvidenceReadCount(), 1);
+
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const executed = await executeResponse.json();
+  assert.equal(executed.mode, "executed");
+  assert.equal(executed.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(fixtureApi.getContact("contact-chance").status_name, "Submitted");
+  assert.equal(fixtureApi.getContactUpdateCount(), 1);
+  assert.equal(fixtureApi.getThresherEvidenceReadCount(), 3);
+});
+
+test("Mac Thresher stage evidence rejects excluded Gmail labels, inadmissible JobNimbus activities, and failed outbound Quo texts", async (t) => {
+  const bridgePort = 19126;
+  const fakeApiPort = 19127;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-thresher-inadmissible-evidence-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const gmailEvidenceMessage = (label) => ({
+    id: `gmail-claim-filed-${label.toLowerCase()}`,
+    threadId: `gmail-claim-filed-${label.toLowerCase()}-thread`,
+    labelIds: [label],
+    snippet: "Carrier confirmed claim ABC-123 was filed.",
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "carrier@example.test" },
+        { name: "To", value: "client@example.test" },
+        { name: "Subject", value: "Claim ABC-123 filed" }
+      ],
+      body: {
+        data: Buffer.from("Carrier confirmed claim ABC-123 was filed.").toString("base64url")
+      }
+    }
+  });
+  const excludedGmailMessages = ["DRAFT", "TRASH", "SPAM"].map(gmailEvidenceMessage);
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    chanceStatus: "Ready for PA Review",
+    secondAssigned: true,
+    secondStatus: "Submitted",
+    communicationScope: true,
+    gmailMessages: excludedGmailMessages,
+    thresherActivities: [{
+      jnid: "evidence-event-claim-filed",
+      record_type_name: "Event",
+      primary: { id: "contact-chance" },
+      title: "Claim filed",
+      description: "Carrier confirmed the claim was filed and assigned claim number ABC123."
+    }, {
+      jnid: "evidence-appointment-claim-filed",
+      record_type_name: "Appointment",
+      primary: { id: "contact-chance" },
+      title: "Claim filed",
+      description: "Carrier confirmed the claim was filed and assigned claim number ABC123."
+    }, {
+      jnid: "evidence-deleted-note-claim-filed",
+      record_type_name: "Note",
+      primary: { id: "contact-chance" },
+      title: "Claim filed",
+      note: "Carrier confirmed the claim was filed and assigned claim number ABC123.",
+      is_deleted: true
+    }, {
+      jnid: "evidence-note-claim-filed",
+      record_type_name: "Note",
+      primary: { id: "contact-chance" },
+      note: "Carrier confirmed the claim was filed and assigned claim number ABC123."
+    }],
+    quoMessages: [{
+      id: "quo-failed-outbound-claim-filed",
+      phoneNumberId: "line-1",
+      from: "+19725550100",
+      to: ["+12145551212"],
+      createdAt: "2026-08-22T15:00:00.000Z",
+      direction: "outgoing",
+      status: "failed",
+      text: "Carrier confirmed the insurance claim was filed and assigned claim number ABC123."
+    }, {
+      id: "quo-contradictory-inbound-sent-claim-filed",
+      phoneNumberId: "line-1",
+      from: "+12145551212",
+      to: ["+19725550100"],
+      createdAt: "2026-08-22T15:01:00.000Z",
+      direction: "incoming",
+      status: "sent",
+      text: "Carrier confirmed the insurance claim was filed and assigned claim number ABC123."
+    }],
+    quoCalls: []
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const planStatusMove = async (reference) => fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_status",
+        payload: {
+          query: "2739",
+          status: "Submitted",
+          transitionEvidence: {
+            reason: "The referenced provider record says the claim was filed.",
+            references: [{ ...reference, gate: "claimFiled" }]
+          }
+        }
+      }],
+      execute: false
+    })
+  });
+
+  for (const message of excludedGmailMessages) {
+    const response = await planStatusMove({ source: "gmail_message", id: message.id });
+    assert.equal(response.status, 400, message.labelIds[0]);
+    assert.match((await response.json()).error, /drafts, trash, and spam cannot prove/i);
+  }
+
+  for (const id of ["evidence-event-claim-filed", "evidence-appointment-claim-filed"]) {
+    const response = await planStatusMove({ source: "jobnimbus_activity", id });
+    assert.equal(response.status, 400, id);
+    assert.match((await response.json()).error, /must be an exact file-related Note/i);
+  }
+
+  const deletedNoteResponse = await planStatusMove({
+    source: "jobnimbus_activity",
+    id: "evidence-deleted-note-claim-filed"
+  });
+  assert.equal(deletedNoteResponse.status, 400);
+  assert.match((await deletedNoteResponse.json()).error, /deleted, archived, or explicitly inactive.*cannot prove/i);
+
+  const failedQuoResponse = await planStatusMove({
+    source: "quo_message",
+    id: "quo-failed-outbound-claim-filed"
+  });
+  assert.equal(failedQuoResponse.status, 400);
+  assert.match((await failedQuoResponse.json()).error, /queued, failed, canceled.*cannot prove/i);
+
+  const contradictoryQuoResponse = await planStatusMove({
+    source: "quo_message",
+    id: "quo-contradictory-inbound-sent-claim-filed"
+  });
+  assert.equal(contradictoryQuoResponse.status, 400);
+  assert.match((await contradictoryQuoResponse.json()).error, /inbound\/received or outbound sent\/delivered/i);
+
+  const noteResponse = await planStatusMove({
+    source: "jobnimbus_activity",
+    id: "evidence-note-claim-filed"
+  });
+  assert.equal(noteResponse.status, 200);
+  const notePlan = await noteResponse.json();
+  assert.equal(
+    notePlan.operations[0].plan.plan.thresherTransition.references[0].id,
+    "evidence-note-claim-filed"
+  );
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+  assert.equal(fixtureApi.getContact("contact-chance").status_name, "Ready for PA Review");
+});
+
+test("Mac status execution stops before PUT when approved Thresher evidence changes", async (t) => {
+  const bridgePort = 19118;
+  const fakeApiPort = 19119;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-thresher-status-race-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    chanceStatus: "Ready for PA Review",
+    secondAssigned: true,
+    secondStatus: "Submitted",
+    thresherActivities: [{
+      jnid: "evidence-claim-filed-race",
+      record_type_name: "Note",
+      primary: { id: "contact-chance" },
+      note: "Carrier confirmed the claim was filed and assigned claim number ABC123.",
+      date_updated: 1_777_000_000
+    }],
+    thresherActivityMutateAtRead: 3,
+    thresherActivityMutation: {
+      note: "Carrier confirmed the claim was filed and assigned claim number DIFFERENT999.",
+      date_updated: 1_777_000_001
+    }
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operation = {
+    type: "jobnimbus.update_status",
+    payload: {
+      query: "2739",
+      status: "Submitted",
+      transitionEvidence: {
+        reason: "The carrier activity confirms the claim was filed.",
+        references: [{
+          source: "jobnimbus_activity",
+          id: "evidence-claim-filed-race",
+          gate: "claimFiled"
+        }]
+      }
+    }
+  };
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: false
+    })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  assert.equal(fixtureApi.getThresherEvidenceReadCount(), 1);
+
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const executed = await executeResponse.json();
+  assert.equal(executed.mode, "partial_failure");
+  assert.equal(executed.batch.failedAt, 0);
+  assert.match(executed.batch.error, /provider evidence.*changed after approval/i);
+  assert.equal(executed.batch.current.status, "reconciliation_required");
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+  assert.equal(fixtureApi.getContact("contact-chance").status_name, "Ready for PA Review");
+  assert.equal(fixtureApi.getThresherEvidenceReadCount(), 3);
+});
+
+test("locked Mac actions require the numeric query to equal the resolved JobNimbus file number", async (t) => {
+  const bridgePort = 19122;
+  const fakeApiPort = 19123;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-exact-file-number-query-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    chanceClaimNumber: "777777"
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: {
+          query: "777777",
+          fields: { city: "Should Not Write" }
+        }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /query must equal the resolved JobNimbus file number/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+  assert.equal(fixtureApi.getContact("contact-chance").city, undefined);
+});
+
+test("Mac Thresher Quo evidence binds exact-file text messages and rejects call metadata", async (t) => {
+  const bridgePort = 19096;
+  const fakeApiPort = 19097;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-thresher-quo-message-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    chanceStatus: "Ready for PA Review",
+    secondAssigned: true,
+    secondStatus: "Submitted",
+    communicationScope: true,
+    quoMessages: [{
+      id: "quo-claim-filed-message",
+      phoneNumberId: "line-1",
+      from: "+12145551212",
+      to: ["+19725550100"],
+      createdAt: "2026-08-22T15:00:00.000Z",
+      direction: "incoming",
+      status: "delivered",
+      text: "Carrier confirmed the insurance claim was filed and assigned claim number ABC123."
+    }],
+    quoCalls: []
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "fixture-quo-key",
+      QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operation = {
+    type: "jobnimbus.update_status",
+    payload: {
+      query: "2739",
+      status: "Submitted",
+      transitionEvidence: {
+        reason: "The exact-file Quo message confirms the claim was filed.",
+        references: [{
+          source: "quo_message",
+          id: "quo-claim-filed-message",
+          gate: "claimFiled",
+          fact: "Caller-supplied text must not establish the gate."
+        }]
+      }
+    }
+  };
+  const messageResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [operation],
+      execute: false
+    })
+  });
+  assert.equal(messageResponse.status, 200);
+  const messagePlan = await messageResponse.json();
+  const evidence = messagePlan.operations[0].plan.plan.thresherTransition.references[0];
+  assert.equal(evidence.source, "quo_message");
+  assert.equal(evidence.id, "quo-claim-filed-message");
+  assert.equal(evidence.fileId, "contact-chance");
+  assert.match(evidence.fact, /Carrier confirmed the insurance claim was filed/i);
+  assert.doesNotMatch(evidence.fact, /Caller-supplied text/i);
+  assert.match(evidence.providerDigest, /^[a-f0-9]{64}$/);
+
+  const callResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        ...operation,
+        payload: {
+          ...operation.payload,
+          transitionEvidence: {
+            reason: "Call metadata must not establish the filing gate.",
+            references: [{
+              source: "quo_call",
+              id: "quo-call-without-transcript",
+              gate: "claimFiled"
+            }]
+          }
+        }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(callResponse.status, 400);
+  assert.match((await callResponse.json()).error, /Unsupported Thresher evidence source: quo_call/i);
+});
+
+test("Mac startup keeps a malformed legacy receipt globally hard-blocked without inventing file scope", async (t) => {
+  const bridgePort = 19100;
+  const fakeApiPort = 19101;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-global-legacy-quarantine-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const batchId = "malformed-global-legacy-batch";
+  const invalidIntentBatchId = "unbound-invalid-intent-batch";
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([{
+    schemaVersion: 1,
+    id: batchId,
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-malformed-bridge-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v1",
+    fileCount: 1,
+    files: [{}],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      status: "executing"
+    }
+  }, {
+    schemaVersion: 1,
+    id: invalidIntentBatchId,
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-invalid-intent-bridge-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:01:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v1",
+    fileCount: 1,
+    files: [{
+      id: "contact-not-in-manifest",
+      number: "9999",
+      operationIndexes: [0],
+      operationTypes: ["jobnimbus.update_contact"]
+    }],
+    completed: [],
+    intents: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      fileId: "contact-not-in-manifest",
+      fileNumber: "9999",
+      status: "executing"
+    }
+  }], null, 2)}\n`, "utf8");
+
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort);
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const policyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(policyResponse.status, 200);
+  const policy = await policyResponse.json();
+  assert.equal(policy.recoveryBoundary.status, "ready");
+  assert.equal(policy.ready, false);
+  assert.equal(policy.receipts.total, 2);
+  assert.equal(policy.receipts.attentionCount, 2);
+  assert.deepEqual(new Set(policy.receipts.attentionBatchIds), new Set([batchId, invalidIntentBatchId]));
+  assert.equal(policy.receipts.unresolvedCount, 2);
+  assert.deepEqual(new Set(policy.receipts.unresolvedBatchIds), new Set([batchId, invalidIntentBatchId]));
+  assert.equal(policy.receipts.reconciliationEligibleCount, 0);
+  assert.deepEqual(policy.receipts.reconciliationEligibleBatchIds, []);
+  assert.equal(policy.receipts.hardBlockedCount, 2);
+  assert.deepEqual(new Set(policy.receipts.hardBlockedBatchIds), new Set([batchId, invalidIntentBatchId]));
+
+  const persisted = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(persisted[0].status, "legacy_quarantined");
+  assert.equal(persisted[0].recovery.fileScopedQuarantine, false);
+  assert.deepEqual(persisted[0].recovery.quarantinedFileIds, []);
+  assert.equal(Object.prototype.hasOwnProperty.call(persisted[0], "current"), false);
+  assert.equal(persisted[1].status, "legacy_quarantined");
+  assert.equal(persisted[1].recovery.phase, "provider_window_missing_immutable_intent");
+  assert.equal(persisted[1].recovery.fileScopedQuarantine, false);
+  assert.deepEqual(persisted[1].recovery.quarantinedFileIds, []);
+  assert.equal(Object.prototype.hasOwnProperty.call(persisted[1], "current"), false);
+
+  const blockedPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Blocked City" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(blockedPlanResponse.status, 409);
+  assert.match((await blockedPlanResponse.json()).error, /requires receipt reconciliation/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+});
+
+test("Mac startup globally quarantines old-schema unresolved receipts without a bound principal", async (t) => {
+  const bridgePort = 19132;
+  const fakeApiPort = 19133;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-legacy-principal-unbound-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const inProgressId = "legacy-unbound-in-progress";
+  const reconciliationId = "legacy-unbound-partial-reconciliation";
+  const oldSchemaFile = {
+    id: "contact-chance-second",
+    number: "2741",
+    operationIndexes: [0],
+    operationTypes: ["jobnimbus.update_contact"]
+  };
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([{
+    schemaVersion: 1,
+    id: inProgressId,
+    approvalId: "legacy-unbound-in-progress-approval",
+    approvalDigest: "a".repeat(64),
+    operatorScope: "assigned",
+    bootId: "legacy-unbound-in-progress-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v1",
+    fileCount: 1,
+    files: [oldSchemaFile],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      fileId: oldSchemaFile.id,
+      fileNumber: oldSchemaFile.number,
+      status: "executing"
+    }
+  }, {
+    schemaVersion: 1,
+    id: reconciliationId,
+    approvalId: "legacy-unbound-reconciliation-approval",
+    approvalDigest: "b".repeat(64),
+    operatorScope: "assigned",
+    bootId: "legacy-unbound-reconciliation-boot",
+    status: "partial_failure",
+    createdAt: "2026-08-22T12:01:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v1",
+    fileCount: 1,
+    files: [oldSchemaFile],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      fileId: oldSchemaFile.id,
+      fileNumber: oldSchemaFile.number,
+      status: "reconciliation_required"
+    }
+  }], null, 2)}\n`, "utf8");
+
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const policyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(policyResponse.status, 200);
+  const policy = await policyResponse.json();
+  assert.equal(policy.recoveryBoundary.status, "ready");
+  assert.equal(policy.ready, false);
+  assert.equal(policy.receipts.total, 2);
+  assert.equal(policy.receipts.unresolvedCount, 2);
+  assert.deepEqual(
+    new Set(policy.receipts.unresolvedBatchIds),
+    new Set([inProgressId, reconciliationId])
+  );
+  assert.equal(policy.receipts.reconciliationEligibleCount, 0);
+  assert.deepEqual(policy.receipts.reconciliationEligibleBatchIds, []);
+  assert.equal(policy.receipts.hardBlockedCount, 2);
+  assert.deepEqual(
+    new Set(policy.receipts.hardBlockedBatchIds),
+    new Set([inProgressId, reconciliationId])
+  );
+
+  const persisted = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(persisted.length, 2);
+  for (const row of persisted) {
+    assert.equal(row.status, "legacy_quarantined");
+    assert.equal(row.recovery.phase, "legacy_principal_unbound");
+    assert.equal(row.recovery.reasonCode, "legacy_principal_unbound");
+    assert.equal(row.recovery.fileScopedQuarantine, false);
+    assert.deepEqual(row.recovery.quarantinedFileIds, []);
+    assert.equal(Object.prototype.hasOwnProperty.call(row, "current"), false);
+  }
+
+  const blockedPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Must Stay Blocked" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(blockedPlanResponse.status, 409);
+  assert.match((await blockedPlanResponse.json()).error, /requires receipt reconciliation/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+  assert.equal(fixtureApi.getContact("contact-chance").city, undefined);
+});
+
+test("Mac pending-verification receipts distinguish manifest-bound file scope from hard blocks", async (t) => {
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const manifest = lockedOperatorManifestFixture();
+
+  async function startPendingCase(caseTest, {
+    bridgePort,
+    fakeApiPort,
+    memoryPrefix,
+    row
+  }) {
+    const memoryRoot = await mkdtemp(path.join(tmpdir(), memoryPrefix));
+    const bridgeData = path.join(memoryRoot, "bridge");
+    await mkdir(bridgeData, { recursive: true });
+    caseTest.after(() => rm(memoryRoot, { recursive: true, force: true }));
+    await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([row], null, 2)}\n`, "utf8");
+    await startOperatorJobNimbusFixture(caseTest, fakeApiPort, { secondAssigned: true });
+    const child = spawn(process.execPath, ["src/server.js"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        PORT: String(bridgePort),
+        JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+        CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+        JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+        JOBNIMBUS_API_KEY: "fixture-key",
+        GOOGLE_CLIENT_ID: "",
+        GOOGLE_CLIENT_SECRET: "",
+        GOOGLE_REFRESH_TOKEN: "",
+        ALLOW_GOOGLE_USER_AUTH: "false",
+        QUO_API_KEY: "",
+        MEMORY_ROOT: memoryRoot,
+        REQUIRE_CHANCE_RUN_POLICY: "true",
+        CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+        BRIDGE_ALLOW_WRITES: "true"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    caseTest.after(() => child.kill("SIGTERM"));
+    await waitForServer(child, bridgePort);
+    return {
+      bridgePort,
+      headers: {
+        authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+        "content-type": "application/json"
+      }
+    };
+  }
+
+  await t.test("manifest-bound pending verification is file-scoped and not globally unresolved", async (caseTest) => {
+    const batchId = "bound-pending-verification";
+    const context = await startPendingCase(caseTest, {
+      bridgePort: 19102,
+      fakeApiPort: 19103,
+      memoryPrefix: "codex-bound-pending-verification-",
+      row: {
+        schemaVersion: 2,
+        id: batchId,
+        principalHash,
+        operatorScope: "assigned",
+        status: "completed_pending_verification",
+        createdAt: "2026-08-22T12:00:00.000Z",
+        operationCount: 1,
+        batchMode: "assigned_single_file_v2",
+        fileCount: 1,
+        files: [{
+          id: "contact-chance",
+          number: "2739",
+          operationIndexes: [0],
+          operationTypes: ["jobnimbus.update_contact"]
+        }],
+        completed: [{
+          index: 0,
+          type: "jobnimbus.update_contact",
+          status: "executed",
+          receipt: {
+            fileId: "contact-chance",
+            fileNumber: "2739",
+            manualVerificationRequired: true
+          }
+        }]
+      }
+    });
+    const policyResponse = await fetch(`http://127.0.0.1:${context.bridgePort}/ops/run-policy`, {
+      headers: context.headers
+    });
+    assert.equal(policyResponse.status, 200);
+    const policy = await policyResponse.json();
+    assert.equal(policy.ready, true);
+    assert.equal(policy.receipts.attentionCount, 1);
+    assert.deepEqual(policy.receipts.attentionBatchIds, [batchId]);
+    assert.equal(policy.receipts.unresolvedCount, 0);
+    assert.deepEqual(policy.receipts.unresolvedBatchIds, []);
+    assert.equal(policy.receipts.reconciliationEligibleCount, 0);
+    assert.deepEqual(policy.receipts.reconciliationEligibleBatchIds, []);
+    assert.equal(policy.receipts.hardBlockedCount, 0);
+    assert.deepEqual(policy.receipts.hardBlockedBatchIds, []);
+
+    const blockedFileResponse = await fetch(`http://127.0.0.1:${context.bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers: context.headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [{
+          type: "jobnimbus.update_contact",
+          payload: { query: "2739", fields: { city: "Austin" } }
+        }],
+        execute: false
+      })
+    });
+    assert.equal(blockedFileResponse.status, 409);
+    assert.match((await blockedFileResponse.json()).error, new RegExp(batchId));
+
+    const unrelatedFileResponse = await fetch(`http://127.0.0.1:${context.bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers: context.headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [{
+          type: "jobnimbus.update_contact",
+          payload: { query: "2741", fields: { city: "Garland" } }
+        }],
+        execute: false
+      })
+    });
+    assert.equal(unrelatedFileResponse.status, 200);
+    assert.equal((await unrelatedFileResponse.json()).mode, "dry_run");
+
+    const reconcileResponse = await fetch(`http://127.0.0.1:${context.bridgePort}/ops/action-batch-reconcile`, {
+      method: "POST",
+      headers: context.headers,
+      body: JSON.stringify({ batchId })
+    });
+    assert.equal(reconcileResponse.status, 200);
+    assert.equal((await reconcileResponse.json()).mode, "verified_noop");
+  });
+
+  await t.test("unbound pending verification is a non-reconcilable global hard block", async (caseTest) => {
+    const batchId = "unbound-pending-verification";
+    const context = await startPendingCase(caseTest, {
+      bridgePort: 19104,
+      fakeApiPort: 19105,
+      memoryPrefix: "codex-unbound-pending-verification-",
+      row: {
+        schemaVersion: 2,
+        id: batchId,
+        principalHash,
+        operatorScope: "assigned",
+        status: "completed_pending_verification",
+        createdAt: "2026-08-22T12:00:00.000Z",
+        operationCount: 1,
+        batchMode: "assigned_single_file_v2",
+        fileCount: 1,
+        files: [{
+          id: "contact-not-in-manifest",
+          number: "9999",
+          operationIndexes: [0],
+          operationTypes: ["jobnimbus.update_contact"]
+        }],
+        completed: [{
+          index: 0,
+          type: "jobnimbus.update_contact",
+          status: "executed",
+          receipt: {
+            fileId: "contact-not-in-manifest",
+            fileNumber: "9999",
+            manualVerificationRequired: true
+          }
+        }]
+      }
+    });
+    const policyResponse = await fetch(`http://127.0.0.1:${context.bridgePort}/ops/run-policy`, {
+      headers: context.headers
+    });
+    assert.equal(policyResponse.status, 200);
+    const policy = await policyResponse.json();
+    assert.equal(policy.ready, false);
+    assert.equal(policy.receipts.attentionCount, 1);
+    assert.deepEqual(policy.receipts.attentionBatchIds, [batchId]);
+    assert.equal(policy.receipts.unresolvedCount, 1);
+    assert.deepEqual(policy.receipts.unresolvedBatchIds, [batchId]);
+    assert.equal(policy.receipts.reconciliationEligibleCount, 0);
+    assert.deepEqual(policy.receipts.reconciliationEligibleBatchIds, []);
+    assert.equal(policy.receipts.hardBlockedCount, 1);
+    assert.deepEqual(policy.receipts.hardBlockedBatchIds, [batchId]);
+  });
+});
+
+test("Mac startup recovery blocks overlap and reconciles an interrupted provider window by fresh read", async (t) => {
+  const bridgePort = 19082;
+  const fakeApiPort = 19083;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-restart-reconcile-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const batchId = "restart-recovery-batch";
+  const createdAt = "2026-08-22T12:00:00.000Z";
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([{
+    schemaVersion: 2,
+    id: batchId,
+    approvalId: "old-approval",
+    approvalDigest: "a".repeat(64),
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-bridge-boot",
+    status: "in_progress",
+    createdAt,
+    operationCount: 2,
+    batchMode: "assigned_multi_v1",
+    fileCount: 2,
+    files: [
+      {
+        id: "contact-chance",
+        number: "2739",
+        operationIndexes: [0],
+        operationTypes: ["jobnimbus.update_contact"]
+      },
+      {
+        id: "contact-chance-second",
+        number: "2741",
+        operationIndexes: [1],
+        operationTypes: ["jobnimbus.update_contact"]
+      }
+    ],
+    intents: [
+      actionBatchIntentFixture({
+        index: 0,
+        type: "jobnimbus.update_contact",
+        fileId: "contact-chance",
+        fileNumber: "2739",
+        reconciliation: { before: {}, after: { city: "Dallas" } }
+      }),
+      actionBatchIntentFixture({
+        index: 1,
+        type: "jobnimbus.update_contact",
+        fileId: "contact-chance-second",
+        fileNumber: "2741",
+        reconciliation: { before: {}, after: { city: "Garland" } }
+      })
+    ],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      status: "executing"
+    }
+  }], null, 2)}\n`, "utf8");
+  await writeFile(path.join(bridgeData, "action-approvals.json"), `${JSON.stringify([{
+    id: "old-approval",
+    status: "active",
+    expiresAtMs: Date.now() + 86_400_000
+  }], null, 2)}\n`, "utf8");
+  await writeFile(path.join(bridgeData, "outbound-sends.json"), `${JSON.stringify([{
+    id: "old-outbound",
+    channel: "gmail",
+    status: "in_progress",
+    createdAt
+  }], null, 2)}\n`, "utf8");
+
+  const manifest = lockedOperatorManifestFixture();
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    initialCity: "Dallas",
+    secondAssigned: true
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const runPolicyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(runPolicyResponse.status, 200);
+  const initialPolicy = await runPolicyResponse.json();
+  assert.equal(initialPolicy.recoveryBoundary.status, "ready");
+  assert.equal(initialPolicy.runPolicy.id, manifest.summary.id);
+  assert.equal(initialPolicy.runPolicy.sha256, manifest.summary.sha256);
+  assert.equal(initialPolicy.runPolicy.fileCount, 58);
+  assert.equal(initialPolicy.receipts.unresolvedCount, 1);
+  assert.deepEqual(initialPolicy.receipts.unresolvedBatchIds, [batchId]);
+  assert.equal(initialPolicy.ready, false);
+
+  const persistedRecovery = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(persistedRecovery[0].status, "reconciliation_required");
+  assert.equal(persistedRecovery[0].current.status, "reconciliation_required");
+  assert.equal(persistedRecovery[0].current.reasonCode, "bridge_restart_during_provider_window");
+  assert.deepEqual(persistedRecovery[0].notAttempted, [{
+    index: 1,
+    type: "jobnimbus.update_contact",
+    fileId: "contact-chance-second",
+    fileNumber: "2741",
+    status: "not_attempted"
+  }]);
+  const persistedApprovals = JSON.parse(
+    await readFile(path.join(bridgeData, "action-approvals.json"), "utf8")
+  );
+  assert.equal(persistedApprovals[0].status, "revoked");
+  assert.equal(persistedApprovals[0].revokedReason, "bridge_restart");
+  const persistedOutbound = JSON.parse(
+    await readFile(path.join(bridgeData, "outbound-sends.json"), "utf8")
+  );
+  assert.equal(persistedOutbound[0].status, "reconciliation_required");
+
+  const receiptResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-receipts`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId })
+  });
+  assert.equal(receiptResponse.status, 200);
+  const receipt = await receiptResponse.json();
+  assert.equal(receipt.mode, "receipt_detail");
+  assert.equal(receipt.receipt.current.status, "reconciliation_required");
+  assert.equal(receipt.receipt.notAttempted[0].fileNumber, "2741");
+  assert.equal(JSON.stringify(receipt).includes("Dallas"), false);
+
+  const blockedPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Austin" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(blockedPlanResponse.status, 409);
+  assert.match((await blockedPlanResponse.json()).error, /still requires receipt reconciliation/i);
+
+  const reconcileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId })
+  });
+  assert.equal(reconcileResponse.status, 200);
+  const reconciled = await reconcileResponse.json();
+  assert.equal(reconciled.mode, "reconciled");
+  assert.equal(reconciled.outcome, "applied_verified");
+  assert.equal(reconciled.receipt.status, "partial_failure");
+  assert.equal(reconciled.receipt.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(reconciled.receipt.current, null);
+  assert.equal(reconciled.receipt.automaticRetryAllowed, false);
+  assert.equal(reconciled.receipt.freshApprovalRequired, true);
+
+  const duplicateReconcileResponse = await fetch(
+    `http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ batchId })
+    }
+  );
+  assert.equal(duplicateReconcileResponse.status, 200);
+  assert.equal((await duplicateReconcileResponse.json()).mode, "verified_noop");
+
+  const finalPolicyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(finalPolicyResponse.status, 200);
+  const finalPolicy = await finalPolicyResponse.json();
+  assert.equal(finalPolicy.receipts.unresolvedCount, 0);
+  assert.equal(finalPolicy.receipts.attentionCount, 1);
+  assert.equal(finalPolicy.ready, true);
+
+  const freshPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Austin" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(freshPlanResponse.status, 200);
+  const freshPlan = await freshPlanResponse.json();
+  assert.equal(freshPlan.mode, "dry_run");
+  assert.equal(freshPlan.runPolicy.sha256, manifest.summary.sha256);
+});
+
+test("Mac reconciliation proves interrupted Gmail drafts applied or not applied before any fresh approval", async (t) => {
+  const bridgePort = 19086;
+  const fakeApiPort = 19087;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-gmail-draft-reconcile-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const appliedBody = "Approved interrupted draft body.";
+  const appliedSubject = "ABC-123";
+  const notAppliedSubject = "XYZ-999";
+  const draftDigest = ({ to, subject, body }) => digest({
+    version: 1,
+    draft: {
+      to,
+      cc: "",
+      bcc: "",
+      subject,
+      body: body.trim(),
+      attachments: []
+    }
+  });
+  const sourceKeyHash = (fileId, subject) => createHash("sha256")
+    .update(`claim-draft:${fileId}:${subject}`, "utf8")
+    .digest("hex");
+  const interruptedBatch = ({
+    id,
+    fileId,
+    fileNumber,
+    subject,
+    body,
+    threadId,
+    channelApprovalDigest
+  }) => ({
+    schemaVersion: 2,
+    id,
+    approvalId: `${id}-approval`,
+    approvalDigest: createHash("sha256").update(`${id}-approval`).digest("hex"),
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-gmail-bridge-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v2",
+    fileCount: 1,
+    files: [{
+      id: fileId,
+      number: fileNumber,
+      operationIndexes: [0],
+      operationTypes: ["gmail.create_draft"]
+    }],
+    intents: [actionBatchIntentFixture({
+      index: 0,
+      type: "gmail.create_draft",
+      fileId,
+      fileNumber,
+      reconciliation: {
+        subject,
+        subjectHash: createHash("sha256").update(subject).digest("hex"),
+        sourceKeyHash: sourceKeyHash(fileId, subject),
+        channelApprovalDigest,
+        threadId,
+        contentDigest: draftDigest({ to: "carrier@example.test", subject, body })
+      }
+    })],
+    completed: [],
+    current: {
+      index: 0,
+      type: "gmail.create_draft",
+      fileId,
+      fileNumber,
+      status: "executing"
+    }
+  });
+  const appliedBatchId = "gmail-draft-applied-batch";
+  const notAppliedBatchId = "gmail-draft-not-applied-batch";
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([
+    interruptedBatch({
+      id: appliedBatchId,
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      subject: appliedSubject,
+      body: appliedBody,
+      threadId: "draft-thread-applied",
+      channelApprovalDigest: "applied-reservation-digest"
+    }),
+    interruptedBatch({
+      id: notAppliedBatchId,
+      fileId: "contact-chance-second",
+      fileNumber: "2741",
+      subject: notAppliedSubject,
+      body: "Interrupted draft that was not created.",
+      threadId: "",
+      channelApprovalDigest: "not-applied-reservation-digest"
+    })
+  ], null, 2)}\n`, "utf8");
+  await writeFile(path.join(bridgeData, "outbound-sends.json"), `${JSON.stringify([
+    {
+      id: "gmail-draft-applied-reservation",
+      channel: "gmail_draft",
+      approvalDigest: "applied-reservation-digest",
+      sourceKeyHash: sourceKeyHash("contact-chance", appliedSubject),
+      subjectHash: createHash("sha256").update(appliedSubject).digest("hex"),
+      status: "in_progress",
+      externalId: "draft-applied",
+      createdAt: "2026-08-22T12:00:00.000Z"
+    },
+    {
+      id: "gmail-draft-not-applied-reservation",
+      channel: "gmail_draft",
+      approvalDigest: "not-applied-reservation-digest",
+      sourceKeyHash: sourceKeyHash("contact-chance-second", notAppliedSubject),
+      subjectHash: createHash("sha256").update(notAppliedSubject).digest("hex"),
+      status: "in_progress",
+      externalId: "missing-draft",
+      createdAt: "2026-08-22T12:00:00.000Z"
+    }
+  ], null, 2)}\n`, "utf8");
+
+  const appliedDraft = {
+    id: "draft-applied",
+    message: {
+      id: "draft-message-applied",
+      threadId: "draft-thread-applied",
+      snippet: appliedBody,
+      payload: {
+        mimeType: "text/plain",
+        headers: [
+          { name: "To", value: "carrier@example.test" },
+          { name: "Subject", value: appliedSubject }
+        ],
+        body: { data: Buffer.from(appliedBody, "utf8").toString("base64url") }
+      }
+    }
+  };
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    secondAssigned: true,
+    gmailDrafts: [appliedDraft]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const appliedResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId: appliedBatchId })
+  });
+  assert.equal(appliedResponse.status, 200);
+  const applied = await appliedResponse.json();
+  assert.equal(applied.mode, "reconciled");
+  assert.equal(applied.outcome, "applied_verified");
+  assert.equal(applied.receipt.status, "completed");
+  assert.equal(applied.receipt.completed[0].receipt.externalId, "draft-applied");
+  assert.equal(applied.receipt.completed[0].receipt.verifiedByReadback, true);
+
+  const notAppliedResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId: notAppliedBatchId })
+  });
+  assert.equal(notAppliedResponse.status, 200);
+  const notApplied = await notAppliedResponse.json();
+  assert.equal(notApplied.mode, "reconciled");
+  assert.equal(notApplied.outcome, "not_applied_verified");
+  assert.equal(notApplied.receipt.status, "partial_failure");
+  assert.equal(notApplied.receipt.completedCount, 0);
+  assert.equal(notApplied.receipt.current, null);
+  assert.equal(notApplied.receipt.automaticRetryAllowed, false);
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+
+  let outbound = JSON.parse(await readFile(path.join(bridgeData, "outbound-sends.json"), "utf8"));
+  assert.equal(
+    outbound.find((row) => row.id === "gmail-draft-applied-reservation").status,
+    "completed"
+  );
+  assert.equal(
+    outbound.find((row) => row.id === "gmail-draft-not-applied-reservation").status,
+    "verified_not_applied"
+  );
+
+  const retryOperation = {
+    type: "gmail.create_draft",
+    payload: {
+      query: "2741",
+      to: "carrier@example.test",
+      subject: notAppliedSubject,
+      body: "Freshly reviewed retry draft.",
+      insuranceClaimEmail: true
+    }
+  };
+  const retryPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [retryOperation],
+      execute: false
+    })
+  });
+  assert.equal(retryPlanResponse.status, 200);
+  const retryPlan = await retryPlanResponse.json();
+  assert.equal(retryPlan.mode, "dry_run");
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+  const retryExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [retryOperation],
+      execute: true,
+      approvalDigest: retryPlan.approvalDigest,
+      approvalChallenge: retryPlan.approvalChallenge
+    })
+  });
+  assert.equal(retryExecuteResponse.status, 200);
+  const retryExecuted = await retryExecuteResponse.json();
+  assert.equal(retryExecuted.mode, "executed");
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 1);
+  outbound = JSON.parse(await readFile(path.join(bridgeData, "outbound-sends.json"), "utf8"));
+  assert.equal(
+    outbound.filter((row) => (
+      row.channel === "gmail_draft"
+      && row.sourceKeyHash === sourceKeyHash("contact-chance-second", notAppliedSubject)
+    )).map((row) => row.status).sort().join(","),
+    "completed,verified_not_applied"
+  );
+});
+
+test("Mac reconciliation durably quarantines a permanent task conflict without blocking unrelated files", async (t) => {
+  const bridgePort = 19094;
+  const fakeApiPort = 19095;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-manual-task-quarantine-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const batchId = "duplicate-task-marker-quarantine";
+  const currentTaskAfter = {
+    title: "Carrier follow-up",
+    subject: "Carrier follow-up",
+    description: "Do: Call the carrier\nWaiting on: Carrier confirmation",
+    note: "[HCN_CURRENT_CONTROL_V1]\nDo: Call the carrier\nWaiting on: Carrier confirmation",
+    date_start: 1_777_296_000,
+    date_end: 1_777_296_000
+  };
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([{
+    schemaVersion: 2,
+    id: batchId,
+    approvalId: `${batchId}-approval`,
+    approvalDigest: createHash("sha256").update(`${batchId}-approval`).digest("hex"),
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-task-conflict-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v2",
+    fileCount: 1,
+    files: [{
+      id: "contact-chance",
+      number: "2739",
+      operationIndexes: [0],
+      operationTypes: ["jobnimbus.ensure_current_task"]
+    }],
+    intents: [actionBatchIntentFixture({
+      index: 0,
+      type: "jobnimbus.ensure_current_task",
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      reconciliation: {
+        decision: "update",
+        selectedTaskId: "duplicate-marker-1",
+        before: null,
+        after: currentTaskAfter,
+        controlInventoryDigest: "approved-duplicate-marker-inventory"
+      }
+    })],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.ensure_current_task",
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      status: "executing"
+    }
+  }], null, 2)}\n`, "utf8");
+
+  const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true,
+    currentTasks: [
+      {
+        jnid: "duplicate-marker-1",
+        record_type_name: "Task",
+        primary: { id: "contact-chance" },
+        related: [{ id: "contact-chance" }],
+        owners: [{ id: chanceOwnerId }],
+        title: "First current task",
+        note: "[HCN_CURRENT_CONTROL_V1]\nDo: First action\nWaiting on: First result",
+        is_completed: "false",
+        is_active: "true",
+        is_archived: "false"
+      },
+      {
+        jnid: "duplicate-marker-2",
+        record_type_name: "Task",
+        primary: { id: "contact-chance" },
+        related: [{ id: "contact-chance" }],
+        owners: [{ id: chanceOwnerId }],
+        title: "Second current task",
+        note: "[HCN_CURRENT_CONTROL_V1]\nDo: Second action\nWaiting on: Second result",
+        is_completed: "false",
+        is_active: "true",
+        is_archived: "false"
+      }
+    ]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const initialPolicyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(initialPolicyResponse.status, 200);
+  const initialPolicy = await initialPolicyResponse.json();
+  assert.equal(initialPolicy.ready, false);
+  assert.deepEqual(initialPolicy.receipts.unresolvedBatchIds, [batchId]);
+
+  const reconcileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId })
+  });
+  assert.equal(reconcileResponse.status, 200);
+  const reconciled = await reconcileResponse.json();
+  assert.equal(reconciled.mode, "manual_quarantined");
+  assert.equal(reconciled.outcome, "unknown_file_quarantined");
+  assert.equal(reconciled.receipt.status, "manual_quarantined");
+  assert.equal(reconciled.receipt.current, null);
+  assert.equal(reconciled.receipt.manualQuarantine.fileNumber, "2739");
+  assert.equal(reconciled.receipt.manualQuarantine.reasonCode, "provider_state_unprovable");
+  assert.match(reconciled.receipt.manualQuarantine.reason, /more than one current-control task marker/i);
+  assert.equal(reconciled.receipt.freshApprovalRequired, false);
+
+  const persisted = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(persisted[0].status, "manual_quarantined");
+  assert.equal(Object.prototype.hasOwnProperty.call(persisted[0], "current"), false);
+  assert.equal(persisted[0].manualQuarantine.fileId, "contact-chance");
+  assert.equal(persisted[0].recovery.fileScopedQuarantine, true);
+  assert.equal(persisted[0].recovery.automaticRetryAllowed, false);
+
+  const finalPolicyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+    headers
+  });
+  assert.equal(finalPolicyResponse.status, 200);
+  const finalPolicy = await finalPolicyResponse.json();
+  assert.equal(finalPolicy.ready, true);
+  assert.equal(finalPolicy.receipts.unresolvedCount, 0);
+  assert.equal(finalPolicy.receipts.attentionCount, 1);
+  assert.deepEqual(finalPolicy.receipts.attentionBatchIds, [batchId]);
+
+  const sameFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Austin" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(sameFileResponse.status, 409);
+  assert.match((await sameFileResponse.json()).error, new RegExp(batchId));
+
+  const unrelatedFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2741", fields: { city: "Garland" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(unrelatedFileResponse.status, 200);
+  assert.equal((await unrelatedFileResponse.json()).mode, "dry_run");
+});
+
+test("Mac current-task reconciliation treats provider string false as expected boolean false", async (t) => {
+  const bridgePort = 19096;
+  const fakeApiPort = 19097;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-task-string-false-reconcile-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
+  const batchId = "current-task-string-false-reconcile";
+  const taskId = "created-current-task";
+  const taskBody = {
+    title: "Carrier follow-up",
+    subject: "Carrier follow-up",
+    description: "Do: Call the carrier\nWaiting on: Carrier confirmation",
+    note: "[HCN_CURRENT_CONTROL_V1]\nDo: Call the carrier\nWaiting on: Carrier confirmation",
+    date_start: 1_777_296_000,
+    date_end: 1_777_296_000,
+    is_completed: false,
+    record_type_name: "Task",
+    owners: [{ id: chanceOwnerId }],
+    primary: { id: "contact-chance" },
+    related: [{ id: "contact-chance" }]
+  };
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([{
+    schemaVersion: 2,
+    id: batchId,
+    approvalId: `${batchId}-approval`,
+    approvalDigest: createHash("sha256").update(`${batchId}-approval`).digest("hex"),
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-task-string-false-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v2",
+    fileCount: 1,
+    files: [{
+      id: "contact-chance",
+      number: "2739",
+      operationIndexes: [0],
+      operationTypes: ["jobnimbus.ensure_current_task"]
+    }],
+    intents: [actionBatchIntentFixture({
+      index: 0,
+      type: "jobnimbus.ensure_current_task",
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      reconciliation: {
+        decision: "create",
+        selectedTaskId: null,
+        before: null,
+        after: taskBody,
+        controlInventoryDigest: "approved-create-task-inventory"
+      }
+    })],
+    completed: [],
+    current: {
+      index: 0,
+      type: "jobnimbus.ensure_current_task",
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      status: "executing"
+    }
+  }], null, 2)}\n`, "utf8");
+
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    currentTasks: [{
+      ...taskBody,
+      jnid: taskId,
+      is_completed: "false",
+      is_active: "true",
+      is_archived: "false",
+      is_deleted: "false"
+    }]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const reconcileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId })
+  });
+  assert.equal(reconcileResponse.status, 200);
+  const reconciled = await reconcileResponse.json();
+  assert.equal(reconciled.mode, "reconciled");
+  assert.equal(reconciled.outcome, "applied_verified");
+  assert.equal(reconciled.receipt.status, "completed");
+  assert.equal(reconciled.receipt.current, null);
+  assert.equal(reconciled.receipt.completedCount, 1);
+  assert.equal(reconciled.receipt.completed[0].receipt.externalId, taskId);
+  assert.equal(reconciled.receipt.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(reconciled.receipt.manualQuarantine, null);
+
+  const persisted = JSON.parse(
+    await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
+  );
+  assert.equal(persisted[0].status, "completed");
+  assert.equal(persisted[0].completed[0].receipt.externalId, taskId);
+  assert.equal(Object.prototype.hasOwnProperty.call(persisted[0], "current"), false);
+});
+
+test("locked Chance run requires each Gmail draft to be the sole batch operation", async (t) => {
+  const bridgePort = 19088;
+  const fakeApiPort = 19089;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-locked-gmail-sole-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [
+        {
+          type: "gmail.create_draft",
+          payload: {
+            query: "2739",
+            to: "carrier@example.test",
+            subject: "ABC-123",
+            body: "Approved carrier draft body.",
+            insuranceClaimEmail: true
+          }
+        },
+        {
+          type: "jobnimbus.update_contact",
+          payload: { query: "2739", fields: { city: "Dallas" } }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /Gmail draft must be the only operation/i);
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+});
+
+test("locked Chance run fails closed when matching or mismatching Gmail drafts appear after approval", async (t) => {
+  const bridgePort = 19090;
+  const fakeApiPort = 19091;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-locked-gmail-race-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    secondAssigned: true
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const matchingOperation = {
+    type: "gmail.create_draft",
+    payload: {
+      query: "2739",
+      to: "carrier@example.test",
+      subject: "ABC-123",
+      body: "Approved matching draft body.",
+      insuranceClaimEmail: true
+    }
+  };
+  const mismatchingOperation = {
+    type: "gmail.create_draft",
+    payload: {
+      query: "2741",
+      to: "carrier@example.test",
+      subject: "XYZ-999",
+      body: "Approved expected draft body.",
+      insuranceClaimEmail: true
+    }
+  };
+  async function plan(operation) {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [operation],
+        execute: false
+      })
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  }
+  const matchingPlan = await plan(matchingOperation);
+  const mismatchingPlan = await plan(mismatchingOperation);
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+
+  const draftSnapshot = ({ id, subject, body }) => ({
+    id,
+    message: {
+      id: `${id}-message`,
+      threadId: "",
+      snippet: body,
+      payload: {
+        mimeType: "text/plain",
+        headers: [
+          { name: "To", value: "carrier@example.test" },
+          { name: "Subject", value: subject }
+        ],
+        body: { data: Buffer.from(body, "utf8").toString("base64url") }
+      }
+    }
+  });
+  fixtureApi.addGmailDraft(draftSnapshot({
+    id: "draft-race-match",
+    subject: "ABC-123",
+    body: matchingOperation.payload.body
+  }));
+  fixtureApi.addGmailDraft(draftSnapshot({
+    id: "draft-race-mismatch",
+    subject: "XYZ-999",
+    body: "Different draft body that was never approved."
+  }));
+  const sourceKeyHash = (fileId, subject) => createHash("sha256")
+    .update(`claim-draft:${fileId}:${subject}`, "utf8")
+    .digest("hex");
+  await writeFile(path.join(bridgeData, "outbound-sends.json"), `${JSON.stringify([
+    {
+      id: "draft-race-match-reservation",
+      channel: "gmail_draft",
+      approvalDigest: "matching-race-reservation",
+      sourceKeyHash: sourceKeyHash("contact-chance", "ABC-123"),
+      status: "completed",
+      externalId: "draft-race-match",
+      createdAt: new Date().toISOString()
+    },
+    {
+      id: "draft-race-mismatch-reservation",
+      channel: "gmail_draft",
+      approvalDigest: "mismatching-race-reservation",
+      sourceKeyHash: sourceKeyHash("contact-chance-second", "XYZ-999"),
+      status: "completed",
+      externalId: "draft-race-mismatch",
+      createdAt: new Date().toISOString()
+    }
+  ], null, 2)}\n`, "utf8");
+
+  async function execute(operation, approvedPlan) {
+    return fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [operation],
+        execute: true,
+        approvalDigest: approvedPlan.approvalDigest,
+        approvalChallenge: approvedPlan.approvalChallenge
+      })
+    });
+  }
+  const matchingExecute = await execute(matchingOperation, matchingPlan);
+  assert.equal(matchingExecute.status, 409);
+  assert.match((await matchingExecute.json()).error, /no longer matches the current plan/i);
+  const mismatchingExecute = await execute(mismatchingOperation, mismatchingPlan);
+  assert.equal(mismatchingExecute.status, 409);
+  assert.match((await mismatchingExecute.json()).error, /no longer matches the current plan/i);
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+
+  const matchingReview = await plan(matchingOperation);
+  assert.equal(matchingReview.operations[0].plan.mode, "existing_draft");
+  assert.equal(matchingReview.operations[0].plan.bodyMatches, true);
+  const mismatchingReview = await plan(mismatchingOperation);
+  assert.equal(mismatchingReview.operations[0].plan.mode, "existing_draft");
+  assert.equal(mismatchingReview.operations[0].plan.bodyMatches, false);
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+});
+
+test("Mac operator interprets provider string booleans and rejects inactive or closed single files", async (t) => {
+  const bridgePort = 19092;
+  const fakeApiPort = 19093;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-provider-string-status-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    chanceIsActive: "true",
+    chanceIsClosed: "false",
+    chanceIsArchived: "false",
+    chanceIsDeleted: "false",
+    secondAssigned: true,
+    secondStatus: "Closed",
+    secondIsActive: "true",
+    secondIsClosed: "true",
+    additionalAssigned: 1,
+    additionalAssignedOverrides: [{
+      status_name: "Active",
+      is_active: "false",
+      is_closed: "false",
+      is_archived: "false",
+      is_deleted: "false"
+    }]
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  async function statusPlan(query) {
+    return fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        operations: [{
+          type: "jobnimbus.update_status",
+          payload: { query, status: "Active" }
+        }],
+        execute: false
+      })
+    });
+  }
+  const activeResponse = await statusPlan("2739");
+  assert.equal(activeResponse.status, 200);
+  assert.equal((await activeResponse.json()).mode, "dry_run");
+
+  const closedResponse = await statusPlan("2741");
+  assert.equal(closedResponse.status, 400);
+  assert.match((await closedResponse.json()).error, /not a Chance Pearson insurance file/i);
+
+  const inactiveResponse = await statusPlan("2742");
+  assert.equal(inactiveResponse.status, 400);
+  assert.match((await inactiveResponse.json()).error, /not a Chance Pearson insurance file/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
 });
 
 async function expectBridgeStartupFailure(environment, pattern) {
