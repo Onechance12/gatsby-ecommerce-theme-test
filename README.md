@@ -65,8 +65,12 @@ transport is unavailable.
   employee-to-line mapping on Render's persistent disk. Actual texts remain
   exact-draft and approval-gated.
 - The consolidated Custom GPT schema exposes one consequential action batch for
-  JobNimbus writes, Gmail drafts/sends, and Quo sends. The assistant must show
-  the exact one-client dry run and wait for Chance's approval. Execution also
+  JobNimbus writes, Gmail drafts/sends, and Quo sends. The dedicated Mac
+  operator may include at most five exact Chance-assigned files only for
+  `jobnimbus.update_contact` and `jobnimbus.update_status`; tasks, notes, Gmail,
+  Quo, calendar, company scope, and every other operator surface remain
+  one-client. The assistant must show the complete dry run and wait for Chance's
+  approval. Execution also
   consumes the newest identity-bound, short-lived server challenge exactly once;
   review, memory closeout,
   document, and sweep endpoints never send messages.
@@ -268,6 +272,15 @@ schema-v2 migration.
 2. After Chance approves, repeat the unchanged operations with `execute:true`
    and the returned `approvalDigest` plus the short-lived, single-use
    `approvalChallenge` before `approvalExpiresAt`.
+
+The dedicated Mac operator may group field corrections and stage moves across
+at most five distinct Chance-assigned files in one approval batch. The grouped
+mode permits only `jobnimbus.update_contact` and `jobnimbus.update_status`, uses
+exact JobNimbus file numbers, and binds every operation to its freshly resolved
+provider file. Company scope, browser-session actions, the HP operator, and all
+other action types remain single-file. Live execution is ordered, stops on the
+first failure, does not roll back earlier verified changes, and records later
+operations as not attempted.
 
 The bridge records successful actions in its dedicated persistent security and
 action ledgers and refuses to run the same approved batch twice. With the

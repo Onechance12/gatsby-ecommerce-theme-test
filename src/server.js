@@ -264,6 +264,14 @@ const ACTION_BATCH_STORE_PATH = process.env.ACTION_BATCH_STORE_PATH || path.join
 const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || path.join(BRIDGE_DATA_DIR, "action-approvals.json");
 const HCN_ACTION_RECEIPT_STORE_PATH = process.env.HCN_ACTION_RECEIPT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "hcn-action-receipts.json");
 const ACTION_APPROVAL_TTL_SECONDS = Math.max(1, Math.min(positiveIntegerEnv("ACTION_APPROVAL_TTL_SECONDS", 900), 3600));
+const ACTION_BATCH_LEDGER_TEST_FAIL_AT = process.env.NODE_ENV === "test"
+  ? Number(process.env.ACTION_BATCH_LEDGER_TEST_FAIL_AT || 0)
+  : 0;
+const CODEX_MAC_ASSIGNED_BATCH_MAX_FILES = 5;
+const CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES = new Set([
+  "jobnimbus.update_contact",
+  "jobnimbus.update_status"
+]);
 const OUTBOUND_SEND_STORE_PATH = process.env.OUTBOUND_SEND_STORE_PATH || path.join(BRIDGE_DATA_DIR, "outbound-sends.json");
 const QUO_LINE_LINK_STORE_PATH = process.env.QUO_LINE_LINK_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-links.json");
 const QUO_LINE_CHALLENGE_STORE_PATH = process.env.QUO_LINE_CHALLENGE_STORE_PATH || path.join(BRIDGE_DATA_DIR, "quo-line-challenges.json");
@@ -335,6 +343,7 @@ let hcnActionExecutionInFlight = false;
 const HCN_ACTION_SESSION_IN_FLIGHT = new Set();
 let quoLineMutationQueue = Promise.resolve();
 let actionBatchMutationQueue = Promise.resolve();
+let actionBatchLedgerWriteCount = 0;
 let actionApprovalMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
 
@@ -647,6 +656,10 @@ function health() {
       defaultScope: "chance_assigned",
       macCompanyExactFileScope: Boolean(CODEX_MAC_OPERATOR_TOKEN),
       companyWideIndexOrSweep: false,
+      macAssignedBatchMaxFiles: CODEX_MAC_ASSIGNED_BATCH_MAX_FILES,
+      macAssignedMultiFileActionTypes: [...CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES],
+      macAssignedMultiFileExecution: "sequential_fail_stop_no_rollback",
+      companyBatchMaxFiles: 1,
       gmailReadsRequireExactAssignedFile: true,
       quoReadsRequireExactAssignedFile: true,
       broadUnmatchedCommunicationsSweep: false,
@@ -1225,6 +1238,19 @@ async function authWhoAmI() {
           companyExactFileScope:
             identity.subject === "codex-mac-operator",
           companyWideIndexOrSweep: false,
+          assignedBatchMaxFiles:
+            identity.subject === "codex-mac-operator"
+              ? CODEX_MAC_ASSIGNED_BATCH_MAX_FILES
+              : 1,
+          assignedMultiFileActionTypes:
+            identity.subject === "codex-mac-operator"
+              ? [...CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES]
+              : [],
+          assignedMultiFileExecution:
+            identity.subject === "codex-mac-operator"
+              ? "sequential_fail_stop_no_rollback"
+              : "unavailable",
+          companyBatchMaxFiles: 1,
           actionPath: "approval_batch_only"
         }
       : null,
@@ -1347,7 +1373,8 @@ async function hcnPrepareActionPlan(input = {}) {
         );
         approval = await issueActionApprovalChallenge(
           preparedBatch.approvalDigest,
-          preparedBatch.operations.length
+          preparedBatch.operations.length,
+          preparedBatch.batchScope
         );
         const engineDryRun = {
           mode: "dry_run",
@@ -5040,7 +5067,9 @@ async function updateContact(input) {
   const query = required(input.query, "query");
   const fields = input.fields;
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) badRequest("fields object is required");
-  const { contact } = await findChanceContact(query);
+  const { contact } = await findChanceContact(query, {
+    expectedFileId: input.expectedFileId
+  });
   const normalizedFields = normalizeContactFields(fields);
   assertCodexOperatorFields(
     normalizedFields,
@@ -5048,7 +5077,17 @@ async function updateContact(input) {
     "contact",
     { allowContactCustomFields: true }
   );
-  const plan = { endpoint: `/contacts/${contact.jnid}`, fields: normalizedFields };
+  const before = Object.fromEntries(
+    Object.keys(normalizedFields).map((key) => [
+      key,
+      Object.prototype.hasOwnProperty.call(contact, key) ? contact[key] : null
+    ])
+  );
+  const plan = {
+    endpoint: `/contacts/${contact.jnid}`,
+    before,
+    fields: normalizedFields
+  };
   if (input.execute !== true) return { mode: "dry_run", file: compactContact(contact), plan };
   const result = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`, { method: "PUT", body: normalizedFields });
   const refreshedContact = await jobNimbus(`/contacts/${encodeURIComponent(contact.jnid)}`);
@@ -5067,7 +5106,9 @@ async function updateStatus(input) {
   }
   const query = required(input.query, "query");
   const requestedStatus = required(input.status || input.statusName || input.workflowStatus, "status");
-  const { contact, knownStatusNames } = await findChanceContact(query);
+  const { contact, knownStatusNames } = await findChanceContact(query, {
+    expectedFileId: input.expectedFileId
+  });
   const status = resolveWorkflowStatusName(requestedStatus, knownStatusNames);
   const body = { status_name: status };
   const plan = {
@@ -7429,13 +7470,22 @@ async function buildChanceEvidencePacket(contact, input) {
 
 async function processActionBatch(input = {}) {
   const preparedBatch = await prepareCanonicalActionBatch(input.operations);
-  const { operations, plans, approvalDigest } = preparedBatch;
+  const { operations, plans, approvalDigest, batchScope } = preparedBatch;
   if (input.execute !== true) {
-    const approval = await issueActionApprovalChallenge(approvalDigest, operations.length);
+    const approval = await issueActionApprovalChallenge(
+      approvalDigest,
+      operations.length,
+      batchScope
+    );
     return {
       mode: "dry_run",
+      batchMode: batchScope.mode,
+      fileCount: batchScope.fileCount,
       operationCount: operations.length,
+      files: batchScope.files,
       operations: plans,
+      displayComplete: true,
+      executionSemantics: "sequential_fail_stop_no_rollback",
       approvalDigest,
       approvalChallenge: approval.challenge,
       approvalExpiresAt: approval.expiresAt,
@@ -7446,7 +7496,12 @@ async function processActionBatch(input = {}) {
   requireApprovalDigest(input.approvalDigest, approvalDigest, "action batch");
   const approval = await consumeActionApprovalChallenge(input.approvalChallenge, approvalDigest);
 
-  const reservation = await reserveActionBatch(approval.id, approvalDigest, operations.length);
+  const reservation = await reserveActionBatch(
+    approval.id,
+    approvalDigest,
+    operations.length,
+    batchScope
+  );
   if (reservation.existing) {
     return {
       mode: "blocked_duplicate",
@@ -7457,22 +7512,62 @@ async function processActionBatch(input = {}) {
   const batch = reservation.batch;
 
   for (let index = 0; index < operations.length; index += 1) {
+    const file = batchScope.operationFiles[index];
+    batch.current = {
+      index,
+      type: operations[index].type,
+      fileId: file.id,
+      fileNumber: file.number,
+      status: "executing",
+      startedAt: new Date().toISOString()
+    };
+    batch.updatedAt = new Date().toISOString();
+    await updateActionBatch(batch);
+    const operationCurrent = { ...batch.current };
+    let verifiedReceipt = null;
     try {
       const result = await executeActionOperation(operations[index], plans[index]);
-      batch.completed.push({ index, type: operations[index].type, status: "executed", receipt: summarizeOperationResult(result) });
+      verifiedReceipt = summarizeOperationResult(result);
+      batch.completed.push({ index, type: operations[index].type, status: "executed", receipt: verifiedReceipt });
+      delete batch.current;
       await updateActionBatch(batch);
     } catch (error) {
+      batch.completed = batch.completed.filter((item) => item.index !== index);
       batch.status = "partial_failure";
       batch.failedAt = index;
+      batch.current = {
+        ...operationCurrent,
+        status: "reconciliation_required",
+        reason: verifiedReceipt
+          ? "The provider write and readback succeeded, but the durable completion receipt could not be saved. Reconcile the exact file and ledger before any retry."
+          : "The provider outcome may be uncertain. Fresh-read this exact file before any retry.",
+        ...(verifiedReceipt ? { verifiedReceipt } : {})
+      };
+      batch.notAttempted = operations.slice(index + 1).map((operation, offset) => {
+        const laterIndex = index + offset + 1;
+        const laterFile = batchScope.operationFiles[laterIndex];
+        return {
+          index: laterIndex,
+          type: operation.type,
+          fileId: laterFile.id,
+          fileNumber: laterFile.number,
+          status: "not_attempted"
+        };
+      });
       batch.error = redactSensitiveText(error.message || String(error));
       batch.updatedAt = new Date().toISOString();
       await updateActionBatch(batch);
-      return { mode: "partial_failure", batch, reason: "Execution stopped immediately. Review completed receipts before retrying any action." };
+      return {
+        mode: "partial_failure",
+        batch,
+        reason: "Execution stopped immediately. Fresh-read the failed file, preserve completed receipts, and do not retry failed or unattempted actions without a new review and approval."
+      };
     }
   }
   batch.status = batch.completed.some((item) => item.receipt?.manualVerificationRequired === true)
     ? "completed_pending_verification"
     : "completed";
+  batch.notAttempted = [];
   batch.completedAt = new Date().toISOString();
   await updateActionBatch(batch);
   return { mode: "executed", batch };
@@ -7484,14 +7579,29 @@ async function prepareCanonicalActionBatch(operationsInput) {
   for (const operation of operations) {
     plans.push(await prepareActionOperation(operation));
   }
-  assertOperatorBatchFileScope(plans);
+  const batchScope = await operatorBatchScope(operations, plans);
   return {
     operations,
     plans,
+    batchScope,
     approvalDigest: digest({
-      version: 2,
+      version: 3,
+      batchScope: stableApprovalBatchScope(batchScope),
       plans: stableApprovalPlans(plans)
     })
+  };
+}
+
+function stableApprovalBatchScope(batchScope) {
+  return {
+    mode: batchScope?.mode || "",
+    fileCount: Number(batchScope?.fileCount || 0),
+    files: (batchScope?.files || []).map((file) => ({
+      id: file.id,
+      number: file.number,
+      operationIndexes: file.operationIndexes,
+      operationTypes: file.operationTypes
+    }))
   };
 }
 
@@ -7502,7 +7612,7 @@ function stableApprovalPlans(plans) {
   }));
 }
 
-async function findChanceContact(query) {
+async function findChanceContact(query, options = {}) {
   const needle = normalizeContactLookupQuery(query);
   if (!needle) badRequest("query is required");
   const lower = needle.toLowerCase();
@@ -7532,7 +7642,16 @@ async function findChanceContact(query) {
   }
 
   const selectedId = matches[0].contact.jnid || matches[0].contact.id;
+  const expectedFileId = String(options.expectedFileId || "").trim();
+  if (expectedFileId && String(selectedId) !== expectedFileId) {
+    conflictError(
+      `The exact file binding changed after approval. Expected ${expectedFileId}; resolved ${selectedId}. Nothing was written.`
+    );
+  }
   const contact = await jobNimbus(`/contacts/${encodeURIComponent(selectedId)}`);
+  if (expectedFileId && String(contact?.jnid || contact?.id || "") !== expectedFileId) {
+    conflictError("JobNimbus returned a different file than the approved immutable file binding. Nothing was written.");
+  }
   if (
     !isInsuranceFile(contact)
     || (!companyScope && !assignedTo(contact, CHANCE_OWNER_ID))
@@ -9173,23 +9292,127 @@ async function readJsonFile(filePath, fallback) {
   }
 }
 
-function assertOperatorBatchFileScope(plans) {
-  if (!isRestrictedEffectRequest()) return;
-  const fileIds = plans.map((prepared, index) => {
-    const id = String(
-      prepared?.plan?.file?.id
-      || prepared?.plan?.plan?.fileScope?.id
-      || prepared?.plan?.fileScope?.id
-      || ""
-    ).trim();
-    if (!id) {
-      badRequest(`The Codex operator could not bind action ${index + 1} to one exact ${operatorFileDescription()}.`);
-    }
-    return id;
-  });
-  if (new Set(fileIds).size !== 1) {
-    badRequest(`A Codex operator action batch may contain operations for only one exact ${operatorFileDescription()}.`);
+function preparedActionFile(prepared, index = 0) {
+  const file = prepared?.plan?.file
+    || prepared?.plan?.plan?.fileScope
+    || prepared?.plan?.fileScope
+    || {};
+  const id = String(file.id || "").trim();
+  if (!id) {
+    badRequest(`The Codex operator could not bind action ${index + 1} to one exact ${operatorFileDescription()}.`);
   }
+  return {
+    id,
+    number: file.number || "",
+    name: file.name || ""
+  };
+}
+
+async function operatorBatchScope(operations, plans) {
+  if (!isRestrictedEffectRequest()) {
+    return {
+      mode: "unrestricted_legacy_v1",
+      fileCount: 0,
+      maxFiles: 0,
+      files: [],
+      operationFiles: operations.map(() => ({ id: "", number: "", name: "" }))
+    };
+  }
+
+  const operationFiles = plans.map((prepared, index) => preparedActionFile(prepared, index));
+  const orderedFiles = [];
+  const filesById = new Map();
+  for (const [index, file] of operationFiles.entries()) {
+    let entry = filesById.get(file.id);
+    if (!entry) {
+      entry = {
+        ...file,
+        operationIndexes: [],
+        operationTypes: []
+      };
+      filesById.set(file.id, entry);
+      orderedFiles.push(entry);
+    }
+    entry.operationIndexes.push(index);
+    entry.operationTypes.push(operations[index].type);
+  }
+
+  const uniqueFileCount = orderedFiles.length;
+  const macAssignedBatch = isMacCodexOperatorRequest()
+    && !operatorCompanyScopeActive()
+    && !isHcnRestrictedEffectRequest();
+  const maxFiles = macAssignedBatch
+    ? CODEX_MAC_ASSIGNED_BATCH_MAX_FILES
+    : 1;
+  if (uniqueFileCount > maxFiles) {
+    if (maxFiles === 1) {
+      badRequest(`A Codex operator action batch may contain operations for only one exact ${operatorFileDescription()}.`);
+    }
+    badRequest(
+      `A Mac Codex operator action batch may contain operations for at most ${maxFiles} exact Chance-assigned files.`
+    );
+  }
+
+  if (uniqueFileCount > 1) {
+    for (const [index, operation] of operations.entries()) {
+      if (!CODEX_MAC_ASSIGNED_MULTI_FILE_ACTION_TYPES.has(operation.type)) {
+        badRequest(
+          `Multi-file Mac batches allow only jobnimbus.update_contact and jobnimbus.update_status; operations[${index}] is ${operation.type}.`
+        );
+      }
+      if (!/^#?\d+$/.test(String(operation.payload?.query || "").trim())) {
+        badRequest(`operations[${index}].payload.query must be the exact JobNimbus file number in a multi-file batch.`);
+      }
+    }
+
+    const closedFileIds = new Set();
+    let previousFileId = "";
+    for (const file of operationFiles) {
+      if (file.id !== previousFileId) {
+        if (closedFileIds.has(file.id)) {
+          badRequest("Operations for each file must be contiguous in a multi-file batch; A/B/A ordering is not allowed.");
+        }
+        if (previousFileId) closedFileIds.add(previousFileId);
+        previousFileId = file.id;
+      }
+    }
+
+    for (const file of orderedFiles) {
+      const typeCounts = file.operationTypes.reduce((counts, type) => {
+        counts[type] = (counts[type] || 0) + 1;
+        return counts;
+      }, {});
+      if (
+        Number(typeCounts["jobnimbus.update_contact"] || 0) > 1
+        || Number(typeCounts["jobnimbus.update_status"] || 0) > 1
+      ) {
+        badRequest("A multi-file batch may contain at most one contact update and one status update per file.");
+      }
+      if (
+        file.operationTypes.length === 2
+        && file.operationTypes[0] !== "jobnimbus.update_contact"
+      ) {
+        badRequest("When a file has both updates, its contact fields must be listed before its status change.");
+      }
+      const current = await jobNimbus(`/contacts/${encodeURIComponent(file.id)}`);
+      assertOperatorContactScope(current);
+      if (!isOpenActive(current)) {
+        badRequest(`JobNimbus file ${file.number || file.id} is inactive, archived, or closed and cannot enter a multi-file batch.`);
+      }
+    }
+  }
+
+  return {
+    mode: uniqueFileCount > 1
+      ? "assigned_multi_v1"
+      : operatorCompanyScopeActive()
+        ? "company_single_file_v1"
+        : "assigned_single_file_v2",
+    fileCount: uniqueFileCount,
+    maxFiles,
+    files: orderedFiles,
+    operationFiles
+  };
 }
 
 async function readSecurityLedger(filePath, label) {
@@ -10560,8 +10783,14 @@ async function prepareActionOperation(operation) {
 async function executeActionOperation(operation, prepared) {
   const input = { ...operation.payload, execute: true };
   switch (operation.type) {
-    case "jobnimbus.update_contact": return updateContact(input);
-    case "jobnimbus.update_status": return updateStatus(input);
+    case "jobnimbus.update_contact": return updateContact({
+      ...input,
+      expectedFileId: preparedActionFile(prepared).id
+    });
+    case "jobnimbus.update_status": return updateStatus({
+      ...input,
+      expectedFileId: preparedActionFile(prepared).id
+    });
     case "jobnimbus.process_update": return processUpdate(input);
     case "jobnimbus.create_note": return createNote(input);
     case "jobnimbus.create_task": return createTask(input);
@@ -10618,7 +10847,7 @@ function actionApprovalIdentityHash() {
     .digest("hex");
 }
 
-async function issueActionApprovalChallenge(approvalDigest, operationCount) {
+async function issueActionApprovalChallenge(approvalDigest, operationCount, batchScope = {}) {
   return withActionApprovalMutation(async () => {
     const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
     const identityHash = actionApprovalIdentityHash();
@@ -10640,6 +10869,9 @@ async function issueActionApprovalChallenge(approvalDigest, operationCount) {
       identityHash,
       approvalDigest,
       operationCount,
+      batchMode: batchScope.mode || "",
+      fileCount: Number(batchScope.fileCount || 0),
+      fileManifestHash: digest(stableApprovalBatchScope(batchScope)),
       status: "active",
       issuedAt: new Date(now).toISOString(),
       expiresAt: new Date(expiresAtMs).toISOString(),
@@ -10708,7 +10940,7 @@ function withActionBatchMutation(callback) {
   return run;
 }
 
-async function reserveActionBatch(approvalId, approvalDigest, operationCount) {
+async function reserveActionBatch(approvalId, approvalDigest, operationCount, batchScope = {}) {
   return withActionBatchMutation(async () => {
     const ledger = await readActionBatchLedger();
     const existing = ledger.find((row) => (
@@ -10723,6 +10955,14 @@ async function reserveActionBatch(approvalId, approvalDigest, operationCount) {
       status: "in_progress",
       createdAt: new Date().toISOString(),
       operationCount,
+      batchMode: batchScope.mode || "",
+      fileCount: Number(batchScope.fileCount || 0),
+      files: (batchScope.files || []).map((file) => ({
+        id: file.id,
+        number: file.number,
+        operationIndexes: file.operationIndexes,
+        operationTypes: file.operationTypes
+      })),
       completed: []
     };
     ledger.push(batch);
@@ -10750,6 +10990,15 @@ async function readActionBatchLedger() {
 }
 
 async function writeActionBatchLedger(rows) {
+  actionBatchLedgerWriteCount += 1;
+  if (
+    ACTION_BATCH_LEDGER_TEST_FAIL_AT > 0
+    && actionBatchLedgerWriteCount === ACTION_BATCH_LEDGER_TEST_FAIL_AT
+  ) {
+    const error = new Error("Injected action-batch ledger write failure for tests.");
+    error.statusCode = 503;
+    throw error;
+  }
   await writeSecurityLedger(ACTION_BATCH_STORE_PATH, rows);
 }
 
@@ -11353,35 +11602,34 @@ function resolveCodexOperatorRequestScope(
   body = {}
 ) {
   if (identity?.type !== "codex_operator_token") return "identity";
-  const requestedScopes = [];
-  if (body.operatorScope !== undefined) {
-    requestedScopes.push(
-      String(body.operatorScope || "").trim().toLowerCase()
-    );
-  }
-  if (pathname === "/ops/action-batch") {
-    for (const operation of Array.isArray(body.operations) ? body.operations : []) {
-      if (operation?.payload?.operatorScope !== undefined) {
-        requestedScopes.push(
-          String(operation.payload.operatorScope || "").trim().toLowerCase()
-        );
-      }
-    }
-  }
-  const scopes = [...new Set(requestedScopes.filter(Boolean))];
-  if (scopes.some((scope) => !["assigned", "company"].includes(scope))) {
+  const topLevelScope = body.operatorScope === undefined
+    ? ""
+    : String(body.operatorScope || "").trim().toLowerCase();
+  if (topLevelScope && !["assigned", "company"].includes(topLevelScope)) {
     const error = new Error("operatorScope must be assigned or company.");
     error.statusCode = 400;
     throw error;
   }
-  if (scopes.length > 1) {
-    const error = new Error(
-      "A Codex operator request cannot mix assigned and company scope."
-    );
-    error.statusCode = 400;
-    throw error;
+  const scope = topLevelScope || "assigned";
+  if (pathname === "/ops/action-batch") {
+    for (const [index, operation] of (Array.isArray(body.operations) ? body.operations : []).entries()) {
+      if (operation?.payload?.operatorScope !== undefined) {
+        const operationScope = String(operation.payload.operatorScope || "").trim().toLowerCase();
+        if (!["assigned", "company"].includes(operationScope)) {
+          const error = new Error("operatorScope must be assigned or company.");
+          error.statusCode = 400;
+          throw error;
+        }
+        if (operationScope !== scope) {
+          const error = new Error(
+            `operations[${index}].payload.operatorScope must match the request operatorScope (${scope}).`
+          );
+          error.statusCode = 400;
+          throw error;
+        }
+      }
+    }
   }
-  const scope = scopes[0] || "assigned";
   if (
     scope === "company"
     && identity.subject !== "codex-mac-operator"
@@ -12979,12 +13227,18 @@ const OPENAPI = {
       ActionBatchRequest: {
         type: "object",
         properties: {
+          operatorScope: {
+            type: "string",
+            enum: ["assigned", "company"],
+            default: "assigned",
+            description: "Dedicated Mac operator only. Defaults to assigned. Company batches require this top-level value plus matching company scope on every operation payload and remain limited to one exact company file."
+          },
           operations: {
             type: "array",
             minItems: 1,
             maxItems: 12,
             items: { $ref: "#/components/schemas/ActionOperation" },
-            description: "Every exact approved action. For task completion use type jobnimbus.update_task with payload {query:'EXACT_FILE',taskId:'TASK_ID',completed:true} so ownership is verified. The dry run returns the canonical JobNimbus body before anything executes."
+            description: "Every exact approved action. The dedicated Mac operator may group operations across at most five distinct Chance-assigned files only when every multi-file operation is jobnimbus.update_contact or jobnimbus.update_status; company scope, browser sessions, the HP operator, and every other effect remain single-file. For task completion use type jobnimbus.update_task with payload {query:'EXACT_FILE',taskId:'TASK_ID',completed:true} so ownership is verified. The dry run returns every canonical JobNimbus body before anything executes."
           },
           approvalDigest: { type: "string", description: "Required for execution. Must match the immediately preceding unchanged batch dry run." },
           approvalChallenge: { type: "string", description: "Single-use, short-lived server challenge returned by the immediately preceding dry run. The local operator wrapper retains and forwards it; do not copy it into chat." },

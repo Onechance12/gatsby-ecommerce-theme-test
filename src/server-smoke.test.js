@@ -39,6 +39,21 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     mobile_phone: options.duplicatePhone ? chance.mobile_phone : "2145553434",
     cf_string_2: "XYZ-999"
   };
+  const additionalAssigned = Array.from(
+    { length: Number(options.additionalAssigned || 0) },
+    (_, index) => ({
+      ...chance,
+      jnid: `contact-chance-extra-${index + 1}`,
+      number: 2742 + index,
+      display_name: `Extra Fixture Homeowner ${index + 1}`,
+      email: `extra-${index + 1}@example.test`,
+      mobile_phone: `214555${String(5000 + index).padStart(4, "0")}`,
+      cf_string_2: `EXTRA-${index + 1}`,
+      ...(Number(options.additionalAssignedInactiveIndex) === index + 1
+        ? { is_active: false }
+        : {})
+    })
+  );
   const companyOther = {
     ...chance,
     jnid: "contact-company-other",
@@ -51,6 +66,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   };
   let taskUpdateCount = 0;
   let companyNoteCreateCount = 0;
+  let contactUpdateCount = 0;
   let taskCompleted = false;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -268,12 +284,35 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       }));
       return;
     }
+    const exactContact = [
+      chance,
+      duplicate,
+      secondAssigned,
+      ...additionalAssigned,
+      companyOther
+    ].find((contact) => url.pathname === `/contacts/${contact.jnid}`);
+    if (exactContact && req.method === "PUT") {
+      contactUpdateCount += 1;
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      if (Number(options.failContactUpdateAt || 0) === contactUpdateCount) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "fixture contact update failure" }));
+        return;
+      }
+      Object.assign(exactContact, body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(exactContact));
+      return;
+    }
     if (url.pathname === "/contacts") {
       res.writeHead(200, { "content-type": "application/json" });
       const contacts = [
         chance,
         ...(options.duplicateName ? [duplicate] : []),
         ...(options.secondAssigned ? [secondAssigned] : []),
+        ...additionalAssigned,
         ...(options.companyOther ? [companyOther] : [])
       ];
       res.end(JSON.stringify({ contacts }));
@@ -292,6 +331,14 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     if (url.pathname === "/contacts/contact-chance-second") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(secondAssigned));
+      return;
+    }
+    const extraAssigned = additionalAssigned.find(
+      (contact) => url.pathname === `/contacts/${contact.jnid}`
+    );
+    if (extraAssigned) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(extraAssigned));
       return;
     }
     if (url.pathname === "/contacts/contact-company-other") {
@@ -375,7 +422,10 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   t.after(() => server.close());
   return {
     getTaskUpdateCount: () => taskUpdateCount,
-    getCompanyNoteCreateCount: () => companyNoteCreateCount
+    getCompanyNoteCreateCount: () => companyNoteCreateCount,
+    getContactUpdateCount: () => contactUpdateCount,
+    getContact: (id) => [chance, duplicate, secondAssigned, ...additionalAssigned, companyOther]
+      .find((contact) => contact.jnid === id)
   };
 }
 
@@ -692,7 +742,11 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   const fakeApiPort = 18886;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-auth-"));
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
-  await startOperatorJobNimbusFixture(t, fakeApiPort, { secondAssigned: true, duplicatePhone: true });
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true,
+    additionalAssigned: 4,
+    duplicatePhone: true
+  });
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
     env: {
@@ -726,6 +780,10 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     authorization: "Bearer fixture-codex-operator-token-1234567890",
     "content-type": "application/json"
   };
+  const macOperatorHeaders = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
   const sharedHeaders = {
     authorization: "Bearer fixture-shared-token",
     "content-type": "application/json"
@@ -744,10 +802,7 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.match(identity.instruction, /dedicated least-privilege Codex operator/i);
 
   const macIdentityResponse = await fetch(`http://127.0.0.1:${bridgePort}/auth/whoami`, {
-    headers: {
-      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
-      "content-type": "application/json"
-    }
+    headers: macOperatorHeaders
   });
   assert.equal(macIdentityResponse.status, 200);
   const macIdentity = await macIdentityResponse.json();
@@ -763,6 +818,13 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(macIdentity.operatorAccess.defaultScope, "chance_assigned");
   assert.equal(macIdentity.operatorAccess.companyExactFileScope, true);
   assert.equal(macIdentity.operatorAccess.companyWideIndexOrSweep, false);
+  assert.equal(macIdentity.operatorAccess.assignedBatchMaxFiles, 5);
+  assert.deepEqual(macIdentity.operatorAccess.assignedMultiFileActionTypes, [
+    "jobnimbus.update_contact",
+    "jobnimbus.update_status"
+  ]);
+  assert.equal(macIdentity.operatorAccess.assignedMultiFileExecution, "sequential_fail_stop_no_rollback");
+  assert.equal(macIdentity.operatorAccess.companyBatchMaxFiles, 1);
   assert.match(macIdentity.instruction, /dedicated least-privilege Codex Mac Operator/i);
 
   const platformSessionResponse = await fetch(`http://127.0.0.1:${bridgePort}/api/v1/session`, {
@@ -1139,6 +1201,118 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.equal(mixedClientBatchResponse.status, 400);
   assert.match((await mixedClientBatchResponse.json()).error, /only one exact Chance-assigned file/i);
 
+  const macFiveFileOperations = [2739, 2741, 2742, 2743, 2744].map(
+    (query) => ({
+      type: "jobnimbus.update_status",
+      payload: { query: String(query), status: "Active" }
+    })
+  );
+  const macFiveFileBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macOperatorHeaders,
+    body: JSON.stringify({ operations: macFiveFileOperations, execute: false })
+  });
+  assert.equal(macFiveFileBatchResponse.status, 200);
+  const macFiveFileBatch = await macFiveFileBatchResponse.json();
+  assert.equal(macFiveFileBatch.batchMode, "assigned_multi_v1");
+  assert.equal(macFiveFileBatch.fileCount, 5);
+  assert.equal(macFiveFileBatch.operationCount, 5);
+  assert.equal(macFiveFileBatch.displayComplete, true);
+  assert.equal(macFiveFileBatch.executionSemantics, "sequential_fail_stop_no_rollback");
+  assert.equal(
+    new Set(macFiveFileBatch.operations.map((operation) => operation.plan.file.id)).size,
+    5
+  );
+  assert.match(macFiveFileBatch.approvalDigest, /^[a-f0-9]{64}$/);
+  assert.match(macFiveFileBatch.approvalChallenge, /^[A-Za-z0-9_-]{40,100}$/);
+
+  const macSixFileBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macOperatorHeaders,
+    body: JSON.stringify({
+      operations: [
+        ...macFiveFileOperations,
+        {
+          type: "jobnimbus.update_status",
+          payload: { query: "2745", status: "Active" }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(macSixFileBatchResponse.status, 400);
+  assert.match((await macSixFileBatchResponse.json()).error, /at most 5 exact Chance-assigned files/i);
+
+  const macMultiFileNoteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macOperatorHeaders,
+    body: JSON.stringify({
+      operations: [
+        {
+          type: "jobnimbus.create_note",
+          payload: { query: "2739", note: "Single-file-only operation." }
+        },
+        {
+          type: "jobnimbus.update_status",
+          payload: { query: "2741", status: "Active" }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(macMultiFileNoteResponse.status, 400);
+  assert.match((await macMultiFileNoteResponse.json()).error, /allow only jobnimbus\.update_contact and jobnimbus\.update_status/i);
+
+  const macMultiFileNameQueryResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macOperatorHeaders,
+    body: JSON.stringify({
+      operations: [
+        {
+          type: "jobnimbus.update_status",
+          payload: { query: "Fixture Homeowner", status: "Active" }
+        },
+        {
+          type: "jobnimbus.update_status",
+          payload: { query: "2741", status: "Active" }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(macMultiFileNameQueryResponse.status, 400);
+  assert.match((await macMultiFileNameQueryResponse.json()).error, /exact JobNimbus file number/i);
+
+  const macDuplicateFileMutationResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macOperatorHeaders,
+    body: JSON.stringify({
+      operations: [
+        { type: "jobnimbus.update_contact", payload: { query: "2739", fields: { city: "Dallas" } } },
+        { type: "jobnimbus.update_contact", payload: { query: "2739", fields: { zip: "75219" } } },
+        { type: "jobnimbus.update_status", payload: { query: "2741", status: "Active" } }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(macDuplicateFileMutationResponse.status, 400);
+  assert.match((await macDuplicateFileMutationResponse.json()).error, /at most one contact update and one status update per file/i);
+
+  const macInterleavedFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macOperatorHeaders,
+    body: JSON.stringify({
+      operations: [
+        { type: "jobnimbus.update_contact", payload: { query: "2739", fields: { city: "Dallas" } } },
+        { type: "jobnimbus.update_status", payload: { query: "2741", status: "Active" } },
+        { type: "jobnimbus.update_status", payload: { query: "2739", status: "Active" } }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(macInterleavedFileResponse.status, 400);
+  assert.match((await macInterleavedFileResponse.json()).error, /A\/B\/A ordering is not allowed/i);
+
   const batchPayload = {
     operations: [{
       type: "jobnimbus.update_task",
@@ -1327,10 +1501,29 @@ test("Mac operator supports one explicit company file while HP and broad company
     ["client-call"]
   );
 
+  const payloadOnlyCompanyScopeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      operations: [{
+        type: "jobnimbus.create_note",
+        payload: {
+          query: "3901",
+          note: "Payload-only company scope must fail closed.",
+          operatorScope: "company"
+        }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(payloadOnlyCompanyScopeResponse.status, 400);
+  assert.match((await payloadOnlyCompanyScopeResponse.json()).error, /must match the request operatorScope \(assigned\)/i);
+
   const companyTaskBatchResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",
     headers: macHeaders,
     body: JSON.stringify({
+      operatorScope: "company",
       operations: [{
         type: "jobnimbus.create_task",
         payload: {
@@ -1355,6 +1548,7 @@ test("Mac operator supports one explicit company file while HP and broad company
     method: "POST",
     headers: macHeaders,
     body: JSON.stringify({
+      operatorScope: "company",
       operations: [{
         type: "jobnimbus.create_note",
         payload: {
@@ -1377,6 +1571,7 @@ test("Mac operator supports one explicit company file while HP and broad company
     method: "POST",
     headers: macHeaders,
     body: JSON.stringify({
+      operatorScope: "company",
       operations: [{
         type: "jobnimbus.create_note",
         payload: {
@@ -1395,10 +1590,32 @@ test("Mac operator supports one explicit company file while HP and broad company
   assert.equal(companyBatchExecute.mode, "executed");
   assert.equal(fixtureApi.getCompanyNoteCreateCount(), 1);
 
+  const companyTwoFileResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      operatorScope: "company",
+      operations: [
+        {
+          type: "jobnimbus.update_status",
+          payload: { query: "3901", status: "Active", operatorScope: "company" }
+        },
+        {
+          type: "jobnimbus.update_status",
+          payload: { query: "2739", status: "Active", operatorScope: "company" }
+        }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(companyTwoFileResponse.status, 400);
+  assert.match((await companyTwoFileResponse.json()).error, /only one exact explicit company insurance file/i);
+
   const mixedScopeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",
     headers: macHeaders,
     body: JSON.stringify({
+      operatorScope: "company",
       operations: [
         {
           type: "jobnimbus.create_note",
@@ -1421,7 +1638,7 @@ test("Mac operator supports one explicit company file while HP and broad company
     })
   });
   assert.equal(mixedScopeResponse.status, 400);
-  assert.match((await mixedScopeResponse.json()).error, /cannot mix assigned and company/i);
+  assert.match((await mixedScopeResponse.json()).error, /must match the request operatorScope/i);
 });
 
 test("Codex operator action batches require the unchanged approval digest", async (t) => {
@@ -1550,6 +1767,345 @@ test("Codex operator action batches require the unchanged approval digest", asyn
   assert.equal(executedBatch.batch.completed[0].receipt.fileId, "contact-chance");
   assert.equal(executedBatch.batch.completed[0].receipt.fileNumber, 2739);
   assert.equal(fixtureApi.getTaskUpdateCount(), 1);
+});
+
+test("Mac operator executes one verified restricted batch across exact assigned files", async (t) => {
+  const bridgePort = 18940;
+  const fakeApiPort = 18941;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-multi-file-execute-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true,
+    additionalAssigned: 3
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operations = [
+    [2739, "Dallas"],
+    [2741, "Garland"],
+    [2742, "Irving"],
+    [2743, "Plano"],
+    [2744, "Coppell"]
+  ].flatMap(([query, city]) => [
+    {
+      type: "jobnimbus.update_contact",
+      payload: { query: String(query), fields: { city } }
+    },
+    {
+      type: "jobnimbus.update_status",
+      payload: { query: String(query), status: "Active" }
+    }
+  ]);
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ operations, execute: false })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  assert.equal(plan.batchMode, "assigned_multi_v1");
+  assert.equal(plan.fileCount, 5);
+  assert.deepEqual(plan.files.map((file) => file.number), [2739, 2741, 2742, 2743, 2744]);
+  assert.deepEqual(
+    plan.files.map((file) => file.operationIndexes),
+    [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
+  );
+  assert.equal(plan.operations[0].plan.plan.before.city, null);
+
+  const changedSubsetResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations: operations.slice(0, 2),
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(changedSubsetResponse.status, 409);
+  assert.match((await changedSubsetResponse.json()).error, /no longer matches the current plan/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations,
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const executed = await executeResponse.json();
+  assert.equal(executed.mode, "executed");
+  assert.equal(executed.batch.batchMode, "assigned_multi_v1");
+  assert.equal(executed.batch.fileCount, 5);
+  assert.equal(executed.batch.completed.length, 10);
+  assert.deepEqual(
+    executed.batch.completed.map((item) => item.receipt.fileId),
+    [
+      "contact-chance",
+      "contact-chance",
+      "contact-chance-second",
+      "contact-chance-second",
+      "contact-chance-extra-1",
+      "contact-chance-extra-1",
+      "contact-chance-extra-2",
+      "contact-chance-extra-2",
+      "contact-chance-extra-3",
+      "contact-chance-extra-3"
+    ]
+  );
+  assert.equal(executed.batch.completed.every((item) => item.receipt.verifiedByReadback === true), true);
+  assert.equal(fixtureApi.getContactUpdateCount(), 10);
+  assert.equal(fixtureApi.getContact("contact-chance").city, "Dallas");
+  assert.equal(fixtureApi.getContact("contact-chance-second").city, "Garland");
+  assert.equal(fixtureApi.getContact("contact-chance-extra-1").city, "Irving");
+  assert.equal(fixtureApi.getContact("contact-chance-extra-2").city, "Plano");
+  assert.equal(fixtureApi.getContact("contact-chance-extra-3").city, "Coppell");
+});
+
+test("Mac operator multi-file batch stops after an uncertain provider failure", async (t) => {
+  const bridgePort = 18942;
+  const fakeApiPort = 18943;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-multi-file-failure-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true,
+    additionalAssigned: 1,
+    failContactUpdateAt: 2
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operations = [
+    { type: "jobnimbus.update_contact", payload: { query: "2739", fields: { city: "Dallas" } } },
+    { type: "jobnimbus.update_contact", payload: { query: "2741", fields: { city: "Garland" } } },
+    { type: "jobnimbus.update_contact", payload: { query: "2742", fields: { city: "Irving" } } }
+  ];
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ operations, execute: false })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations,
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const result = await executeResponse.json();
+  assert.equal(result.mode, "partial_failure");
+  assert.equal(result.batch.completed.length, 1);
+  assert.equal(result.batch.completed[0].receipt.fileId, "contact-chance");
+  assert.equal(result.batch.current.index, 1);
+  assert.equal(result.batch.current.fileId, "contact-chance-second");
+  assert.equal(result.batch.current.status, "reconciliation_required");
+  assert.deepEqual(result.batch.notAttempted, [{
+    index: 2,
+    type: "jobnimbus.update_contact",
+    fileId: "contact-chance-extra-1",
+    fileNumber: 2742,
+    status: "not_attempted"
+  }]);
+  assert.equal(fixtureApi.getContactUpdateCount(), 2);
+  assert.equal(fixtureApi.getContact("contact-chance").city, "Dallas");
+  assert.equal(fixtureApi.getContact("contact-chance-second").city, undefined);
+  assert.equal(fixtureApi.getContact("contact-chance-extra-1").city, undefined);
+});
+
+test("Mac operator preserves exact reconciliation identity when completion receipt persistence fails", async (t) => {
+  const bridgePort = 18946;
+  const fakeApiPort = 18947;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-multi-file-ledger-failure-"));
+  const actionBatchStorePath = path.join(memoryRoot, "bridge", "action-batches.json");
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    secondAssigned: true
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      ACTION_BATCH_STORE_PATH: actionBatchStorePath,
+      ACTION_BATCH_LEDGER_TEST_FAIL_AT: "3",
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const operations = [
+    { type: "jobnimbus.update_contact", payload: { query: "2739", fields: { city: "Dallas" } } },
+    { type: "jobnimbus.update_contact", payload: { query: "2741", fields: { city: "Garland" } } }
+  ];
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ operations, execute: false })
+  });
+  assert.equal(planResponse.status, 200);
+  const plan = await planResponse.json();
+  const executeResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operations,
+      execute: true,
+      approvalDigest: plan.approvalDigest,
+      approvalChallenge: plan.approvalChallenge
+    })
+  });
+  assert.equal(executeResponse.status, 200);
+  const result = await executeResponse.json();
+  assert.equal(result.mode, "partial_failure");
+  assert.deepEqual(result.batch.completed, []);
+  assert.equal(result.batch.current.index, 0);
+  assert.equal(result.batch.current.type, "jobnimbus.update_contact");
+  assert.equal(result.batch.current.fileId, "contact-chance");
+  assert.equal(result.batch.current.fileNumber, 2739);
+  assert.equal(result.batch.current.status, "reconciliation_required");
+  assert.equal(result.batch.current.verifiedReceipt.fileId, "contact-chance");
+  assert.equal(result.batch.current.verifiedReceipt.verifiedByReadback, true);
+  assert.deepEqual(result.batch.notAttempted, [{
+    index: 1,
+    type: "jobnimbus.update_contact",
+    fileId: "contact-chance-second",
+    fileNumber: 2741,
+    status: "not_attempted"
+  }]);
+  assert.equal(fixtureApi.getContactUpdateCount(), 1);
+  assert.equal(fixtureApi.getContact("contact-chance").city, "Dallas");
+  assert.equal(fixtureApi.getContact("contact-chance-second").city, undefined);
+
+  const persisted = JSON.parse(await readFile(actionBatchStorePath, "utf8"));
+  assert.equal(persisted.length, 1);
+  assert.deepEqual(persisted[0].completed, []);
+  assert.equal(persisted[0].current.fileId, "contact-chance");
+  assert.equal(persisted[0].current.status, "reconciliation_required");
+  assert.equal(persisted[0].current.verifiedReceipt.verifiedByReadback, true);
+});
+
+test("Mac operator rejects an inactive file before issuing a multi-file approval", async (t) => {
+  const bridgePort = 18944;
+  const fakeApiPort = 18945;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-multi-file-inactive-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    additionalAssigned: 1,
+    additionalAssignedInactiveIndex: 1
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+
+  const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      operations: [
+        { type: "jobnimbus.update_status", payload: { query: "2739", status: "Active" } },
+        { type: "jobnimbus.update_status", payload: { query: "2742", status: "Active" } }
+      ],
+      execute: false
+    })
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /inactive, archived, or closed/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
 });
 
 test("Codex operator approval challenges expire before execution", async (t) => {
