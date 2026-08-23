@@ -8171,7 +8171,27 @@ test("Mac startup globally quarantines old-schema unresolved receipts without a 
     batchMode: "assigned_single_file_v1",
     fileCount: 1,
     files: [oldSchemaFile],
-    completed: [],
+    completed: [{
+      index: 0,
+      type: "jobnimbus.update_contact",
+      status: "executed",
+      receipt: {
+        fileNumber: "2741",
+        mode: "executed",
+        verifiedByReadback: false,
+        deliveryStatus: "pending",
+        deliveryConfirmed: false,
+        manualVerificationRequired: true,
+        externalId: "must-not-be-exposed"
+      }
+    }],
+    failedAt: {
+      index: 0,
+      type: "jobnimbus.update_contact",
+      fileNumber: "2741",
+      status: "provider_error",
+      error: "must-not-be-exposed"
+    },
     current: {
       index: 0,
       type: "jobnimbus.update_contact",
@@ -8270,11 +8290,42 @@ test("Mac startup globally quarantines old-schema unresolved receipts without a 
     assert.equal(summary.recovery.reasonCode, "legacy_principal_unbound");
     assert.equal(summary.recovery.fileScopedQuarantine, false);
   }
+  const reconciliationSummary = policy.receipts.hardBlockedSummaries.find(
+    (summary) => summary.batchId === inProgressId
+  );
+  assert.equal(reconciliationSummary.batchMode, "assigned_single_file_v1");
+  assert.deepEqual(reconciliationSummary.completed, [{
+    index: 0,
+    type: "jobnimbus.update_contact",
+    status: "executed",
+    fileNumber: "2741",
+    receipt: {
+      mode: "executed",
+      verifiedByReadback: false,
+      deliveryStatus: "pending",
+      deliveryConfirmed: false,
+      manualVerificationRequired: true
+    }
+  }]);
+  assert.deepEqual(reconciliationSummary.failedAt, {
+    index: 0,
+    type: "jobnimbus.update_contact",
+    status: "provider_error",
+    fileNumber: "2741",
+    receipt: {
+      mode: "",
+      verifiedByReadback: null,
+      deliveryStatus: "",
+      deliveryConfirmed: null,
+      manualVerificationRequired: null
+    }
+  });
   const publicHardBlocked = JSON.stringify(policy.receipts.hardBlockedSummaries);
   for (const forbidden of [
     "contact-chance-second",
     "legacy-unbound-in-progress-approval",
     "legacy-unbound-reconciliation-approval",
+    "must-not-be-exposed",
     "a".repeat(64),
     "b".repeat(64)
   ]) {

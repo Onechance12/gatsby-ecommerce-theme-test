@@ -8428,6 +8428,35 @@ function minimizedHardBlockedRunReceipt(row, principalHash) {
   const runPolicyId = String(row?.runPolicyId || "").trim();
   const runPolicySha256 = String(row?.runPolicySha256 || "").trim().toLowerCase();
   const principalBound = validActionBatchPrincipalHash(row?.principalHash);
+  const minimizedOperation = (entry = {}) => {
+    const receipt = entry?.receipt && typeof entry.receipt === "object"
+      ? entry.receipt
+      : {};
+    const type = String(entry?.type || "").trim();
+    const fileNumber = String(entry?.fileNumber || receipt?.fileNumber || "")
+      .trim()
+      .replace(/^#/, "");
+    const index = Number(entry?.index);
+    return {
+      index: Number.isSafeInteger(index) && index >= 0 && index < 15 ? index : -1,
+      type: knownTypes.has(type) ? type : "",
+      status: safeToken(entry?.status),
+      fileNumber: /^\d{1,12}$/.test(fileNumber) ? fileNumber : "",
+      receipt: {
+        mode: safeToken(receipt?.mode),
+        verifiedByReadback: typeof receipt?.verifiedByReadback === "boolean"
+          ? receipt.verifiedByReadback
+          : null,
+        deliveryStatus: safeToken(receipt?.deliveryStatus),
+        deliveryConfirmed: typeof receipt?.deliveryConfirmed === "boolean"
+          ? receipt.deliveryConfirmed
+          : null,
+        manualVerificationRequired: typeof receipt?.manualVerificationRequired === "boolean"
+          ? receipt.manualVerificationRequired
+          : null
+      }
+    };
+  };
   return {
     batchId: /^[a-zA-Z0-9_-]{8,100}$/.test(String(row?.id || ""))
       ? String(row.id)
@@ -8441,9 +8470,19 @@ function minimizedHardBlockedRunReceipt(row, principalHash) {
     operationCount: Number.isSafeInteger(Number(row?.operationCount))
       ? Number(row.operationCount)
       : 0,
+    batchMode: safeToken(row?.batchMode),
     completedCount: Array.isArray(row?.completed)
       ? Math.min(row.completed.length, 15)
       : 0,
+    completed: (Array.isArray(row?.completed) ? row.completed : [])
+      .slice(0, 15)
+      .map(minimizedOperation),
+    failedAt: row?.failedAt && typeof row.failedAt === "object"
+      ? minimizedOperation(row.failedAt)
+      : null,
+    notAttempted: (Array.isArray(row?.notAttempted) ? row.notAttempted : [])
+      .slice(0, 15)
+      .map(minimizedOperation),
     currentPresent: Boolean(row?.current),
     files: files.slice(0, 5).map((file) => {
       const source = (Array.isArray(row?.files) ? row.files : []).find((item) => (
