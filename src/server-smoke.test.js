@@ -6250,23 +6250,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
     body: JSON.stringify({ operations: [changingDraftOperation], execute: false })
   });
-  assert.equal(retryChangingDraftPlanResponse.status, 200);
-  const retryChangingDraftPlan = await retryChangingDraftPlanResponse.json();
-  assert.equal(retryChangingDraftPlan.approvalDigest, changingDraftBatch.approvalDigest);
-  const retryChangingDraftExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
-    method: "POST",
-    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
-    body: JSON.stringify({
-      operations: [changingDraftOperation],
-      execute: true,
-      approvalDigest: retryChangingDraftPlan.approvalDigest,
-      approvalChallenge: retryChangingDraftPlan.approvalChallenge
-    })
-  });
-  assert.equal(retryChangingDraftExecuteResponse.status, 200);
-  const retryChangingDraftExecute = await retryChangingDraftExecuteResponse.json();
-  assert.equal(retryChangingDraftExecute.mode, "blocked_duplicate");
-  assert.equal(retryChangingDraftExecute.batch.status, "partial_failure");
+  assert.equal(retryChangingDraftPlanResponse.status, 409);
+  assert.match((await retryChangingDraftPlanResponse.json()).error, /requires receipt reconciliation/i);
   assert.equal(fixtureGmailDraftCreateCount, 0);
 
   // The next assertions exercise an independent legacy send-plan surface.
@@ -8361,6 +8346,222 @@ test("Mac startup globally quarantines old-schema unresolved receipts without a 
   assert.match((await blockedPlanResponse.json()).error, /requires receipt reconciliation/i);
   assert.equal(fixtureApi.getContactUpdateCount(), 0);
   assert.equal(fixtureApi.getContact("contact-chance").city, undefined);
+
+  for (const authorization of [
+    "Bearer fixture-shared-token"
+  ]) {
+    const nonMacResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        operations: [{
+          type: "jobnimbus.update_contact",
+          payload: { query: "2739", fields: { city: "Legacy Global Block" } }
+        }],
+        execute: false
+      })
+    });
+    assert.equal(nonMacResponse.status, 409);
+    assert.match((await nonMacResponse.json()).error, /requires receipt reconciliation/i);
+  }
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+});
+
+test("Mac legacy historical isolation is exact, reversible, non-replayable, and fail-closed", async (t) => {
+  const bridgePort = 19162;
+  const fakeApiPort = 19163;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-legacy-historical-isolation-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const ids = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+    "44444444-4444-4444-8444-444444444444",
+    "55555555-5555-4555-8555-555555555555",
+    "66666666-6666-4666-8666-666666666666"
+  ];
+  const legacyRows = ids.slice(0, 5).map((id, index) => ({
+    schemaVersion: 1,
+    id,
+    approvalId: `legacy-approval-${index}`,
+    approvalDigest: createHash("sha256").update(`legacy-${index}`).digest("hex"),
+    status: "partial_failure",
+    createdAt: `2026-07-${String(10 + index).padStart(2, "0")}T12:00:00.000Z`,
+    operationCount: index < 2 ? 2 : 1,
+    completed: [],
+    failedAt: 0,
+    error: "provider outcome is unknown"
+  }));
+  legacyRows.push({
+    schemaVersion: 1,
+    id: ids[5],
+    approvalId: "legacy-pending-approval",
+    approvalDigest: createHash("sha256").update("legacy-pending").digest("hex"),
+    status: "completed_pending_verification",
+    createdAt: "2026-08-20T19:52:54.356Z",
+    operationCount: 1,
+    completed: [{
+      index: 0,
+      type: "quo.send_text",
+      status: "executed",
+      receipt: {
+        mode: "executed",
+        fileId: "contact-chance",
+        fileNumber: "2739",
+        deliveryStatus: "sent",
+        deliveryConfirmed: false,
+        manualVerificationRequired: true,
+        externalId: "must-remain-private"
+      }
+    }]
+  });
+  await writeFile(
+    path.join(bridgeData, "action-batches.json"),
+    `${JSON.stringify(legacyRows, null, 2)}\n`,
+    "utf8"
+  );
+  const manifest = lockedOperatorManifestFixture();
+  const isolation = {
+    schemaVersion: 1,
+    id: "chance-58-prelock-receipts-v1",
+    runPolicyId: manifest.summary.id,
+    runPolicySha256: manifest.summary.sha256,
+    entries: legacyRows.map((row) => ({
+      batchId: row.id,
+      rawRowSha256: digest({ version: 1, row }),
+      expectedStatus: row.status,
+      operationCount: row.operationCount,
+      completedCount: row.completed.length
+    }))
+  };
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort);
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+      GOOGLE_REFRESH_TOKEN: "",
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      CHANCE_OPERATOR_LEGACY_ISOLATION_JSON: JSON.stringify(isolation),
+      CODEX_OPERATOR_TOKEN: "fixture-codex-hp-operator-token-1234567890",
+      BRIDGE_ALLOW_WRITES: "true",
+      HCN_ACTION_EXECUTION_ENABLED: "false",
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      ALLOW_VOICE_CALLS: "false",
+      ALLOW_RETELL_CALLS: "false",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const policyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, { headers });
+  assert.equal(policyResponse.status, 200);
+  const policy = await policyResponse.json();
+  assert.equal(policy.ready, true);
+  assert.equal(policy.legacyIsolation.valid, true);
+  assert.equal(policy.legacyIsolation.classification, "legacy_historical_attention_nonblocking");
+  assert.equal(policy.legacyIsolation.neverReplay, true);
+  assert.equal(policy.receipts.unresolvedCount, 0);
+  assert.equal(policy.receipts.hardBlockedCount, 0);
+  assert.equal(policy.receipts.historicalAttentionCount, 6);
+  assert.deepEqual(new Set(policy.receipts.historicalAttentionBatchIds), new Set(ids));
+  assert.equal(policy.receipts.historicalAttentionSummaries.length, 6);
+  assert.equal(
+    policy.receipts.historicalAttentionSummaries.every((summary) => /^[a-f0-9]{64}$/.test(summary.rawRowSha256)),
+    true
+  );
+  assert.equal(
+    JSON.stringify(policy.receipts.historicalAttentionSummaries).includes("must-remain-private"),
+    false
+  );
+
+  const planResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Isolation Plan Only" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(planResponse.status, 200);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+
+  for (const authorization of [
+    "Bearer fixture-shared-token",
+    "Bearer fixture-codex-hp-operator-token-1234567890"
+  ]) {
+    const nonMacResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        operations: [{
+          type: "jobnimbus.update_contact",
+          payload: { query: "2739", fields: { city: "Non-Mac Must Stay Blocked" } }
+        }],
+        execute: false
+      })
+    });
+    assert.equal(nonMacResponse.status, 409);
+    assert.match((await nonMacResponse.json()).error, /requires receipt reconciliation/i);
+  }
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+
+  const tamperedRows = JSON.parse(JSON.stringify(legacyRows));
+  tamperedRows[0].updatedAt = "2026-08-23T20:00:00.000Z";
+  await writeFile(
+    path.join(bridgeData, "action-batches.json"),
+    `${JSON.stringify(tamperedRows, null, 2)}\n`,
+    "utf8"
+  );
+  const driftedPolicyResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, { headers });
+  assert.equal(driftedPolicyResponse.status, 200);
+  const driftedPolicy = await driftedPolicyResponse.json();
+  assert.equal(driftedPolicy.ready, false);
+  assert.equal(driftedPolicy.legacyIsolation.valid, false);
+  assert.equal(driftedPolicy.legacyIsolation.errorCode, "fingerprint_mismatch");
+  assert.equal(driftedPolicy.receipts.hardBlockedCount, 6);
+
+  const blockedPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "jobnimbus.update_contact",
+        payload: { query: "2739", fields: { city: "Must Stay Blocked" } }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(blockedPlanResponse.status, 409);
+  assert.match((await blockedPlanResponse.json()).error, /historical receipt isolation/i);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
 });
 
 test("Mac pending-verification receipts distinguish manifest-bound file scope from hard blocks", async (t) => {

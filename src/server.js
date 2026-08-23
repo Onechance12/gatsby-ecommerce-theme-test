@@ -302,6 +302,8 @@ const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "htt
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
 const ALLOW_QUO_SEND = RELEASE_GATES.ALLOW_QUO_SEND;
 const ALLOW_LEGACY_CLIENT_MEMORY_WRITES = RELEASE_GATES.ALLOW_LEGACY_CLIENT_MEMORY_WRITES;
+const CHANCE_OPERATOR_LEGACY_ISOLATION_ID = "chance-58-prelock-receipts-v1";
+const CHANCE_OPERATOR_LEGACY_ISOLATION_STATE = initializeChanceOperatorLegacyIsolation();
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
@@ -330,6 +332,113 @@ function initializeChanceOperatorRunManifest() {
     return { manifest: loadChanceOperatorRunManifest(raw), error: "" };
   } catch (error) {
     return { manifest: null, error: String(error?.message || error) };
+  }
+}
+
+function initializeChanceOperatorLegacyIsolation() {
+  const raw = String(process.env.CHANCE_OPERATOR_LEGACY_ISOLATION_JSON || "").trim();
+  if (!raw) return { config: null, error: "" };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Legacy isolation must be one JSON object.");
+    }
+    const allowedTopLevel = new Set([
+      "schemaVersion",
+      "id",
+      "runPolicyId",
+      "runPolicySha256",
+      "entries"
+    ]);
+    if (Object.keys(parsed).some((key) => !allowedTopLevel.has(key))) {
+      throw new Error("Legacy isolation contains an unsupported top-level field.");
+    }
+    if (Number(parsed.schemaVersion) !== 1) {
+      throw new Error("Legacy isolation schemaVersion must be 1.");
+    }
+    if (String(parsed.id || "") !== CHANCE_OPERATOR_LEGACY_ISOLATION_ID) {
+      throw new Error(`Legacy isolation id must be ${CHANCE_OPERATOR_LEGACY_ISOLATION_ID}.`);
+    }
+    const runPolicyId = String(parsed.runPolicyId || "").trim();
+    const runPolicySha256 = String(parsed.runPolicySha256 || "").trim().toLowerCase();
+    if (!runPolicyId || !/^[a-f0-9]{64}$/.test(runPolicySha256)) {
+      throw new Error("Legacy isolation must pin one run-policy id and SHA-256.");
+    }
+    if (!Array.isArray(parsed.entries) || parsed.entries.length !== 6) {
+      throw new Error("Legacy isolation must contain exactly six receipt fingerprints.");
+    }
+    const seen = new Set();
+    const entries = parsed.entries.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error("Every legacy isolation entry must be an object.");
+      }
+      const allowedEntryFields = new Set([
+        "batchId",
+        "rawRowSha256",
+        "expectedStatus",
+        "operationCount",
+        "completedCount"
+      ]);
+      if (Object.keys(entry).some((key) => !allowedEntryFields.has(key))) {
+        throw new Error("A legacy isolation entry contains an unsupported field.");
+      }
+      const batchId = String(entry.batchId || "").trim();
+      const rawRowSha256 = String(entry.rawRowSha256 || "").trim().toLowerCase();
+      const expectedStatus = String(entry.expectedStatus || "").trim();
+      const operationCount = Number(entry.operationCount);
+      const completedCount = Number(entry.completedCount);
+      if (!/^[a-f0-9-]{36}$/.test(batchId) || seen.has(batchId)) {
+        throw new Error("Legacy isolation batch IDs must be unique UUIDs.");
+      }
+      if (!/^[a-f0-9]{64}$/.test(rawRowSha256)) {
+        throw new Error("Legacy isolation rawRowSha256 values must be lowercase SHA-256 digests.");
+      }
+      if (!["partial_failure", "completed_pending_verification"].includes(expectedStatus)) {
+        throw new Error("Legacy isolation status is unsupported.");
+      }
+      if (
+        !Number.isSafeInteger(operationCount)
+        || operationCount < 1
+        || operationCount > 15
+        || !Number.isSafeInteger(completedCount)
+        || completedCount < 0
+        || completedCount > operationCount
+      ) {
+        throw new Error("Legacy isolation operation counts are invalid.");
+      }
+      seen.add(batchId);
+      return Object.freeze({
+        batchId,
+        rawRowSha256,
+        expectedStatus,
+        operationCount,
+        completedCount
+      });
+    });
+    const partialFailures = entries.filter((entry) => (
+      entry.expectedStatus === "partial_failure"
+      && entry.completedCount === 0
+    ));
+    const pending = entries.filter((entry) => (
+      entry.expectedStatus === "completed_pending_verification"
+      && entry.operationCount === 1
+      && entry.completedCount === 1
+    ));
+    if (partialFailures.length !== 5 || pending.length !== 1) {
+      throw new Error("Legacy isolation must bind five empty partial failures and one one-operation pending-verification receipt.");
+    }
+    return {
+      config: Object.freeze({
+        schemaVersion: 1,
+        id: CHANCE_OPERATOR_LEGACY_ISOLATION_ID,
+        runPolicyId,
+        runPolicySha256,
+        entries: Object.freeze(entries)
+      }),
+      error: ""
+    };
+  } catch (error) {
+    return { config: null, error: String(error?.message || error) };
   }
 }
 const REALTIME_VOICES = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
@@ -8288,6 +8397,135 @@ async function buildChanceEvidencePacket(contact, input) {
   };
 }
 
+function legacyActionBatchRowSha256(row) {
+  return digest({ version: 1, row });
+}
+
+function legacyIsolationRuntimeSafe() {
+  return REQUIRE_CHANCE_RUN_POLICY
+    && !ALLOW_GMAIL_SEND
+    && !ALLOW_QUO_SEND
+    && !ALLOW_VOICE_CALLS
+    && !ALLOW_RETELL_CALLS
+    && !ALLOW_CLIENT_COORDINATOR_CALLS
+    && !ALLOW_CARRIER_FOLLOWUP_CALLS
+    && !HCN_ACTION_EXECUTION_ENABLED
+    && !ALLOW_LEGACY_CLIENT_MEMORY_WRITES;
+}
+
+function isLegacyHistoricalIsolationCandidate(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+  if (!/^[a-f0-9-]{36}$/.test(String(row.id || "").trim())) return false;
+  if (
+    Object.hasOwn(row, "schemaVersion")
+    && (
+      !Number.isSafeInteger(Number(row.schemaVersion))
+      || Number(row.schemaVersion) > 1
+    )
+  ) return false;
+  if (validActionBatchPrincipalHash(row.principalHash)) return false;
+  if (String(row.runPolicyId || "").trim() || String(row.runPolicySha256 || "").trim()) return false;
+  if (Array.isArray(row.files) ? row.files.length > 0 : Object.hasOwn(row, "files")) return false;
+  if (Array.isArray(row.intents) ? row.intents.length > 0 : Object.hasOwn(row, "intents")) return false;
+  if (row.current !== undefined && row.current !== null) return false;
+  if (String(row.operatorScope || "").trim().toLowerCase() === "company") return false;
+  const operationCount = Number(row.operationCount);
+  const completed = Array.isArray(row.completed) ? row.completed : [];
+  if (!Number.isSafeInteger(operationCount) || operationCount < 1 || operationCount > 15) return false;
+  if (row.status === "partial_failure") return completed.length === 0;
+  if (row.status !== "completed_pending_verification") return false;
+  if (operationCount !== 1 || completed.length !== 1) return false;
+  const item = completed[0];
+  return Number(item?.index) === 0
+    && String(item?.type || "").trim().length > 0
+    && item?.receipt
+    && typeof item.receipt === "object"
+    && !Array.isArray(item.receipt)
+    && item.receipt.manualVerificationRequired === true;
+}
+
+function resolveChanceLegacyHistoricalIsolation(ledger) {
+  const config = CHANCE_OPERATOR_LEGACY_ISOLATION_STATE.config;
+  const empty = (errorCode, error = CHANCE_OPERATOR_LEGACY_ISOLATION_STATE.error) => ({
+    configured: Boolean(String(process.env.CHANCE_OPERATOR_LEGACY_ISOLATION_JSON || "").trim()),
+    valid: false,
+    id: config?.id || CHANCE_OPERATOR_LEGACY_ISOLATION_ID,
+    isolatedIds: new Set(),
+    entries: [],
+    errorCode,
+    error: String(error || "").slice(0, 300)
+  });
+  if (!config) return empty(
+    CHANCE_OPERATOR_LEGACY_ISOLATION_STATE.error ? "configuration_invalid" : "not_configured"
+  );
+  if (
+    !CHANCE_OPERATOR_RUN_MANIFEST
+    || config.runPolicyId !== CHANCE_OPERATOR_RUN_MANIFEST.id
+    || config.runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST.sha256
+  ) return empty("run_policy_mismatch", "Legacy isolation does not match the active run policy.");
+  if (!legacyIsolationRuntimeSafe()) {
+    return empty("runtime_not_safe", "Outbound, call, browser-action, and legacy-memory gates must remain disabled.");
+  }
+  const candidates = (Array.isArray(ledger) ? ledger : [])
+    .filter(isLegacyHistoricalIsolationCandidate);
+  const candidateIds = candidates.map((row) => String(row.id));
+  const configuredIds = config.entries.map((entry) => entry.batchId);
+  if (
+    candidates.length !== config.entries.length
+    || new Set(candidateIds).size !== candidateIds.length
+    || configuredIds.some((id) => !candidateIds.includes(id))
+    || candidateIds.some((id) => !configuredIds.includes(id))
+  ) return empty("candidate_set_mismatch", "The exact set of legacy receipt candidates changed.");
+  const entries = [];
+  for (const expected of config.entries) {
+    const matches = candidates.filter((row) => String(row.id) === expected.batchId);
+    if (matches.length !== 1) return empty("candidate_identity_mismatch", "A legacy receipt is missing or duplicated.");
+    const row = matches[0];
+    const completedCount = Array.isArray(row.completed) ? row.completed.length : 0;
+    if (
+      String(row.status || "") !== expected.expectedStatus
+      || Number(row.operationCount) !== expected.operationCount
+      || completedCount !== expected.completedCount
+      || legacyActionBatchRowSha256(row) !== expected.rawRowSha256
+    ) return empty("fingerprint_mismatch", "A legacy receipt no longer matches its exact approved fingerprint.");
+    const completed = row.status === "completed_pending_verification"
+      ? row.completed[0]
+      : null;
+    const receiptFileId = String(completed?.receipt?.fileId || "").trim();
+    const receiptFileNumber = String(completed?.receipt?.fileNumber || "").trim().replace(/^#/, "");
+    const manifestBoundFile = Boolean(
+      receiptFileId
+      && receiptFileNumber
+      && chanceManifestFileBinding(
+        CHANCE_OPERATOR_RUN_MANIFEST,
+        receiptFileNumber,
+        receiptFileId
+      )
+    );
+    entries.push({
+      batchId: expected.batchId,
+      rawRowSha256: expected.rawRowSha256,
+      status: expected.expectedStatus,
+      operationCount: expected.operationCount,
+      completedCount: expected.completedCount,
+      fileNumber: manifestBoundFile ? receiptFileNumber : "",
+      operationType: String(completed?.type || "").trim(),
+      priorOutcome: expected.expectedStatus === "partial_failure"
+        ? "unknown_provider_outcome"
+        : "completed_delivery_unverified"
+    });
+  }
+  return {
+    configured: true,
+    valid: true,
+    id: config.id,
+    isolatedIds: new Set(entries.map((entry) => entry.batchId)),
+    entries,
+    errorCode: "",
+    error: ""
+  };
+}
+
 async function operatorRunPolicy() {
   if (!isMacCodexOperatorRequest()) {
     const error = new Error("The locked Chance run-policy attestation is available only to the dedicated Mac operator.");
@@ -8296,6 +8534,7 @@ async function operatorRunPolicy() {
   }
   const policy = chanceOperatorRunManifestSummary(CHANCE_OPERATOR_RUN_MANIFEST);
   const ledger = await readActionBatchLedger();
+  const legacyIsolation = resolveChanceLegacyHistoricalIsolation(ledger);
   const principalHash = actionApprovalIdentityHash();
   const attentionStatuses = new Set([
     "in_progress",
@@ -8337,7 +8576,11 @@ async function operatorRunPolicy() {
     )
   ];
   const attention = visible.filter(isAttentionRow);
+  const historicalAttention = attention.filter((row) => (
+    legacyIsolation.isolatedIds.has(String(row.id || ""))
+  ));
   const unresolved = attention.filter((row) => {
+    if (legacyIsolation.isolatedIds.has(String(row.id || ""))) return false;
     if (!validActionBatchPrincipalHash(row.principalHash)) return true;
     if (row.principalHash !== principalHash) {
       return actionBatchResourceLockScope(row).global;
@@ -8385,12 +8628,36 @@ async function operatorRunPolicy() {
         .slice(0, 50)
         .map((row) => minimizedHardBlockedRunReceipt(row, principalHash)),
       attentionCount: attention.length,
-      attentionBatchIds: attention.map((row) => row.id)
+      attentionBatchIds: attention.map((row) => row.id),
+      historicalAttentionCount: historicalAttention.length,
+      historicalAttentionBatchIds: historicalAttention.map((row) => row.id),
+      historicalAttentionSummaries: historicalAttention
+        .slice(0, 50)
+        .map((row) => minimizedHardBlockedRunReceipt(row, principalHash))
+    },
+    legacyIsolation: {
+      configured: legacyIsolation.configured,
+      valid: legacyIsolation.valid,
+      id: legacyIsolation.id,
+      runPolicyId: CHANCE_OPERATOR_LEGACY_ISOLATION_STATE.config?.runPolicyId || "",
+      runPolicySha256: CHANCE_OPERATOR_LEGACY_ISOLATION_STATE.config?.runPolicySha256 || "",
+      entryCount: legacyIsolation.entries.length,
+      errorCode: legacyIsolation.errorCode,
+      error: legacyIsolation.error,
+      classification: legacyIsolation.valid
+        ? "legacy_historical_attention_nonblocking"
+        : "inactive_fail_closed",
+      reasonCode: legacyIsolation.valid
+        ? "pre_scope_receipt_unrecoverable_manual_risk_acceptance"
+        : "",
+      neverReplay: true,
+      freshReadRequired: true
     },
     ready: policy.available
       && ACTION_RECEIPT_RECOVERY_STATE.status === "ready"
+      && (!legacyIsolation.configured || legacyIsolation.valid)
       && unresolved.length === 0,
-    instruction: "Verify this manifest ID/hash/count/expiry against the local plugin before any action plan. Reconcile every unresolved batch before retrying its actions."
+    instruction: "Verify this manifest ID/hash/count/expiry against the local plugin before any action plan. Reconcile every unresolved batch before retrying its actions. Historical-isolation receipts remain unknown, visible, non-replayable audit attention and require a fresh provider read before every new action."
   };
 }
 
@@ -8461,6 +8728,7 @@ function minimizedHardBlockedRunReceipt(row, principalHash) {
     batchId: /^[a-zA-Z0-9_-]{8,100}$/.test(String(row?.id || ""))
       ? String(row.id)
       : "",
+    rawRowSha256: legacyActionBatchRowSha256(row),
     status: safeToken(row?.status) || "unknown",
     principalBound,
     principalMatchesCurrent: principalBound
@@ -8938,18 +9206,33 @@ async function processActionBatch(input = {}) {
 }
 
 async function assertNoUnresolvedBatchOverlap(batchScope) {
-  const blocking = findUnresolvedBatchOverlap(
-    await readActionBatchLedger(),
-    batchScope
-  );
+  const ledger = await readActionBatchLedger();
+  const legacyIsolation = resolveChanceLegacyHistoricalIsolation(ledger);
+  const allowLegacyIsolation = legacyIsolationAppliesToBatch(batchScope);
+  if (allowLegacyIsolation && legacyIsolation.configured && !legacyIsolation.valid) {
+    conflictError("The exact historical receipt isolation no longer attests. No action may be planned until its six fingerprints, runtime gates, and run policy match again.");
+  }
+  const blocking = findUnresolvedBatchOverlap(ledger, batchScope, { allowLegacyIsolation });
   if (!blocking) return;
   throwUnresolvedBatchOverlap(blocking);
 }
 
-function findUnresolvedBatchOverlap(ledger, batchScope) {
+function legacyIsolationAppliesToBatch(batchScope) {
+  return isMacCodexOperatorRequest()
+    && !operatorCompanyScopeActive()
+    && String(batchScope?.runPolicyId || "") === String(CHANCE_OPERATOR_RUN_MANIFEST?.id || "")
+    && String(batchScope?.runPolicySha256 || "") === String(CHANCE_OPERATOR_RUN_MANIFEST?.sha256 || "")
+    && Number(batchScope?.fileCount || 0) >= 1;
+}
+
+function findUnresolvedBatchOverlap(ledger, batchScope, options = {}) {
   const desiredFileIds = new Set((batchScope?.files || []).map((file) => String(file.id || "")));
-  if (!desiredFileIds.size) return null;
+  const legacyIsolation = resolveChanceLegacyHistoricalIsolation(ledger);
   return ledger.find((row) => {
+    if (
+      options.allowLegacyIsolation === true
+      && legacyIsolation.isolatedIds.has(String(row?.id || ""))
+    ) return false;
     const status = String(row.status || "");
     const blocks = [
       "in_progress",
@@ -8957,11 +9240,17 @@ function findUnresolvedBatchOverlap(ledger, batchScope) {
       "legacy_quarantined",
       "manual_quarantined",
       "completed_pending_verification"
-    ].includes(status) || Boolean(row.current);
+    ].includes(status)
+      || (
+        status === "partial_failure"
+        && !validActionBatchPrincipalHash(row.principalHash)
+      )
+      || Boolean(row.current);
     if (!blocks) return false;
     if (!validActionBatchPrincipalHash(row.principalHash)) return true;
     const lockScope = actionBatchResourceLockScope(row);
     return lockScope.global
+      || desiredFileIds.size === 0
       || lockScope.files.some((file) => desiredFileIds.has(file.id));
   });
 }
@@ -12993,11 +13282,16 @@ async function reserveActionBatch(
 ) {
   return withActionBatchMutation(async () => {
     const ledger = await readActionBatchLedger();
+    const legacyIsolation = resolveChanceLegacyHistoricalIsolation(ledger);
+    const allowLegacyIsolation = legacyIsolationAppliesToBatch(batchScope);
+    if (allowLegacyIsolation && legacyIsolation.configured && !legacyIsolation.valid) {
+      conflictError("The exact historical receipt isolation no longer attests. No action may execute until its six fingerprints, runtime gates, and run policy match again.");
+    }
     const existing = ledger.find((row) => (
       row.approvalId === approvalId || row.approvalDigest === approvalDigest
     ));
     if (existing) return { existing };
-    const blocking = findUnresolvedBatchOverlap(ledger, batchScope);
+    const blocking = findUnresolvedBatchOverlap(ledger, batchScope, { allowLegacyIsolation });
     if (blocking) throwUnresolvedBatchOverlap(blocking);
 
     const batch = {

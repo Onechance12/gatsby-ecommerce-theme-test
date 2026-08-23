@@ -143,6 +143,7 @@ ACTION_BATCH_STORE_PATH=/var/data/bridge/action-batches.json
 ACTION_APPROVAL_STORE_PATH=/var/data/bridge/action-approvals.json
 ACTION_APPROVAL_TTL_SECONDS=900
 CHANCE_OPERATOR_RUN_MANIFEST_JSON=
+CHANCE_OPERATOR_LEGACY_ISOLATION_JSON=
 OUTBOUND_SEND_STORE_PATH=/var/data/bridge/outbound-sends.json
 OPENAI_API_KEY=
 OPENAI_OPERATIONAL_MODEL=gpt-5.6-luna
@@ -284,6 +285,15 @@ notes, task completion, calendar writes, company mutations, backward moves, and
 nonmanifest files are blocked. Live execution is ordered, stops on the
 first failure, does not roll back earlier verified changes, and records later
 operations as not attempted.
+
+`CHANCE_OPERATOR_LEGACY_ISOLATION_JSON` is an optional, reversible manual-risk
+attestation for the six pre-scope receipts that cannot be reconciled to an exact
+file. It must bind the active manifest and each untouched raw ledger row by ID,
+SHA-256, status, and operation counts. The bridge applies it only as one
+all-or-nothing set while every send, text, call, browser-action, and legacy
+memory gate is disabled. It never rewrites or replays those receipts; they stay
+visible as historical unknown-outcome attention, and any row/config/runtime
+drift immediately restores the global block.
 
 The bridge records successful actions in its dedicated persistent security and
 action ledgers and refuses to run the same approved batch twice. With the
