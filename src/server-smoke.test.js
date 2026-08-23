@@ -8088,6 +8088,30 @@ test("Mac startup keeps a malformed legacy receipt globally hard-blocked without
   assert.deepEqual(policy.receipts.reconciliationEligibleBatchIds, []);
   assert.equal(policy.receipts.hardBlockedCount, 2);
   assert.deepEqual(new Set(policy.receipts.hardBlockedBatchIds), new Set([batchId, invalidIntentBatchId]));
+  assert.deepEqual(
+    policy.receipts.hardBlockedSummaries.map((row) => ({
+      batchId: row.batchId,
+      scope: row.scope,
+      principalBound: row.principalBound,
+      files: row.files
+    })),
+    [{
+      batchId,
+      scope: "global",
+      principalBound: true,
+      files: []
+    }, {
+      batchId: invalidIntentBatchId,
+      scope: "outside_manifest_files",
+      principalBound: true,
+      files: [{
+        number: "9999",
+        operationTypes: ["jobnimbus.update_contact"]
+      }]
+    }]
+  );
+  assert.equal(JSON.stringify(policy.receipts.hardBlockedSummaries).includes("contact-not-in-manifest"), false);
+  assert.equal(JSON.stringify(policy.receipts.hardBlockedSummaries).includes("approval"), false);
 
   const persisted = JSON.parse(
     await readFile(path.join(bridgeData, "action-batches.json"), "utf8")
@@ -8231,6 +8255,31 @@ test("Mac startup globally quarantines old-schema unresolved receipts without a 
     new Set(policy.receipts.hardBlockedBatchIds),
     new Set([inProgressId, reconciliationId])
   );
+  assert.equal(policy.receipts.hardBlockedSummaries.length, 2);
+  for (const summary of policy.receipts.hardBlockedSummaries) {
+    assert.equal(summary.scope, "manifest_files");
+    assert.equal(summary.principalBound, false);
+    assert.equal(summary.principalMatchesCurrent, false);
+    assert.deepEqual(summary.files, [{
+      number: "2741",
+      operationTypes: ["jobnimbus.update_contact"]
+    }]);
+    assert.equal(summary.runPolicy.present, false);
+    assert.equal(summary.runPolicy.matchesCurrent, false);
+    assert.equal(summary.recovery.phase, "legacy_principal_unbound");
+    assert.equal(summary.recovery.reasonCode, "legacy_principal_unbound");
+    assert.equal(summary.recovery.fileScopedQuarantine, false);
+  }
+  const publicHardBlocked = JSON.stringify(policy.receipts.hardBlockedSummaries);
+  for (const forbidden of [
+    "contact-chance-second",
+    "legacy-unbound-in-progress-approval",
+    "legacy-unbound-reconciliation-approval",
+    "a".repeat(64),
+    "b".repeat(64)
+  ]) {
+    assert.equal(publicHardBlocked.includes(forbidden), false);
+  }
 
   const persisted = JSON.parse(
     await readFile(path.join(bridgeData, "action-batches.json"), "utf8")

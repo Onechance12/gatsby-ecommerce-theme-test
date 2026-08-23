@@ -8381,6 +8381,9 @@ async function operatorRunPolicy() {
       reconciliationEligibleBatchIds: reconciliationEligible.map((row) => row.id),
       hardBlockedCount: hardBlocked.length,
       hardBlockedBatchIds: hardBlocked.map((row) => row.id),
+      hardBlockedSummaries: hardBlocked
+        .slice(0, 50)
+        .map((row) => minimizedHardBlockedRunReceipt(row, principalHash)),
       attentionCount: attention.length,
       attentionBatchIds: attention.map((row) => row.id)
     },
@@ -8388,6 +8391,88 @@ async function operatorRunPolicy() {
       && ACTION_RECEIPT_RECOVERY_STATE.status === "ready"
       && unresolved.length === 0,
     instruction: "Verify this manifest ID/hash/count/expiry against the local plugin before any action plan. Reconcile every unresolved batch before retrying its actions."
+  };
+}
+
+function minimizedHardBlockedRunReceipt(row, principalHash) {
+  const files = validatedActionBatchFileScope(row);
+  const manifestMatches = CHANCE_OPERATOR_RUN_MANIFEST
+    ? files.filter((file) => chanceManifestFileBinding(
+        CHANCE_OPERATOR_RUN_MANIFEST,
+        file.number,
+        file.id
+      ))
+    : [];
+  const scope = !files.length || (
+    manifestMatches.length > 0
+    && manifestMatches.length !== files.length
+  )
+    ? "global"
+    : manifestMatches.length === files.length
+      ? "manifest_files"
+      : "outside_manifest_files";
+  const knownTypes = new Set([
+    ...ACTION_OPERATION_TYPES,
+    ...HCN_BROWSER_ACTION_TYPES
+  ]);
+  const safeToken = (value) => {
+    const token = String(value || "").trim();
+    return /^[a-z0-9_]{1,80}$/i.test(token) ? token : "";
+  };
+  const safeTimestamp = (value) => {
+    const timestamp = String(value || "").trim();
+    return Number.isFinite(Date.parse(timestamp))
+      ? new Date(timestamp).toISOString()
+      : "";
+  };
+  const runPolicyId = String(row?.runPolicyId || "").trim();
+  const runPolicySha256 = String(row?.runPolicySha256 || "").trim().toLowerCase();
+  const principalBound = validActionBatchPrincipalHash(row?.principalHash);
+  return {
+    batchId: /^[a-zA-Z0-9_-]{8,100}$/.test(String(row?.id || ""))
+      ? String(row.id)
+      : "",
+    status: safeToken(row?.status) || "unknown",
+    principalBound,
+    principalMatchesCurrent: principalBound
+      && String(row.principalHash) === String(principalHash),
+    createdAt: safeTimestamp(row?.createdAt),
+    updatedAt: safeTimestamp(row?.updatedAt),
+    operationCount: Number.isSafeInteger(Number(row?.operationCount))
+      ? Number(row.operationCount)
+      : 0,
+    completedCount: Array.isArray(row?.completed)
+      ? Math.min(row.completed.length, 15)
+      : 0,
+    currentPresent: Boolean(row?.current),
+    files: files.slice(0, 5).map((file) => {
+      const source = (Array.isArray(row?.files) ? row.files : []).find((item) => (
+        String(item?.id || "").trim() === file.id
+        && String(item?.number || "").trim().replace(/^#/, "") === file.number
+      ));
+      return {
+        number: file.number,
+        operationTypes: [...new Set(
+          (Array.isArray(source?.operationTypes) ? source.operationTypes : [])
+            .map((type) => String(type || "").trim())
+            .filter((type) => knownTypes.has(type))
+        )].slice(0, 15)
+      };
+    }),
+    runPolicy: {
+      present: Boolean(runPolicyId || runPolicySha256),
+      matchesCurrent: Boolean(
+        CHANCE_OPERATOR_RUN_MANIFEST
+        && runPolicyId === CHANCE_OPERATOR_RUN_MANIFEST.id
+        && runPolicySha256 === CHANCE_OPERATOR_RUN_MANIFEST.sha256
+      )
+    },
+    recovery: {
+      phase: safeToken(row?.recovery?.phase),
+      reasonCode: safeToken(row?.recovery?.reasonCode),
+      fileScopedQuarantine: row?.recovery?.fileScopedQuarantine === true
+    },
+    scope
   };
 }
 
