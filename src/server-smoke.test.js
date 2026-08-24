@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { digest } from "./claim-filing-adapter.js";
+import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import {
   CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
@@ -17,12 +18,39 @@ import {
 const PHASE_ZERO_BUILD_SHA = "810802542c35625327662e97fd21f7208532b371";
 const PLATFORM_FIXTURE_SECRET = "platform-fixture-secret-must-not-leak";
 
-function lockedOperatorManifestFixture() {
+function retellConfigurationPacketFixture() {
+  return {
+    informationToCapture: [
+      "claim or reference number",
+      "representative and adjuster contact information",
+      "document-submission destination and subject rule",
+      "confirmed inspection date, arrival window, timezone, and access requirements",
+      "carrier next step and expected timeframe"
+    ],
+    stopRules: [
+      "Never guess a client, claim, policy, date, damage fact, or appointment time.",
+      "Never schedule outside the merged availability supplied for the call.",
+      "Never provide sensitive identity, banking, card, PIN, or password information.",
+      "Never update JobNimbus or send a carrier email from the phone call."
+    ],
+    resultFormat: {
+      objectiveCompleted: "yes/no/partial",
+      claimNumber: "",
+      adjuster: {},
+      inspection: { scheduled: false, start: "", end: "", timezone: "", accessRequirements: "" },
+      documentSubmission: "",
+      nextStep: "",
+      blocker: ""
+    }
+  };
+}
+
+function lockedOperatorManifestFixture(options = {}) {
   const input = {
     schemaVersion: 1,
     id: "chance-58-files-v1",
     operatorScope: "assigned",
-    expiresAt: "2099-01-01T00:00:00.000Z",
+    expiresAt: options.expiresAt || "2099-01-01T00:00:00.000Z",
     files: [
       { number: "2739", fileId: "contact-chance" },
       { number: "2741", fileId: "contact-chance-second" },
@@ -69,7 +97,12 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     status_name: options.chanceStatus || "Active",
     email: "client@example.test",
     mobile_phone: "2145551212",
-    cf_string_2: options.chanceClaimNumber || (options.communicationScope ? "ABC-123" : "ABC123"),
+    cf_string_2: options.chanceClaimNumber !== undefined
+      ? options.chanceClaimNumber
+      : (options.communicationScope ? "ABC-123" : "ABC123"),
+    ...(options.chanceOverrides && typeof options.chanceOverrides === "object"
+      ? options.chanceOverrides
+      : {}),
     ...(options.initialCity ? { city: options.initialCity } : {})
   };
   const duplicate = {
@@ -899,7 +932,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.platform.runtime.configurationDrift.status, "detected");
   assert.deepEqual(
     health.platform.runtime.configurationDrift.differences.map((item) => item.key),
-    ["ALLOW_CARRIER_FOLLOWUP_CALLS", "ALLOW_RETELL_CALLS"]
+    ["ALLOW_RETELL_CALLS", "ALLOW_RETELL_CLAIM_CALLS"]
   );
   assert.equal(JSON.stringify(health.platform).includes(PLATFORM_FIXTURE_SECRET), false);
 
@@ -953,14 +986,32 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     true
   );
   assert.equal(
+    schema.components.schemas.PlatformReleaseGateKey.enum
+      .includes("ALLOW_RETELL_CLAIM_CALLS"),
+    true
+  );
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.controls
+      .required.includes("claimFilingApprovalLane"),
+    true
+  );
+  assert.equal(
+    schema.components.schemas.PlatformRuntimeStatus.properties.controls
+      .required.includes("jobNimbusWritesActionBatchOnly"),
+    true
+  );
+  assert.equal(
     schema.components.schemas.PlatformSessionResponse.properties.identity.additionalProperties,
     false
   );
   assert.equal(schema.paths["/claim-filing/prepare"].post.operationId, "prepareClaimFilingCall");
+  assert.equal(schema.paths["/claim-filing/configuration"].post.operationId, "verifyRetellClaimFilingConfiguration");
   assert.equal(schema.paths["/claim-filing/call"].post.operationId, "placeApprovedClaimFilingCall");
+  assert.equal(schema.paths["/claim-filing/call"].post["x-openai-isConsequential"], true);
   assert.equal(schema.paths["/claim-filing/result"].post.operationId, "reviewClaimFilingCallResult");
   assert.equal(schema.paths["/claim-filing/callbacks"].post.operationId, "listPendingClaimCallbacks");
   assert.equal(schema.paths["/claim-filing/writeback"].post.operationId, "processApprovedClaimFilingWriteback");
+  assert.equal(schema.paths["/claim-filing/writeback"].post["x-openai-isConsequential"], true);
   assert.equal(schema.paths["/scheduling/availability"].post.operationId, "reviewUnifiedSchedulingAvailability");
   assert.equal(schema.paths["/retell/configure-agent"].post.operationId, "configureApprovedRetellAgent");
   assert.equal(schema.paths["/retell/configure-client-coordinator"].post.operationId, "configureApprovedClientCoordinatorAgent");
@@ -1172,7 +1223,8 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
   assert.deepEqual(macIdentity.identity.scopes, [
     "client_evidence:read",
     "company_exact_file:read",
-    "approval_batches:prepare_execute"
+    "approval_batches:prepare_execute",
+    "retell_claim_filing:prepare_execute_review"
   ]);
   assert.equal(macIdentity.operatorAccess.defaultScope, "chance_assigned");
   assert.equal(macIdentity.operatorAccess.companyExactFileScope, true);
@@ -1753,6 +1805,474 @@ test("Codex operator token is distinct, scoped, and keeps batch approval gates",
     body: "{}"
   });
   assert.equal(unknownTokenResponse.status, 401);
+});
+
+test("Mac Operator Retell claim filing is single-file, exact-approved, isolated, and idempotent", async (t) => {
+  const bridgePort = 18970;
+  const fakeJobNimbusPort = 18971;
+  const fakeRetellPort = 18972;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-retell-claim-lane-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const manifest = lockedOperatorManifestFixture();
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeJobNimbusPort, {
+    chanceClaimNumber: "",
+    chanceStatus: "Ready for PA Review",
+    chanceOverrides: {
+      address_line1: "100 Test St",
+      city: "Dallas",
+      state_text: "TX",
+      zip: "75201",
+      cf_string_1: "State Farm",
+      cf_string_3: "POLICY-1",
+      cf_string_5: "Hail / wind",
+      cf_date_1: "2026-04-25"
+    },
+    reviewActivities: [{
+      jnid: "claim-evidence-1",
+      primary: { id: "contact-chance" },
+      record_type_name: "Note",
+      note: "Roof and exterior hail damage documented."
+    }]
+  });
+  const publicBaseUrl = `http://127.0.0.1:${bridgePort}`;
+  const guardedToken = "fixture-retell-guarded-end-token-1234567890";
+  const inboundToken = "fixture_retell_inbound_webhook_token_1234567890";
+  const expectedLlm = buildRetellLlmFromPacket(retellConfigurationPacketFixture(), {
+    guardedEndCallUrl: `${publicBaseUrl}/retell/guarded-end-call`,
+    guardedEndCallAuthorization: `Bearer ${guardedToken}`
+  }).toLlmRequestBody();
+  const retellCalls = [];
+  let retellCreateCount = 0;
+  let retellStopCount = 0;
+  const fakeRetell = createServer(async (req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${fakeRetellPort}`);
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    let payload;
+    if (req.method === "GET" && url.pathname === "/get-agent/fixture-claim-agent") {
+      payload = {
+        agent_id: "fixture-claim-agent",
+        version: 7,
+        is_published: true,
+        timezone: "America/Chicago",
+        response_engine: { type: "retell-llm", llm_id: "fixture-claim-llm", version: 5 },
+        post_call_analysis_data: postCallAnalysisSchema()
+      };
+    } else if (req.method === "GET" && url.pathname === "/get-retell-llm/fixture-claim-llm") {
+      assert.equal(url.searchParams.get("version"), "5");
+      payload = { ...expectedLlm, version: 5, is_published: true };
+    } else if (
+      req.method === "GET"
+      && url.pathname.startsWith("/get-phone-number/")
+      && decodeURIComponent(url.pathname.slice("/get-phone-number/".length)) === "+12145550100"
+    ) {
+      payload = {
+        phone_number: "+12145550100",
+        inbound_agents: [{
+          agent_id: "fixture-claim-agent",
+          agent_version: "latest_published",
+          weight: 1
+        }],
+        inbound_webhook_url: `${publicBaseUrl}/retell/inbound?token=${encodeURIComponent(inboundToken)}`
+      };
+    } else if (req.method === "POST" && url.pathname === "/v3/list-calls") {
+      payload = { items: structuredClone(retellCalls) };
+    } else if (req.method === "POST" && url.pathname === "/v2/create-phone-call") {
+      retellCreateCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const call = {
+        call_id: `call-${retellCreateCount}`,
+        call_status: "ended",
+        direction: "outbound",
+        agent_id: body.override_agent_id,
+        to_number: body.to_number,
+        from_number: body.from_number,
+        start_timestamp: Date.now(),
+        duration_ms: 120000,
+        disconnection_reason: "user_hangup",
+        transcript: "The claim is filed under SF-123. Send the representation documents to claims@example.test.",
+        metadata: body.metadata,
+        retell_llm_dynamic_variables: body.retell_llm_dynamic_variables,
+        call_analysis: {
+          call_successful: true,
+          call_summary: "Claim opened.",
+          custom_analysis_data: {
+            filing_outcome: "claim_filed",
+            claim_number: "SF-123",
+            document_submission: "claims@example.test",
+            document_submission_requested: true,
+            next_step: "Carrier will assign an adjuster.",
+            callback_requested: false
+          }
+        }
+      };
+      retellCalls.push(call);
+      payload = { call_id: call.call_id, call_status: "registered" };
+    } else if (req.method === "GET" && url.pathname.startsWith("/v2/get-call/")) {
+      const callId = decodeURIComponent(url.pathname.slice("/v2/get-call/".length));
+      payload = retellCalls.find((call) => call.call_id === callId);
+      if (!payload) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+    } else if (req.method === "POST" && url.pathname.startsWith("/v2/stop-call/")) {
+      retellStopCount += 1;
+      payload = { stopped: true };
+    } else {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(payload));
+  });
+  await new Promise((resolve) => fakeRetell.listen(fakeRetellPort, "127.0.0.1", resolve));
+  t.after(() => fakeRetell.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      PUBLIC_BASE_URL: publicBaseUrl,
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeJobNimbusPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-1234567890",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-hp-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
+      RETELL_API_KEY: "fixture-retell-api-key",
+      RETELL_AGENT_ID: "fixture-claim-agent",
+      RETELL_FROM_NUMBER: "+12145550100",
+      RETELL_GUARDED_END_CALL_TOKEN: guardedToken,
+      RETELL_INBOUND_WEBHOOK_TOKEN: inboundToken,
+      ALLOW_RETELL_CALLS: "true",
+      ALLOW_RETELL_CLAIM_CALLS: "true",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      ALLOW_VOICE_CALLS: "false",
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      BRIDGE_ALLOW_WRITES: "false",
+      HCN_ACTION_EXECUTION_ENABLED: "false",
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      MEMORY_ROOT: memoryRoot
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const macHeaders = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const hpHeaders = {
+    authorization: "Bearer fixture-codex-hp-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+  const sharedHeaders = {
+    authorization: "Bearer fixture-shared-bridge-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const configResponse = await fetch(`${publicBaseUrl}/claim-filing/configuration`, {
+    method: "POST",
+    headers: macHeaders,
+    body: "{}"
+  });
+  assert.equal(configResponse.status, 200);
+  const config = await configResponse.json();
+  assert.equal(config.ready, true);
+  assert.equal(config.guardedEndCredentialIsolated, true);
+  assert.equal(config.inboundWebhookCredentialIsolated, true);
+  assert.equal(config.guardedEndAuthorizationMatches, true);
+  assert.equal(config.phoneNumberMatches, true);
+  assert.equal(config.inboundWebhookUrlMatches, true);
+  assert.equal(config.inboundAgentRoutingMatches, true);
+  assert.match(config.expectedPhoneConfigDigest, /^[a-f0-9]{64}$/);
+  assert.equal(config.expectedPhoneConfigDigest, config.livePhoneConfigDigest);
+  assert.equal(config.dtmfPressDigitAvailable, true);
+  assert.equal(config.writebackRequiresSeparateApproval, true);
+  assert.equal(config.automaticJobNimbusWriteback, false);
+  assert.equal(JSON.stringify(config).includes(guardedToken), false);
+  assert.equal(JSON.stringify(config).includes(inboundToken), false);
+
+  for (const headers of [hpHeaders, sharedHeaders]) {
+    const denied = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: "2739", includeCarrierBatch: false })
+    });
+    assert.equal(denied.status, 403);
+  }
+  const batchDenied = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ query: "2739", includeCarrierBatch: true })
+  });
+  assert.equal(batchDenied.status, 400);
+
+  const exactInput = {
+    query: "2739",
+    goal: "file_new_claim",
+    includeCarrierBatch: false,
+    stormTime: "Approximately 4:30 PM CDT from the verified file evidence"
+  };
+  const preparedResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify(exactInput)
+  });
+  assert.equal(preparedResponse.status, 200);
+  const prepared = await preparedResponse.json();
+  assert.equal(prepared.mode, "dry_run");
+  assert.equal(prepared.file.number, "2739");
+  assert.equal(prepared.readiness.ready, true);
+  assert.equal(prepared.batchClaims, undefined);
+  assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
+  assert.match(prepared.approvalChallenge, /^[A-Za-z0-9_-]{40,100}$/);
+
+  const missingChallenge = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ ...exactInput, planDigest: prepared.planDigest, execute: true })
+  });
+  assert.equal(missingChallenge.status, 400);
+  assert.equal(retellCreateCount, 0);
+
+  const changedPlan = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      ...exactInput,
+      stormTime: "5:00 PM CDT",
+      planDigest: prepared.planDigest,
+      approvalChallenge: prepared.approvalChallenge,
+      execute: true
+    })
+  });
+  assert.equal(changedPlan.status, 409);
+  assert.equal(retellCreateCount, 0);
+
+  const executeBody = {
+    ...exactInput,
+    planDigest: prepared.planDigest,
+    approvalChallenge: prepared.approvalChallenge,
+    execute: true
+  };
+  const concurrent = await Promise.all([
+    fetch(`${publicBaseUrl}/claim-filing/call`, {
+      method: "POST",
+      headers: macHeaders,
+      body: JSON.stringify(executeBody)
+    }),
+    fetch(`${publicBaseUrl}/claim-filing/call`, {
+      method: "POST",
+      headers: macHeaders,
+      body: JSON.stringify(executeBody)
+    })
+  ]);
+  assert.equal(retellCreateCount, 1);
+  assert.equal(concurrent.some((response) => response.status === 200), true);
+  assert.equal(concurrent.every((response) => [200, 409].includes(response.status)), true);
+  const successResponse = concurrent.find((response) => response.status === 200);
+  const success = await successResponse.json();
+  assert.equal(success.mode, "executed");
+  assert.equal(success.callId, "call-1");
+
+  const replayResponse = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify(executeBody)
+  });
+  assert.equal(replayResponse.status, 200);
+  assert.equal((await replayResponse.json()).mode, "duplicate_prevented");
+  assert.equal(retellCreateCount, 1);
+
+  const resultResponse = await fetch(`${publicBaseUrl}/claim-filing/result`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ callId: "call-1" })
+  });
+  assert.equal(resultResponse.status, 200);
+  const result = await resultResponse.json();
+  assert.equal(result.extracted.claimNumber, "SF-123");
+  assert.match(result.nextStep, /direct claim writeback is unavailable/i);
+
+  const callbacksResponse = await fetch(`${publicBaseUrl}/claim-filing/callbacks`, {
+    method: "POST",
+    headers: macHeaders,
+    body: "{}"
+  });
+  assert.equal(callbacksResponse.status, 200);
+  assert.equal((await callbacksResponse.json()).count, 0);
+
+  const outbound = retellCalls.find((call) => call.call_id === "call-1");
+  retellCalls.push({
+    ...structuredClone(outbound),
+    call_id: "callback-tampered",
+    direction: "inbound",
+    metadata: {
+      ...structuredClone(outbound.metadata),
+      callLeg: "carrier_callback",
+      originalCallId: "call-1",
+      operatorPrincipalHash: "f".repeat(64)
+    }
+  });
+  const tamperedCallbackResult = await fetch(`${publicBaseUrl}/claim-filing/result`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ callId: "call-1" })
+  });
+  assert.equal(tamperedCallbackResult.status, 403);
+
+  const writebackDenied = await fetch(`${publicBaseUrl}/claim-filing/writeback`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({ callId: "call-1", writebackDigest: result.writebackDigest, execute: true })
+  });
+  assert.equal(writebackDenied.status, 403);
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
+
+  const broadGuardDenied = await fetch(`${publicBaseUrl}/retell/guarded-end-call`, {
+    method: "POST",
+    headers: sharedHeaders,
+    body: JSON.stringify({ call: { call_id: "call-1" } })
+  });
+  assert.equal(broadGuardDenied.status, 403);
+  const dedicatedGuard = await fetch(`${publicBaseUrl}/retell/guarded-end-call`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${guardedToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ call: { call_id: "call-1" } })
+  });
+  assert.equal(dedicatedGuard.status, 200);
+  assert.equal((await dedicatedGuard.json()).allowed, false);
+  assert.equal(retellStopCount, 0);
+
+  const corruptionPlanResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify(exactInput)
+  });
+  assert.equal(corruptionPlanResponse.status, 200);
+  const corruptionPlan = await corruptionPlanResponse.json();
+  await writeFile(path.join(memoryRoot, "bridge", "claim-call-ledger.json"), "{not-json", "utf8");
+  const createCountBeforeCorruptionAttempt = retellCreateCount;
+  const corruptLedgerCallResponse = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      ...exactInput,
+      planDigest: corruptionPlan.planDigest,
+      approvalChallenge: corruptionPlan.approvalChallenge,
+      execute: true
+    })
+  });
+  assert.equal(corruptLedgerCallResponse.status, 503);
+  assert.match((await corruptLedgerCallResponse.json()).error, /Claim call ledger is corrupted/i);
+  assert.equal(retellCreateCount, createCountBeforeCorruptionAttempt);
+});
+
+test("expired Mac manifest blocks claim planning and execution while callback recovery stays readable", async (t) => {
+  const bridgePort = 18973;
+  const fakeRetellPort = 18974;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-retell-expired-manifest-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const manifest = lockedOperatorManifestFixture({
+    expiresAt: new Date(Date.now() + 4_000).toISOString()
+  });
+  let retellRequestCount = 0;
+  let retellCreateCount = 0;
+  const fakeRetell = createServer(async (req, res) => {
+    retellRequestCount += 1;
+    if (req.method === "POST" && req.url === "/v2/create-phone-call") retellCreateCount += 1;
+    const payload = req.method === "POST" && req.url === "/v3/list-calls"
+      ? { items: [] }
+      : { error: "unexpected Retell request" };
+    res.writeHead(payload.items ? 200 : 500, { "content-type": "application/json" });
+    res.end(JSON.stringify(payload));
+  });
+  await new Promise((resolve) => fakeRetell.listen(fakeRetellPort, "127.0.0.1", resolve));
+  t.after(() => fakeRetell.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      PUBLIC_BASE_URL: `http://127.0.0.1:${bridgePort}`,
+      JOBNIMBUS_API_BASE_URL: "http://127.0.0.1:18975",
+      JOBNIMBUS_API_KEY: "fixture-key",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
+      RETELL_API_KEY: "fixture-retell-api-key",
+      RETELL_AGENT_ID: "fixture-claim-agent",
+      RETELL_FROM_NUMBER: "+12145550100",
+      RETELL_GUARDED_END_CALL_TOKEN: "fixture-retell-guarded-end-token-1234567890",
+      RETELL_INBOUND_WEBHOOK_TOKEN: "fixture_retell_inbound_webhook_token_1234567890",
+      ALLOW_RETELL_CALLS: "true",
+      ALLOW_RETELL_CLAIM_CALLS: "true",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      ALLOW_VOICE_CALLS: "false",
+      ALLOW_GMAIL_SEND: "false",
+      ALLOW_QUO_SEND: "false",
+      BRIDGE_ALLOW_WRITES: "false",
+      HCN_ACTION_EXECUTION_ENABLED: "false",
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      MEMORY_ROOT: memoryRoot
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const waitForExpiryMs = Math.max(0, Date.parse(manifest.input.expiresAt) - Date.now() + 25);
+  await new Promise((resolve) => setTimeout(resolve, waitForExpiryMs));
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const blockedRequests = [
+    ["/claim-filing/configuration", {}],
+    ["/claim-filing/prepare", { query: "2739", goal: "file_new_claim" }],
+    ["/claim-filing/call", {
+      query: "2739",
+      goal: "file_new_claim",
+      planDigest: "0".repeat(64),
+      approvalChallenge: "a".repeat(43),
+      execute: true
+    }]
+  ];
+  for (const [pathname, body] of blockedRequests) {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}${pathname}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 409, pathname);
+    const blocked = await response.json();
+    assert.match(blocked.error, /run manifest expired/i, pathname);
+    assert.equal(blocked.approvalChallenge, undefined, pathname);
+  }
+  assert.equal(retellRequestCount, 0);
+  assert.equal(retellCreateCount, 0);
+
+  const callbacksResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/callbacks`, {
+    method: "POST",
+    headers,
+    body: "{}"
+  });
+  assert.equal(callbacksResponse.status, 200);
+  assert.equal((await callbacksResponse.json()).count, 0);
+  assert.equal(retellRequestCount, 1);
+  assert.equal(retellCreateCount, 0);
 });
 
 test("Mac operator supports one explicit company file while HP and broad company access stay blocked", async (t) => {
@@ -3478,7 +3998,7 @@ test("employee Google OAuth keeps Gmail identity isolated and enforces the emplo
     headers: { ...headers, "content-type": "application/json" },
     body: "{}"
   });
-  assert.equal(fullAccessResponse.status, 400);
+  assert.equal(fullAccessResponse.status, 403);
 
   const callbackUri = "https://chatgpt.com/aip/g-fixture/oauth/callback";
   const authorizeResponse = await fetch(
@@ -5411,7 +5931,145 @@ test("Retell configuration creates an editable draft before publishing", async (
   assert.equal(requests.filter((request) => request.path.includes("create-agent-version")).length, 1);
 });
 
-test("prepare route reads fresh evidence and enforces Chance ownership", async (t) => {
+test("claim-agent configuration publishes the guarded prompt and exact callback phone routing", async (t) => {
+  const bridgePort = 18976;
+  const fakeRetellPort = 18977;
+  const publicBaseUrl = `http://127.0.0.1:${bridgePort}`;
+  const guardedToken = "fixture-claim-config-guarded-token-1234567890";
+  const inboundToken = "fixture-claim-config-inbound-token-1234567890";
+  let phoneUpdateCount = 0;
+  let publishedVersion = null;
+  const fakeRetell = createServer(async (req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${fakeRetellPort}`);
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    let payload;
+    if (req.method === "GET" && url.pathname === "/get-agent/fixture-claim-config-agent") {
+      payload = {
+        agent_id: "fixture-claim-config-agent",
+        version: 7,
+        is_published: true,
+        response_engine: { type: "retell-llm", llm_id: "fixture-claim-config-llm", version: 4 }
+      };
+    } else if (req.method === "POST" && url.pathname === "/create-agent-version/fixture-claim-config-agent") {
+      assert.equal(body.base_version, 7);
+      payload = {
+        agent_id: "fixture-claim-config-agent",
+        version: 8,
+        is_published: false,
+        response_engine: { type: "retell-llm", llm_id: "fixture-claim-config-llm", version: 5 }
+      };
+    } else if (req.method === "PATCH" && url.pathname === "/update-retell-llm/fixture-claim-config-llm") {
+      assert.equal(url.searchParams.get("version"), "5");
+      assert.equal(body.begin_message, "");
+      assert.equal(body.general_tools.some((tool) => tool.name === "press_digit"), true);
+      const guardedTool = body.general_tools.find((tool) => tool.name === "request_guarded_end_call");
+      assert.equal(guardedTool.url, `${publicBaseUrl}/retell/guarded-end-call`);
+      assert.equal(guardedTool.headers.authorization, `Bearer ${guardedToken}`);
+      payload = { llm_id: "fixture-claim-config-llm", version: 5, is_published: false };
+    } else if (req.method === "PATCH" && url.pathname === "/update-agent/fixture-claim-config-agent") {
+      assert.equal(url.searchParams.get("version"), "8");
+      assert.equal(body.response_engine.version, 5);
+      assert.equal(body.timezone, "America/Chicago");
+      assert.deepEqual(body.post_call_analysis_data, postCallAnalysisSchema());
+      payload = {
+        agent_id: "fixture-claim-config-agent",
+        version: 8,
+        is_published: false,
+        response_engine: body.response_engine
+      };
+    } else if (req.method === "POST" && url.pathname === "/publish-agent-version/fixture-claim-config-agent") {
+      publishedVersion = body.version;
+      payload = {};
+    } else if (
+      req.method === "PATCH"
+      && url.pathname.startsWith("/update-phone-number/")
+      && decodeURIComponent(url.pathname.slice("/update-phone-number/".length)) === "+12145550100"
+    ) {
+      phoneUpdateCount += 1;
+      assert.deepEqual(body.inbound_agents, [{
+        agent_id: "fixture-claim-config-agent",
+        agent_version: "latest_published",
+        weight: 1
+      }]);
+      assert.equal(
+        body.inbound_webhook_url,
+        `${publicBaseUrl}/retell/inbound?token=${encodeURIComponent(inboundToken)}`
+      );
+      payload = { phone_number: "+12145550100" };
+    } else {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(payload));
+  });
+  await new Promise((resolve) => fakeRetell.listen(fakeRetellPort, "127.0.0.1", resolve));
+  t.after(() => fakeRetell.close());
+
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      PUBLIC_BASE_URL: publicBaseUrl,
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-claim-config-bridge-token-1234567890",
+      RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
+      RETELL_API_KEY: "fixture-claim-config-api-key",
+      RETELL_AGENT_ID: "fixture-claim-config-agent",
+      RETELL_FROM_NUMBER: "+12145550100",
+      RETELL_GUARDED_END_CALL_TOKEN: guardedToken,
+      RETELL_INBOUND_WEBHOOK_TOKEN: inboundToken,
+      ALLOW_RETELL_CALLS: "false",
+      ALLOW_RETELL_CLAIM_CALLS: "false",
+      ALLOW_CLIENT_COORDINATOR_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-claim-config-bridge-token-1234567890",
+    "content-type": "application/json"
+  };
+  const dryRunResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ execute: false })
+  });
+  assert.equal(dryRunResponse.status, 200);
+  const dryRun = await dryRunResponse.json();
+  assert.equal(dryRun.mode, "dry_run");
+  assert.equal(dryRun.inboundAgentRouting, "exact_claim_agent_latest_published");
+  assert.match(dryRun.phoneConfigurationDigest, /^[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(dryRun).includes(guardedToken), false);
+  assert.equal(JSON.stringify(dryRun).includes(inboundToken), false);
+
+  const executeResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      execute: true,
+      publish: true,
+      configDigest: dryRun.configDigest
+    })
+  });
+  const executed = await executeResponse.json();
+  assert.equal(executeResponse.status, 200, JSON.stringify(executed));
+  assert.equal(executed.mode, "executed");
+  assert.equal(executed.published, true);
+  assert.equal(executed.phoneNumberConfigured, true);
+  assert.equal(executed.inboundWebhookConfigured, true);
+  assert.equal(publishedVersion, 8);
+  assert.equal(phoneUpdateCount, 1);
+});
+
+test("Mac claim prepare reads fresh evidence while the shared bridge principal is denied", async (t) => {
   const bridgePort = 18880;
   const fakeApiPort = 18881;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "jobnimbus-bridge-smoke-"));
@@ -5421,6 +6079,10 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     jnid: "contact-chance",
     number: 2739,
     record_type_name: "Insurance",
+    is_active: true,
+    is_archived: false,
+    is_closed: false,
+    is_deleted: false,
     owners: [{ id: chanceOwnerId }],
     display_name: "Fixture Homeowner",
     status_name: "Ready for PA Review",
@@ -5762,6 +6424,8 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-token",
       CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
       CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(lockedOperatorManifestFixture().input),
       CENSUS_GEOCODER_URL: `http://127.0.0.1:${fakeApiPort}/geocoder`,
       HAIL_REPORTS_URL: `http://127.0.0.1:${fakeApiPort}/lsr`,
       RETELL_AGENT_ID: "fixture-agent",
@@ -5799,13 +6463,25 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
   assert.equal(chanceIdentity.identity.email, "cpearson@wavepa.com");
   assert.equal(chanceIdentity.identity.quoLineConfigured, true);
 
-  const preparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
+  const sharedPrepareDenied = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
     body: JSON.stringify({ query: "2739" })
   });
-  assert.equal(preparedResponse.status, 200);
+  assert.equal(sharedPrepareDenied.status, 403);
+
+  const macClaimHeaders = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const preparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macClaimHeaders,
+    body: JSON.stringify({ query: "2739" })
+  });
   const prepared = await preparedResponse.json();
+  assert.equal(preparedResponse.status, 200, JSON.stringify(prepared));
   assert.equal(prepared.file.id, "contact-chance");
   assert.equal(prepared.readiness.ready, true);
   assert.equal(prepared.evidence.documentsReviewed, 3);
@@ -5820,7 +6496,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
 
   const labeledPreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
-    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    headers: macClaimHeaders,
     body: JSON.stringify({ query: "JobNimbus #2739" })
   });
   assert.equal(labeledPreparedResponse.status, 200);
@@ -6643,7 +7319,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
 
   const rejectedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
-    headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
+    headers: macClaimHeaders,
     body: JSON.stringify({ query: "9999" })
   });
   assert.equal(rejectedResponse.status, 400);

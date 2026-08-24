@@ -72,6 +72,24 @@ test("allows a completed filing only after claim number, closing questions, and 
   assert.equal(decision.code, "objective_complete");
 });
 
+test("allows the operator find_existing_claim goal after a transcript-backed existing claim", () => {
+  const decision = evaluateGuardedEndCall({
+    call: call([
+      ["user", "I found the existing claim. The claim number is 430J1Z808."],
+      ["agent", "Where should I send our Letter of Representation and what is the next step?"],
+      ["user", "Use the claims portal. The adjuster will call tomorrow. You're all set. Have a great day."],
+      ["agent", "Thank you."]
+    ], "find_existing_claim"),
+    args: {
+      ...completedArgs,
+      goal: "find_existing_claim",
+      outcome: "existing_claim_confirmed"
+    }
+  });
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.code, "objective_complete");
+});
+
 test("accepts a claim number spoken one digit word at a time", () => {
   const decision = evaluateGuardedEndCall({
     call: call([

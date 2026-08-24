@@ -164,6 +164,8 @@ const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
+const RETELL_GUARDED_END_CALL_TOKEN = process.env.RETELL_GUARDED_END_CALL_TOKEN || "";
+const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || "";
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
 const HCN_ACTION_EXECUTION_ENABLED =
   RELEASE_GATES.HCN_ACTION_EXECUTION_ENABLED;
@@ -266,6 +268,7 @@ const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR
 const RETELL_CARRIER_FOLLOWUP_AGENT_ID = process.env.RETELL_CARRIER_FOLLOWUP_AGENT_ID || "agent_66fb8a49fc6ab5a777eb9f0474";
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = RELEASE_GATES.ALLOW_RETELL_CALLS;
+const ALLOW_RETELL_CLAIM_CALLS = RELEASE_GATES.ALLOW_RETELL_CLAIM_CALLS;
 const ALLOW_CLIENT_COORDINATOR_CALLS = RELEASE_GATES.ALLOW_CLIENT_COORDINATOR_CALLS;
 const ALLOW_CARRIER_FOLLOWUP_CALLS = RELEASE_GATES.ALLOW_CARRIER_FOLLOWUP_CALLS;
 const CHANCE_OWNER_ID = process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941";
@@ -275,6 +278,10 @@ const ACTION_APPROVAL_STORE_PATH = process.env.ACTION_APPROVAL_STORE_PATH || pat
 const BRIDGE_BOOT_ID = randomUUID();
 const HCN_ACTION_RECEIPT_STORE_PATH = process.env.HCN_ACTION_RECEIPT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "hcn-action-receipts.json");
 const ACTION_APPROVAL_TTL_SECONDS = Math.max(1, Math.min(positiveIntegerEnv("ACTION_APPROVAL_TTL_SECONDS", 900), 3600));
+const CLAIM_CALL_APPROVAL_TTL_SECONDS = Math.max(
+  1,
+  Math.min(positiveIntegerEnv("CLAIM_CALL_APPROVAL_TTL_SECONDS", 900), 3600)
+);
 const ACTION_BATCH_LEDGER_TEST_FAIL_AT = process.env.NODE_ENV === "test"
   ? Number(process.env.ACTION_BATCH_LEDGER_TEST_FAIL_AT || 0)
   : 0;
@@ -304,7 +311,6 @@ const ALLOW_QUO_SEND = RELEASE_GATES.ALLOW_QUO_SEND;
 const ALLOW_LEGACY_CLIENT_MEMORY_WRITES = RELEASE_GATES.ALLOW_LEGACY_CLIENT_MEMORY_WRITES;
 const CHANCE_OPERATOR_LEGACY_ISOLATION_ID = "chance-58-prelock-receipts-v1";
 const CHANCE_OPERATOR_LEGACY_ISOLATION_STATE = initializeChanceOperatorLegacyIsolation();
-const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || BRIDGE_TOKEN || "";
 const RETELL_CALLBACK_TTL_HOURS = Math.max(1, Math.min(positiveIntegerEnv("RETELL_CALLBACK_TTL_HOURS", 72), 168));
 const OPENAI_INPUT_TRANSCRIPTION_MODEL = process.env.OPENAI_INPUT_TRANSCRIPTION_MODEL || "gpt-4o-mini-transcribe";
 const OPERATIONS_TIME_ZONE = "America/Chicago";
@@ -493,6 +499,7 @@ let quoLineMutationQueue = Promise.resolve();
 let actionBatchMutationQueue = Promise.resolve();
 let actionBatchLedgerWriteCount = 0;
 let actionApprovalMutationQueue = Promise.resolve();
+let claimCallMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
 const ACTION_RECEIPT_RECOVERY_STATE = {
   status: "pending",
@@ -517,6 +524,45 @@ if (
   && secureEqual(CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN)
 ) {
   throw new Error("CODEX_MAC_OPERATOR_TOKEN must be different from CODEX_OPERATOR_TOKEN.");
+}
+for (const [name, token, pattern, message] of [
+  [
+    "RETELL_GUARDED_END_CALL_TOKEN",
+    RETELL_GUARDED_END_CALL_TOKEN,
+    /^[\x21-\x7E]{32,512}$/,
+    "32 to 512 printable non-space ASCII characters"
+  ],
+  [
+    "RETELL_INBOUND_WEBHOOK_TOKEN",
+    RETELL_INBOUND_WEBHOOK_TOKEN,
+    /^[A-Za-z0-9_-]{32,512}$/,
+    "32 to 512 URL-safe characters"
+  ]
+]) {
+  if (token && !pattern.test(token)) throw new Error(`${name} must contain ${message}.`);
+}
+const RETELL_BOUNDARY_TOKENS = [
+  ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+  ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+  ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+  ["RETELL_GUARDED_END_CALL_TOKEN", RETELL_GUARDED_END_CALL_TOKEN],
+  ["RETELL_INBOUND_WEBHOOK_TOKEN", RETELL_INBOUND_WEBHOOK_TOKEN]
+].filter(([, token]) => Boolean(token));
+for (let left = 0; left < RETELL_BOUNDARY_TOKENS.length; left += 1) {
+  for (let right = left + 1; right < RETELL_BOUNDARY_TOKENS.length; right += 1) {
+    const [leftName, leftToken] = RETELL_BOUNDARY_TOKENS[left];
+    const [rightName, rightToken] = RETELL_BOUNDARY_TOKENS[right];
+    if (secureEqual(leftToken, rightToken)) {
+      throw new Error(`${leftName} and ${rightName} must use distinct credentials.`);
+    }
+  }
+}
+if (
+  ALLOW_RETELL_CALLS
+  && ALLOW_RETELL_CLAIM_CALLS
+  && (!RETELL_GUARDED_END_CALL_TOKEN || !RETELL_INBOUND_WEBHOOK_TOKEN)
+) {
+  throw new Error("Enabled Retell claim filing requires distinct RETELL_GUARDED_END_CALL_TOKEN and RETELL_INBOUND_WEBHOOK_TOKEN credentials.");
 }
 
 const routes = new Map([
@@ -584,6 +630,7 @@ const routes = new Map([
   ["POST /jobnimbus/create-calendar-event", createCalendarEvent],
   ["POST /jobnimbus/update-calendar-event", updateCalendarEvent],
   ["POST /claim-filing/prepare", prepareClaimFiling],
+  ["POST /claim-filing/configuration", claimFilingConfiguration],
   ["POST /claim-filing/call", placeClaimFilingCall],
   ["POST /claim-filing/result", claimFilingResult],
   ["POST /claim-filing/callbacks", pendingClaimCallbacks],
@@ -826,8 +873,13 @@ function health() {
       retainedDraftIdIsOneShot: true,
       querylessIndexIsPiiMinimized: true,
       chanceBrainClientMemory: "disabled",
-      directWriteUploadSendOrCallRoutes: false,
-      actionBatchOnly: true,
+      directUnapprovedWriteUploadSendOrCallRoutes: false,
+      directApprovedClaimCallRoute: true,
+      actionBatchOnly: false,
+      jobNimbusWritesActionBatchOnly: true,
+      claimFilingApprovalLane: Boolean(CODEX_MAC_OPERATOR_TOKEN),
+      claimFilingSingleFileOnly: true,
+      claimFilingWritebackAllowed: false,
       approvalChallenge: "short_lived_identity_bound_single_use"
     },
     gmailSendAllowed: ALLOW_GMAIL_SEND,
@@ -906,13 +958,26 @@ function health() {
       callsAllowed: ALLOW_VOICE_CALLS
     },
     claimFiling: {
-      available: Boolean(RETELL_API_KEY && RETELL_AGENT_ID && RETELL_FROM_NUMBER),
+      available: Boolean(
+        RETELL_API_KEY
+        && RETELL_AGENT_ID
+        && RETELL_FROM_NUMBER
+        && RETELL_GUARDED_END_CALL_TOKEN
+        && RETELL_INBOUND_WEBHOOK_TOKEN
+      ),
       engine: "retell",
-      callsAllowed: ALLOW_RETELL_CALLS,
+      callsAllowed: ALLOW_RETELL_CALLS && ALLOW_RETELL_CLAIM_CALLS,
+      dedicatedCallGate: ALLOW_RETELL_CLAIM_CALLS,
       ownerScope: "Chance Pearson",
       approvalDigestRequired: true,
+      shortLivedSingleUseChallengeRequired: true,
+      operatorSingleFileOnly: true,
+      operatorWritebackAllowed: false,
       writebackRequiresSeparateApproval: true,
       callbackWebhookAvailable: Boolean(RETELL_INBOUND_WEBHOOK_TOKEN),
+      guardedEndCredentialConfigured: Boolean(RETELL_GUARDED_END_CALL_TOKEN),
+      guardedEndCredentialIsolated: Boolean(RETELL_GUARDED_END_CALL_TOKEN),
+      inboundWebhookCredentialIsolated: Boolean(RETELL_INBOUND_WEBHOOK_TOKEN),
       callbackPacketRestoration: "full_approved_packet",
       callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
       retryRequiresPriorCallId: true
@@ -921,8 +986,8 @@ function health() {
       available: Boolean(RETELL_API_KEY && RETELL_CLIENT_COORDINATOR_AGENT_ID && RETELL_FROM_NUMBER),
       engine: "retell",
       supportedModes: ["appointment_confirmation", "missing_document_request", "status_update", "client_check_in"],
-      appointmentCallsAllowed: ALLOW_RETELL_CALLS,
-      expandedModesAllowed: ALLOW_CLIENT_COORDINATOR_CALLS,
+      appointmentCallsAllowed: ALLOW_RETELL_CALLS && ALLOW_CLIENT_COORDINATOR_CALLS,
+      expandedModesAllowed: ALLOW_RETELL_CALLS && ALLOW_CLIENT_COORDINATOR_CALLS,
       ownerScope: "Chance Pearson",
       freshEvidenceRequired: true,
       approvalDigestRequired: true,
@@ -1418,14 +1483,27 @@ async function authWhoAmI() {
               ? { ...ACTION_RECEIPT_RECOVERY_STATE }
               : { status: "unavailable", lastStartupRecoveryAt: "", error: "" },
           companyBatchMaxFiles: 1,
-          actionPath: "approval_batch_only"
+          claimFilingSingleFileOnly:
+            identity.subject === "codex-mac-operator",
+          claimFilingWritebackAllowed: false,
+          claimFilingSupportedGoals:
+            identity.subject === "codex-mac-operator"
+              ? ["file_new_claim", "find_existing_claim"]
+              : [],
+          callApprovalChallenge:
+            identity.subject === "codex-mac-operator"
+              ? "short_lived_identity_bound_single_use"
+              : "unavailable",
+          actionPath: identity.subject === "codex-mac-operator"
+            ? "approval_batch_plus_retell_claim_filing"
+            : "approval_batch_only"
         }
       : null,
     gmailMode: identity.type === "google_oauth" ? "signed_in_employee_mailbox" : "legacy_chance_mailbox",
     instruction: identity.type === "google_oauth"
       ? "The bridge will use this signed-in employee's Google token for Gmail and enforce this employee's Wave Ops role."
       : identity.type === "codex_operator_token"
-        ? `This task is using the dedicated least-privilege ${identity.name || "Codex operator"} credential. It may review evidence and prepare exact approval batches, but direct writes, uploads, calls, drafts, and sends are denied.`
+        ? `This task is using the dedicated least-privilege ${identity.name || "Codex operator"} credential. JobNimbus writes remain approval-batch-only. The Mac operator may separately place one exact Retell claim-filing call after a fresh single-file plan and a short-lived single-use approval; uploads, sends, generic calls, and claim-result writeback remain denied.`
         : "This task is using the temporary shared bridge-token fallback and Chance's legacy Gmail connection."
   };
 }
@@ -3419,31 +3497,325 @@ function sourceStatus(name, settled, busyCount) {
     : { name, status: "blocked", busyCount: 0, error: String(settled.reason?.message || settled.reason || "unavailable").slice(0, 300) };
 }
 
+async function assertMacOperatorNormalWorkReady() {
+  if (!isMacCodexOperatorRequest()) return;
+  assertOperatorReceiptBoundaryReady();
+  const boundary = await operatorRunPolicy();
+  if (boundary?.ready === true) return;
+  const error = new Error(
+    "The locked Chance run-policy or receipt boundary is not ready. Review bridge_restart_verify before claim work."
+  );
+  error.statusCode = 409;
+  throw error;
+}
+
+async function assertMacOperatorClaimPlanningReady() {
+  if (!isMacCodexOperatorRequest()) return;
+  await assertMacOperatorNormalWorkReady();
+  const expiresAt = String(CHANCE_OPERATOR_RUN_MANIFEST?.expiresAt || "").trim();
+  const expiresAtMs = Date.parse(expiresAt);
+  if (Number.isFinite(expiresAtMs) && expiresAtMs > Date.now()) return;
+  const error = new Error(
+    "The Chance operator run manifest expired. Refresh and review the 58-file roster before configuring, preparing, or placing a claim call."
+  );
+  error.statusCode = 409;
+  throw error;
+}
+
+function claimFilingApprovalScope(file = {}) {
+  const runPolicy = chanceOperatorRunManifestSummary(CHANCE_OPERATOR_RUN_MANIFEST);
+  return {
+    mode: "claim_filing_single_file_v1",
+    runPolicyId: runPolicy.id || "",
+    runPolicySha256: runPolicy.sha256 || "",
+    runPolicyExpiresAt: runPolicy.expiresAt || "",
+    fileCount: 1,
+    files: [{
+      id: String(file.id || ""),
+      number: String(file.number || "").replace(/^#/, ""),
+      operationIndexes: [0],
+      operationTypes: ["retell.claim_filing_call"]
+    }]
+  };
+}
+
+function bindClaimCallApproval(plan, input = {}) {
+  const sourcePlanDigest = String(plan?.planDigest || "");
+  const retryOfCallId = String(input.retryOfCallId || "").trim();
+  const planDigest = digest({
+    mode: "retell_claim_call_v1",
+    sourcePlanDigest,
+    retryOfCallId
+  });
+  return {
+    ...plan,
+    sourcePlanDigest,
+    planDigest,
+    retryOfCallId,
+    callPlan: {
+      ...plan.callPlan,
+      metadata: {
+        ...(plan.callPlan?.metadata || {}),
+        sourcePlanDigest,
+        planDigest,
+        retryOfCallId
+      }
+    }
+  };
+}
+
+function claimFilingToolAttestation(tools) {
+  return (Array.isArray(tools) ? tools : []).map((tool) => cleanObject({
+    type: String(tool?.type || ""),
+    name: String(tool?.name || ""),
+    description: String(tool?.description || ""),
+    url: String(tool?.url || ""),
+    method: String(tool?.method || ""),
+    timeout_ms: Number.isFinite(Number(tool?.timeout_ms)) ? Number(tool.timeout_ms) : undefined,
+    delay_ms: Number.isFinite(Number(tool?.delay_ms)) ? Number(tool.delay_ms) : undefined,
+    speak_during_execution: typeof tool?.speak_during_execution === "boolean"
+      ? tool.speak_during_execution
+      : undefined,
+    speak_after_execution: typeof tool?.speak_after_execution === "boolean"
+      ? tool.speak_after_execution
+      : undefined,
+    parameters: tool?.parameters && typeof tool.parameters === "object"
+      ? tool.parameters
+      : undefined,
+    headerNames: tool?.headers && typeof tool.headers === "object"
+      ? Object.keys(tool.headers).sort()
+      : undefined,
+    authorizationHeaderSha256: tool?.headers && typeof tool.headers === "object"
+      && String(tool.headers.Authorization || tool.headers.authorization || "")
+      ? digest(String(tool.headers.Authorization || tool.headers.authorization))
+      : undefined
+  }));
+}
+
+function claimFilingAnalysisAttestation(fields) {
+  return (Array.isArray(fields) ? fields : []).map((field) => cleanObject({
+    type: String(field?.type || ""),
+    name: String(field?.name || ""),
+    description: String(field?.description || ""),
+    choices: Array.isArray(field?.choices) ? field.choices.map(String) : undefined
+  }));
+}
+
+function expectedRetellClaimPhoneConfiguration() {
+  return {
+    phoneNumber: RETELL_FROM_NUMBER,
+    inboundAgents: [{
+      agent_id: RETELL_AGENT_ID,
+      agent_version: "latest_published",
+      weight: 1
+    }],
+    inboundWebhookUrl: `${PUBLIC_BASE_URL}/retell/inbound?token=${encodeURIComponent(RETELL_INBOUND_WEBHOOK_TOKEN)}`
+  };
+}
+
+function claimFilingPhoneAgentAttestation(bindings) {
+  return (Array.isArray(bindings) ? bindings : []).map((binding) => cleanObject({
+    agent_id: String(binding?.agent_id || ""),
+    agent_version: typeof binding?.agent_version === "number"
+      ? binding.agent_version
+      : String(binding?.agent_version || ""),
+    weight: Number(binding?.weight)
+  }));
+}
+
+async function claimFilingConfiguration() {
+  if (isMacCodexOperatorRequest()) await assertMacOperatorClaimPlanningReady();
+  if (
+    !RETELL_API_KEY
+    || !RETELL_AGENT_ID
+    || !RETELL_FROM_NUMBER
+    || !RETELL_GUARDED_END_CALL_TOKEN
+    || !RETELL_INBOUND_WEBHOOK_TOKEN
+  ) {
+    badRequest("Retell claim filing is not fully configured.");
+  }
+  const [agent, phone] = await Promise.all([
+    retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`),
+    retellApi("GET", `/get-phone-number/${encodeURIComponent(RETELL_FROM_NUMBER)}`)
+  ]);
+  const llmId = String(agent?.response_engine?.llm_id || "").trim();
+  const llmVersion = Number(agent?.response_engine?.version);
+  if (
+    agent?.response_engine?.type !== "retell-llm"
+    || !llmId
+    || !Number.isInteger(llmVersion)
+    || llmVersion < 0
+  ) {
+    badRequest("The configured Retell claim agent does not have a versioned Retell LLM response engine.");
+  }
+
+  const llm = await retellApi(
+    "GET",
+    versionedRetellEndpoint(`/get-retell-llm/${encodeURIComponent(llmId)}`, llmVersion)
+  );
+  const expectedLlm = buildRetellLlmFromPacket(retellConfigurationPacket(), {
+    guardedEndCallUrl: `${PUBLIC_BASE_URL}/retell/guarded-end-call`,
+    guardedEndCallAuthorization: `Bearer ${RETELL_GUARDED_END_CALL_TOKEN}`
+  }).toLlmRequestBody();
+  const expectedAnalysis = postCallAnalysisSchema();
+  const liveTools = Array.isArray(llm?.general_tools) ? llm.general_tools : [];
+  const liveAnalysis = Array.isArray(agent?.post_call_analysis_data)
+    ? agent.post_call_analysis_data
+    : [];
+  const expectedTools = claimFilingToolAttestation(expectedLlm.general_tools);
+  const attestedLiveTools = claimFilingToolAttestation(liveTools);
+  const expectedAnalysisFields = claimFilingAnalysisAttestation(expectedAnalysis);
+  const attestedLiveAnalysis = claimFilingAnalysisAttestation(liveAnalysis);
+  const expectedPhone = expectedRetellClaimPhoneConfiguration();
+  const expectedInboundAgents = claimFilingPhoneAgentAttestation(expectedPhone.inboundAgents);
+  const liveInboundAgents = claimFilingPhoneAgentAttestation(phone?.inbound_agents);
+  const expectedConfiguration = {
+    generalPrompt: expectedLlm.general_prompt,
+    generalTools: expectedTools,
+    postCallAnalysisData: expectedAnalysisFields,
+    timeZone: OPERATIONS_TIME_ZONE
+  };
+  const liveConfiguration = {
+    generalPrompt: String(llm?.general_prompt || ""),
+    generalTools: attestedLiveTools,
+    postCallAnalysisData: attestedLiveAnalysis,
+    timeZone: String(agent?.timezone || "")
+  };
+  const expectedConfigDigest = digest(expectedConfiguration);
+  const liveConfigDigest = digest(liveConfiguration);
+  const expectedToolNames = expectedLlm.general_tools.map((tool) => String(tool.name || "")).sort();
+  const liveToolNames = liveTools.map((tool) => String(tool?.name || "")).filter(Boolean).sort();
+  const expectedGuardedEndTool = expectedTools.find((tool) => tool.name === "request_guarded_end_call");
+  const liveGuardedEndTool = attestedLiveTools.find((tool) => tool.name === "request_guarded_end_call");
+  const guardedEndAuthorizationMatches = Boolean(
+    expectedGuardedEndTool?.authorizationHeaderSha256
+    && liveGuardedEndTool?.authorizationHeaderSha256 === expectedGuardedEndTool.authorizationHeaderSha256
+  );
+  const promptMatches = liveConfiguration.generalPrompt === expectedConfiguration.generalPrompt;
+  const toolsMatch = digest(attestedLiveTools) === digest(expectedTools);
+  const analysisSchemaMatches = digest(attestedLiveAnalysis) === digest(expectedAnalysisFields);
+  const timezoneMatches = liveConfiguration.timeZone === OPERATIONS_TIME_ZONE;
+  const published = agent?.is_published === true && llm?.is_published === true;
+  const phoneNumberMatches = String(phone?.phone_number || "") === expectedPhone.phoneNumber;
+  const inboundWebhookUrlMatches = String(phone?.inbound_webhook_url || "") === expectedPhone.inboundWebhookUrl;
+  const inboundAgentRoutingMatches = digest(liveInboundAgents) === digest(expectedInboundAgents);
+  const expectedPhoneConfigDigest = digest({
+    phoneNumber: expectedPhone.phoneNumber,
+    inboundAgents: expectedInboundAgents,
+    inboundWebhookUrl: expectedPhone.inboundWebhookUrl
+  });
+  const livePhoneConfigDigest = digest({
+    phoneNumber: String(phone?.phone_number || ""),
+    inboundAgents: liveInboundAgents,
+    inboundWebhookUrl: String(phone?.inbound_webhook_url || "")
+  });
+  const callbackWebhookAvailable = phoneNumberMatches
+    && inboundWebhookUrlMatches
+    && inboundAgentRoutingMatches;
+  const ready = published
+    && promptMatches
+    && toolsMatch
+    && guardedEndAuthorizationMatches
+    && analysisSchemaMatches
+    && timezoneMatches
+    && callbackWebhookAvailable
+    && expectedConfigDigest === liveConfigDigest;
+
+  return {
+    mode: "read_only",
+    ready,
+    agentConfigured: true,
+    fromNumberConfigured: true,
+    callbackWebhookAvailable,
+    guardedEndCredentialConfigured: true,
+    guardedEndCredentialIsolated: true,
+    inboundWebhookCredentialConfigured: true,
+    inboundWebhookCredentialIsolated: true,
+    inboundWebhookAuthentication: "dedicated_unexposed_url_token",
+    phoneNumberMatches,
+    inboundWebhookUrlMatches,
+    inboundAgentRoutingMatches,
+    expectedPhoneConfigDigest,
+    livePhoneConfigDigest,
+    guardedEndAuthorizationMatches,
+    callbackPacketRestoration: "full_approved_packet",
+    agentPublished: agent?.is_published === true,
+    llmPublished: llm?.is_published === true,
+    agentVersion: Number(agent?.version),
+    llmVersion,
+    promptMatches,
+    toolsMatch,
+    toolNames: liveToolNames,
+    expectedToolNames,
+    dtmfPressDigitAvailable: liveToolNames.includes("press_digit"),
+    guardedEndCallAvailable: liveToolNames.includes("request_guarded_end_call"),
+    analysisSchemaMatches,
+    analysisFields: liveAnalysis.map((field) => String(field?.name || "")).filter(Boolean),
+    timezoneMatches,
+    expectedConfigDigest,
+    liveConfigDigest,
+    approvalModel: "fresh_single_file_digest_plus_short_lived_identity_bound_single_use_challenge",
+    writebackRequiresSeparateApproval: true,
+    automaticJobNimbusWriteback: false,
+    instruction: ready
+      ? "The live Retell carrier agent matches this deployed bridge and is ready for separately approved single-file claim calls."
+      : "Do not place a claim call. The live Retell carrier agent differs from this deployed bridge or is not fully published."
+  };
+}
+
 async function prepareClaimFiling(input) {
+  if (isMacCodexOperatorRequest()) await assertMacOperatorClaimPlanningReady();
+  const claimInput = isMacCodexOperatorRequest()
+    ? { ...input, includeCarrierBatch: false }
+    : input;
   const context = await buildLiveClaimContext(required(input.query, "query"));
-  let plan = await buildClaimPlanWithStormTime(input, context.canonicalInput, context.file);
-  plan = await attachSameCarrierBatch(plan, context, input);
+  let plan = await buildClaimPlanWithStormTime(claimInput, context.canonicalInput, context.file);
+  plan = await attachSameCarrierBatch(plan, context, claimInput);
   plan = await attachSchedulingAvailability(plan);
+  plan = bindClaimCallApproval(plan, claimInput);
+  const approval = plan.readiness.ready
+    ? await issueActionApprovalChallenge(
+        plan.planDigest,
+        1,
+        claimFilingApprovalScope(context.file),
+        "claim_filing_call",
+        CLAIM_CALL_APPROVAL_TTL_SECONDS
+      )
+    : null;
   return {
     mode: "dry_run",
     approvalRequired: true,
     file: context.file,
     evidence: context.evidenceSummary,
     ...plan,
+    approvalChallenge: approval?.challenge || "",
+    approvalExpiresAt: approval?.expiresAt || "",
     nextStep: plan.readiness.ready
-      ? "Review this exact packet. To call, submit its planDigest to placeApprovedClaimFilingCall with execute=true."
+      ? "Review this exact single-file packet. To call, submit its planDigest and hidden single-use approval challenge to placeApprovedClaimFilingCall with execute=true before expiry."
       : "Resolve the listed blockers, then prepare the filing again."
   };
 }
 
 async function placeClaimFilingCall(input) {
+  if (isMacCodexOperatorRequest()) await assertMacOperatorClaimPlanningReady();
+  const claimInput = isMacCodexOperatorRequest()
+    ? { ...input, includeCarrierBatch: false }
+    : input;
   const context = await buildLiveClaimContext(required(input.query, "query"));
-  let plan = await buildClaimPlanWithStormTime(input, context.canonicalInput, context.file);
-  plan = await attachSameCarrierBatch(plan, context, input);
+  let plan = await buildClaimPlanWithStormTime(claimInput, context.canonicalInput, context.file);
+  plan = await attachSameCarrierBatch(plan, context, claimInput);
   plan = await attachSchedulingAvailability(plan);
+  plan = bindClaimCallApproval(plan, claimInput);
   assertApprovalDigest(input.planDigest, plan.planDigest);
 
   const request = retellCallBody(plan);
+  const operatorPrincipalHash = isMacCodexOperatorRequest()
+    ? actionApprovalIdentityHash()
+    : "";
+  if (operatorPrincipalHash) {
+    request.metadata.operatorLane = "codex_mac_single_file_claim_filing";
+    request.metadata.operatorPrincipalHash = operatorPrincipalHash;
+  }
   const retryOfCallId = String(input.retryOfCallId || "").trim();
   if (input.execute !== true) {
     return {
@@ -3456,16 +3828,55 @@ async function placeClaimFilingCall(input) {
     };
   }
 
-  if (!ALLOW_RETELL_CALLS) badRequest("Retell calls are disabled. Set ALLOW_RETELL_CALLS=true only after approving the deployment and first controlled call.");
+  if (!ALLOW_RETELL_CALLS || !ALLOW_RETELL_CLAIM_CALLS) {
+    badRequest("Retell claim-filing calls are disabled. ALLOW_RETELL_CALLS and ALLOW_RETELL_CLAIM_CALLS must both be true.");
+  }
   if (!RETELL_API_KEY || !RETELL_AGENT_ID || !RETELL_FROM_NUMBER) {
     badRequest("Retell claim filing is not configured. RETELL_API_KEY, RETELL_AGENT_ID, and RETELL_FROM_NUMBER are required.");
   }
   if (!plan.readiness.ready) badRequest(`Claim filing is blocked: ${plan.readiness.blockers.join("; ")}`);
 
-  const ledger = await readClaimCallLedger();
-  const prior = ledger.find((row) => row.planDigest === plan.planDigest && String(row.retryOfCallId || "") === retryOfCallId && row.callId)
-    || await findRemoteClaimCallAttempt(plan.planDigest, retryOfCallId);
+  const retellConfiguration = await claimFilingConfiguration();
+  if (retellConfiguration.ready !== true) {
+    badRequest("The live Retell claim agent is not attested to the deployed bridge configuration.");
+  }
+
+  let ledger = await readClaimCallLedger();
+  const localPrior = ledger.find((row) => (
+    row.planDigest === plan.planDigest
+    && String(row.retryOfCallId || "") === retryOfCallId
+    && row.callId
+  ));
+  const remotePrior = localPrior
+    ? null
+    : await findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorPrincipalHash);
+  const prior = localPrior || remotePrior;
   if (prior) {
+    let reconciledReservation = Boolean(localPrior);
+    if (remotePrior) {
+      reconciledReservation = await withClaimCallMutation(async () => {
+        const latest = await readClaimCallLedger();
+        const reservation = latest.find((row) => (
+          row.planDigest === plan.planDigest
+          && String(row.retryOfCallId || "") === retryOfCallId
+          && !row.callId
+          && String(row.principalHash || "") === operatorPrincipalHash
+        ));
+        if (reservation) {
+          reservation.callId = remotePrior.callId;
+          reservation.callStatus = remotePrior.callStatus;
+          reservation.reconciledAt = new Date().toISOString();
+          await writeClaimCallLedger(latest.slice(-500));
+          return true;
+        }
+        return false;
+      });
+    }
+    if (operatorPrincipalHash && !reconciledReservation) {
+      const error = new Error("Retell contains this operator-stamped call, but its local durable approval reservation is missing. No second call was placed; manual reconciliation is required.");
+      error.statusCode = 409;
+      throw error;
+    }
     return {
       mode: "duplicate_prevented",
       file: context.file,
@@ -3473,8 +3884,21 @@ async function placeClaimFilingCall(input) {
       callId: prior.callId,
       callStatus: prior.callStatus,
       createdAt: prior.createdAt,
+      automaticJobNimbusWriteback: false,
+      automaticChanceBrainWriteback: false,
       note: "This exact approved filing plan already created a Retell call. No second call was placed."
     };
+  }
+  const unresolvedReservation = ledger.find((row) => (
+    row.planDigest === plan.planDigest
+    && String(row.retryOfCallId || "") === retryOfCallId
+    && !row.callId
+    && ["provider_pending", "provider_outcome_unknown"].includes(String(row.callStatus || ""))
+  ));
+  if (unresolvedReservation) {
+    const error = new Error("A prior approved Retell provider window is unresolved. Nothing was called; reconcile the exact plan against Retell before retrying.");
+    error.statusCode = 409;
+    throw error;
   }
 
   if (retryOfCallId) {
@@ -3487,28 +3911,63 @@ async function placeClaimFilingCall(input) {
     request.metadata.retryOfCallId = retryOfCallId;
   }
 
-  const result = await retellApi("POST", "/v2/create-phone-call", request);
+  const approval = await consumeActionApprovalChallenge(
+    input.approvalChallenge,
+    plan.planDigest,
+    "claim_filing_call",
+    claimFilingApprovalScope(context.file)
+  );
+
   const record = {
+    id: randomUUID(),
+    approvalId: approval.id,
     planDigest: plan.planDigest,
-    callId: result.call_id,
-    callStatus: result.call_status,
+    callId: "",
+    callStatus: "provider_pending",
     contactId: context.file.id,
     fileNumber: context.file.number,
     goal: plan.packet.goal,
     retryOfCallId,
+    principalHash: operatorPrincipalHash,
+    operatorLane: operatorPrincipalHash ? "codex_mac_single_file_claim_filing" : "",
     createdAt: new Date().toISOString()
   };
-  ledger.push(record);
-  await writeClaimCallLedger(ledger.slice(-500));
-  const memoryCloseout = safeCloseoutAction(MEMORY_CONFIG, {
-    channel: "retell",
-    action: "place_claim_call",
-    status: result.call_status || "registered",
-    subjectKey: context.file.id,
-    fileLabel: `${context.file.number || ""} ${context.file.name || ""}`.trim(),
-    summary: `Placed approved Retell carrier call for ${plan.packet.goal}.`,
-    externalId: result.call_id,
-    evidence: result.call_id ? [`retell:${result.call_id}`] : []
+  await withClaimCallMutation(async () => {
+    const latest = await readClaimCallLedger();
+    latest.push(record);
+    await writeClaimCallLedger(latest.slice(-500));
+  });
+  let result;
+  try {
+    result = await retellApi("POST", "/v2/create-phone-call", request);
+    if (
+      !/^[A-Za-z0-9_-]{1,200}$/.test(String(result?.call_id || ""))
+      || !/^[A-Za-z0-9_-]{1,80}$/.test(String(result?.call_status || ""))
+    ) {
+      const error = new Error("Retell accepted the provider request but did not return a usable call id and status. Manual reconciliation is required before any retry.");
+      error.statusCode = 502;
+      throw error;
+    }
+  } catch (error) {
+    await withClaimCallMutation(async () => {
+      const latest = await readClaimCallLedger();
+      const reserved = latest.find((row) => row.id === record.id);
+      if (reserved) {
+        reserved.callStatus = "provider_outcome_unknown";
+        reserved.providerErrorAt = new Date().toISOString();
+        await writeClaimCallLedger(latest.slice(-500));
+      }
+    });
+    throw error;
+  }
+  await withClaimCallMutation(async () => {
+    const latest = await readClaimCallLedger();
+    const reserved = latest.find((row) => row.id === record.id);
+    if (!reserved) throw new Error("The durable Retell call reservation is missing after provider execution.");
+    reserved.callId = result.call_id;
+    reserved.callStatus = result.call_status;
+    reserved.providerConfirmedAt = new Date().toISOString();
+    await writeClaimCallLedger(latest.slice(-500));
   });
   return {
     mode: "executed",
@@ -3516,8 +3975,9 @@ async function placeClaimFilingCall(input) {
     planDigest: plan.planDigest,
     callId: result.call_id,
     callStatus: result.call_status,
-    nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId.",
-    memoryCloseout
+    automaticJobNimbusWriteback: false,
+    automaticChanceBrainWriteback: false,
+    nextStep: "After the call ends, use reviewClaimFilingCallResult with this callId. Any JobNimbus update requires a separate approval batch."
   };
 }
 
@@ -3661,7 +4121,9 @@ async function retellClientCoordinatorCall(input = {}) {
   }
 
   assertApprovalDigest(input.planDigest, planDigest);
-  if (!ALLOW_RETELL_CALLS) badRequest("Retell calls are disabled.");
+  if (!ALLOW_RETELL_CALLS || !ALLOW_CLIENT_COORDINATOR_CALLS) {
+    badRequest("Client Coordinator calls are disabled. ALLOW_RETELL_CALLS and ALLOW_CLIENT_COORDINATOR_CALLS must both be true.");
+  }
   if (mode !== "appointment_confirmation" && !ALLOW_CLIENT_COORDINATOR_CALLS) {
     badRequest("Expanded Client Coordinator calls are disabled until the dedicated prompt is reviewed, published, and ALLOW_CLIENT_COORDINATOR_CALLS=true.");
   }
@@ -4202,6 +4664,40 @@ async function findRemoteClaimCallAttempt(planDigest, retryOfCallId) {
   } : null;
 }
 
+async function findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorPrincipalHash = "") {
+  const planDigest = String(plan?.planDigest || "");
+  const response = await retellApi("POST", "/v3/list-calls", {
+    filter_criteria: {},
+    sort_order: "descending",
+    limit: 100
+  });
+  const row = (response.items || []).find((call) =>
+    call.direction === "outbound" &&
+    String(call.agent_id || "") === String(plan?.callPlan?.agentId || "") &&
+    call.metadata?.source === "hcn-wave-jobnimbus-bridge" &&
+    String(call.metadata?.ownerId || "") === CHANCE_OWNER_ID &&
+    String(call.metadata?.contactId || "") === String(plan?.file?.id || "") &&
+    String(call.metadata?.fileNumber || "").replace(/^#/, "") === String(plan?.file?.number || "").replace(/^#/, "") &&
+    String(call.metadata?.goal || "") === String(plan?.packet?.goal || "") &&
+    String(call.metadata?.planDigest || "") === String(planDigest) &&
+    String(call.metadata?.retryOfCallId || "") === String(retryOfCallId || "") &&
+    (
+      !operatorPrincipalHash
+      || (
+        call.metadata?.operatorLane === "codex_mac_single_file_claim_filing"
+        && String(call.metadata?.operatorPrincipalHash || "") === operatorPrincipalHash
+      )
+    )
+  );
+  return row ? {
+    planDigest,
+    retryOfCallId,
+    callId: row.call_id,
+    callStatus: row.call_status,
+    createdAt: row.start_timestamp ? new Date(row.start_timestamp).toISOString() : ""
+  } : null;
+}
+
 async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
   if (input.includeCarrierBatch === false || primaryPlan.packet.goal !== "file_new_claim") return primaryPlan;
   const carrierKey = normalizeCompare(primaryContext.file.carrier);
@@ -4306,11 +4802,13 @@ async function claimFilingResult(input) {
     unverified: analysis.proposal.unverified,
     writebackDigest: analysis.writebackDigest,
     approvalRequired: true,
-    nextStep: proposedCalendarEvent?.ready
-      ? "Review the result and exact appointment. JobNimbus writeback and calendar creation remain separate approval-gated actions."
-      : workflow.applicable
-        ? workflow.primaryAction
-        : "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
+    nextStep: isMacCodexOperatorRequest()
+      ? "Review the transcript and extraction. Any JobNimbus field, stage, note, task, or calendar change must be freshly prepared through its separate approved Operator action path; direct claim writeback is unavailable."
+      : proposedCalendarEvent?.ready
+        ? "Review the result and exact appointment. JobNimbus writeback and calendar creation remain separate approval-gated actions."
+        : workflow.applicable
+          ? workflow.primaryAction
+          : "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
   };
 }
 
@@ -4443,7 +4941,15 @@ function versionedRetellEndpoint(endpoint, version) {
 }
 
 async function configureRetellAgent(input = {}) {
-  if (!RETELL_API_KEY || !RETELL_AGENT_ID) badRequest("RETELL_API_KEY and RETELL_AGENT_ID are required.");
+  if (
+    !RETELL_API_KEY
+    || !RETELL_AGENT_ID
+    || !RETELL_FROM_NUMBER
+    || !RETELL_GUARDED_END_CALL_TOKEN
+    || !RETELL_INBOUND_WEBHOOK_TOKEN
+  ) {
+    badRequest("Retell claim-agent configuration requires the API key, agent, from number, guarded-end credential, and inbound-webhook credential.");
+  }
   const agent = await retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`);
   const llmId = String(agent?.response_engine?.llm_id || "").trim();
   if (agent?.response_engine?.type !== "retell-llm" || !llmId) {
@@ -4452,16 +4958,22 @@ async function configureRetellAgent(input = {}) {
 
   const llmConfig = buildRetellLlmFromPacket(retellConfigurationPacket(), {
     guardedEndCallUrl: `${PUBLIC_BASE_URL}/retell/guarded-end-call`,
-    guardedEndCallAuthorization: BRIDGE_TOKEN ? `Bearer ${BRIDGE_TOKEN}` : ""
+    guardedEndCallAuthorization: RETELL_GUARDED_END_CALL_TOKEN
+      ? `Bearer ${RETELL_GUARDED_END_CALL_TOKEN}`
+      : ""
   }).toLlmRequestBody();
   const analysisSchema = postCallAnalysisSchema();
+  const phoneConfig = expectedRetellClaimPhoneConfiguration();
   const configDigest = digest({
     agentId: RETELL_AGENT_ID,
     llmId,
     generalPrompt: llmConfig.general_prompt,
     generalTools: llmConfig.general_tools,
     postCallAnalysisData: analysisSchema,
-    timeZone: OPERATIONS_TIME_ZONE
+    timeZone: OPERATIONS_TIME_ZONE,
+    phoneNumber: phoneConfig.phoneNumber,
+    inboundAgents: phoneConfig.inboundAgents,
+    inboundWebhookUrl: phoneConfig.inboundWebhookUrl
   });
   const preview = {
     agentId: RETELL_AGENT_ID,
@@ -4471,7 +4983,10 @@ async function configureRetellAgent(input = {}) {
     configDigest,
     promptCharacters: llmConfig.general_prompt.length,
     toolNames: llmConfig.general_tools.map((tool) => tool.name),
-    analysisFields: analysisSchema.map((field) => field.name)
+    analysisFields: analysisSchema.map((field) => field.name),
+    phoneConfigurationDigest: digest(phoneConfig),
+    inboundAgentRouting: "exact_claim_agent_latest_published",
+    inboundWebhookAuthentication: "dedicated_unexposed_url_token"
   };
 
   if (input.execute !== true) {
@@ -4514,15 +5029,21 @@ async function configureRetellAgent(input = {}) {
     version_title: "Carrier filing safeguards and verified property facts",
     version_description: "Chance-scoped JobNimbus and Google Calendar scheduling authority with approval-gated calendar writeback."
   });
+  await retellApi("PATCH", `/update-phone-number/${encodeURIComponent(RETELL_FROM_NUMBER)}`, {
+    inbound_agents: phoneConfig.inboundAgents,
+    inbound_webhook_url: phoneConfig.inboundWebhookUrl
+  });
 
   return {
     mode: "executed",
     published: true,
+    phoneNumberConfigured: true,
+    inboundWebhookConfigured: true,
     ...preview,
     draftAgentVersion: Number(draftAgent.version),
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
-    nextStep: "Verify the deployed bridge health and prepare one inspection-scheduling call. Do not place the call without Chance's approval."
+    nextStep: "Verify the live claim-agent, phone routing, and callback webhook attestation. Do not place a call without Chance's separate approval of one fresh exact-file plan."
   };
 }
 
@@ -4531,6 +5052,8 @@ async function guardedRetellEndCall(input = {}) {
   const args = input.args && typeof input.args === "object" ? input.args : input;
   const callId = required(suppliedCall.call_id || input.call_id || args.call_id, "call.call_id");
   const liveCall = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+
+  await assertGuardedRetellCallOwnership(liveCall);
 
   if (String(liveCall.call_status || "") !== "ongoing") {
     return {
@@ -4549,16 +5072,14 @@ async function guardedRetellEndCall(input = {}) {
 
   const reviewCall = {
     ...liveCall,
-    ...suppliedCall,
-    metadata: { ...(liveCall.metadata || {}), ...(suppliedCall.metadata || {}) },
+    metadata: { ...(liveCall.metadata || {}) },
     retell_llm_dynamic_variables: {
-      ...(liveCall.retell_llm_dynamic_variables || {}),
-      ...(suppliedCall.retell_llm_dynamic_variables || {})
+      ...(liveCall.retell_llm_dynamic_variables || {})
     },
-    transcript_object: suppliedCall.transcript_object?.length
-      ? suppliedCall.transcript_object
-      : liveCall.transcript_object,
-    transcript: suppliedCall.transcript || liveCall.transcript
+    transcript_object: Array.isArray(liveCall.transcript_object)
+      ? liveCall.transcript_object
+      : [],
+    transcript: String(liveCall.transcript || "")
   };
   const decision = evaluateGuardedEndCall({ call: reviewCall, args });
   if (!decision.allowed) {
@@ -4576,6 +5097,51 @@ async function guardedRetellEndCall(input = {}) {
     stopped: true,
     message: "The bridge verified completion and ended the call. Do not speak again."
   };
+}
+
+async function assertGuardedRetellCallOwnership(liveCall = {}) {
+  const metadata = liveCall.metadata || {};
+  const principalHash = String(metadata.operatorPrincipalHash || "");
+  const contactId = String(metadata.contactId || "");
+  const fileNumber = String(metadata.fileNumber || "").replace(/^#/, "");
+  const planDigest = String(metadata.planDigest || "");
+  const goal = String(metadata.goal || "");
+  const retryOfCallId = String(metadata.retryOfCallId || "");
+  const callLeg = String(metadata.callLeg || "outbound");
+  const ledgerCallId = callLeg === "carrier_callback"
+    ? String(metadata.originalCallId || "")
+    : String(liveCall.call_id || "");
+  const ledger = await readClaimCallLedger();
+  const row = ledger.find((item) => (
+    String(item.callId || "") === ledgerCallId
+    && String(item.principalHash || "") === principalHash
+    && String(item.operatorLane || "") === "codex_mac_single_file_claim_filing"
+  ));
+  const owned = Boolean(
+    row
+    && String(liveCall.agent_id || "") === RETELL_AGENT_ID
+    && metadata.source === "hcn-wave-jobnimbus-bridge"
+    && String(metadata.ownerId || "") === CHANCE_OWNER_ID
+    && metadata.operatorLane === "codex_mac_single_file_claim_filing"
+    && validActionBatchPrincipalHash(principalHash)
+    && ['file_new_claim', 'find_existing_claim'].includes(goal)
+    && String(row.contactId || "") === contactId
+    && String(row.fileNumber || "").replace(/^#/, "") === fileNumber
+    && String(row.planDigest || "") === planDigest
+    && String(row.goal || "") === goal
+    && String(row.retryOfCallId || "") === retryOfCallId
+    && CHANCE_OPERATOR_RUN_MANIFEST
+    && chanceManifestFileBinding(
+      CHANCE_OPERATOR_RUN_MANIFEST,
+      fileNumber,
+      contactId
+    )
+  );
+  if (!owned) {
+    const error = new Error("This call is not bound to an approved Mac Operator claim-filing reservation and pinned Chance file.");
+    error.statusCode = 403;
+    throw error;
+  }
 }
 
 async function configureClientCoordinatorAgent(input = {}) {
@@ -4865,6 +5431,8 @@ async function recentCallbackCandidates(fromNumber) {
     .map((call) => String(call.metadata.originalCallId)));
   const candidates = rows
     .filter((call) => call.direction === "outbound")
+    .filter((call) => String(call.agent_id || "") === RETELL_AGENT_ID)
+    .filter((call) => ['file_new_claim', 'find_existing_claim'].includes(String(call.metadata?.goal || "")))
     .map(callbackCandidateFromCall)
     .filter(Boolean)
     .filter((candidate) => candidate.callbackRequested)
@@ -4891,7 +5459,37 @@ function callbackCaseLabel(candidate) {
 }
 
 async function pendingClaimCallbacks() {
-  const candidates = await recentCallbackCandidates("");
+  let candidates = await recentCallbackCandidates("");
+  if (isMacCodexOperatorRequest()) {
+    const principalHash = actionApprovalIdentityHash();
+    const ledger = await readClaimCallLedger();
+    candidates = candidates.filter((candidate) => {
+      const row = ledger.find((item) => (
+        String(item.callId || "") === String(candidate.callId || "")
+        && String(item.principalHash || "") === principalHash
+        && String(item.operatorLane || "") === "codex_mac_single_file_claim_filing"
+      ));
+      if (!row) return false;
+      if (candidate.agentId !== RETELL_AGENT_ID) return false;
+      if (candidate.ownerId !== CHANCE_OWNER_ID) return false;
+      if (candidate.operatorLane !== "codex_mac_single_file_claim_filing") return false;
+      if (candidate.operatorPrincipalHash !== principalHash) return false;
+      if (!['file_new_claim', 'find_existing_claim'].includes(String(candidate.goal || ""))) return false;
+      if (String(row.contactId || "") !== String(candidate.contactId || "")) return false;
+      if (String(row.fileNumber || "").replace(/^#/, "") !== String(candidate.fileNumber || "").replace(/^#/, "")) return false;
+      if (String(row.planDigest || "") !== String(candidate.planDigest || "")) return false;
+      if (String(row.goal || "") !== String(candidate.goal || "")) return false;
+      if (String(row.retryOfCallId || "") !== String(candidate.retryOfCallId || "")) return false;
+      return Boolean(
+        CHANCE_OPERATOR_RUN_MANIFEST
+        && chanceManifestFileBinding(
+          CHANCE_OPERATOR_RUN_MANIFEST,
+          String(candidate.fileNumber || "").replace(/^#/, ""),
+          String(candidate.contactId || "")
+        )
+      );
+    });
+  }
   return {
     mode: "read_only",
     callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
@@ -5153,6 +5751,54 @@ async function loadClaimCallAnalysis(callId) {
     continuation ? { raw: continuation, callId: continuation.call_id } : null,
     CHANCE_OWNER_ID
   );
+  if (isMacCodexOperatorRequest()) {
+    const principalHash = actionApprovalIdentityHash();
+    const ledger = await readClaimCallLedger();
+    const row = ledger.find((item) => (
+      String(item.callId || "") === String(requestedRaw.call_id || "")
+      && String(item.principalHash || "") === principalHash
+      && String(item.operatorLane || "") === "codex_mac_single_file_claim_filing"
+    ));
+    const metadataFileNumber = String(requestedRaw.metadata?.fileNumber || "").replace(/^#/, "");
+    const metadataContactId = String(requestedRaw.metadata?.contactId || "");
+    const continuationMetadata = continuation?.metadata || {};
+    const continuationMatches = !continuation || Boolean(
+      String(continuation.agent_id || "") === RETELL_AGENT_ID
+      && String(continuationMetadata.source || "") === "hcn-wave-jobnimbus-bridge"
+      && String(continuationMetadata.ownerId || "") === CHANCE_OWNER_ID
+      && String(continuationMetadata.contactId || "") === metadataContactId
+      && String(continuationMetadata.fileNumber || "").replace(/^#/, "") === metadataFileNumber
+      && String(continuationMetadata.goal || "") === String(requestedRaw.metadata?.goal || "")
+      && String(continuationMetadata.planDigest || "") === String(requestedRaw.metadata?.planDigest || "")
+      && String(continuationMetadata.operatorLane || "") === "codex_mac_single_file_claim_filing"
+      && String(continuationMetadata.operatorPrincipalHash || "") === principalHash
+      && String(continuationMetadata.originalCallId || "") === String(requestedRaw.call_id || "")
+    );
+    const operatorOwned = Boolean(
+      row
+      && String(requestedRaw.agent_id || "") === RETELL_AGENT_ID
+      && String(requestedRaw.metadata?.operatorLane || "") === "codex_mac_single_file_claim_filing"
+      && String(requestedRaw.metadata?.operatorPrincipalHash || "") === principalHash
+      && ['file_new_claim', 'find_existing_claim'].includes(String(requestedRaw.metadata?.goal || ""))
+      && String(row.contactId || "") === metadataContactId
+      && String(row.fileNumber || "").replace(/^#/, "") === metadataFileNumber
+      && String(row.planDigest || "") === String(requestedRaw.metadata?.planDigest || "")
+      && String(row.goal || "") === String(requestedRaw.metadata?.goal || "")
+      && String(row.retryOfCallId || "") === String(requestedRaw.metadata?.retryOfCallId || "")
+      && continuationMatches
+      && CHANCE_OPERATOR_RUN_MANIFEST
+      && chanceManifestFileBinding(
+        CHANCE_OPERATOR_RUN_MANIFEST,
+        metadataFileNumber,
+        metadataContactId
+      )
+    );
+    if (!operatorOwned) {
+      const error = new Error("This Retell result is not bound to the current Mac operator principal and pinned Chance file manifest.");
+      error.statusCode = 403;
+      throw error;
+    }
+  }
   const { contact } = await findChanceContact(metadata.contactId);
   const file = compactContact(contact);
   const result = analyzeClaimCall(call, {
@@ -5233,13 +5879,11 @@ async function executeContactUpdatePlan(plan) {
 }
 
 async function readClaimCallLedger() {
-  const rows = await readJsonFile(CLAIM_CALL_STORE_PATH, []);
-  return Array.isArray(rows) ? rows : [];
+  return readSecurityLedger(CLAIM_CALL_STORE_PATH, "Claim call ledger");
 }
 
 async function writeClaimCallLedger(rows) {
-  await mkdir(path.dirname(CLAIM_CALL_STORE_PATH), { recursive: true });
-  await writeFile(CLAIM_CALL_STORE_PATH, `${JSON.stringify(rows, null, 2)}\n`, "utf8");
+  await writeSecurityLedger(CLAIM_CALL_STORE_PATH, rows);
 }
 
 function previewRetellRequest(request) {
@@ -8406,7 +9050,6 @@ function legacyIsolationRuntimeSafe() {
     && !ALLOW_GMAIL_SEND
     && !ALLOW_QUO_SEND
     && !ALLOW_VOICE_CALLS
-    && !ALLOW_RETELL_CALLS
     && !ALLOW_CLIENT_COORDINATOR_CALLS
     && !ALLOW_CARRIER_FOLLOWUP_CALLS
     && !HCN_ACTION_EXECUTION_ENABLED
@@ -8464,7 +9107,7 @@ function resolveChanceLegacyHistoricalIsolation(ledger) {
     || config.runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST.sha256
   ) return empty("run_policy_mismatch", "Legacy isolation does not match the active run policy.");
   if (!legacyIsolationRuntimeSafe()) {
-    return empty("runtime_not_safe", "Outbound, call, browser-action, and legacy-memory gates must remain disabled.");
+    return empty("runtime_not_safe", "Unapproved sends, unrelated call lanes, browser-action execution, and legacy-memory writes must remain disabled.");
   }
   const candidates = (Array.isArray(ledger) ? ledger : [])
     .filter(isLegacyHistoricalIsolationCandidate);
@@ -9126,7 +9769,12 @@ async function processActionBatch(input = {}) {
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true before executing an approved batch.");
   requireApprovalDigest(input.approvalDigest, approvalDigest, "action batch");
-  const approval = await consumeActionApprovalChallenge(input.approvalChallenge, approvalDigest);
+  const approval = await consumeActionApprovalChallenge(
+    input.approvalChallenge,
+    approvalDigest,
+    "action_batch",
+    batchScope
+  );
 
   const reservation = await reserveActionBatch(
     approval.id,
@@ -13100,6 +13748,15 @@ function withActionApprovalMutation(callback) {
   return run;
 }
 
+function withClaimCallMutation(callback) {
+  const run = claimCallMutationQueue.then(callback);
+  claimCallMutationQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 function actionApprovalIdentityHash() {
   if (isHcnRestrictedEffectRequest()) {
     const sessionId = String(
@@ -13138,7 +13795,13 @@ function validActionBatchPrincipalHash(value) {
   return /^[a-f0-9]{64}$/i.test(String(value || "").trim());
 }
 
-async function issueActionApprovalChallenge(approvalDigest, operationCount, batchScope = {}) {
+async function issueActionApprovalChallenge(
+  approvalDigest,
+  operationCount,
+  batchScope = {},
+  approvalKind = "action_batch",
+  ttlSeconds = ACTION_APPROVAL_TTL_SECONDS
+) {
   return withActionApprovalMutation(async () => {
     const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
     const identityHash = actionApprovalIdentityHash();
@@ -13153,12 +13816,19 @@ async function issueActionApprovalChallenge(approvalDigest, operationCount, batc
       }
     }
     const challenge = randomBytes(32).toString("base64url");
-    const expiresAtMs = now + ACTION_APPROVAL_TTL_SECONDS * 1000;
+    const normalizedKind = String(approvalKind || "").trim();
+    if (!["action_batch", "claim_filing_call"].includes(normalizedKind)) {
+      throw new TypeError("Unsupported approval challenge kind.");
+    }
+    const normalizedTtl = Math.max(1, Math.min(Number(ttlSeconds || 0), 3600));
+    const expiresAtMs = now + normalizedTtl * 1000;
     const row = {
       id: randomUUID(),
       challengeHash: createHash("sha256").update(challenge, "utf8").digest("hex"),
+      bootId: BRIDGE_BOOT_ID,
       identityHash,
       approvalDigest,
+      approvalKind: normalizedKind,
       operationCount,
       batchMode: batchScope.mode || "",
       runPolicyId: batchScope.runPolicyId || "",
@@ -13192,18 +13862,38 @@ async function revokeActionApprovalChallenge(approvalId) {
   });
 }
 
-async function consumeActionApprovalChallenge(value, approvalDigest) {
+async function consumeActionApprovalChallenge(
+  value,
+  approvalDigest,
+  approvalKind = "action_batch",
+  expectedScope = null
+) {
   const challenge = String(value || "").trim();
+  const normalizedKind = String(approvalKind || "").trim();
+  const label = normalizedKind === "claim_filing_call"
+    ? "Retell claim-call execution"
+    : "Action batch execution";
   if (!/^[A-Za-z0-9_-]{40,100}$/.test(challenge)) {
-    badRequest("Action batch execution requires the single-use approvalChallenge from its exact dry run.");
+    badRequest(`${label} requires the single-use approvalChallenge from its exact dry run.`);
   }
   return withActionApprovalMutation(async () => {
     const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
     const challengeHash = createHash("sha256").update(challenge, "utf8").digest("hex");
     const row = ledger.find((item) => item.challengeHash === challengeHash);
     const identityHash = actionApprovalIdentityHash();
-    if (!row || row.identityHash !== identityHash || row.approvalDigest !== approvalDigest) {
-      const error = new Error("The action approval challenge does not match this identity and exact plan. Nothing was executed; prepare and approve a fresh dry run.");
+    const rowKind = String(row?.approvalKind || "action_batch");
+    const expectedScopeHash = expectedScope
+      ? digest(stableApprovalBatchScope(expectedScope))
+      : "";
+    if (
+      !row
+      || row.bootId !== BRIDGE_BOOT_ID
+      || row.identityHash !== identityHash
+      || row.approvalDigest !== approvalDigest
+      || rowKind !== normalizedKind
+      || (expectedScopeHash && row.fileManifestHash !== expectedScopeHash)
+    ) {
+      const error = new Error("The approval challenge does not match this bridge boot, identity, action kind, run policy, file scope, and exact plan. Nothing was executed; prepare and approve a fresh dry run.");
       error.statusCode = 409;
       throw error;
     }
@@ -13214,7 +13904,7 @@ async function consumeActionApprovalChallenge(value, approvalDigest) {
         row.expiredAt = new Date(now).toISOString();
         await writeSecurityLedger(ACTION_APPROVAL_STORE_PATH, ledger);
       }
-      const error = new Error(`The action approval challenge is ${row.status || "unavailable"}. Nothing was executed; prepare and approve a fresh dry run.`);
+      const error = new Error(`The approval challenge is ${row.status || "unavailable"}. Nothing was executed; prepare and approve a fresh dry run.`);
       error.statusCode = 409;
       throw error;
     }
@@ -13550,7 +14240,7 @@ function requireApprovalDigest(provided, expected, label) {
 
 function redactSensitiveText(value) {
   let text = String(value || "");
-  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, RETELL_GUARDED_END_CALL_TOKEN, RETELL_INBOUND_WEBHOOK_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
     text = text.split(secret).join("[REDACTED]");
   }
   return text
@@ -13626,6 +14316,21 @@ async function authenticateRequest(req) {
 async function authenticateBearerRequest(req) {
   const token = bearerToken(req);
   if (!token) return null;
+  if (RETELL_GUARDED_END_CALL_TOKEN && secureEqual(token, RETELL_GUARDED_END_CALL_TOKEN)) {
+    return {
+      type: "retell_guarded_end_token",
+      subject: "retell-claim-agent",
+      email: "",
+      name: "Retell Claim Agent",
+      role: "retell_guarded_end",
+      hostedDomain: "",
+      scopes: ["retell_claim_call:guarded_end_only"],
+      googleAccessToken: "",
+      jobNimbusOwnerId: "",
+      jobNimbusScope: "none",
+      quoLineId: ""
+    };
+  }
   if (BRIDGE_TOKEN && token === BRIDGE_TOKEN) {
     return {
       type: "bridge_token",
@@ -13667,7 +14372,8 @@ async function authenticateBearerRequest(req) {
       scopes: [
         "client_evidence:read",
         "company_exact_file:read",
-        "approval_batches:prepare_execute"
+        "approval_batches:prepare_execute",
+        "retell_claim_filing:prepare_execute_review"
       ],
       googleAccessToken: "",
       jobNimbusOwnerId: CHANCE_OWNER_ID,
@@ -14083,7 +14789,50 @@ function assertIdentityRequestScope(
   body = {},
   operatorScope = "assigned"
 ) {
+  if (
+    pathname === "/retell/guarded-end-call"
+    && identity?.type !== "retell_guarded_end_token"
+  ) {
+    const error = new Error("The guarded Retell end-call route accepts only its dedicated one-route credential.");
+    error.statusCode = 403;
+    throw error;
+  }
+  const claimFilingRoute = [
+    "/claim-filing/configuration",
+    "/claim-filing/prepare",
+    "/claim-filing/call",
+    "/claim-filing/result",
+    "/claim-filing/callbacks"
+  ].includes(pathname);
+  if (
+    claimFilingRoute
+    && !(
+      identity?.type === "codex_operator_token"
+      && identity.subject === "codex-mac-operator"
+    )
+  ) {
+    const error = new Error("Retell claim filing is available only to the dedicated Mac operator approval lane.");
+    error.statusCode = 403;
+    throw error;
+  }
   if (identity?.type !== "codex_operator_token") return;
+  if (["/claim-filing/prepare", "/claim-filing/call"].includes(pathname)) {
+    if (!String(body.query || "").trim()) {
+      const error = new Error("The Retell claim-filing operator requires one exact Chance-file query.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (body.includeCarrierBatch === true) {
+      const error = new Error("The Retell claim-filing operator is single-file only; includeCarrierBatch cannot be true.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!["file_new_claim", "find_existing_claim"].includes(String(body.goal || "file_new_claim").trim())) {
+      const error = new Error("The Retell claim-filing operator supports only file_new_claim or find_existing_claim.");
+      error.statusCode = 400;
+      throw error;
+    }
+  }
   if (body.includeBrainAdvisory === true) {
     const error = new Error("The Codex operator cannot send client evidence to an operational advisory model.");
     error.statusCode = 403;
@@ -14895,9 +15644,11 @@ const OPENAPI = {
               actionBatchOnly: { $ref: "#/components/schemas/PlatformGateStatus" },
               automaticEmailOrTextSending: { $ref: "#/components/schemas/PlatformGateStatus" },
               changedPayloadInvalidatesApproval: { $ref: "#/components/schemas/PlatformGateStatus" },
+              claimFilingApprovalLane: { $ref: "#/components/schemas/PlatformGateStatus" },
               directEffectRoutes: { $ref: "#/components/schemas/PlatformGateStatus" },
               exactDryRunDigestRequired: { $ref: "#/components/schemas/PlatformGateStatus" },
               explicitChanceApprovalRequired: { $ref: "#/components/schemas/PlatformGateStatus" },
+              jobNimbusWritesActionBatchOnly: { $ref: "#/components/schemas/PlatformGateStatus" },
               modelCanExecute: { $ref: "#/components/schemas/PlatformGateStatus" },
               roleEnforcement: { $ref: "#/components/schemas/PlatformGateStatus" },
               schedulingFailClosed: { $ref: "#/components/schemas/PlatformGateStatus" },
@@ -14907,9 +15658,11 @@ const OPENAPI = {
               "actionBatchOnly",
               "automaticEmailOrTextSending",
               "changedPayloadInvalidatesApproval",
+              "claimFilingApprovalLane",
               "directEffectRoutes",
               "exactDryRunDigestRequired",
               "explicitChanceApprovalRequired",
+              "jobNimbusWritesActionBatchOnly",
               "modelCanExecute",
               "roleEnforcement",
               "schedulingFailClosed",
@@ -14994,6 +15747,7 @@ const OPENAPI = {
           "ALLOW_LEGACY_CLIENT_MEMORY_WRITES",
           "ALLOW_QUO_SEND",
           "ALLOW_RETELL_CALLS",
+          "ALLOW_RETELL_CLAIM_CALLS",
           "ALLOW_VOICE_CALLS",
           "BRIDGE_ALLOW_WRITES",
           "HCN_ACTION_EXECUTION_ENABLED"
@@ -15643,6 +16397,7 @@ const OPENAPI = {
       },
       ClaimFilingPrepareRequest: {
         type: "object",
+        additionalProperties: false,
         properties: {
           query: { type: "string", description: "Chance Pearson JobNimbus file identifier. Prefer JobNimbus number, claim number, or exact address." },
           goal: { type: "string", enum: ["file_new_claim", "find_existing_claim", "status_follow_up", "lor_destination", "inspection_scheduling", "adjuster_assignment"], default: "file_new_claim" },
@@ -15660,12 +16415,15 @@ const OPENAPI = {
           homeLivable: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           temporaryRepairs: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           contractorHired: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
+          includeCarrierBatch: { type: "boolean", default: false, description: "Must be false for the dedicated Mac operator. Claim-call approvals are always one JobNimbus file at a time." },
+          retryOfCallId: { type: "string", description: "Optional prior ended call id for a separately prepared and approved retry of this same file." },
           overrides: { type: "object", additionalProperties: true, description: "Approved per-call overrides. If DOL must also be saved to JobNimbus, execute and verify that update first, then prepare the call from the refreshed file. A later DOL change intentionally invalidates an earlier plan digest." }
         },
         required: ["query"]
       },
       ClaimFilingCallRequest: {
         type: "object",
+        additionalProperties: false,
         properties: {
           query: { type: "string", description: "Same Chance file identifier used to prepare the approved plan." },
           planDigest: { type: "string", description: "Exact digest returned by prepareClaimFilingCall after all approved JobNimbus field updates are complete. Any later file fact change, including DOL, invalidates it and requires a fresh preparation." },
@@ -15684,11 +16442,18 @@ const OPENAPI = {
           homeLivable: { type: "string" },
           temporaryRepairs: { type: "string" },
           contractorHired: { type: "string" },
+          includeCarrierBatch: { type: "boolean", default: false, description: "Must be false for the dedicated Mac operator. The bridge also forces one-file mode server-side." },
           overrides: { type: "object", additionalProperties: true },
           retryOfCallId: { type: "string", description: "For an intentional retry only: the prior ended Retell call id for this same file. The bridge rejects retries while a callback is active or after a claim number was captured." },
-          execute: { type: "boolean", default: false, description: "True only after Chance approves the exact prepared plan. Also requires ALLOW_RETELL_CALLS=true." }
+          approvalChallenge: { type: "string", description: "Hidden short-lived single-use challenge returned by the immediately preceding exact dry run. The local Operator retains it; do not copy it into chat." },
+          execute: { type: "boolean", default: false, description: "True only after Chance approves the exact prepared plan. Also requires both Retell claim-call gates." }
         },
         required: ["query", "planDigest"]
+      },
+      ClaimFilingConfigurationRequest: {
+        type: "object",
+        additionalProperties: false,
+        properties: {}
       },
       ClaimFilingResultRequest: {
         type: "object",
@@ -15712,6 +16477,7 @@ const OPENAPI = {
       },
       RetellAgentConfigurationRequest: {
         type: "object",
+        additionalProperties: false,
         properties: {
           configDigest: { type: "string", description: "Exact digest returned by the dry-run configuration review." },
           execute: { type: "boolean", default: false, description: "False returns a dry-run. True updates the Retell LLM and agent only when configDigest matches." },
@@ -16247,9 +17013,17 @@ const OPENAPI = {
         responses: { "200": { description: "Fresh Chance-only JobNimbus evidence packet, readiness review, exact call plan, and approval digest. For inspection scheduling, includes live merged JobNimbus and Google Calendar authority. Never places a call." } }
       }
     },
+    "/claim-filing/configuration": {
+      post: {
+        operationId: "verifyRetellClaimFilingConfiguration",
+        requestBody: jsonBody("ClaimFilingConfigurationRequest"),
+        responses: { "200": { description: "Read-only live attestation of the published Retell claim agent, linked LLM prompt, guarded tools, DTMF support, extraction schema, timezone, exact phone routing, authenticated callback webhook, and callback restoration." } }
+      }
+    },
     "/claim-filing/call": {
       post: {
         operationId: "placeApprovedClaimFilingCall",
+        "x-openai-isConsequential": true,
         requestBody: jsonBody("ClaimFilingCallRequest"),
         responses: { "200": { description: "Rechecks the Chance file and, for inspection scheduling, both calendars; then dry-runs or places the exact approved Retell carrier call. Calendar changes invalidate the prior digest and duplicate calls are blocked." } }
       }
@@ -16271,6 +17045,7 @@ const OPENAPI = {
     "/claim-filing/writeback": {
       post: {
         operationId: "processApprovedClaimFilingWriteback",
+        "x-openai-isConsequential": true,
         requestBody: jsonBody("ClaimFilingWritebackRequest"),
         responses: { "200": { description: "Rechecks the Chance file and call result, then dry-runs or executes the exact approved JobNimbus field/status/note update." } }
       }
@@ -16278,8 +17053,9 @@ const OPENAPI = {
     "/retell/configure-agent": {
       post: {
         operationId: "configureApprovedRetellAgent",
+        "x-openai-isConsequential": true,
         requestBody: jsonBody("RetellAgentConfigurationRequest"),
-        responses: { "200": { description: "Dry-runs or, after exact digest approval, updates and publishes the Retell prompt, tools, timezone, and post-call extraction schema." } }
+        responses: { "200": { description: "Dry-runs or, after exact digest approval, updates and publishes the Retell prompt, tools, timezone, post-call extraction schema, exact inbound claim-agent routing, and authenticated callback webhook." } }
       }
     },
     "/retell/configure-client-coordinator": {

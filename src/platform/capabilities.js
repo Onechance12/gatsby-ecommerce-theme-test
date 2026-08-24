@@ -5,7 +5,7 @@ import { RELEASE_GATE_DEFAULTS, RELEASE_GATE_KEYS } from "./release-gates.js";
 
 export const CAPABILITY_SCHEMA = "hcn.platform.capability-descriptor";
 export const CAPABILITY_SCHEMA_VERSION = "1.0.0";
-export const CAPABILITY_VERSION = "2026-08-23.1";
+export const CAPABILITY_VERSION = "2026-08-24.1";
 
 const GOOGLE_ROLES = new Set([
   "chance",
@@ -68,6 +68,7 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("jobnimbus.calendar.create", "POST /jobnimbus/create-calendar-event"),
   capability("jobnimbus.calendar.update", "POST /jobnimbus/update-calendar-event"),
   capability("claims.filing.prepare", "POST /claim-filing/prepare"),
+  capability("claims.filing.configuration.review", "POST /claim-filing/configuration"),
   capability("claims.filing.call.place", "POST /claim-filing/call"),
   capability("claims.filing.result.review", "POST /claim-filing/result"),
   capability("claims.filing.callbacks.read", "POST /claim-filing/callbacks"),
@@ -173,9 +174,11 @@ export function buildRuntimeStatus(runtime = {}) {
       actionBatchOnly: gateStatus(codexOperator.actionBatchOnly),
       automaticEmailOrTextSending: gateStatus(outboundSafety.automaticEmailOrTextSending),
       changedPayloadInvalidatesApproval: gateStatus(outboundSafety.changedPayloadInvalidatesApproval),
-      directEffectRoutes: gateStatus(codexOperator.directWriteUploadSendOrCallRoutes),
+      claimFilingApprovalLane: gateStatus(codexOperator.claimFilingApprovalLane),
+      directEffectRoutes: gateStatus(codexOperator.directUnapprovedWriteUploadSendOrCallRoutes),
       exactDryRunDigestRequired: gateStatus(outboundSafety.exactDryRunDigestRequired),
       explicitChanceApprovalRequired: gateStatus(outboundSafety.explicitChanceApprovalRequired),
+      jobNimbusWritesActionBatchOnly: gateStatus(codexOperator.jobNimbusWritesActionBatchOnly),
       modelCanExecute: gateStatus(brain.modelCanExecute),
       roleEnforcement: gateStatus(userOAuth.roleEnforcement),
       schedulingFailClosed: gateStatus(scheduling.failClosed),

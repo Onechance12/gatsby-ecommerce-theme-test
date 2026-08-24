@@ -77,9 +77,9 @@ test("Google roles are normalized to named capabilities without wildcard authori
       .filter(({ route }) => !route.includes(" /hcn/"))
       .map(({ name }) => name)
   ).size;
-  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount);
+  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 5);
   assert.equal(chance.authorizedCapabilities.includes("gmail.drafts.send"), true);
-  assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), true);
+  assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), false);
   assert.equal(chance.authorizedCapabilities.includes("hcn.work_center.read"), false);
   assert.equal(chance.authorizedCapabilities.includes("hcn.file.review"), false);
   assert.equal(JSON.stringify(chance).includes("allRoutes"), false);
@@ -169,12 +169,13 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
     gmailSendAllowed: false,
     quoSendAllowed: undefined,
     releaseGates: {
-      ALLOW_CARRIER_FOLLOWUP_CALLS: true,
+      ALLOW_CARRIER_FOLLOWUP_CALLS: false,
       ALLOW_CLIENT_COORDINATOR_CALLS: false,
       ALLOW_GMAIL_SEND: false,
       ALLOW_LEGACY_CLIENT_MEMORY_WRITES: false,
       ALLOW_QUO_SEND: undefined,
       ALLOW_RETELL_CALLS: true,
+      ALLOW_RETELL_CLAIM_CALLS: true,
       ALLOW_VOICE_CALLS: false,
       BRIDGE_ALLOW_WRITES: true,
       HCN_ACTION_EXECUTION_ENABLED: false
@@ -187,8 +188,10 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
       roleEnforcement: true
     },
     codexOperator: {
-      actionBatchOnly: true,
-      directWriteUploadSendOrCallRoutes: false
+      actionBatchOnly: false,
+      jobNimbusWritesActionBatchOnly: true,
+      claimFilingApprovalLane: true,
+      directUnapprovedWriteUploadSendOrCallRoutes: false
     },
     outboundSafety: {
       automaticEmailOrTextSending: false,
@@ -220,7 +223,9 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.gates.gmailSend, "disabled");
   assert.equal(status.gates.hcnActionExecution, "disabled");
   assert.equal(status.gates.quoSend, "unknown");
-  assert.equal(status.controls.actionBatchOnly, "enabled");
+  assert.equal(status.controls.actionBatchOnly, "disabled");
+  assert.equal(status.controls.jobNimbusWritesActionBatchOnly, "enabled");
+  assert.equal(status.controls.claimFilingApprovalLane, "enabled");
   assert.equal(status.controls.directEffectRoutes, "disabled");
   assert.equal(status.brain.advisory, "unconfigured");
   assert.equal(status.brain.fallback, "disabled");
@@ -228,7 +233,7 @@ test("runtime output contains only normalized booleans-as-statuses and reviewed 
   assert.equal(status.brain.legacyClientMemoryWrites, "disabled");
   assert.equal(status.brain.snapshotSafety, "migration_required");
   assert.equal(status.configurationDrift.scope, "release_critical_effect_gates");
-  assert.equal(status.configurationDrift.monitoredKeys.length, 9);
+  assert.equal(status.configurationDrift.monitoredKeys.length, 10);
   assert.equal(status.configurationDrift.status, "detected");
   assert.deepEqual(status.configurationDrift.differences, [{
     key: "BRIDGE_ALLOW_WRITES",

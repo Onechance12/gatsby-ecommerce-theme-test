@@ -197,8 +197,8 @@ test("coordinator routes are read-focused while Google roles cannot use HCN brow
   assert.equal(routeAllowed(coordinator, "POST", "/auth/quo-line"), true);
   assert.equal(routeAllowed(coordinator, "POST", "/claim-filing/call"), false);
   assert.equal(routeAllowed(coordinator, "POST", "/quo/send"), false);
-  assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), true);
-  assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), true);
+  assert.equal(routeAllowed(chance, "POST", "/claim-filing/call"), false);
+  assert.equal(routeAllowed(employee, "POST", "/claim-filing/call"), false);
   for (const role of [
     "chance",
     "administrator",
@@ -251,14 +251,19 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
   for (const route of [
     "GET /ops/run-policy",
     "POST /ops/action-batch-receipts",
-    "POST /ops/action-batch-reconcile"
+    "POST /ops/action-batch-reconcile",
+    "POST /claim-filing/configuration",
+    "POST /claim-filing/prepare",
+    "POST /claim-filing/call",
+    "POST /claim-filing/result",
+    "POST /claim-filing/callbacks"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
     assert.equal(routeAllowed(operator, method, pathname), false, route);
     assert.equal(routeAllowed(macOperator, method, pathname), true, route);
   }
-  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 20);
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 25);
 
   for (const route of [
     "POST /auth/quo-line",
@@ -273,9 +278,6 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     "POST /jobnimbus/update-task",
     "POST /jobnimbus/create-calendar-event",
     "POST /jobnimbus/update-calendar-event",
-    "POST /claim-filing/call",
-    "POST /claim-filing/prepare",
-    "POST /claim-filing/result",
     "POST /claim-filing/writeback",
     "POST /retell/client-coordinator-call",
     "POST /retell/carrier-follow-up-call",
@@ -307,13 +309,35 @@ test("shared bridge token preserves legacy routes but cannot read scoped session
   for (const route of [
     "POST /jobnimbus/upload-file",
     "POST /jobnimbus/update-contact",
-    "POST /claim-filing/call",
     "POST /gmail/send",
     "POST /quo/send",
     "POST /artifacts/list"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(routeAllowed(shared, method, pathname), true, route);
+  }
+  assert.equal(routeAllowed(shared, "POST", "/claim-filing/call"), false);
+});
+
+test("dedicated Retell credential is confined to guarded claim-call termination", () => {
+  const retell = {
+    type: "retell_guarded_end_token",
+    role: "retell_guarded_end",
+    subject: "retell-claim-agent"
+  };
+  assert.equal(routeAllowed(retell, "POST", "/retell/guarded-end-call"), true);
+  for (const route of [
+    "POST /claim-filing/prepare",
+    "POST /claim-filing/call",
+    "POST /claim-filing/result",
+    "POST /claim-filing/writeback",
+    "POST /jobnimbus/update-contact",
+    "POST /gmail/send",
+    "POST /quo/send",
+    "GET /auth/whoami"
+  ]) {
+    const [method, pathname] = route.split(" ");
+    assert.equal(routeAllowed(retell, method, pathname), false, route);
   }
 });
 

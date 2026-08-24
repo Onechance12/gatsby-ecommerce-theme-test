@@ -40,7 +40,7 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
     return allow("The homeowner conversation reached a verified wrap-up.", "homeowner_complete");
   }
 
-  if (!["file_new_claim", "confirm_existing_claim", "claim_status", "inspection_scheduling"].includes(goal)) {
+  if (!["file_new_claim", "find_existing_claim", "confirm_existing_claim", "claim_status", "inspection_scheduling"].includes(goal)) {
     return deny("The call objective is missing or is not authorized for guarded termination.", "unsupported_goal");
   }
 
@@ -51,7 +51,7 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const noNumberWithTiming = NO_NUMBER_YET.test(transcript) && /\b(?:later|within|after|when|once|by|business (?:day|hours?)|hours?|days?|assigned|generated|issued)\b/i.test(transcript);
   const callbackConfirmed = args.callback_confirmed === true && CALLBACK_CONFIRMED.test(transcript);
 
-  if (["file_new_claim", "confirm_existing_claim"].includes(goal)) {
+  if (["file_new_claim", "find_existing_claim", "confirm_existing_claim"].includes(goal)) {
     if (!["claim_filed", "existing_claim_confirmed"].includes(outcome) && !callbackConfirmed && !noNumberWithTiming) {
       return deny("The filing outcome is incomplete. Keep the call connected.", "incomplete_outcome");
     }

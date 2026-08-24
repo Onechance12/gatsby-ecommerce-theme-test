@@ -76,13 +76,31 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /gmail/attachment-review",
   "POST /quo/numbers",
   "POST /quo/history",
-  "POST /quo/transcript"
+  "POST /quo/transcript",
+  "POST /claim-filing/configuration",
+  "POST /claim-filing/prepare",
+  "POST /claim-filing/call",
+  "POST /claim-filing/result",
+  "POST /claim-filing/callbacks"
 ]);
 
 const CODEX_MAC_OPERATOR_ONLY_ROUTES = new Set([
   "GET /ops/run-policy",
   "POST /ops/action-batch-receipts",
-  "POST /ops/action-batch-reconcile"
+  "POST /ops/action-batch-reconcile",
+  "POST /claim-filing/configuration",
+  "POST /claim-filing/prepare",
+  "POST /claim-filing/call",
+  "POST /claim-filing/result",
+  "POST /claim-filing/callbacks"
+]);
+
+const CODEX_MAC_CLAIM_FILING_ROUTES = new Set([
+  "POST /claim-filing/configuration",
+  "POST /claim-filing/prepare",
+  "POST /claim-filing/call",
+  "POST /claim-filing/result",
+  "POST /claim-filing/callbacks"
 ]);
 
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([
@@ -264,8 +282,16 @@ export function routeAllowed(identity, method, pathname) {
   if (HCN_BROWSER_CHANCE_ONLY_ROUTES.has(route)) {
     return identity.type === "hcn_browser_session" && identity.role === "chance";
   }
+  if (CODEX_MAC_CLAIM_FILING_ROUTES.has(route)) {
+    return identity.type === "codex_operator_token"
+      && identity.role === "codex_operator"
+      && identity.subject === "codex-mac-operator";
+  }
   if (identity.type === "bridge_token") {
     return route !== "GET /api/v1/session";
+  }
+  if (identity.type === "retell_guarded_end_token") {
+    return route === "POST /retell/guarded-end-call";
   }
   if (identity.type === "codex_operator_token") {
     return identity.role === "codex_operator"

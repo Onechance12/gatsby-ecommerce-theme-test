@@ -71,6 +71,7 @@ test("callbackCandidateFromCall reconstructs a pending case from Retell metadata
     }
   }), {
     callId: "call-1",
+    agentId: "",
     contactId: "contact-2717",
     fileNumber: "2717",
     goal: "file_new_claim",
@@ -88,6 +89,9 @@ test("callbackCandidateFromCall reconstructs a pending case from Retell metadata
     planDigest: "",
     version: "",
     batchContactIds: "",
+    retryOfCallId: "",
+    operatorLane: "",
+    operatorPrincipalHash: "",
     dynamicVariables: {
       goal: "file_new_claim",
       carrier: "National General",
@@ -175,6 +179,32 @@ test("callback packet fails closed when a critical fact is missing", () => {
   }, "matched");
   assert.match(callback.callbackPacketStatus, /^INCOMPLETE:/);
   assert.match(callback.callbackPacketStatus, /dateOfLoss/);
+});
+
+test("find-existing-claim callbacks require the exact lookup packet", () => {
+  const incomplete = buildCallbackDynamicVariables({
+    dynamicVariables: {
+      goal: "find_existing_claim",
+      insuredName: "Fixture Homeowner",
+      propertyAddress: "100 Test St, Dallas, TX 75201",
+      carrier: "State Farm",
+      policyNumberSpoken: "Missing",
+      dateOfLoss: "04/25/2026"
+    }
+  }, "matched");
+  assert.match(incomplete.callbackPacketStatus, /^INCOMPLETE:/);
+  assert.match(incomplete.callbackPacketStatus, /policyNumberSpoken/);
+  const ready = buildCallbackDynamicVariables({
+    dynamicVariables: {
+      goal: "find_existing_claim",
+      insuredName: "Fixture Homeowner",
+      propertyAddress: "100 Test St, Dallas, TX 75201",
+      carrier: "State Farm",
+      policyNumberSpoken: "POLICY-1",
+      dateOfLoss: "04/25/2026"
+    }
+  }, "matched");
+  assert.equal(ready.callbackPacketStatus, "READY");
 });
 
 test("callback matching requires a unique safe association", () => {

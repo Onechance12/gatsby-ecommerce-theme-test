@@ -152,6 +152,7 @@ export function callbackCandidateFromCall(call) {
   if (filingOutcome === "claim_filed" || filingOutcome === "existing_claim_confirmed") return null;
   return {
     callId: String(call.call_id || ""),
+    agentId: String(call.agent_id || ""),
     contactId: String(metadata.contactId),
     fileNumber: String(metadata.fileNumber || ""),
     goal: String(metadata.goal || variables.goal || "file_new_claim"),
@@ -169,6 +170,9 @@ export function callbackCandidateFromCall(call) {
     planDigest: String(metadata.planDigest || ""),
     version: String(metadata.version || ""),
     batchContactIds: String(metadata.batchContactIds || ""),
+    retryOfCallId: String(metadata.retryOfCallId || ""),
+    operatorLane: String(metadata.operatorLane || ""),
+    operatorPrincipalHash: String(metadata.operatorPrincipalHash || ""),
     dynamicVariables: stringifyDynamicVariables(variables)
   };
 }
@@ -201,6 +205,9 @@ export function buildCallbackMetadata(candidate, match = "matched") {
     goal: String(candidate?.goal || "file_new_claim"),
     planDigest: String(candidate?.planDigest || ""),
     batchContactIds: String(candidate?.batchContactIds || ""),
+    retryOfCallId: String(candidate?.retryOfCallId || ""),
+    operatorLane: String(candidate?.operatorLane || ""),
+    operatorPrincipalHash: String(candidate?.operatorPrincipalHash || ""),
     callLeg: "carrier_callback",
     originalCallId: String(candidate?.callId || ""),
     callbackMatch: String(match || "matched")
@@ -221,8 +228,13 @@ export function confirmedCallbackRequest(call) {
 }
 
 function callbackPacketStatus(variables) {
-  if (String(variables.goal || "file_new_claim") !== "file_new_claim") return "READY";
-  const required = ["insuredName", "propertyAddress", "carrier", "dateOfLoss", "causeOfLoss", "damageOpening", "damageDetails"];
+  const goal = String(variables.goal || "file_new_claim");
+  const required = goal === "file_new_claim"
+    ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss", "causeOfLoss", "damageOpening", "damageDetails"]
+    : goal === "find_existing_claim"
+      ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss"]
+      : [];
+  if (!required.length) return "INCOMPLETE: unsupported goal";
   const missing = required.filter((key) => !variables[key] || /^missing/i.test(String(variables[key])));
   return missing.length ? `INCOMPLETE: ${missing.join(", ")}` : "READY";
 }

@@ -134,12 +134,18 @@ services:
         sync: false
       - key: RETELL_FROM_NUMBER
         sync: false
+      - key: RETELL_GUARDED_END_CALL_TOKEN
+        sync: false
+      - key: RETELL_INBOUND_WEBHOOK_TOKEN
+        sync: false
       - key: ALLOW_RETELL_CALLS
+        value: "true"
+      - key: ALLOW_RETELL_CLAIM_CALLS
         value: "true"
       - key: ALLOW_CLIENT_COORDINATOR_CALLS
         value: "false"
       - key: ALLOW_CARRIER_FOLLOWUP_CALLS
-        value: "true"
+        value: "false"
       - key: ALLOW_LEGACY_CLIENT_MEMORY_WRITES
         value: "false"
       - key: RETELL_CALLBACK_TTL_HOURS

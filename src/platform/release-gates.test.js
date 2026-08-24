@@ -26,7 +26,7 @@ test("all release-critical render manifest gates match the code defaults", () =>
     readFileSync(RENDER_MANIFEST_PATH, "utf8")
   );
 
-  assert.equal(RELEASE_GATE_KEYS.length, 9);
+  assert.equal(RELEASE_GATE_KEYS.length, 10);
   for (const key of RELEASE_GATE_KEYS) {
     assert.equal(
       manifestValues.has(key),
@@ -60,6 +60,7 @@ test("release gate parsing is exact and fails closed", () => {
     ALLOW_QUO_SEND: " true ",
     ALLOW_VOICE_CALLS: true,
     ALLOW_RETELL_CALLS: "true",
+    ALLOW_RETELL_CLAIM_CALLS: "true",
     ALLOW_CLIENT_COORDINATOR_CALLS: "false",
     ALLOW_CARRIER_FOLLOWUP_CALLS: "1",
     ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "true",
@@ -73,6 +74,7 @@ test("release gate parsing is exact and fails closed", () => {
     ALLOW_LEGACY_CLIENT_MEMORY_WRITES: true,
     ALLOW_QUO_SEND: false,
     ALLOW_RETELL_CALLS: true,
+    ALLOW_RETELL_CLAIM_CALLS: true,
     ALLOW_VOICE_CALLS: false,
     BRIDGE_ALLOW_WRITES: true,
     HCN_ACTION_EXECUTION_ENABLED: true
