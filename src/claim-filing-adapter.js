@@ -11,7 +11,7 @@ import {
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-07-16.2";
+export const CLAIM_PLAN_VERSION = "2026-08-24.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export function buildClaimFilingPlan(input, options = {}) {
@@ -139,9 +139,14 @@ export function retellCallBody(plan) {
     from_number: plan.callPlan.from,
     to_number: plan.callPlan.to,
     override_agent_id: plan.callPlan.agentId,
+    override_agent_version: plan.callPlan.agentVersion,
     metadata: plan.callPlan.metadata,
     retell_llm_dynamic_variables: plan.callPlan.dynamicVariables
   });
+}
+
+export function callbackDynamicVariablesDigest(variables) {
+  return digest(stringifyDynamicVariables(variables));
 }
 
 export function callbackCandidateFromCall(call) {
@@ -152,7 +157,16 @@ export function callbackCandidateFromCall(call) {
   if (filingOutcome === "claim_filed" || filingOutcome === "existing_claim_confirmed") return null;
   return {
     callId: String(call.call_id || ""),
+    callStatus: String(call.call_status || ""),
     agentId: String(call.agent_id || ""),
+    reportedAgentVersion: Number.isInteger(Number(call.agent_version))
+      ? Number(call.agent_version)
+      : null,
+    agentVersion: Number.isInteger(Number(metadata.agentVersion))
+      ? Number(metadata.agentVersion)
+      : null,
+    agentConfigDigest: String(metadata.agentConfigDigest || ""),
+    callbackPacketDigest: String(metadata.callbackPacketDigest || ""),
     contactId: String(metadata.contactId),
     fileNumber: String(metadata.fileNumber || ""),
     goal: String(metadata.goal || variables.goal || "file_new_claim"),
@@ -168,6 +182,7 @@ export function callbackCandidateFromCall(call) {
     createdAt: Number(call.start_timestamp || 0),
     ownerId: String(metadata.ownerId || ""),
     planDigest: String(metadata.planDigest || ""),
+    sourcePlanDigest: String(metadata.sourcePlanDigest || ""),
     version: String(metadata.version || ""),
     batchContactIds: String(metadata.batchContactIds || ""),
     retryOfCallId: String(metadata.retryOfCallId || ""),
@@ -204,6 +219,12 @@ export function buildCallbackMetadata(candidate, match = "matched") {
     fileNumber: String(candidate?.fileNumber || ""),
     goal: String(candidate?.goal || "file_new_claim"),
     planDigest: String(candidate?.planDigest || ""),
+    sourcePlanDigest: String(candidate?.sourcePlanDigest || ""),
+    agentVersion: Number.isInteger(Number(candidate?.agentVersion))
+      ? Number(candidate.agentVersion)
+      : undefined,
+    agentConfigDigest: String(candidate?.agentConfigDigest || ""),
+    callbackPacketDigest: String(candidate?.callbackPacketDigest || ""),
     batchContactIds: String(candidate?.batchContactIds || ""),
     retryOfCallId: String(candidate?.retryOfCallId || ""),
     operatorLane: String(candidate?.operatorLane || ""),
@@ -227,16 +248,73 @@ export function confirmedCallbackRequest(call) {
   return /(?:(?:request for (?:a )?callback|callback request) (?:has been|is|was) (?:confirmed|accepted|scheduled|received)|callback (?:is|was|has been) (?:confirmed|accepted|scheduled)|you(?:'ll| will) receive (?:a|the) callback|we(?:'ll| will) call you back|(?:your|the) (?:place|position) in (?:the )?line (?:has been|is) (?:saved|reserved))/i.test(transcript);
 }
 
-function callbackPacketStatus(variables) {
+export function callbackPacketStatus(variables) {
   const goal = String(variables.goal || "file_new_claim");
-  const required = goal === "file_new_claim"
+  const goalRequired = goal === "file_new_claim"
     ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss", "causeOfLoss", "damageOpening", "damageDetails"]
     : goal === "find_existing_claim"
       ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss"]
       : [];
-  if (!required.length) return "INCOMPLETE: unsupported goal";
+  if (!goalRequired.length) return "INCOMPLETE: unsupported goal";
+  const required = goal === "file_new_claim"
+    ? [
+        ...goalRequired,
+        "injuries",
+        "homeLivable",
+        "temporaryRepairs",
+        "contractorHired",
+        "batchClaimCount",
+        "batchClaims"
+      ]
+    : goalRequired;
   const missing = required.filter((key) => !variables[key] || /^missing/i.test(String(variables[key])));
-  return missing.length ? `INCOMPLETE: ${missing.join(", ")}` : "READY";
+  if (missing.length) return `INCOMPLETE: ${missing.join(", ")}`;
+
+  // Existing-claim lookups are exactly hash-bound to the complete approved
+  // packet by the server, but do not require new-claim damage/batch answers.
+  if (goal === "find_existing_claim") return "READY";
+
+  const batchCountText = String(variables.batchClaimCount || "").trim();
+  if (!/^\d+$/.test(batchCountText)) return "INCOMPLETE: invalid batchClaimCount";
+  const batchCount = Number(batchCountText);
+  if (!Number.isSafeInteger(batchCount) || batchCount < 0 || batchCount > 6) {
+    return "INCOMPLETE: invalid batchClaimCount";
+  }
+  if (batchCount === 0) {
+    return String(variables.batchClaims || "").trim() === "None"
+      ? "READY"
+      : "INCOMPLETE: batchClaims must be None when batchClaimCount is zero";
+  }
+  let batchClaims;
+  try {
+    batchClaims = JSON.parse(String(variables.batchClaims || ""));
+  } catch {
+    return "INCOMPLETE: invalid batchClaims JSON";
+  }
+  if (!Array.isArray(batchClaims) || batchClaims.length !== batchCount) {
+    return "INCOMPLETE: batchClaims count mismatch";
+  }
+  const batchRequired = [
+    "fileNumber",
+    "contactId",
+    "insuredName",
+    "propertyAddress",
+    "policyNumber",
+    "dateOfLoss",
+    "causeOfLoss",
+    "injuries",
+    "homeLivable",
+    "temporaryRepairs",
+    "contractorHired"
+  ];
+  const incompleteBatch = batchClaims.findIndex((claim) => (
+    !claim
+    || typeof claim !== "object"
+    || batchRequired.some((key) => !claim[key] || /^missing/i.test(String(claim[key])))
+  ));
+  return incompleteBatch === -1
+    ? "READY"
+    : `INCOMPLETE: batchClaims[${incompleteBatch}]`;
 }
 
 function stringifyDynamicVariables(variables) {

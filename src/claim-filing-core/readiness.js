@@ -8,6 +8,10 @@
 import { cleanClaimNumber } from "./packet.js";
 
 const isMissing = (v) => !v || /^missing/i.test(String(v));
+const isGenericCause = (v) => /^(?:property damage|other|unknown|undetermined|n\/a|not applicable)$/i.test(String(v || "").trim());
+const practicalDamageCategories = (values) => (Array.isArray(values) ? values : [])
+  .map((value) => String(value || "").trim())
+  .filter((value) => value && !/^(?:missing|unknown|no specific damage categories)/i.test(value));
 
 // assessReadiness(packet, to, carrier)
 //   packet  — from buildClaimCallPacket
@@ -24,13 +28,25 @@ export function assessReadiness(packet, to, carrier) {
   if (isMissing(f.dateOfLoss)) blockers.push("no date of loss");
   if (!to && !carrier) blockers.push("no filing phone for this carrier");
 
+  if (packet.goal === "file_new_claim") {
+    if (isMissing(f.causeOfLoss) || isGenericCause(f.causeOfLoss)) {
+      blockers.push("no verified cause of loss");
+    }
+    if (!practicalDamageCategories(packet.damageSummary).length) {
+      blockers.push("no verified practical damage categories");
+    }
+    if (isMissing(packet.damageOpening)) {
+      blockers.push("no evidence-backed damage opening");
+    }
+  }
+
   if (isMissing(f.policyNumber)) {
     if (carrier?.requiresPolicyNumber) blockers.push(`no policy number (${carrier.display} requires it to locate the policy)`);
     else warnings.push("no policy number — carrier will be asked to locate coverage by insured name/address/phone");
   }
 
   if (isMissing(f.stormTime)) warnings.push("no storm time (run DOL report / inspection capture)");
-  if (!packet.damageSummary?.length || /^No specific/i.test(packet.damageSummary[0])) {
+  if (packet.goal !== "file_new_claim" && !practicalDamageCategories(packet.damageSummary).length) {
     warnings.push("no damage scope captured");
   }
   return { ready: blockers.length === 0, blockers, warnings };

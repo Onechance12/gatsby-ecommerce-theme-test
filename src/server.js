@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import {
   buildPostClaimWorkflow,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
+  callbackDynamicVariablesDigest,
   digest,
   retellCallBody,
   callbackCandidateFromCall,
@@ -44,6 +45,8 @@ import {
 } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
+import { extractCallResults } from "./claim-filing-core/resultExtraction.js";
+import { evaluateClaimCallResource } from "./claim-filing-core/resourceLock.js";
 import {
   buildClientCoordinatorAgentSettings,
   buildClientCoordinatorConversation,
@@ -704,14 +707,21 @@ const server = createServer(async (req, res) => {
       }
       assertHcnCookieRequestSafety(req, authentication);
     }
-    const body = req.method === "GET"
-      ? {}
-      : await readJson(
+    const parsedBody = req.method === "GET"
+      ? { body: {}, rawBody: Buffer.alloc(0) }
+      : await readJsonEnvelope(
           req,
           url.pathname.startsWith("/hcn/api/")
             ? hcnApiBodyLimit(url.pathname)
             : MAX_JSON_BODY_BYTES
         );
+    if (
+      url.pathname === "/retell/inbound"
+      && !retellInboundSignatureAuthorized(req, parsedBody.rawBody)
+    ) {
+      return send(res, 401, { error: "Unauthorized inbound webhook" });
+    }
+    const body = parsedBody.body;
     const operatorScope = resolveCodexOperatorRequestScope(
       identity,
       req.method,
@@ -978,6 +988,9 @@ function health() {
       guardedEndCredentialConfigured: Boolean(RETELL_GUARDED_END_CALL_TOKEN),
       guardedEndCredentialIsolated: Boolean(RETELL_GUARDED_END_CALL_TOKEN),
       inboundWebhookCredentialIsolated: Boolean(RETELL_INBOUND_WEBHOOK_TOKEN),
+      inboundWebhookSignatureVerification: "retell_hmac_sha256_raw_body_timestamp",
+      inboundFallbackAgent: "unset_fail_closed",
+      exactPublishedAgentVersionRequired: true,
       callbackPacketRestoration: "full_approved_packet",
       callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
       retryRequiresPriorCallId: true
@@ -3539,26 +3552,43 @@ function claimFilingApprovalScope(file = {}) {
   };
 }
 
-function bindClaimCallApproval(plan, input = {}) {
+function bindClaimCallApproval(plan, input = {}, attestation = null) {
   const sourcePlanDigest = String(plan?.planDigest || "");
   const retryOfCallId = String(input.retryOfCallId || "").trim();
+  const agentVersion = Number.isInteger(Number(attestation?.agentVersion))
+    ? Number(attestation.agentVersion)
+    : null;
+  const agentConfigDigest = String(attestation?.agentConfigDigest || "");
+  const callbackPacketDigest = callbackDynamicVariablesDigest(plan?.callPlan?.dynamicVariables || {});
   const planDigest = digest({
     mode: "retell_claim_call_v1",
     sourcePlanDigest,
-    retryOfCallId
+    retryOfCallId,
+    agentId: String(plan?.callPlan?.agentId || ""),
+    agentVersion,
+    agentConfigDigest,
+    callbackPacketDigest
   });
   return {
     ...plan,
     sourcePlanDigest,
     planDigest,
     retryOfCallId,
+    agentVersion,
+    agentConfigDigest,
+    callbackPacketDigest,
+    configurationAttested: Boolean(agentVersion !== null && agentConfigDigest),
     callPlan: {
       ...plan.callPlan,
+      agentVersion,
       metadata: {
         ...(plan.callPlan?.metadata || {}),
         sourcePlanDigest,
         planDigest,
-        retryOfCallId
+        retryOfCallId,
+        agentVersion,
+        agentConfigDigest,
+        callbackPacketDigest
       }
     }
   };
@@ -3604,11 +3634,10 @@ function claimFilingAnalysisAttestation(fields) {
 function expectedRetellClaimPhoneConfiguration() {
   return {
     phoneNumber: RETELL_FROM_NUMBER,
-    inboundAgents: [{
-      agent_id: RETELL_AGENT_ID,
-      agent_version: "latest_published",
-      weight: 1
-    }],
+    // Retell falls back to this list when the inbound webhook fails. Keep it
+    // empty so an unattested callback cannot reach the claim agent without the
+    // exact approved packet returned by our webhook.
+    inboundAgents: [],
     inboundWebhookUrl: `${PUBLIC_BASE_URL}/retell/inbound?token=${encodeURIComponent(RETELL_INBOUND_WEBHOOK_TOKEN)}`
   };
 }
@@ -3638,6 +3667,10 @@ async function claimFilingConfiguration() {
     retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`),
     retellApi("GET", `/get-phone-number/${encodeURIComponent(RETELL_FROM_NUMBER)}`)
   ]);
+  const agentVersion = Number(agent?.version);
+  if (!Number.isInteger(agentVersion) || agentVersion < 0) {
+    badRequest("The configured Retell claim agent does not have an exact published version.");
+  }
   const llmId = String(agent?.response_engine?.llm_id || "").trim();
   const llmVersion = Number(agent?.response_engine?.version);
   if (
@@ -3709,6 +3742,14 @@ async function claimFilingConfiguration() {
     inboundAgents: liveInboundAgents,
     inboundWebhookUrl: String(phone?.inbound_webhook_url || "")
   });
+  const agentConfigDigest = digest({
+    agentId: RETELL_AGENT_ID,
+    agentVersion,
+    llmId,
+    llmVersion,
+    configurationDigest: liveConfigDigest,
+    phoneConfigurationDigest: livePhoneConfigDigest
+  });
   const callbackWebhookAvailable = phoneNumberMatches
     && inboundWebhookUrlMatches
     && inboundAgentRoutingMatches;
@@ -3731,7 +3772,8 @@ async function claimFilingConfiguration() {
     guardedEndCredentialIsolated: true,
     inboundWebhookCredentialConfigured: true,
     inboundWebhookCredentialIsolated: true,
-    inboundWebhookAuthentication: "dedicated_unexposed_url_token",
+    inboundWebhookAuthentication: "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp",
+    inboundFallbackAgentUnset: liveInboundAgents.length === 0,
     phoneNumberMatches,
     inboundWebhookUrlMatches,
     inboundAgentRoutingMatches,
@@ -3741,8 +3783,9 @@ async function claimFilingConfiguration() {
     callbackPacketRestoration: "full_approved_packet",
     agentPublished: agent?.is_published === true,
     llmPublished: llm?.is_published === true,
-    agentVersion: Number(agent?.version),
+    agentVersion,
     llmVersion,
+    agentConfigDigest,
     promptMatches,
     toolsMatch,
     toolNames: liveToolNames,
@@ -3772,8 +3815,19 @@ async function prepareClaimFiling(input) {
   let plan = await buildClaimPlanWithStormTime(claimInput, context.canonicalInput, context.file);
   plan = await attachSameCarrierBatch(plan, context, claimInput);
   plan = await attachSchedulingAvailability(plan);
-  plan = bindClaimCallApproval(plan, claimInput);
-  const approval = plan.readiness.ready
+  let retellConfiguration = null;
+  if (plan.readiness.ready && ALLOW_RETELL_CALLS && ALLOW_RETELL_CLAIM_CALLS) {
+    retellConfiguration = await claimFilingConfiguration();
+    if (retellConfiguration.ready !== true) {
+      plan.readiness.ready = false;
+      plan.readiness.blockers = [...new Set([
+        ...(plan.readiness.blockers || []),
+        "the exact published Retell claim-agent version and configuration are not attested"
+      ])];
+    }
+  }
+  plan = bindClaimCallApproval(plan, claimInput, retellConfiguration);
+  const approval = plan.readiness.ready && plan.configurationAttested
     ? await issueActionApprovalChallenge(
         plan.planDigest,
         1,
@@ -3790,9 +3844,11 @@ async function prepareClaimFiling(input) {
     ...plan,
     approvalChallenge: approval?.challenge || "",
     approvalExpiresAt: approval?.expiresAt || "",
-    nextStep: plan.readiness.ready
+    nextStep: plan.readiness.ready && plan.configurationAttested
       ? "Review this exact single-file packet. To call, submit its planDigest and hidden single-use approval challenge to placeApprovedClaimFilingCall with execute=true before expiry."
-      : "Resolve the listed blockers, then prepare the filing again."
+      : plan.readiness.ready
+        ? "Claim-call execution is disabled, so no executable approval was issued. Enable both Retell call gates and prepare the filing again to attest and bind the exact published agent version."
+        : "Resolve the listed blockers, then prepare the filing again."
   };
 }
 
@@ -3805,7 +3861,19 @@ async function placeClaimFilingCall(input) {
   let plan = await buildClaimPlanWithStormTime(claimInput, context.canonicalInput, context.file);
   plan = await attachSameCarrierBatch(plan, context, claimInput);
   plan = await attachSchedulingAvailability(plan);
-  plan = bindClaimCallApproval(plan, claimInput);
+  if (!ALLOW_RETELL_CALLS || !ALLOW_RETELL_CLAIM_CALLS) {
+    badRequest("Retell claim-filing calls are disabled. ALLOW_RETELL_CALLS and ALLOW_RETELL_CLAIM_CALLS must both be true.");
+  }
+  if (!RETELL_API_KEY || !RETELL_AGENT_ID || !RETELL_FROM_NUMBER) {
+    badRequest("Retell claim filing is not configured. RETELL_API_KEY, RETELL_AGENT_ID, and RETELL_FROM_NUMBER are required.");
+  }
+  if (!plan.readiness.ready) badRequest(`Claim filing is blocked: ${plan.readiness.blockers.join("; ")}`);
+
+  const retellConfiguration = await claimFilingConfiguration();
+  if (retellConfiguration.ready !== true) {
+    badRequest("The live Retell claim agent is not attested to the deployed bridge configuration.");
+  }
+  plan = bindClaimCallApproval(plan, claimInput, retellConfiguration);
   assertApprovalDigest(input.planDigest, plan.planDigest);
 
   const request = retellCallBody(plan);
@@ -3828,55 +3896,90 @@ async function placeClaimFilingCall(input) {
     };
   }
 
-  if (!ALLOW_RETELL_CALLS || !ALLOW_RETELL_CLAIM_CALLS) {
-    badRequest("Retell claim-filing calls are disabled. ALLOW_RETELL_CALLS and ALLOW_RETELL_CLAIM_CALLS must both be true.");
-  }
-  if (!RETELL_API_KEY || !RETELL_AGENT_ID || !RETELL_FROM_NUMBER) {
-    badRequest("Retell claim filing is not configured. RETELL_API_KEY, RETELL_AGENT_ID, and RETELL_FROM_NUMBER are required.");
-  }
-  if (!plan.readiness.ready) badRequest(`Claim filing is blocked: ${plan.readiness.blockers.join("; ")}`);
-
-  const retellConfiguration = await claimFilingConfiguration();
-  if (retellConfiguration.ready !== true) {
-    badRequest("The live Retell claim agent is not attested to the deployed bridge configuration.");
-  }
-
-  let ledger = await readClaimCallLedger();
-  const localPrior = ledger.find((row) => (
-    row.planDigest === plan.planDigest
-    && String(row.retryOfCallId || "") === retryOfCallId
-    && row.callId
-  ));
-  const remotePrior = localPrior
-    ? null
-    : await findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorPrincipalHash);
-  const prior = localPrior || remotePrior;
-  if (prior) {
-    let reconciledReservation = Boolean(localPrior);
-    if (remotePrior) {
-      reconciledReservation = await withClaimCallMutation(async () => {
-        const latest = await readClaimCallLedger();
-        const reservation = latest.find((row) => (
-          row.planDigest === plan.planDigest
-          && String(row.retryOfCallId || "") === retryOfCallId
+  const admission = await withClaimCallMutation(async () => {
+    const ledger = await readClaimCallLedger();
+    const remoteCalls = await listRemoteClaimCalls();
+    const localPrior = ledger.find((row) => (
+      claimLedgerReservationMatchesPlan(row, plan, retryOfCallId, operatorPrincipalHash)
+      && row.callId
+    ));
+    const remotePrior = localPrior
+      ? null
+      : findRemoteOperatorClaimCallAttemptInRows(
+          remoteCalls,
+          plan,
+          retryOfCallId,
+          operatorPrincipalHash
+        );
+    const prior = localPrior || remotePrior;
+    if (prior) {
+      let reconciledReservation = Boolean(localPrior);
+      if (remotePrior) {
+        const reservation = ledger.find((row) => (
+          claimLedgerReservationMatchesPlan(row, plan, retryOfCallId, operatorPrincipalHash)
           && !row.callId
-          && String(row.principalHash || "") === operatorPrincipalHash
         ));
         if (reservation) {
           reservation.callId = remotePrior.callId;
           reservation.callStatus = remotePrior.callStatus;
           reservation.reconciledAt = new Date().toISOString();
-          await writeClaimCallLedger(latest.slice(-500));
-          return true;
+          await writeClaimCallLedger(ledger.slice(-500));
+          reconciledReservation = true;
         }
-        return false;
-      });
+      }
+      if (operatorPrincipalHash && !reconciledReservation) {
+        conflictError("Retell contains this operator-stamped call, but its local durable approval reservation is missing. No second call was placed; manual reconciliation is required.");
+      }
+      return { mode: "duplicate", prior };
     }
-    if (operatorPrincipalHash && !reconciledReservation) {
-      const error = new Error("Retell contains this operator-stamped call, but its local durable approval reservation is missing. No second call was placed; manual reconciliation is required.");
-      error.statusCode = 409;
-      throw error;
-    }
+
+    const resource = await buildClaimCallResourceSnapshot({
+      file: context.file,
+      ledger,
+      remoteCalls
+    });
+    if (resource.ledgerChanged) await writeClaimCallLedger(ledger.slice(-500));
+    const decision = evaluateClaimCallResource({
+      ...resource,
+      requestedGoal: plan.packet.goal,
+      retryOfCallId
+    });
+    if (!decision.allowed) conflictError(decision.reason);
+
+    const approval = await consumeActionApprovalChallenge(
+      input.approvalChallenge,
+      plan.planDigest,
+      "claim_filing_call",
+      claimFilingApprovalScope(context.file)
+    );
+
+    const record = {
+      id: randomUUID(),
+      approvalId: approval.id,
+      planDigest: plan.planDigest,
+      sourcePlanDigest: plan.sourcePlanDigest,
+      callId: "",
+      callStatus: "provider_pending",
+      agentId: plan.callPlan.agentId,
+      agentVersion: plan.agentVersion,
+      agentConfigDigest: plan.agentConfigDigest,
+      callbackPacketDigest: plan.callbackPacketDigest,
+      ownerId: CHANCE_OWNER_ID,
+      contactId: context.file.id,
+      fileNumber: context.file.number,
+      goal: plan.packet.goal,
+      retryOfCallId,
+      principalHash: operatorPrincipalHash,
+      operatorLane: operatorPrincipalHash ? "codex_mac_single_file_claim_filing" : "",
+      createdAt: new Date().toISOString()
+    };
+    ledger.push(record);
+    await writeClaimCallLedger(ledger.slice(-500));
+    return { mode: "reserved", record };
+  });
+
+  if (admission.mode === "duplicate") {
+    const prior = admission.prior;
     return {
       mode: "duplicate_prevented",
       file: context.file,
@@ -3889,54 +3992,9 @@ async function placeClaimFilingCall(input) {
       note: "This exact approved filing plan already created a Retell call. No second call was placed."
     };
   }
-  const unresolvedReservation = ledger.find((row) => (
-    row.planDigest === plan.planDigest
-    && String(row.retryOfCallId || "") === retryOfCallId
-    && !row.callId
-    && ["provider_pending", "provider_outcome_unknown"].includes(String(row.callStatus || ""))
-  ));
-  if (unresolvedReservation) {
-    const error = new Error("A prior approved Retell provider window is unresolved. Nothing was called; reconcile the exact plan against Retell before retrying.");
-    error.statusCode = 409;
-    throw error;
-  }
 
-  if (retryOfCallId) {
-    const retryAnalysis = await loadClaimCallAnalysis(retryOfCallId);
-    if (retryAnalysis.file.id !== context.file.id) badRequest("retryOfCallId belongs to a different JobNimbus file.");
-    if (retryAnalysis.call.callStatus !== "ended") badRequest("The prior call or callback is still active; do not create a retry yet.");
-    if (retryAnalysis.extracted.claimNumber || ["claim_filed", "existing_claim_confirmed"].includes(retryAnalysis.extracted.outcome)) {
-      badRequest("The prior call already captured a claim number. Review and write back that result instead of retrying.");
-    }
-    request.metadata.retryOfCallId = retryOfCallId;
-  }
-
-  const approval = await consumeActionApprovalChallenge(
-    input.approvalChallenge,
-    plan.planDigest,
-    "claim_filing_call",
-    claimFilingApprovalScope(context.file)
-  );
-
-  const record = {
-    id: randomUUID(),
-    approvalId: approval.id,
-    planDigest: plan.planDigest,
-    callId: "",
-    callStatus: "provider_pending",
-    contactId: context.file.id,
-    fileNumber: context.file.number,
-    goal: plan.packet.goal,
-    retryOfCallId,
-    principalHash: operatorPrincipalHash,
-    operatorLane: operatorPrincipalHash ? "codex_mac_single_file_claim_filing" : "",
-    createdAt: new Date().toISOString()
-  };
-  await withClaimCallMutation(async () => {
-    const latest = await readClaimCallLedger();
-    latest.push(record);
-    await writeClaimCallLedger(latest.slice(-500));
-  });
+  if (retryOfCallId) request.metadata.retryOfCallId = retryOfCallId;
+  const record = admission.record;
   let result;
   try {
     result = await retellApi("POST", "/v2/create-phone-call", request);
@@ -4644,12 +4702,8 @@ function homeownerAppointmentLabels(dateStart, dateEnd) {
 }
 
 async function findRemoteClaimCallAttempt(planDigest, retryOfCallId) {
-  const response = await retellApi("POST", "/v3/list-calls", {
-    filter_criteria: {},
-    sort_order: "descending",
-    limit: 100
-  });
-  const row = (response.items || []).find((call) =>
+  const rows = await listRemoteClaimCalls();
+  const row = rows.find((call) =>
     call.direction === "outbound" &&
     call.metadata?.source === "hcn-wave-jobnimbus-bridge" &&
     String(call.metadata?.planDigest || "") === String(planDigest) &&
@@ -4664,14 +4718,23 @@ async function findRemoteClaimCallAttempt(planDigest, retryOfCallId) {
   } : null;
 }
 
-async function findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorPrincipalHash = "") {
-  const planDigest = String(plan?.planDigest || "");
+async function listRemoteClaimCalls() {
   const response = await retellApi("POST", "/v3/list-calls", {
     filter_criteria: {},
     sort_order: "descending",
     limit: 100
   });
-  const row = (response.items || []).find((call) =>
+  return Array.isArray(response.items) ? response.items : [];
+}
+
+async function findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorPrincipalHash = "") {
+  const rows = await listRemoteClaimCalls();
+  return findRemoteOperatorClaimCallAttemptInRows(rows, plan, retryOfCallId, operatorPrincipalHash);
+}
+
+function findRemoteOperatorClaimCallAttemptInRows(rows, plan, retryOfCallId, operatorPrincipalHash = "") {
+  const planDigest = String(plan?.planDigest || "");
+  const row = (Array.isArray(rows) ? rows : []).find((call) =>
     call.direction === "outbound" &&
     String(call.agent_id || "") === String(plan?.callPlan?.agentId || "") &&
     call.metadata?.source === "hcn-wave-jobnimbus-bridge" &&
@@ -4680,6 +4743,12 @@ async function findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorP
     String(call.metadata?.fileNumber || "").replace(/^#/, "") === String(plan?.file?.number || "").replace(/^#/, "") &&
     String(call.metadata?.goal || "") === String(plan?.packet?.goal || "") &&
     String(call.metadata?.planDigest || "") === String(planDigest) &&
+    String(call.metadata?.sourcePlanDigest || "") === String(plan?.sourcePlanDigest || "") &&
+    Number(call.agent_version) === Number(plan?.agentVersion) &&
+    Number(call.metadata?.agentVersion) === Number(plan?.agentVersion) &&
+    String(call.metadata?.agentConfigDigest || "") === String(plan?.agentConfigDigest || "") &&
+    String(call.metadata?.callbackPacketDigest || "") === String(plan?.callbackPacketDigest || "") &&
+    callbackDynamicVariablesDigest(call.retell_llm_dynamic_variables || {}) === String(plan?.callbackPacketDigest || "") &&
     String(call.metadata?.retryOfCallId || "") === String(retryOfCallId || "") &&
     (
       !operatorPrincipalHash
@@ -4696,6 +4765,202 @@ async function findRemoteOperatorClaimCallAttempt(plan, retryOfCallId, operatorP
     callStatus: row.call_status,
     createdAt: row.start_timestamp ? new Date(row.start_timestamp).toISOString() : ""
   } : null;
+}
+
+function claimLedgerReservationMatchesPlan(row, plan, retryOfCallId, operatorPrincipalHash = "") {
+  return Boolean(
+    String(row?.planDigest || "") === String(plan?.planDigest || "")
+    && String(row?.sourcePlanDigest || "") === String(plan?.sourcePlanDigest || "")
+    && String(row?.agentId || "") === String(plan?.callPlan?.agentId || "")
+    && Number(row?.agentVersion) === Number(plan?.agentVersion)
+    && String(row?.agentConfigDigest || "") === String(plan?.agentConfigDigest || "")
+    && String(row?.callbackPacketDigest || "") === String(plan?.callbackPacketDigest || "")
+    && String(row?.ownerId || "") === CHANCE_OWNER_ID
+    && String(row?.contactId || "") === String(plan?.file?.id || "")
+    && String(row?.fileNumber || "").replace(/^#/, "") === String(plan?.file?.number || "").replace(/^#/, "")
+    && String(row?.goal || "") === String(plan?.packet?.goal || "")
+    && String(row?.retryOfCallId || "") === String(retryOfCallId || "")
+    && (
+      !operatorPrincipalHash
+      || (
+        String(row?.operatorLane || "") === "codex_mac_single_file_claim_filing"
+        && String(row?.principalHash || "") === operatorPrincipalHash
+      )
+    )
+  );
+}
+
+async function buildClaimCallResourceSnapshot({ file, ledger, remoteCalls }) {
+  const contactId = String(file?.id || "");
+  const fileNumber = String(file?.number || "").replace(/^#/, "");
+  const rows = (Array.isArray(ledger) ? ledger : []).filter((row) => (
+    String(row.contactId || "") === contactId
+    && String(row.fileNumber || "").replace(/^#/, "") === fileNumber
+    && ["file_new_claim", "find_existing_claim"].includes(String(row.goal || ""))
+  ));
+  const inventory = Array.isArray(remoteCalls) ? remoteCalls : [];
+  const outboundForContact = inventory.filter((call) => claimResourceRemoteCallMatchesFile(call, file));
+  const outboundById = new Map(outboundForContact.map((call) => [String(call.call_id || ""), call]));
+  const claimedRemoteIds = new Set();
+  const unresolvedReservations = [];
+  const attempts = [];
+  let ledgerChanged = false;
+
+  for (const row of rows) {
+    let callId = String(row.callId || "");
+    let raw = callId ? outboundById.get(callId) : null;
+
+    if (!callId) {
+      const candidates = outboundForContact.filter((call) => claimResourceRemoteCallMatchesLedger(call, row));
+      if (candidates.length === 1) {
+        raw = candidates[0];
+        callId = String(raw.call_id || "");
+        row.callId = callId;
+        row.callStatus = String(raw.call_status || "");
+        row.reconciledAt = new Date().toISOString();
+        ledgerChanged = true;
+      } else if (candidates.length > 1) {
+        attempts.push({
+          reconciliationRequired: true,
+          reason: "More than one Retell call matches a single durable claim-call reservation for this JobNimbus file. Manual reconciliation is required."
+        });
+        continue;
+      } else if (["provider_pending", "provider_outcome_unknown"].includes(String(row.callStatus || ""))) {
+        unresolvedReservations.push(row);
+        continue;
+      }
+    }
+
+    if (!callId) continue;
+    if (!raw) {
+      try {
+        raw = await retellApi("GET", `/v2/get-call/${encodeURIComponent(callId)}`);
+      } catch {
+        attempts.push({
+          callId,
+          reconciliationRequired: true,
+          reason: `Durable Retell call ${callId} for this JobNimbus file could not be read from Retell. Manual reconciliation is required.`
+        });
+        continue;
+      }
+    }
+    claimedRemoteIds.add(String(raw.call_id || ""));
+    if (!claimResourceRemoteCallMatchesLedger(raw, row)) {
+      attempts.push({
+        callId,
+        reconciliationRequired: true,
+        reason: `Retell call ${callId} no longer matches its durable JobNimbus contact, goal, digest, or operator binding.`
+      });
+      continue;
+    }
+
+    if (String(row.callStatus || "") !== String(raw.call_status || "")) {
+      row.callStatus = String(raw.call_status || "");
+      row.providerStatusCheckedAt = new Date().toISOString();
+      ledgerChanged = true;
+    }
+    attempts.push(claimResourceAttempt(raw, row, inventory));
+  }
+
+  for (const raw of outboundForContact) {
+    if (claimedRemoteIds.has(String(raw.call_id || ""))) continue;
+    attempts.push({
+      callId: String(raw.call_id || ""),
+      callStatus: String(raw.call_status || ""),
+      createdAt: Number(raw.start_timestamp || 0),
+      reconciliationRequired: true,
+      reason: `Retell contains claim call ${String(raw.call_id || "(unknown)")} for this JobNimbus file without a matching durable approval reservation. Manual reconciliation is required.`
+    });
+  }
+
+  return { attempts, unresolvedReservations, ledgerChanged };
+}
+
+function claimResourceAttempt(outbound, row, inventory) {
+  const continuations = (Array.isArray(inventory) ? inventory : [])
+    .filter((call) => claimResourceCallbackMatchesOutbound(call, outbound))
+    .sort((left, right) => Number(right.start_timestamp || 0) - Number(left.start_timestamp || 0));
+  const continuation = continuations[0] || null;
+  const effective = continuation || outbound;
+  const extracted = extractCallResults({
+    callStatus: String(effective.call_status || ""),
+    disconnectionReason: String(effective.disconnection_reason || ""),
+    transcript: String(effective.transcript || ""),
+    raw: effective
+  });
+  return {
+    callId: String(outbound.call_id || row.callId || ""),
+    callStatus: String(outbound.call_status || row.callStatus || ""),
+    createdAt: Number(outbound.start_timestamp || Date.parse(row.createdAt || "") || 0),
+    goal: String(outbound.metadata?.goal || row.goal || ""),
+    outcome: String(extracted.outcome || ""),
+    claimNumber: String(extracted.claimNumber || ""),
+    callbackConfirmed: Boolean(callbackCandidateFromCall(outbound)?.callbackRequested),
+    callbackStatus: continuation ? String(continuation.call_status || "") : ""
+  };
+}
+
+function claimResourceRemoteCallMatchesFile(call, file) {
+  const metadata = call?.metadata || {};
+  return Boolean(
+    call?.direction === "outbound"
+    && String(call.agent_id || "") === RETELL_AGENT_ID
+    && metadata.source === "hcn-wave-jobnimbus-bridge"
+    && String(metadata.ownerId || "") === CHANCE_OWNER_ID
+    && String(metadata.contactId || "") === String(file?.id || "")
+    && String(metadata.fileNumber || "").replace(/^#/, "") === String(file?.number || "").replace(/^#/, "")
+    && ["file_new_claim", "find_existing_claim"].includes(String(metadata.goal || ""))
+  );
+}
+
+function claimResourceRemoteCallMatchesLedger(call, row) {
+  const metadata = call?.metadata || {};
+  return Boolean(
+    call?.direction === "outbound"
+    && String(call.agent_id || "") === RETELL_AGENT_ID
+    && String(row.agentId || "") === RETELL_AGENT_ID
+    && metadata.source === "hcn-wave-jobnimbus-bridge"
+    && String(metadata.ownerId || "") === CHANCE_OWNER_ID
+    && String(row.ownerId || "") === CHANCE_OWNER_ID
+    && String(metadata.contactId || "") === String(row.contactId || "")
+    && String(metadata.fileNumber || "").replace(/^#/, "") === String(row.fileNumber || "").replace(/^#/, "")
+    && String(metadata.goal || "") === String(row.goal || "")
+    && String(metadata.planDigest || "") === String(row.planDigest || "")
+    && String(metadata.sourcePlanDigest || "") === String(row.sourcePlanDigest || "")
+    && Number(call.agent_version) === Number(row.agentVersion)
+    && Number(metadata.agentVersion) === Number(row.agentVersion)
+    && String(metadata.agentConfigDigest || "") === String(row.agentConfigDigest || "")
+    && String(metadata.callbackPacketDigest || "") === String(row.callbackPacketDigest || "")
+    && callbackDynamicVariablesDigest(call.retell_llm_dynamic_variables || {}) === String(row.callbackPacketDigest || "")
+    && String(metadata.retryOfCallId || "") === String(row.retryOfCallId || "")
+    && String(metadata.operatorLane || "") === String(row.operatorLane || "")
+    && String(metadata.operatorPrincipalHash || "") === String(row.principalHash || "")
+  );
+}
+
+function claimResourceCallbackMatchesOutbound(call, outbound) {
+  const metadata = call?.metadata || {};
+  const original = outbound?.metadata || {};
+  return Boolean(
+    call?.direction === "inbound"
+    && String(call.agent_id || "") === RETELL_AGENT_ID
+    && metadata.source === "hcn-wave-jobnimbus-bridge"
+    && String(metadata.originalCallId || "") === String(outbound?.call_id || "")
+    && String(metadata.ownerId || "") === String(original.ownerId || "")
+    && String(metadata.contactId || "") === String(original.contactId || "")
+    && String(metadata.fileNumber || "").replace(/^#/, "") === String(original.fileNumber || "").replace(/^#/, "")
+    && String(metadata.goal || "") === String(original.goal || "")
+    && String(metadata.planDigest || "") === String(original.planDigest || "")
+    && String(metadata.sourcePlanDigest || "") === String(original.sourcePlanDigest || "")
+    && Number(call.agent_version) === Number(outbound.agent_version)
+    && Number(metadata.agentVersion) === Number(original.agentVersion)
+    && String(metadata.agentConfigDigest || "") === String(original.agentConfigDigest || "")
+    && String(metadata.callbackPacketDigest || "") === String(original.callbackPacketDigest || "")
+    && guardedCallPacketDigest(call, "carrier_callback") === String(original.callbackPacketDigest || "")
+    && String(metadata.retryOfCallId || "") === String(original.retryOfCallId || "")
+    && String(metadata.operatorLane || "") === String(original.operatorLane || "")
+    && String(metadata.operatorPrincipalHash || "") === String(original.operatorPrincipalHash || "")
+  );
 }
 
 async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
@@ -4985,8 +5250,8 @@ async function configureRetellAgent(input = {}) {
     toolNames: llmConfig.general_tools.map((tool) => tool.name),
     analysisFields: analysisSchema.map((field) => field.name),
     phoneConfigurationDigest: digest(phoneConfig),
-    inboundAgentRouting: "exact_claim_agent_latest_published",
-    inboundWebhookAuthentication: "dedicated_unexposed_url_token"
+    inboundAgentRouting: "unset_fail_closed_webhook_override_only",
+    inboundWebhookAuthentication: "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp"
   };
 
   if (input.execute !== true) {
@@ -5107,6 +5372,10 @@ async function assertGuardedRetellCallOwnership(liveCall = {}) {
   const planDigest = String(metadata.planDigest || "");
   const goal = String(metadata.goal || "");
   const retryOfCallId = String(metadata.retryOfCallId || "");
+  const sourcePlanDigest = String(metadata.sourcePlanDigest || "");
+  const agentVersion = Number(metadata.agentVersion);
+  const agentConfigDigest = String(metadata.agentConfigDigest || "");
+  const callbackPacketDigest = String(metadata.callbackPacketDigest || "");
   const callLeg = String(metadata.callLeg || "outbound");
   const ledgerCallId = callLeg === "carrier_callback"
     ? String(metadata.originalCallId || "")
@@ -5120,14 +5389,22 @@ async function assertGuardedRetellCallOwnership(liveCall = {}) {
   const owned = Boolean(
     row
     && String(liveCall.agent_id || "") === RETELL_AGENT_ID
+    && String(row.agentId || "") === RETELL_AGENT_ID
+    && Number(liveCall.agent_version) === Number(row.agentVersion)
+    && agentVersion === Number(row.agentVersion)
     && metadata.source === "hcn-wave-jobnimbus-bridge"
     && String(metadata.ownerId || "") === CHANCE_OWNER_ID
+    && String(row.ownerId || "") === CHANCE_OWNER_ID
     && metadata.operatorLane === "codex_mac_single_file_claim_filing"
     && validActionBatchPrincipalHash(principalHash)
     && ['file_new_claim', 'find_existing_claim'].includes(goal)
     && String(row.contactId || "") === contactId
     && String(row.fileNumber || "").replace(/^#/, "") === fileNumber
     && String(row.planDigest || "") === planDigest
+    && String(row.sourcePlanDigest || "") === sourcePlanDigest
+    && String(row.agentConfigDigest || "") === agentConfigDigest
+    && String(row.callbackPacketDigest || "") === callbackPacketDigest
+    && guardedCallPacketDigest(liveCall, callLeg) === callbackPacketDigest
     && String(row.goal || "") === goal
     && String(row.retryOfCallId || "") === retryOfCallId
     && CHANCE_OPERATOR_RUN_MANIFEST
@@ -5142,6 +5419,24 @@ async function assertGuardedRetellCallOwnership(liveCall = {}) {
     error.statusCode = 403;
     throw error;
   }
+}
+
+function guardedCallPacketDigest(liveCall, callLeg) {
+  const variables = { ...(liveCall?.retell_llm_dynamic_variables || {}) };
+  if (callLeg === "carrier_callback") {
+    for (const key of [
+      "directionMode",
+      "callbackMatch",
+      "callbackCarrier",
+      "callbackInsuredName",
+      "callbackPropertyAddress",
+      "callbackPolicyNumber",
+      "callbackClaimNumber",
+      "pendingCallbackCases",
+      "callbackPacketStatus"
+    ]) delete variables[key];
+  }
+  return callbackDynamicVariablesDigest(variables);
 }
 
 async function configureClientCoordinatorAgent(input = {}) {
@@ -5384,37 +5679,112 @@ async function retellInbound(input) {
   if (event !== "call_inbound" || !inbound?.from_number || !inbound?.to_number) {
     badRequest("Expected a Retell call_inbound webhook payload.");
   }
+  if (String(inbound.to_number) !== RETELL_FROM_NUMBER) {
+    return rejectedRetellInbound();
+  }
 
-  const candidates = await recentCallbackCandidates(inbound.from_number);
+  const retellConfiguration = await claimFilingConfiguration();
+  if (retellConfiguration.ready !== true) return rejectedRetellInbound();
+  const discoveredCandidates = await recentCallbackCandidates(inbound.from_number);
+  const candidates = await durableApprovedCallbackCandidates(
+    discoveredCandidates,
+    retellConfiguration
+  );
   const { selected, match } = selectCallbackCandidate(candidates, inbound.from_number);
-  const dynamicVariables = selected
-    ? buildCallbackDynamicVariables(selected, match)
-    : buildCallbackDynamicVariables({
-        carrier: "Unknown carrier callback",
-        insuredName: "Unknown",
-        propertyAddress: "Unknown",
-        policyNumberSpoken: "Unknown",
-        claimNumber: "Unknown"
-      }, match);
+  if (!selected || match !== "matched") return rejectedRetellInbound();
+  const dynamicVariables = buildCallbackDynamicVariables(selected, match);
+  if (dynamicVariables.callbackPacketStatus !== "READY") return rejectedRetellInbound();
 
   if (String(dynamicVariables.goal || "") === "inspection_scheduling") {
     const availability = await collectUnifiedSchedulingAvailability();
     applyAvailabilityDynamicVariables(dynamicVariables, availability);
   }
 
-  if (!selected && candidates.length) {
-    dynamicVariables.pendingCallbackCases = candidates.slice(0, 8).map(callbackCaseLabel).join(" | ");
-  }
   const metadata = buildCallbackMetadata(selected, match);
-  if (!metadata.ownerId) metadata.ownerId = CHANCE_OWNER_ID;
 
   return {
     call_inbound: {
       override_agent_id: RETELL_AGENT_ID,
+      override_agent_version: selected.agentVersion,
       dynamic_variables: dynamicVariables,
       metadata
     }
   };
+}
+
+function rejectedRetellInbound() {
+  return { call_inbound: { reject: true } };
+}
+
+async function durableApprovedCallbackCandidates(candidates, retellConfiguration) {
+  const [ledger, approvals] = await Promise.all([
+    readClaimCallLedger(),
+    readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger")
+  ]);
+  if (!ledger.length || !approvals.length) return [];
+  const liveAgentVersion = Number(retellConfiguration?.agentVersion);
+  const liveAgentConfigDigest = String(retellConfiguration?.agentConfigDigest || "");
+  const cutoff = Date.now() - (RETELL_CALLBACK_TTL_HOURS * 60 * 60 * 1000);
+  if (!Number.isInteger(liveAgentVersion) || !liveAgentConfigDigest) return [];
+
+  return (Array.isArray(candidates) ? candidates : []).filter((candidate) => {
+    const row = ledger.find((item) => String(item.callId || "") === String(candidate.callId || ""));
+    if (!row) return false;
+    const approval = approvals.find((item) => String(item.id || "") === String(row.approvalId || ""));
+    const principalHash = String(row.principalHash || "");
+    const actualPacketDigest = callbackDynamicVariablesDigest(candidate.dynamicVariables || {});
+    const callbackVariables = buildCallbackDynamicVariables(candidate, "matched");
+    const fileNumber = String(candidate.fileNumber || "").replace(/^#/, "");
+    const contactId = String(candidate.contactId || "");
+    const reconstructedPlanDigest = digest({
+      mode: "retell_claim_call_v1",
+      sourcePlanDigest: String(candidate.sourcePlanDigest || ""),
+      retryOfCallId: String(candidate.retryOfCallId || ""),
+      agentId: String(candidate.agentId || ""),
+      agentVersion: candidate.agentVersion,
+      agentConfigDigest: String(candidate.agentConfigDigest || ""),
+      callbackPacketDigest: String(candidate.callbackPacketDigest || "")
+    });
+    return Boolean(
+      approval
+      && approval.status === "consumed"
+      && approval.approvalKind === "claim_filing_call"
+      && approval.approvalDigest === row.planDigest
+      && approval.identityHash === principalHash
+      && Number(approval.operationCount) === 1
+      && validActionBatchPrincipalHash(principalHash)
+      && row.operatorLane === "codex_mac_single_file_claim_filing"
+      && candidate.operatorLane === "codex_mac_single_file_claim_filing"
+      && candidate.operatorPrincipalHash === principalHash
+      && candidate.agentId === RETELL_AGENT_ID
+      && String(row.agentId || "") === RETELL_AGENT_ID
+      && candidate.agentVersion === liveAgentVersion
+      && candidate.reportedAgentVersion === liveAgentVersion
+      && Number(row.agentVersion) === liveAgentVersion
+      && candidate.agentConfigDigest === liveAgentConfigDigest
+      && String(row.agentConfigDigest || "") === liveAgentConfigDigest
+      && candidate.ownerId === CHANCE_OWNER_ID
+      && String(row.ownerId || "") === CHANCE_OWNER_ID
+      && candidate.callStatus === "ended"
+      && Number.isFinite(Number(candidate.createdAt))
+      && Number(candidate.createdAt) >= cutoff
+      && Number.isFinite(Date.parse(String(row.createdAt || "")))
+      && Date.parse(String(row.createdAt || "")) >= cutoff
+      && ['file_new_claim', 'find_existing_claim'].includes(String(candidate.goal || ""))
+      && String(row.contactId || "") === contactId
+      && String(row.fileNumber || "").replace(/^#/, "") === fileNumber
+      && String(row.planDigest || "") === String(candidate.planDigest || "")
+      && reconstructedPlanDigest === String(candidate.planDigest || "")
+      && String(row.sourcePlanDigest || "") === String(candidate.sourcePlanDigest || "")
+      && String(row.goal || "") === String(candidate.goal || "")
+      && String(row.retryOfCallId || "") === String(candidate.retryOfCallId || "")
+      && String(row.callbackPacketDigest || "") === String(candidate.callbackPacketDigest || "")
+      && candidate.callbackPacketDigest === actualPacketDigest
+      && callbackVariables.callbackPacketStatus === "READY"
+      && CHANCE_OPERATOR_RUN_MANIFEST
+      && chanceManifestFileBinding(CHANCE_OPERATOR_RUN_MANIFEST, fileNumber, contactId)
+    );
+  });
 }
 
 async function recentCallbackCandidates(fromNumber) {
@@ -5518,7 +5888,28 @@ function samePhone(a, b) {
 
 function retellInboundAuthorized(url) {
   if (!RETELL_INBOUND_WEBHOOK_TOKEN) return false;
-  return url.searchParams.get("token") === RETELL_INBOUND_WEBHOOK_TOKEN;
+  return secureEqual(String(url.searchParams.get("token") || ""), RETELL_INBOUND_WEBHOOK_TOKEN);
+}
+
+function retellInboundSignatureAuthorized(req, rawBody) {
+  if (!RETELL_API_KEY || !Buffer.isBuffer(rawBody)) return false;
+  const header = String(req.headers["x-retell-signature"] || "").trim();
+  const fields = Object.fromEntries(header.split(",").map((part) => {
+    const separator = part.indexOf("=");
+    return separator > 0
+      ? [part.slice(0, separator).trim(), part.slice(separator + 1).trim()]
+      : ["", ""];
+  }));
+  const timestamp = String(fields.v || "");
+  const suppliedDigest = String(fields.d || "").toLowerCase();
+  if (!/^\d{13}$/.test(timestamp) || !/^[a-f0-9]{64}$/.test(suppliedDigest)) return false;
+  const timestampMs = Number(timestamp);
+  if (!Number.isSafeInteger(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) return false;
+  const expectedDigest = createHmac("sha256", RETELL_API_KEY)
+    .update(rawBody)
+    .update(timestamp, "utf8")
+    .digest("hex");
+  return secureEqual(suppliedDigest, expectedDigest);
 }
 
 async function buildLiveClaimContext(query) {
@@ -15375,12 +15766,16 @@ function parseSocketJson(raw) {
 }
 
 async function readJson(req, maximumBytes = MAX_JSON_BODY_BYTES) {
+  return (await readJsonEnvelope(req, maximumBytes)).body;
+}
+
+async function readJsonEnvelope(req, maximumBytes = MAX_JSON_BODY_BYTES) {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
     const error = new Error("Request body limit is unavailable.");
     error.statusCode = 503;
     throw error;
   }
-  let raw = "";
+  const chunks = [];
   let bytes = 0;
   for await (const chunk of req) {
     bytes += chunk.length;
@@ -15389,10 +15784,16 @@ async function readJson(req, maximumBytes = MAX_JSON_BODY_BYTES) {
       error.statusCode = 413;
       throw error;
     }
-    raw += chunk;
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  if (!raw.trim()) return {};
-  try { return JSON.parse(raw); } catch { badRequest("Request body must be valid JSON."); }
+  const rawBody = Buffer.concat(chunks);
+  const raw = rawBody.toString("utf8");
+  if (!raw.trim()) return { body: {}, rawBody };
+  try {
+    return { body: JSON.parse(raw), rawBody };
+  } catch {
+    badRequest("Request body must be valid JSON.");
+  }
 }
 
 function hcnApiBodyLimit(pathname) {

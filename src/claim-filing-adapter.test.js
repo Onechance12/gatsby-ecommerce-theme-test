@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   callbackCandidateFromCall,
+  callbackDynamicVariablesDigest,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
   buildPostClaimWorkflow,
@@ -71,7 +72,12 @@ test("callbackCandidateFromCall reconstructs a pending case from Retell metadata
     }
   }), {
     callId: "call-1",
+    callStatus: "",
     agentId: "",
+    reportedAgentVersion: null,
+    agentVersion: null,
+    agentConfigDigest: "",
+    callbackPacketDigest: "",
     contactId: "contact-2717",
     fileNumber: "2717",
     goal: "file_new_claim",
@@ -87,6 +93,7 @@ test("callbackCandidateFromCall reconstructs a pending case from Retell metadata
     createdAt: 1770000000000,
     ownerId: "",
     planDigest: "",
+    sourcePlanDigest: "",
     version: "",
     batchContactIds: "",
     retryOfCallId: "",
@@ -201,10 +208,59 @@ test("find-existing-claim callbacks require the exact lookup packet", () => {
       propertyAddress: "100 Test St, Dallas, TX 75201",
       carrier: "State Farm",
       policyNumberSpoken: "POLICY-1",
-      dateOfLoss: "04/25/2026"
+      dateOfLoss: "04/25/2026",
+      injuries: "No injuries reported",
+      homeLivable: "Yes, the home is livable",
+      temporaryRepairs: "No temporary repairs",
+      contractorHired: "No contractor hired",
+      batchClaimCount: "0",
+      batchClaims: "None"
     }
   }, "matched");
   assert.equal(ready.callbackPacketStatus, "READY");
+});
+
+test("callback readiness and digest bind the complete approved dynamic-variable packet", () => {
+  const variables = {
+    goal: "file_new_claim",
+    insuredName: "Fixture Homeowner",
+    propertyAddress: "100 Test St, Dallas, TX 75201",
+    carrier: "State Farm",
+    policyNumberSpoken: "POLICY-1",
+    dateOfLoss: "04/25/2026",
+    causeOfLoss: "Hail",
+    damageOpening: "The documented damage is roof hail damage.",
+    damageDetails: "Roof hail damage",
+    injuries: "No injuries reported",
+    homeLivable: "Yes, the home is livable",
+    temporaryRepairs: "No temporary repairs",
+    contractorHired: "No contractor hired",
+    batchClaimCount: "0",
+    batchClaims: "None"
+  };
+  assert.equal(buildCallbackDynamicVariables({ dynamicVariables: variables }).callbackPacketStatus, "READY");
+  const incomplete = { ...variables };
+  delete incomplete.contractorHired;
+  assert.match(buildCallbackDynamicVariables({ dynamicVariables: incomplete }).callbackPacketStatus, /contractorHired/);
+  assert.notEqual(callbackDynamicVariablesDigest(incomplete), callbackDynamicVariablesDigest(variables));
+});
+
+test("Retell call body pins the exact attested agent version", () => {
+  const plan = buildClaimFilingPlan(fixture(), {
+    ownerId: OWNER_ID,
+    fileNumber: "2742",
+    from: "+18176867361",
+    to: "+18002557828",
+    agentId: "agent-1",
+    overrides: {
+      carrier: "Allstate Insurance Company",
+      dateOfLoss: "04/27/2026",
+      causeOfLoss: "Hail",
+      damageDetails: ["Roof hail damage"]
+    }
+  });
+  plan.callPlan.agentVersion = 7;
+  assert.equal(retellCallBody(plan).override_agent_version, 7);
 });
 
 test("callback matching requires a unique safe association", () => {
@@ -327,7 +383,7 @@ test("claim packet exposes only the fixed Retell-owned human opening", () => {
   assert.equal(plan.packet.scriptAuthority, "retell_fixed_carrier_workflow");
   assert.match(plan.packet.humanRepresentativeScript, /We are the public adjuster for the homeowner/);
   assert.doesNotMatch(plan.packet.humanRepresentativeScript.split("\n")[0], /Fixture Homeowner|100 Test St|POLICY-1|04\/25\/2026/);
-  assert.match(plan.packet.scriptInstruction, /Do not invent or rewrite an opening script/);
+  assert.match(plan.packet.scriptInstruction, /Do not invent damage/);
 });
 
 test("inspection scheduling prompt uses only merged live calendar authority", () => {
@@ -378,10 +434,10 @@ test("claim packet separates the short damage opening from detailed follow-up sc
     from: "+12145550100",
     agentId: "agent-1"
   });
-  assert.equal(
-    plan.callPlan.dynamicVariables.damageOpening,
-    "It has roof damage along with collateral on the exterior of the home, mostly paint, window screens, and gutters. I also believe there is some interior damage."
-  );
+  assert.match(plan.callPlan.dynamicVariables.damageOpening, /^The documented damage includes /);
+  assert.match(plan.callPlan.dynamicVariables.damageOpening, /roof damage/);
+  assert.match(plan.callPlan.dynamicVariables.damageOpening, /bathroom ceiling and adjoining walls/);
+  assert.doesNotMatch(plan.callPlan.dynamicVariables.damageOpening, /I also believe|mostly paint/i);
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /window screens\/windows/);
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /garage door/);
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /bathroom ceiling and adjoining walls/);
@@ -450,6 +506,45 @@ test("verified damage details replace broader inferred damage categories", () =>
   });
   assert.deepEqual(plan.packet.damageSummary, ["Roof hail damage", "Fence damage"]);
   assert.doesNotMatch(plan.callPlan.dynamicVariables.damageSummary, /detached/i);
+});
+
+test("new-claim filing hard-blocks without a verified cause and practical damage category", () => {
+  const input = fixture({
+    file: {
+      ...fixture().file,
+      typeOfLoss: ""
+    },
+    evidence: { documents: [], notes: [], tasks: [] }
+  });
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.readiness.ready, false);
+  assert.match(plan.readiness.blockers.join("; "), /no verified cause of loss/);
+  assert.match(plan.readiness.blockers.join("; "), /no verified practical damage categories/);
+  assert.equal(plan.callPlan.dynamicVariables.damageOpening, "Missing");
+  assert.doesNotMatch(plan.packet.humanRepresentativeScript, /roof damage|window screens|interior damage/i);
+});
+
+test("existing-claim lookup remains ready without cause or damage scope", () => {
+  const input = fixture({
+    file: {
+      ...fixture().file,
+      typeOfLoss: ""
+    },
+    evidence: { documents: [], notes: [], tasks: [] }
+  });
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1",
+    goal: "find_existing_claim"
+  });
+  assert.equal(plan.readiness.ready, true);
+  assert.equal(plan.callPlan.dynamicVariables.damageOpening, "Not applicable for an existing-claim lookup.");
+  assert.doesNotMatch(plan.readiness.blockers.join("; "), /cause|damage/i);
 });
 
 function fixture(overrides = {}) {

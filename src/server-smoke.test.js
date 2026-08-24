@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -1844,6 +1844,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   const retellCalls = [];
   let retellCreateCount = 0;
   let retellStopCount = 0;
+  let retellAgentVersion = 7;
   const fakeRetell = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeRetellPort}`);
     const chunks = [];
@@ -1853,7 +1854,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
     if (req.method === "GET" && url.pathname === "/get-agent/fixture-claim-agent") {
       payload = {
         agent_id: "fixture-claim-agent",
-        version: 7,
+        version: retellAgentVersion,
         is_published: true,
         timezone: "America/Chicago",
         response_engine: { type: "retell-llm", llm_id: "fixture-claim-llm", version: 5 },
@@ -1869,11 +1870,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
     ) {
       payload = {
         phone_number: "+12145550100",
-        inbound_agents: [{
-          agent_id: "fixture-claim-agent",
-          agent_version: "latest_published",
-          weight: 1
-        }],
+        inbound_agents: [],
         inbound_webhook_url: `${publicBaseUrl}/retell/inbound?token=${encodeURIComponent(inboundToken)}`
       };
     } else if (req.method === "POST" && url.pathname === "/v3/list-calls") {
@@ -1886,6 +1883,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
         call_status: "ended",
         direction: "outbound",
         agent_id: body.override_agent_id,
+        agent_version: body.override_agent_version,
         to_number: body.to_number,
         from_number: body.from_number,
         start_timestamp: Date.now(),
@@ -1993,6 +1991,10 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(config.phoneNumberMatches, true);
   assert.equal(config.inboundWebhookUrlMatches, true);
   assert.equal(config.inboundAgentRoutingMatches, true);
+  assert.equal(config.inboundFallbackAgentUnset, true);
+  assert.equal(config.inboundWebhookAuthentication, "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp");
+  assert.equal(config.agentVersion, 7);
+  assert.match(config.agentConfigDigest, /^[a-f0-9]{64}$/);
   assert.match(config.expectedPhoneConfigDigest, /^[a-f0-9]{64}$/);
   assert.equal(config.expectedPhoneConfigDigest, config.livePhoneConfigDigest);
   assert.equal(config.dtmfPressDigitAvailable, true);
@@ -2034,6 +2036,9 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(prepared.readiness.ready, true);
   assert.equal(prepared.batchClaims, undefined);
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
+  assert.equal(prepared.agentVersion, 7);
+  assert.match(prepared.agentConfigDigest, /^[a-f0-9]{64}$/);
+  assert.match(prepared.callbackPacketDigest, /^[a-f0-9]{64}$/);
   assert.match(prepared.approvalChallenge, /^[A-Za-z0-9_-]{40,100}$/);
 
   const missingChallenge = await fetch(`${publicBaseUrl}/claim-filing/call`, {
@@ -2057,6 +2062,21 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   });
   assert.equal(changedPlan.status, 409);
   assert.equal(retellCreateCount, 0);
+
+  retellAgentVersion = 8;
+  const driftedVersion = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      ...exactInput,
+      planDigest: prepared.planDigest,
+      approvalChallenge: prepared.approvalChallenge,
+      execute: true
+    })
+  });
+  assert.equal(driftedVersion.status, 409);
+  assert.equal(retellCreateCount, 0);
+  retellAgentVersion = 7;
 
   const executeBody = {
     ...exactInput,
@@ -2103,6 +2123,171 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(result.extracted.claimNumber, "SF-123");
   assert.match(result.nextStep, /direct claim writeback is unavailable/i);
 
+  const outbound = retellCalls.find((call) => call.call_id === "call-1");
+  const completedOutbound = structuredClone(outbound);
+  outbound.transcript = "The carrier could not complete the claim intake.";
+  outbound.call_analysis = {
+    call_successful: false,
+    call_summary: "No result.",
+    custom_analysis_data: {
+      filing_outcome: "no_result",
+      claim_number: "",
+      callback_requested: false
+    }
+  };
+
+  const changedRedialInput = {
+    ...exactInput,
+    stormTime: "Approximately 4:45 PM CDT from revised verified file evidence"
+  };
+  const changedRedialPlanResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify(changedRedialInput)
+  });
+  assert.equal(changedRedialPlanResponse.status, 200);
+  const changedRedialPlan = await changedRedialPlanResponse.json();
+  const changedRedialResponse = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      ...changedRedialInput,
+      planDigest: changedRedialPlan.planDigest,
+      approvalChallenge: changedRedialPlan.approvalChallenge,
+      execute: true
+    })
+  });
+  assert.equal(changedRedialResponse.status, 409);
+  assert.match((await changedRedialResponse.json()).error, /call-1.*retryOfCallId/i);
+  assert.equal(retellCreateCount, 1);
+
+  outbound.transcript = "Your request for a callback has been confirmed. We will call you back.";
+  outbound.call_analysis = {
+    call_successful: false,
+    call_summary: "Carrier callback confirmed.",
+    custom_analysis_data: {
+      filing_outcome: "callback_requested",
+      claim_number: "",
+      callback_requested: true
+    }
+  };
+  const callbackRetryInput = {
+    ...changedRedialInput,
+    retryOfCallId: "call-1"
+  };
+  const callbackRetryPlanResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify(callbackRetryInput)
+  });
+  assert.equal(callbackRetryPlanResponse.status, 200);
+  const callbackRetryPlan = await callbackRetryPlanResponse.json();
+  const callbackRetryResponse = await fetch(`${publicBaseUrl}/claim-filing/call`, {
+    method: "POST",
+    headers: macHeaders,
+    body: JSON.stringify({
+      ...callbackRetryInput,
+      planDigest: callbackRetryPlan.planDigest,
+      approvalChallenge: callbackRetryPlan.approvalChallenge,
+      execute: true
+    })
+  });
+  assert.equal(callbackRetryResponse.status, 409);
+  assert.match((await callbackRetryResponse.json()).error, /callback confirmation is still pending/i);
+  assert.equal(retellCreateCount, 1);
+
+  const inboundPayload = (overrides = {}) => ({
+    event: "call_inbound",
+    call_inbound: {
+      from_number: outbound.to_number,
+      to_number: "+12145550100",
+      ...overrides
+    }
+  });
+  const signedInbound = async (payload, options = {}) => {
+    const raw = JSON.stringify(payload);
+    const timestamp = String(options.timestamp || Date.now());
+    const signature = options.signature || `v=${timestamp},d=${createHmac("sha256", "fixture-retell-api-key")
+      .update(raw)
+      .update(timestamp, "utf8")
+      .digest("hex")}`;
+    const url = options.omitToken
+      ? `${publicBaseUrl}/retell/inbound`
+      : `${publicBaseUrl}/retell/inbound?token=${encodeURIComponent(inboundToken)}`;
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(options.omitSignature ? {} : { "x-retell-signature": signature })
+      },
+      body: raw
+    });
+  };
+
+  const unsignedInbound = await signedInbound(inboundPayload(), { omitSignature: true });
+  assert.equal(unsignedInbound.status, 401);
+  const forgedInbound = await signedInbound(inboundPayload(), {
+    signature: `v=${Date.now()},d=${"0".repeat(64)}`
+  });
+  assert.equal(forgedInbound.status, 401);
+  const missingTokenInbound = await signedInbound(inboundPayload(), { omitToken: true });
+  assert.equal(missingTokenInbound.status, 401);
+  const staleInbound = await signedInbound(inboundPayload(), { timestamp: Date.now() - 6 * 60 * 1000 });
+  assert.equal(staleInbound.status, 401);
+
+  const wrongNumberInbound = await signedInbound(inboundPayload({ to_number: "+12145550101" }));
+  assert.equal(wrongNumberInbound.status, 200);
+  assert.deepEqual((await wrongNumberInbound.json()).call_inbound, { reject: true });
+
+  const admittedInbound = await signedInbound(inboundPayload());
+  assert.equal(admittedInbound.status, 200);
+  const admitted = await admittedInbound.json();
+  assert.equal(admitted.call_inbound.override_agent_id, "fixture-claim-agent");
+  assert.equal(admitted.call_inbound.override_agent_version, 7);
+  assert.equal(admitted.call_inbound.dynamic_variables.callbackPacketStatus, "READY");
+  assert.equal(admitted.call_inbound.dynamic_variables.insuredName, "Fixture Homeowner");
+
+  const ledgerPath = path.join(memoryRoot, "bridge", "claim-call-ledger.json");
+  const originalLedger = await readFile(ledgerPath, "utf8");
+  await rm(ledgerPath, { force: true });
+  const missingLedgerInbound = await signedInbound(inboundPayload());
+  assert.equal(missingLedgerInbound.status, 200);
+  assert.deepEqual((await missingLedgerInbound.json()).call_inbound, { reject: true });
+  await writeFile(ledgerPath, originalLedger, "utf8");
+
+  await writeFile(ledgerPath, "{not-json", "utf8");
+  const corruptInbound = await signedInbound(inboundPayload());
+  assert.equal(corruptInbound.status, 503);
+  await writeFile(ledgerPath, originalLedger, "utf8");
+
+  const savedCalls = structuredClone(retellCalls);
+  const legacyCall = structuredClone(outbound);
+  delete legacyCall.metadata.agentVersion;
+  delete legacyCall.metadata.agentConfigDigest;
+  delete legacyCall.metadata.callbackPacketDigest;
+  delete legacyCall.metadata.sourcePlanDigest;
+  retellCalls.splice(0, retellCalls.length, legacyCall);
+  const legacyInbound = await signedInbound(inboundPayload());
+  assert.equal(legacyInbound.status, 200);
+  assert.deepEqual((await legacyInbound.json()).call_inbound, { reject: true });
+
+  const incompleteCall = structuredClone(outbound);
+  delete incompleteCall.retell_llm_dynamic_variables.contractorHired;
+  retellCalls.splice(0, retellCalls.length, incompleteCall);
+  const incompleteInbound = await signedInbound(inboundPayload());
+  assert.equal(incompleteInbound.status, 200);
+  assert.deepEqual((await incompleteInbound.json()).call_inbound, { reject: true });
+
+  retellCalls.splice(0, retellCalls.length, ...savedCalls);
+  retellAgentVersion = 8;
+  const driftedCallbackInbound = await signedInbound(inboundPayload());
+  assert.equal(driftedCallbackInbound.status, 200);
+  assert.deepEqual((await driftedCallbackInbound.json()).call_inbound, { reject: true });
+  retellAgentVersion = 7;
+
+  const restoredOutbound = retellCalls.find((call) => call.call_id === "call-1");
+  Object.assign(restoredOutbound, completedOutbound);
+
   const callbacksResponse = await fetch(`${publicBaseUrl}/claim-filing/callbacks`, {
     method: "POST",
     headers: macHeaders,
@@ -2111,13 +2296,12 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(callbacksResponse.status, 200);
   assert.equal((await callbacksResponse.json()).count, 0);
 
-  const outbound = retellCalls.find((call) => call.call_id === "call-1");
   retellCalls.push({
-    ...structuredClone(outbound),
+    ...structuredClone(restoredOutbound),
     call_id: "callback-tampered",
     direction: "inbound",
     metadata: {
-      ...structuredClone(outbound.metadata),
+      ...structuredClone(restoredOutbound.metadata),
       callLeg: "carrier_callback",
       originalCallId: "call-1",
       operatorPrincipalHash: "f".repeat(64)
@@ -5988,11 +6172,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       && decodeURIComponent(url.pathname.slice("/update-phone-number/".length)) === "+12145550100"
     ) {
       phoneUpdateCount += 1;
-      assert.deepEqual(body.inbound_agents, [{
-        agent_id: "fixture-claim-config-agent",
-        agent_version: "latest_published",
-        weight: 1
-      }]);
+      assert.deepEqual(body.inbound_agents, []);
       assert.equal(
         body.inbound_webhook_url,
         `${publicBaseUrl}/retell/inbound?token=${encodeURIComponent(inboundToken)}`
@@ -6045,7 +6225,8 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   assert.equal(dryRunResponse.status, 200);
   const dryRun = await dryRunResponse.json();
   assert.equal(dryRun.mode, "dry_run");
-  assert.equal(dryRun.inboundAgentRouting, "exact_claim_agent_latest_published");
+  assert.equal(dryRun.inboundAgentRouting, "unset_fail_closed_webhook_override_only");
+  assert.equal(dryRun.inboundWebhookAuthentication, "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp");
   assert.match(dryRun.phoneConfigurationDigest, /^[a-f0-9]{64}$/);
   assert.equal(JSON.stringify(dryRun).includes(guardedToken), false);
   assert.equal(JSON.stringify(dryRun).includes(inboundToken), false);
@@ -6491,7 +6672,7 @@ test("Mac claim prepare reads fresh evidence while the shared bridge principal i
   assert.equal(prepared.packet.verifiedFileFacts.stormTime, "Approximately 4:30 PM CDT based on a nearby reported hail event");
   assert.equal(prepared.stormTimeEvidence.verifiedWeatherMatch, true);
   assert.equal(prepared.stormTimeEvidence.dateMatchedToJobNimbusDol, "2026-04-25");
-  assert.match(prepared.packet.scriptInstruction, /Do not invent or rewrite an opening script/);
+  assert.match(prepared.packet.scriptInstruction, /Do not invent damage/);
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
 
   const labeledPreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {

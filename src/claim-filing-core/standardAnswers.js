@@ -56,7 +56,10 @@ export function inferCause(file = {}, evidence = {}) {
   if (source.includes("hail")) return "Hail";
   if (source.includes("wind")) return "Wind";
   if (source.includes("water")) return "Water";
-  return "Property damage";
+  // A generic property-loss label is not a cause. Returning Missing keeps new
+  // claim filing fail-closed until the file or its evidence names an actual
+  // cause, while existing-claim lookup can continue without damage facts.
+  return "Missing";
 }
 
 // Infer the property-level damage categories from free-text evidence. Returns a
@@ -72,7 +75,8 @@ export function inferDamageCategories(file = {}, evidence = {}) {
   ].join("\n").toLowerCase();
 
   const checks = [
-    ["roof hail/wind damage", /roof|shingle|slope|hail|wind/],
+    ["roof damage", /roof|shingle|slope/],
+    ["hail/wind impact damage", /(?:hail|wind)(?:\s+\w+){0,4}\s+(?:damage|impact)|(?:damage|impact)(?:\s+\w+){0,4}\s+(?:hail|wind)/],
     ["gutters/downspouts", /gutter|downspout/],
     ["fascia/soffit", /fascia|soffit/],
     ["window screens/windows", /window|screen|glazing/],

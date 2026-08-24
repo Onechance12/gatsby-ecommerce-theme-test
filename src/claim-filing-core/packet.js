@@ -7,8 +7,6 @@ import { normalizeClaimFileInput } from "./inputContract.js";
 import { resolveStandardAnswers, inferCause, inferDamageCategories } from "./standardAnswers.js";
 
 export const DEFAULT_GOAL = "file_new_claim";
-export const DEFAULT_DAMAGE_OPENING = "It has roof damage along with collateral on the exterior of the home, mostly paint, window screens, and gutters. I also believe there is some interior damage.";
-
 const ALLOWED_GOALS = new Set([
   "file_new_claim",
   "find_existing_claim",
@@ -66,9 +64,12 @@ export function buildClaimCallPacket(input, options = {}) {
   };
 
   const inferredDamageCategories = inferDamageCategories(file, normalized.evidence);
-  const damageOpening = String(overrides.damageOpening || DEFAULT_DAMAGE_OPENING).trim();
   const damageDetails = normalizeDamageDetails(overrides.damageDetails, inferredDamageCategories);
   const damageCategories = overrides.damageDetails ? [...damageDetails] : inferredDamageCategories;
+  const damageOpening = String(
+    overrides.damageOpening
+    || (goal === "file_new_claim" ? evidenceBackedDamageOpening(damageCategories) : "Not applicable for an existing-claim lookup.")
+  ).trim();
   const missingFields = missingCallFields(facts, goal, damageCategories);
 
   return {
@@ -80,7 +81,7 @@ export function buildClaimCallPacket(input, options = {}) {
     damageDetails,
     missingFields,
     scriptAuthority: "retell_fixed_carrier_workflow",
-    scriptInstruction: "Do not invent or rewrite an opening script. Retell handles the IVR with short answers and uses the fixed human-representative opening only after a live person answers.",
+    scriptInstruction: "Do not invent damage. Retell handles the IVR with short answers and uses only the evidence-backed damage opening after a live person asks what was damaged.",
     quoLearnedCallPattern: buildQuoLearnedPattern(goal),
     callScript: buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails),
     shortIvrAnswers: buildIvrAnswers(goal, facts),
@@ -99,6 +100,15 @@ function normalizeDamageDetails(value, fallback) {
   if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
   if (value && String(value).trim()) return String(value).split(/[,;\n]+/).map((item) => item.trim()).filter(Boolean);
   return [...fallback];
+}
+
+function evidenceBackedDamageOpening(categories) {
+  const verified = (Array.isArray(categories) ? categories : [])
+    .map((item) => String(item || "").trim())
+    .filter((item) => item && !/^(?:missing|unknown|no specific damage categories)/i.test(item));
+  if (!verified.length) return "Missing";
+  if (verified.length === 1) return `The documented damage is ${verified[0]}.`;
+  return `The documented damage includes ${verified.slice(0, -1).join(", ")}, and ${verified.at(-1)}.`;
 }
 
 export function normalizeGoal(value, file) {
@@ -176,7 +186,7 @@ function buildIvrAnswers(goal, facts) {
   return answers;
 }
 
-function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT_DAMAGE_OPENING, damageDetails = damageCategories) {
+function buildHumanScript(goal, facts, damageCategories, damageOpening = "Missing", damageDetails = damageCategories) {
   const filingIntro = "Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting. We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf.";
   const intro = `Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting calling regarding the property claim for ${facts.insuredName}.`;
   if (goal === "file_new_claim") {
