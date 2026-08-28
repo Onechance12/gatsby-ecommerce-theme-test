@@ -573,6 +573,20 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(health.platform.boundaries.chanceBrain, "disconnected_no_route");
   assert.equal(health.platform.boundaries.hcnChanceBrainDataFlow, "none");
   assert.equal(health.platform.boundaries.jobrolo, "disconnected");
+  assert.equal(health.jobroloAdapter.contract, "jobrolo.hcn.request.v1");
+  assert.equal(health.jobroloAdapter.ready, false);
+  assert.equal(health.jobroloAdapter.managementSweepExposed, true);
+  assert.equal(health.jobroloAdapter.managementSweepReady, false);
+  assert.equal(health.jobroloImportTransport.ready, false);
+  assert.equal(health.jobroloImportTransport.photoManifestsExposed, true);
+  assert.equal(
+    health.platform.integrations.jobrolo.generalAdapter.availability,
+    "unavailable"
+  );
+  assert.equal(
+    health.platform.integrations.jobrolo.importTransport.availability,
+    "unavailable"
+  );
   assert.equal(
     health.platform.boundaries.hcnOperationsBrain,
     "foundation_persistence_pending"
@@ -621,6 +635,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(platformMeta.build.attested, true);
   assert.equal(platformMeta.boundaries.chanceBrain, "disconnected_no_route");
   assert.equal(platformMeta.boundaries.jobrolo, "disconnected");
+  assert.equal(
+    platformMeta.integrations.jobrolo.generalAdapter.contract,
+    "jobrolo.hcn.request.v1"
+  );
   assert.equal(JSON.stringify(platformMeta).includes(PLATFORM_FIXTURE_SECRET), false);
 
   const unauthenticatedSessionResponse = await fetch(`http://127.0.0.1:${port}/api/v1/session`);
@@ -649,6 +667,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "#/components/schemas/PlatformSessionResponse"
   );
   assert.equal(schema.components.schemas.PlatformMetadataResponse.additionalProperties, false);
+  assert.equal(
+    schema.components.schemas.PlatformMetadataResponse.properties.integrations.$ref,
+    "#/components/schemas/PlatformJobroloIntegrationCatalog"
+  );
   assert.deepEqual(
     schema.components.schemas.PlatformMetadataResponse.properties.boundaries
       .properties.jobrolo.enum,
@@ -717,6 +739,42 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/jobnimbus/photo-review"].post.operationId, "reviewJobNimbusPhotos");
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
   assert.equal(schema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
+  const signedReadRoutes = {
+    "/integrations/jobrolo/v1/status": "readJobroloHcnStatus",
+    "/integrations/jobrolo/v1/work-center": "readJobroloHcnWorkCenter",
+    "/integrations/jobrolo/v1/file-review": "readJobroloHcnFile",
+    "/integrations/jobrolo/v1/communication-sweep":
+      "readJobroloHcnCommunicationSweep",
+    "/integrations/jobrolo/v1/quo-phone-history":
+      "readJobroloHcnQuoPhoneHistory",
+    "/integrations/jobrolo/v1/management-sweep":
+      "readJobroloHcnManagementSweep",
+    "/integrations/jobrolo-import/v1/catalog":
+      "readJobroloImportCatalog",
+    "/integrations/jobrolo-import/v1/snapshot":
+      "readJobroloImportSnapshot",
+    "/integrations/jobrolo-import/v1/document-content":
+      "readJobroloImportDocumentContent"
+  };
+  for (const [pathname, operationId] of Object.entries(signedReadRoutes)) {
+    assert.equal(schema.paths[pathname].post.operationId, operationId);
+    assert.equal(
+      schema.paths[pathname].post["x-hcn-service-to-service"],
+      true
+    );
+    assert.equal(
+      schema.paths[pathname].post["x-openai-isConsequential"],
+      false
+    );
+  }
+  assert.deepEqual(
+    schema.paths["/integrations/jobrolo/v1/management-sweep"].post.security,
+    [{ jobroloHmacAuthorization: [] }]
+  );
+  assert.deepEqual(
+    schema.paths["/integrations/jobrolo-import/v1/snapshot"].post.security,
+    [{ jobroloImportHmacAuthorization: [] }]
+  );
 
   const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
   assert.equal(chatgptSchemaResponse.status, 200);
@@ -735,6 +793,14 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(Object.values(chatgptSchema.paths).flatMap((path) => Object.values(path)).length, 28);
   assert.equal(chatgptSchema.paths["/api/v1/meta"], undefined);
   assert.equal(chatgptSchema.paths["/api/v1/session"], undefined);
+  assert.equal(
+    chatgptSchema.paths["/integrations/jobrolo/v1/management-sweep"],
+    undefined
+  );
+  assert.equal(
+    chatgptSchema.paths["/integrations/jobrolo-import/v1/snapshot"],
+    undefined
+  );
   assert.equal(chatgptSchema.paths["/auth/whoami"].get.operationId, "readSignedInWaveIdentity");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post.operationId, "linkAuthenticatedQuoLine");
   assert.equal(chatgptSchema.paths["/auth/quo-line"].post["x-openai-isConsequential"], true);

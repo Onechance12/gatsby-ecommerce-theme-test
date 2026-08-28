@@ -5,14 +5,20 @@ import {
 } from "node:crypto";
 
 export const JOBROLO_HCN_REQUEST_SCHEMA = "jobrolo.hcn.request.v1";
+export const HCN_JOBROLO_REQUEST_SCHEMA = JOBROLO_HCN_REQUEST_SCHEMA;
 
-export const JOBROLO_HCN_ROUTES = Object.freeze([
+export const JOBROLO_HCN_READ_ROUTES = Object.freeze([
   "/integrations/jobrolo/v1/status",
   "/integrations/jobrolo/v1/work-center",
   "/integrations/jobrolo/v1/file-review",
   "/integrations/jobrolo/v1/communication-sweep",
   "/integrations/jobrolo/v1/quo-phone-history",
-  "/integrations/jobrolo/v1/management-sweep",
+  "/integrations/jobrolo/v1/management-sweep"
+]);
+export const HCN_JOBROLO_READ_ROUTES = JOBROLO_HCN_READ_ROUTES;
+
+export const JOBROLO_HCN_ROUTES = Object.freeze([
+  ...JOBROLO_HCN_READ_ROUTES,
   "/integrations/jobrolo/v1/assistant/turn",
   "/integrations/jobrolo/v1/action-plans/prepare",
   "/integrations/jobrolo/v1/action-plans/execute",

@@ -52,6 +52,14 @@ test("public metadata proves the runtime without exposing environment contents",
   assert.equal(meta.boundaries.hcnChanceBrainDataFlow, "none");
   assert.equal(meta.boundaries.jobrolo, "disconnected");
   assert.equal(
+    meta.integrations.jobrolo.generalAdapter.availability,
+    "unavailable"
+  );
+  assert.equal(
+    meta.integrations.jobrolo.importTransport.availability,
+    "unavailable"
+  );
+  assert.equal(
     meta.boundaries.hcnOperationsBrain,
     "foundation_persistence_pending"
   );
@@ -130,7 +138,15 @@ test("public metadata reports only the narrow signed Jobrolo adapter when it is 
     env: {},
     runtime: {
       jobroloAdapter: {
-        ready: true
+        ready: true,
+        communicationSweepReady: true,
+        quoPhoneHistoryReady: true,
+        managementSweepReady: true
+      },
+      jobroloImportTransport: {
+        ready: true,
+        photoManifestsExposed: true,
+        documentContentBoundToManifest: true
       }
     },
     nodeRuntime: NODE_RUNTIME,
@@ -138,6 +154,39 @@ test("public metadata reports only the narrow signed Jobrolo adapter when it is 
   });
 
   assert.equal(meta.boundaries.jobrolo, "narrow_signed_thresher_adapter");
+  assert.equal(
+    meta.integrations.jobrolo.generalAdapter.availability,
+    "ready"
+  );
+  assert.equal(
+    meta.integrations.jobrolo.generalAdapter.contract,
+    "jobrolo.hcn.request.v1"
+  );
+  assert.deepEqual(
+    meta.integrations.jobrolo.generalAdapter.readCapabilities,
+    {
+      status: "ready",
+      workCenter: "ready",
+      fileReview: "ready",
+      communicationSweep: "ready",
+      quoPhoneHistory: "ready",
+      managementSweep: "ready"
+    }
+  );
+  assert.equal(
+    meta.integrations.jobrolo.importTransport.availability,
+    "ready"
+  );
+  assert.equal(
+    meta.integrations.jobrolo.importTransport.photoManifests,
+    "ready"
+  );
+  assert.equal(
+    meta.integrations.jobrolo.importTransport.documentContentBoundToManifest,
+    true
+  );
+  assert.equal(meta.integrations.jobrolo.providerCredentialsExposed, false);
+  assert.equal(meta.integrations.jobrolo.automaticExecution, false);
   assert.equal(meta.boundaries.chanceBrain, "disconnected_no_route");
   assert.equal(meta.boundaries.hcnChanceBrainDataFlow, "none");
 });

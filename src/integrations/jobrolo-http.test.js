@@ -362,6 +362,23 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(status.response.status, 200, status.text);
   assert.equal(status.body.schema, "hcn.jobrolo.response.v1");
   assert.equal(status.body.result.adapter.status, "connected");
+  assert.equal(status.body.result.adapter.managementSweepExposed, true);
+  assert.equal(status.body.result.adapter.managementSweepReady, true);
+  assert.equal(status.body.result.adapter.communicationSweepReady, true);
+  assert.equal(status.body.result.adapter.quoPhoneHistoryReady, true);
+  assert.deepEqual(status.body.result.adapter.readRoutes, [
+    "/integrations/jobrolo/v1/status",
+    "/integrations/jobrolo/v1/work-center",
+    "/integrations/jobrolo/v1/file-review",
+    "/integrations/jobrolo/v1/communication-sweep",
+    "/integrations/jobrolo/v1/quo-phone-history",
+    "/integrations/jobrolo/v1/management-sweep"
+  ]);
+  assert.equal(status.body.result.adapter.importTransport.ready, false);
+  assert.equal(
+    status.body.result.adapter.importTransport.photoManifestsExposed,
+    true
+  );
   assert.equal(status.body.result.profile.email, EMAIL);
   assert.equal(status.body.result.jobNimbus.scope, "assigned");
 
