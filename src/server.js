@@ -277,6 +277,8 @@ import {
   HCN_JOBROLO_CLAIM_FILING_ROUTES,
   isJobroloHcnRoute,
   HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
+  HCN_JOBROLO_REQUEST_SCHEMA,
+  HCN_JOBROLO_READ_ROUTES,
   loadJobroloHcnClaimFilingConfiguration,
   loadJobroloHcnIntegrationConfiguration,
   loadJobroloHcnNoteWritebackConfiguration
@@ -296,6 +298,7 @@ import {
   createJobroloImportTransportResponse,
   HCN_JOBROLO_IMPORT_CATALOG_ROUTE,
   HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE,
+  HCN_JOBROLO_IMPORT_ROUTES,
   HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE,
   HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS,
   isJobroloImportRoute,
@@ -1841,11 +1844,13 @@ function health() {
       ready:
         HCN_JOBROLO_CONFIGURATION.ready === true
         && hcnConsoleFreshReadConfigured(),
+      contract: HCN_JOBROLO_REQUEST_SCHEMA,
       authentication:
         "dedicated_hmac_timestamp_nonce_body_hash",
       principalMode: "fixed_server_side_approved_employee",
       principalSelectableByCaller: false,
       fileScope: "assigned_only",
+      readRoutes: [...HCN_JOBROLO_READ_ROUTES],
       assistant: "existing_thresher_read_only_runtime",
       actionPreparation: "existing_hcn_exact_plan",
       actionExecution:
@@ -1854,9 +1859,38 @@ function health() {
       automaticExecution: false,
       providerCredentialsExposed: false,
       communicationSweepExposed: true,
+      communicationSweepReady:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured(),
       quoPhoneHistoryExposed: true,
+      quoPhoneHistoryReady:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured()
+        && Boolean(QUO_API_KEY),
+      managementSweepExposed: true,
+      managementSweepReady:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured()
+        && HCN_MANAGEMENT_ADJUSTERS.ready === true,
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
+      legacyTokensAccepted: false
+    },
+    jobroloImportTransport: {
+      enabled: HCN_JOBROLO_IMPORT_CONFIGURATION.enabled === true,
+      ready:
+        HCN_JOBROLO_IMPORT_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured(),
+      contract: "jobrolo.jobnimbus-import.transport-response.v1",
+      authentication:
+        "dedicated_import_hmac_exact_bytes_timestamp_durable_nonce",
+      principalMode: "fixed_server_side_approved_employee",
+      principalSelectableByCaller: false,
+      fileScope: "assigned_only",
+      readRoutes: [...HCN_JOBROLO_IMPORT_ROUTES],
+      photoManifestsExposed: true,
+      documentContentBoundToManifest: true,
+      providerCredentialsExposed: false,
       legacyTokensAccepted: false
     },
     hcnAssistant: {
@@ -3491,7 +3525,28 @@ async function jobroloHcnStatus(input = {}) {
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       communicationSweepExposed: true,
+      communicationSweepReady:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured(),
       quoPhoneHistoryExposed: true,
+      quoPhoneHistoryReady:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured()
+        && Boolean(QUO_API_KEY),
+      managementSweepExposed: true,
+      managementSweepReady:
+        HCN_JOBROLO_CONFIGURATION.ready === true
+        && hcnConsoleFreshReadConfigured()
+        && HCN_MANAGEMENT_ADJUSTERS.ready === true,
+      readRoutes: [...HCN_JOBROLO_READ_ROUTES],
+      importTransport: {
+        ready:
+          HCN_JOBROLO_IMPORT_CONFIGURATION.ready === true
+          && hcnConsoleFreshReadConfigured(),
+        readRoutes: [...HCN_JOBROLO_IMPORT_ROUTES],
+        photoManifestsExposed: true,
+        documentContentBoundToManifest: true
+      },
       providerCredentialsExposed: false
     })
   });
@@ -22460,6 +22515,18 @@ const OPENAPI = {
         type: "apiKey",
         in: "cookie",
         name: "__Host-hcn_session"
+      },
+      jobroloHmacAuthorization: {
+        type: "apiKey",
+        in: "header",
+        name: "Authorization",
+        description: "Dedicated service credential formatted exactly as Jobrolo-HMAC <client-id>. The timestamp, nonce, body digest, and HMAC signature headers are also required."
+      },
+      jobroloImportHmacAuthorization: {
+        type: "apiKey",
+        in: "header",
+        name: "Authorization",
+        description: "Separate import-only credential formatted exactly as Jobrolo-Import-HMAC <client-id>. It cannot call the general adapter or any effect route."
       }
     },
     schemas: {
@@ -22707,6 +22774,105 @@ const OPENAPI = {
           "HCN_ACTION_EXECUTION_ENABLED"
         ]
       },
+      PlatformJobroloIntegrationCatalog: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          jobrolo: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              schemaVersion: {
+                type: "string",
+                const: "hcn.platform.jobrolo-integration.v1"
+              },
+              generalAdapter: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  availability: { $ref: "#/components/schemas/JobroloIntegrationAvailability" },
+                  contract: { type: "string", const: HCN_JOBROLO_REQUEST_SCHEMA },
+                  authentication: { type: "string", const: "dedicated_hmac_timestamp_nonce_body_hash" },
+                  principalMode: { type: "string", const: "fixed_server_side_approved_employee" },
+                  principalSelectableByCaller: { type: "boolean", const: false },
+                  fileScope: { type: "string", const: "assigned_only" },
+                  readCapabilities: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: Object.fromEntries(
+                      [
+                        "status",
+                        "workCenter",
+                        "fileReview",
+                        "communicationSweep",
+                        "quoPhoneHistory",
+                        "managementSweep"
+                      ].map((name) => [name, {
+                        $ref: "#/components/schemas/JobroloIntegrationAvailability"
+                      }])
+                    ),
+                    required: [
+                      "status",
+                      "workCenter",
+                      "fileReview",
+                      "communicationSweep",
+                      "quoPhoneHistory",
+                      "managementSweep"
+                    ]
+                  }
+                },
+                required: [
+                  "availability",
+                  "contract",
+                  "authentication",
+                  "principalMode",
+                  "principalSelectableByCaller",
+                  "fileScope",
+                  "readCapabilities"
+                ]
+              },
+              importTransport: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  availability: { $ref: "#/components/schemas/JobroloIntegrationAvailability" },
+                  contract: { type: "string", const: "jobrolo.jobnimbus-import.transport-response.v1" },
+                  authentication: { type: "string", const: "dedicated_import_hmac_exact_bytes_timestamp_durable_nonce" },
+                  principalMode: { type: "string", const: "fixed_server_side_approved_employee" },
+                  principalSelectableByCaller: { type: "boolean", const: false },
+                  fileScope: { type: "string", const: "assigned_only" },
+                  photoManifests: { $ref: "#/components/schemas/JobroloIntegrationAvailability" },
+                  documentContentBoundToManifest: { type: "boolean" }
+                },
+                required: [
+                  "availability",
+                  "contract",
+                  "authentication",
+                  "principalMode",
+                  "principalSelectableByCaller",
+                  "fileScope",
+                  "photoManifests",
+                  "documentContentBoundToManifest"
+                ]
+              },
+              providerCredentialsExposed: { type: "boolean", const: false },
+              automaticExecution: { type: "boolean", const: false }
+            },
+            required: [
+              "schemaVersion",
+              "generalAdapter",
+              "importTransport",
+              "providerCredentialsExposed",
+              "automaticExecution"
+            ]
+          }
+        },
+        required: ["jobrolo"]
+      },
+      JobroloIntegrationAvailability: {
+        type: "string",
+        enum: ["ready", "unavailable"]
+      },
       PlatformMetadataResponse: {
         type: "object",
         additionalProperties: false,
@@ -22733,6 +22899,9 @@ const OPENAPI = {
             ]
           },
           runtime: { $ref: "#/components/schemas/PlatformRuntimeStatus" },
+          integrations: {
+            $ref: "#/components/schemas/PlatformJobroloIntegrationCatalog"
+          },
           boundaries: {
             type: "object",
             additionalProperties: false,
@@ -22761,7 +22930,7 @@ const OPENAPI = {
             ]
           }
         },
-        required: ["schemaVersion", "generatedAt", "build", "capabilityCatalog", "runtime", "boundaries"]
+        required: ["schemaVersion", "generatedAt", "build", "capabilityCatalog", "runtime", "integrations", "boundaries"]
       },
       PlatformSessionResponse: {
         type: "object",
@@ -23702,6 +23871,90 @@ const OPENAPI = {
         }
       }
     },
+    "/integrations/jobrolo/v1/status": jobroloHcnReadOpenApi({
+      operationId: "readJobroloHcnStatus",
+      description: "Service-to-service status for the fixed-principal Jobrolo/HCN adapter. No caller-selected employee, provider credential, write, send, call, or approval authority is accepted.",
+      inputSchema: openApiStrictObject()
+    }),
+    "/integrations/jobrolo/v1/work-center": jobroloHcnReadOpenApi({
+      operationId: "readJobroloHcnWorkCenter",
+      description: "Fresh read-only page of active insurance files assigned to the server-configured HCN principal. Results use opaque file references.",
+      inputSchema: openApiStrictObject({
+        offset: { type: "integer", minimum: 0, maximum: 5000 },
+        limit: { type: "integer", minimum: 1, maximum: 50 }
+      }, ["offset", "limit"])
+    }),
+    "/integrations/jobrolo/v1/file-review": jobroloHcnReadOpenApi({
+      operationId: "readJobroloHcnFile",
+      description: "Fresh read-only review of one opaque active assigned-file reference. JobNimbus is required; Gmail and Quo source gaps remain explicit partial states.",
+      inputSchema: openApiStrictObject({
+        fileRef: { type: "string", pattern: "^subject_[a-f0-9]{32}$" },
+        recentLimit: { type: "integer", minimum: 1, maximum: 20 }
+      }, ["fileRef", "recentLimit"])
+    }),
+    "/integrations/jobrolo/v1/communication-sweep": jobroloHcnReadOpenApi({
+      operationId: "readJobroloHcnCommunicationSweep",
+      description: "Read-only communication recovery sweep across the fixed principal's active assigned JobNimbus files, linked Gmail mailbox, and available Quo team lines. Candidate matches never authorize an action.",
+      inputSchema: openApiStrictObject({
+        communicationDays: { type: "integer", minimum: 1, maximum: 90, default: 30 },
+        gmailLimit: { type: "integer", minimum: 1, maximum: 25, default: 25 },
+        quoLimit: { type: "integer", minimum: 1, maximum: 50, default: 50 },
+        quoTranscriptLimit: { type: "integer", minimum: 0, maximum: 25, default: 12 },
+        includeQuoTranscripts: { type: "boolean", default: true }
+      })
+    }),
+    "/integrations/jobrolo/v1/quo-phone-history": jobroloHcnReadOpenApi({
+      operationId: "readJobroloHcnQuoPhoneHistory",
+      description: "Read-only Quo history across available team lines only after the phone resolves to exactly one fresh active JobNimbus file assigned to the fixed principal.",
+      inputSchema: openApiStrictObject({
+        phone: { type: "string", pattern: "^\\+1[2-9]\\d{9}$" },
+        maxResults: { type: "integer", minimum: 1, maximum: 50, default: 25 },
+        includeTranscripts: { type: "boolean", default: true },
+        transcriptLimit: { type: "integer", minimum: 0, maximum: 3, default: 3 }
+      }, ["phone"])
+    }),
+    "/integrations/jobrolo/v1/management-sweep": jobroloHcnReadOpenApi({
+      operationId: "readJobroloHcnManagementSweep",
+      description: "Fresh read-only JobNimbus activity-gap report for exactly the server-configured management adjusters and six Estimating-board statuses. Gmail, Quo, and calendar are not evaluated by this report.",
+      inputSchema: openApiStrictObject({
+        limitPerAdjuster: { type: "integer", minimum: 1, maximum: 10, default: 10 }
+      })
+    }),
+    "/integrations/jobrolo-import/v1/catalog": jobroloImportReadOpenApi({
+      operationId: "readJobroloImportCatalog",
+      description: "Returns a complete, bounded catalog of active assigned JobNimbus files for the fixed import principal using opaque source references.",
+      requestSchema: openApiStrictObject({
+        schema: { type: "string", const: "jobrolo.jobnimbus-import.catalog-request.v1" },
+        requestId: { type: "string", pattern: "^request_[a-f0-9]{32}$" }
+      }, ["schema", "requestId"])
+    }),
+    "/integrations/jobrolo-import/v1/snapshot": jobroloImportReadOpenApi({
+      operationId: "readJobroloImportSnapshot",
+      description: "Returns one normalized assigned-file snapshot with bounded activities, tasks, operational documents, and photo manifests. It never transfers document bytes on this route.",
+      requestSchema: openApiStrictObject({
+        schema: { type: "string", const: "jobrolo.jobnimbus-import.snapshot-request.v1" },
+        requestId: { type: "string", pattern: "^request_[a-f0-9]{32}$" },
+        sourceFileRef: { type: "string", pattern: "^subject_[a-f0-9]{32}$" }
+      }, ["schema", "requestId", "sourceFileRef"])
+    }),
+    "/integrations/jobrolo-import/v1/document-content": jobroloImportReadOpenApi({
+      operationId: "readJobroloImportDocumentContent",
+      description: "Streams one exact bounded document or photo only when the opaque file reference, opaque record reference, and signed manifest digest still match fresh assigned-file evidence.",
+      binaryResponse: true,
+      requestSchema: openApiStrictObject({
+        schema: { type: "string", const: "jobrolo.jobnimbus-import.document-content-request.v1" },
+        requestId: { type: "string", pattern: "^request_[a-f0-9]{32}$" },
+        sourceFileRef: { type: "string", pattern: "^subject_[a-f0-9]{32}$" },
+        sourceRecordRef: { type: "string", pattern: "^ref_[a-f0-9]{32}$" },
+        manifestDigest: { type: "string", pattern: "^[a-f0-9]{64}$" }
+      }, [
+        "schema",
+        "requestId",
+        "sourceFileRef",
+        "sourceRecordRef",
+        "manifestDigest"
+      ])
+    }),
     "/hcn/connect/google/start": {
       get: {
         operationId: "startHcnGoogleConnector",
@@ -24864,6 +25117,179 @@ function jsonBody(schemaName) {
       }
     }
   };
+}
+
+function openApiStrictObject(properties = {}, required = []) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    ...(required.length ? { required } : {})
+  };
+}
+
+function jobroloHcnReadOpenApi({
+  operationId,
+  description,
+  inputSchema
+}) {
+  return {
+    post: {
+      operationId,
+      security: [{ jobroloHmacAuthorization: [] }],
+      "x-hcn-service-to-service": true,
+      "x-openai-isConsequential": false,
+      description,
+      parameters: jobroloSignedHeaderParameters("general"),
+      requestBody: {
+        required: true,
+        content: {
+          "application/json": {
+            schema: openApiStrictObject({
+              schema: {
+                type: "string",
+                const: HCN_JOBROLO_REQUEST_SCHEMA
+              },
+              requestId: {
+                type: "string",
+                pattern: "^request_[a-f0-9]{32}$"
+              },
+              actor: openApiStrictObject({
+                sessionRef: {
+                  type: "string",
+                  pattern: "^session_[a-f0-9]{32}$"
+                }
+              }, ["sessionRef"]),
+              input: inputSchema
+            }, ["schema", "requestId", "actor", "input"])
+          }
+        }
+      },
+      responses: {
+        "200": {
+          description:
+            "Signed, privacy-minimized HCN result. Live sources win; automatic execution is false."
+        },
+        "400": { description: "Strict route input validation failed." },
+        "401": {
+          description:
+            "The exact service credential, method/path binding, timestamp, nonce, body digest, or HMAC signature failed."
+        },
+        "403": {
+          description:
+            "The fixed configured HCN principal or required management role was not authorized."
+        },
+        "404": {
+          description:
+            "The opaque assigned-file scope or exact phone correlation was not found."
+        },
+        "409": {
+          description:
+            "Fresh scope changed or a configured safe bound was exceeded."
+        },
+        "503": {
+          description:
+            "The adapter, fixed-principal source, or required fresh evidence is unavailable."
+        }
+      }
+    }
+  };
+}
+
+function jobroloImportReadOpenApi({
+  operationId,
+  description,
+  requestSchema,
+  binaryResponse = false
+}) {
+  return {
+    post: {
+      operationId,
+      security: [{ jobroloImportHmacAuthorization: [] }],
+      "x-hcn-service-to-service": true,
+      "x-openai-isConsequential": false,
+      description,
+      parameters: jobroloSignedHeaderParameters("import"),
+      requestBody: {
+        required: true,
+        content: {
+          "application/json": { schema: requestSchema }
+        }
+      },
+      responses: {
+        "200": binaryResponse
+          ? {
+              description:
+                "Signed exact document bytes with request, nonce, manifest, digest, timestamp, content type, and length bound in response headers.",
+              content: {
+                "application/octet-stream": {
+                  schema: { type: "string", format: "binary" }
+                }
+              }
+            }
+          : {
+              description:
+                "Signed bounded import transport response with an opaque assigned-file projection."
+            },
+        "400": { description: "Strict request validation failed." },
+        "401": {
+          description:
+            "The separate import credential, exact bytes, timestamp, durable nonce, digest, or signature failed."
+        },
+        "404": { description: "The opaque assigned source was not found." },
+        "409": {
+          description:
+            "Assignment, source evidence, or the exact manifest changed."
+        },
+        "413": { description: "A fixed request or response bound was exceeded." },
+        "503": {
+          description:
+            "The import transport, durable replay store, or fresh source is unavailable."
+        }
+      }
+    }
+  };
+}
+
+function jobroloSignedHeaderParameters(profile) {
+  const isImport = profile === "import";
+  const prefix = isImport ? "x-jobrolo-import-" : "x-jobrolo-";
+  return [
+    {
+      name: `${prefix}timestamp`,
+      in: "header",
+      required: true,
+      schema: isImport
+        ? {
+            type: "string",
+            format: "date-time",
+            pattern:
+              "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          }
+        : { type: "string", pattern: "^\\d{13}$" }
+    },
+    {
+      name: `${prefix}nonce`,
+      in: "header",
+      required: true,
+      schema: {
+        type: "string",
+        pattern: "^nonce_[a-f0-9]{32}$"
+      }
+    },
+    {
+      name: `${prefix}content-sha256`,
+      in: "header",
+      required: true,
+      schema: { type: "string", pattern: "^[a-f0-9]{64}$" }
+    },
+    {
+      name: `${prefix}signature`,
+      in: "header",
+      required: true,
+      schema: { type: "string", pattern: "^[a-f0-9]{64}$" }
+    }
+  ];
 }
 
 function hcnAssistantConversationMutationRequestBody(includeTitle) {

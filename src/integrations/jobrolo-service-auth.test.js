@@ -8,6 +8,7 @@ import {
   deriveJobroloAssistantSessionBindingRef,
   HCN_JOBROLO_CLAIM_FILING_ROUTES,
   HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
+  JOBROLO_HCN_READ_ROUTES,
   loadJobroloHcnClaimFilingConfiguration,
   loadJobroloHcnIntegrationConfiguration,
   loadJobroloHcnNoteWritebackConfiguration,
@@ -24,6 +25,23 @@ const NOTE_SECRET =
 const CLAIM_PATH = "/integrations/jobrolo/v1/claim-filings/prepare";
 const CLAIM_SECRET =
   "jobrolo-claim-filing-test-secret-unique-123456";
+
+test("general adapter read surface is explicit and excludes every effect route", () => {
+  assert.deepEqual(JOBROLO_HCN_READ_ROUTES, [
+    "/integrations/jobrolo/v1/status",
+    "/integrations/jobrolo/v1/work-center",
+    "/integrations/jobrolo/v1/file-review",
+    "/integrations/jobrolo/v1/communication-sweep",
+    "/integrations/jobrolo/v1/quo-phone-history",
+    "/integrations/jobrolo/v1/management-sweep"
+  ]);
+  assert.equal(
+    JOBROLO_HCN_READ_ROUTES.some((route) =>
+      /(?:execute|prepare|writeback|send|call)/.test(route)
+    ),
+    false
+  );
+});
 
 function fixture(overrides = {}) {
   const configuration = loadJobroloHcnIntegrationConfiguration({

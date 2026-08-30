@@ -19,19 +19,36 @@ session reference; the caller cannot select an email, JobNimbus owner, company
 scope, or provider identity. Every request rechecks the configured HCN user and
 the exact matching active JobNimbus employee before work begins.
 
-The adapter exposes only these `POST` routes:
+The general fixed-principal adapter exposes only these `POST` routes:
 
 - `/integrations/jobrolo/v1/status`
 - `/integrations/jobrolo/v1/work-center`
 - `/integrations/jobrolo/v1/file-review`
+- `/integrations/jobrolo/v1/communication-sweep`
+- `/integrations/jobrolo/v1/quo-phone-history`
+- `/integrations/jobrolo/v1/management-sweep`
 - `/integrations/jobrolo/v1/assistant/turn`
 - `/integrations/jobrolo/v1/action-plans/prepare`
 - `/integrations/jobrolo/v1/action-plans/execute`
 - `/integrations/jobrolo/v1/action-receipts/detail`
 
-It does not expose claim filing, Retell, management sweeps, team management,
+The communication sweep remains bound to the fixed principal's active assigned
+JobNimbus files, linked Gmail mailbox, and available Quo team lines. Proposed
+matches are evidence candidates only and never authorize an action. The Quo
+phone-history route reads available team lines only after the requested phone
+resolves to exactly one fresh, active JobNimbus file assigned to that same
+principal. The management sweep has a different, immutable server-side scope:
+exactly the configured management adjusters and the six Estimating-board
+statuses. It ranks complete JobNimbus activity reads only and explicitly does
+not claim Gmail, Quo, or calendar coverage.
+
+The general credential does not expose claim filing, Retell, team management,
 connector mutations, legacy routes, arbitrary provider calls, or a general
-bridge proxy.
+bridge proxy. Claim filing, ordinary-chat note writeback, and import transport
+use separate default-off credentials and disjoint route allowlists. The
+service's full OpenAPI document catalogs the stable signed read routes for
+deployment verification; the ChatGPT Actions OpenAPI intentionally excludes
+every service-to-service route.
 
 ## Authentication contract
 
@@ -117,6 +134,26 @@ but it does not receive HCN provider credentials, private provider identifiers,
 the HCN approval challenge, or unrestricted HCN storage access. There is no
 database replication or shared backup relationship.
 
+### Read-only JobNimbus import transport
+
+The separate import-only credential exposes exactly these routes:
+
+- `/integrations/jobrolo-import/v1/catalog`
+- `/integrations/jobrolo-import/v1/snapshot`
+- `/integrations/jobrolo-import/v1/document-content`
+
+Catalog and snapshot reads remain restricted to the fixed principal's complete
+active assigned-file index and return opaque references. The snapshot includes
+bounded operational document and photo manifests but no document bytes. The
+document-content route transfers one exact bounded document or photo only when
+the opaque file reference, record reference, and signed manifest digest still
+match fresh evidence. Its request signature binds the exact body bytes, method,
+path, timestamp, and nonce; replay receipts use atomic durable storage. Response
+signatures bind the request, manifest proof, response timestamp, content type,
+length, and byte digest. The import client id and secret cannot match the
+general adapter, note-writeback, claim-filing, provider, OAuth, model, storage,
+or encryption credentials.
+
 ## Consequential actions
 
 Preparation reuses the exact HCN browser action contract and creates the same
@@ -176,6 +213,21 @@ HCN requires four dedicated variables:
 - `HCN_JOBROLO_CLIENT_ID`
 - `HCN_JOBROLO_SHARED_SECRET`
 - `HCN_JOBROLO_PRINCIPAL_EMAIL`
+
+The independent import transport requires:
+
+- `HCN_JOBROLO_IMPORT_TRANSPORT_ENABLED=true`
+- `HCN_JOBROLO_IMPORT_CLIENT_ID`
+- `HCN_JOBROLO_IMPORT_SHARED_SECRET`
+- `HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL`
+- `HCN_JOBROLO_IMPORT_CONNECTION_REF`
+
+Its durable nonce store also requires the isolated `HCN_OPERATIONS_ROOT`.
+Management-report readiness additionally requires the reviewed fixed-adjuster
+configuration and the fresh HCN JobNimbus read foundation. Public metadata
+reports the general adapter, each read capability, import transport, photo
+manifest availability, and provider-credential boundary independently; route
+presence alone is never reported as runtime readiness.
 
 Partial, disabled-with-credentials, malformed, or reused-secret configuration
 fails closed. Health metadata reports the boundary as connected only when this
