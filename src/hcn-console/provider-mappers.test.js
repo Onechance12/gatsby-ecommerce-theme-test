@@ -1189,15 +1189,8 @@ test('exact JobNimbus import reference enforcement also covers tasks and documen
   }
 });
 
-test('JobNimbus zero and positive finite numeric dates remain missing without UTC shifts', () => {
-  for (const dateOfLoss of [
-    0,
-    1785261000,
-    1785261000000,
-    1,
-    1.5,
-    Number.MAX_VALUE,
-  ]) {
+test('JobNimbus positive numeric date epochs preserve the UTC civil date', () => {
+  for (const dateOfLoss of [1777291200, 1777291200000]) {
     const index = mapJobNimbusIndexEnvelope(
       {
         ...FRESHNESS,
@@ -1206,7 +1199,7 @@ test('JobNimbus zero and positive finite numeric dates remain missing without UT
       },
       { chanceOwnerId: CHANCE_ID },
     );
-    assert.equal(index.data.files[0].missingFacts.dateOfLoss, true);
+    assert.equal(index.data.files[0].missingFacts.dateOfLoss, false);
 
     const result = mapJobNimbusFileEnvelope(
       {
@@ -1224,13 +1217,13 @@ test('JobNimbus zero and positive finite numeric dates remain missing without UT
         expectedProviderFileId: FILE_ID,
       },
     );
-    assert.equal(result.data.file.dateOfLoss, null);
-    assert.equal(result.data.file.missingFacts.dateOfLoss, true);
+    assert.equal(result.data.file.dateOfLoss, '2026-04-27');
+    assert.equal(result.data.file.missingFacts.dateOfLoss, false);
   }
 });
 
-test('JobNimbus textual zero date sentinels remain missing', () => {
-  for (const dateOfLoss of ['0', '0000']) {
+test('JobNimbus zero date sentinels remain missing', () => {
+  for (const dateOfLoss of [0, '0', '0000']) {
     const result = mapJobNimbusFileEnvelope(
       {
         ...FRESHNESS,
@@ -1279,13 +1272,21 @@ test('JobNimbus date of loss preserves supported civil calendar forms', () => {
   }
 });
 
-test('JobNimbus date of loss rejects timestamp strings, Date objects, non-finite numbers, and impossible dates', () => {
+test('JobNimbus date of loss rejects timestamps, malformed or out-of-range numeric epochs, and impossible dates', () => {
   for (const dateOfLoss of [
     '2026-05-17T23:00:00-05:00',
     '2026-05-17T00:00:00.000Z',
     new Date('2026-05-17T00:00:00.000Z'),
     '1785261000',
     '1785261000000',
+    1,
+    1.5,
+    999999999,
+    10000000000,
+    999999999999,
+    10000000000000,
+    Number.MAX_SAFE_INTEGER,
+    Number.MAX_VALUE,
     Number.NaN,
     Number.POSITIVE_INFINITY,
     Number.NEGATIVE_INFINITY,

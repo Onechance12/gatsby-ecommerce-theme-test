@@ -1687,19 +1687,40 @@ function normalizeNullableProviderTimestamp(value) {
 
 function normalizeProviderDate(value) {
   if (value === undefined || value === null || value === '') return null;
-  // JobNimbus emits both zero and positive epoch-like numbers for this civil
-  // field. No source-zone contract exists, so those numeric values are
-  // unavailable rather than instants that may be shifted into a date.
   if (value === 0) return null;
-  if (
-    typeof value === 'number'
-    && Number.isFinite(value)
-    && value > 0
-  ) return null;
-  // Date objects, negative numbers, and non-finite numbers are malformed
-  // provider values. Date objects must never be UTC-converted into an
-  // apparent civil loss date.
-  if (value instanceof Date || typeof value === 'number') {
+  // JobNimbus custom date fields arrive as either calendar text or a numeric
+  // Unix epoch. The bridge writes date-only values at noon UTC, and provider
+  // readback preserves the civil date in UTC. Only the same
+  // 10-digit-second/13-digit-millisecond epoch shapes already accepted by
+  // claim filing are admitted here; shorter, ambiguous, fractional, unsafe,
+  // and out-of-range numbers fail closed.
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      fail(
+        'invalid_provider_record',
+        'JobNimbus numeric date of loss must be a positive 10-digit Unix-seconds or 13-digit Unix-milliseconds epoch.',
+      );
+    }
+    const text = String(value);
+    if (!/^\d{10}$/.test(text) && !/^\d{13}$/.test(text)) {
+      fail(
+        'invalid_provider_record',
+        'JobNimbus numeric date of loss must be a positive 10-digit Unix-seconds or 13-digit Unix-milliseconds epoch.',
+      );
+    }
+    const milliseconds = text.length === 10 ? value * 1000 : value;
+    const parsed = new Date(milliseconds);
+    if (Number.isNaN(parsed.getTime())) {
+      fail(
+        'invalid_provider_record',
+        'JobNimbus numeric date of loss is outside the supported calendar range.',
+      );
+    }
+    return parsed.toISOString().slice(0, 10);
+  }
+  // Date objects must never be UTC-converted into an apparent civil loss
+  // date because their construction zone is not part of the provider value.
+  if (value instanceof Date) {
     fail(
       'invalid_provider_record',
       'JobNimbus date of loss must be a calendar date without a time or timezone.',
