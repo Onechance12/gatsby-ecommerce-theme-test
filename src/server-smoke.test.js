@@ -263,6 +263,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     .map((thread) => [String(thread?.id || ""), structuredClone(thread)]));
   let gmailDraftCreateCount = 0;
   let gmailSendCount = 0;
+  let gmailDraftReadCount = 0;
   let gmailSentMessageMutation = String(options.gmailSentMessageMutation || "");
   const fixtureRelationField = (url) => {
     try {
@@ -344,8 +345,16 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
         res.end(JSON.stringify({ error: { message: "Draft not found" } }));
         return;
       }
+      gmailDraftReadCount += 1;
+      const responseDraft = structuredClone(draft);
+      if (options.gmailDraftVolatilePayloadHeader) {
+        responseDraft.message.payload.headers.push({
+          name: "X-Gmail-Provider-Read",
+          value: String(gmailDraftReadCount)
+        });
+      }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(draft));
+      res.end(JSON.stringify(responseDraft));
       return;
     }
     if (
@@ -10264,8 +10273,7 @@ test("Mac reconciliation proves an interrupted existing-draft send only from exa
         sha256: createHash("sha256").update(body, "utf8").digest("hex"),
         content: body
       }],
-      attachments: [],
-      payload: draft.message.payload
+      attachments: []
     });
   };
   const immutableDigest = (subject) => digest({
@@ -10850,6 +10858,7 @@ test("locked Mac operator sends only a separately approved bridge-created draft 
   const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
     communicationScope: true,
     secondAssigned: true,
+    gmailDraftVolatilePayloadHeader: true,
     chanceOverrides: {
       address_line1: "3431 Manana Dr",
       city: "Dallas",
@@ -10965,6 +10974,33 @@ test("locked Mac operator sends only a separately approved bridge-created draft 
   assert.equal(
     currentManifestSendPlan.operations[0].plan.plan.draftProvenance.immediatePredecessorReattested,
     false
+  );
+
+  const repeatedCurrentManifestSendPlanResponse = await fetch(
+    `http://127.0.0.1:${bridgePort}/ops/action-batch`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy,
+        operations: [sendOperation],
+        execute: false
+      })
+    }
+  );
+  assert.equal(repeatedCurrentManifestSendPlanResponse.status, 200);
+  const repeatedCurrentManifestSendPlan = await repeatedCurrentManifestSendPlanResponse.json();
+  assert.equal(
+    repeatedCurrentManifestSendPlan.operations[0].plan.plan.contentDigest,
+    currentManifestSendPlan.operations[0].plan.plan.contentDigest
+  );
+  assert.equal(
+    repeatedCurrentManifestSendPlan.operations[0].plan.approvalDigest,
+    currentManifestSendPlan.operations[0].plan.approvalDigest
+  );
+  assert.equal(
+    repeatedCurrentManifestSendPlan.approvalDigest,
+    currentManifestSendPlan.approvalDigest
   );
 
   const previousManifest = loadChanceOperatorRunManifest({

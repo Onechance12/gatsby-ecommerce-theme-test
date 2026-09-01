@@ -8515,17 +8515,22 @@ async function gmailDraftSnapshot(draftId) {
     deliveryHeaders,
     body: mime.primaryBody,
     bodyRepresentations: mime.bodyRepresentations,
-    attachments: mime.attachments,
-    contentDigest: digest({
-      draftId: String(draft.id || draftId),
-      messageId: message.id,
-      threadId: message.threadId,
-      deliveryHeaders,
-      bodyRepresentations: mime.bodyRepresentations,
-      attachments: mime.attachments,
-      payload: draft.message?.payload || null
-    })
+    attachments: mime.attachments
   };
+  // Gmail may reorder MIME headers or add provider-only payload metadata between
+  // otherwise identical `format=full` reads. Those raw fields are not transmitted
+  // by the immutable-send lane, so including the whole provider payload makes an
+  // unchanged reviewed draft fail its approval digest. Preserve source identity
+  // and every reviewed MIME descriptor while excluding only that volatile raw
+  // payload; body or attachment changes still alter this digest.
+  snapshot.contentDigest = digest({
+    draftId: snapshot.id,
+    messageId: snapshot.messageId,
+    threadId: snapshot.threadId,
+    deliveryHeaders: snapshot.deliveryHeaders,
+    bodyRepresentations: snapshot.bodyRepresentations,
+    attachments: snapshot.attachments
+  });
   Object.defineProperty(snapshot, GMAIL_DRAFT_MIME_BYTES, {
     value: mime[GMAIL_DRAFT_MIME_BYTES],
     enumerable: false
