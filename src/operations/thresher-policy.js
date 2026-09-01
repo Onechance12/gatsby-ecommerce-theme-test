@@ -10,8 +10,13 @@ export const CHANCE_OPERATOR_ALLOWED_ACTION_TYPES = Object.freeze([
   "jobnimbus.update_contact",
   "jobnimbus.update_status",
   "jobnimbus.ensure_current_task",
-  "gmail.create_draft"
+  "gmail.create_draft",
+  "gmail.send_existing_draft"
 ]);
+
+const CHANCE_OPERATOR_LEGACY_ALLOWED_ACTION_TYPES = Object.freeze(
+  CHANCE_OPERATOR_ALLOWED_ACTION_TYPES.filter((type) => type !== "gmail.send_existing_draft")
+);
 
 export const CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS = Object.freeze([
   "display_name",
@@ -192,7 +197,18 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
   if (!exactStringSet(input.excludedFileNumbers, CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS)) {
     throw new Error("The Chance operator run manifest must exclude JobNimbus file #2628.");
   }
-  if (!exactStringSet(input.allowedActionTypes, CHANCE_OPERATOR_ALLOWED_ACTION_TYPES)) {
+  const allowedActionTypes = exactStringSet(
+    input.allowedActionTypes,
+    CHANCE_OPERATOR_ALLOWED_ACTION_TYPES
+  )
+    ? CHANCE_OPERATOR_ALLOWED_ACTION_TYPES
+    : exactStringSet(
+      input.allowedActionTypes,
+      CHANCE_OPERATOR_LEGACY_ALLOWED_ACTION_TYPES
+    )
+      ? CHANCE_OPERATOR_LEGACY_ALLOWED_ACTION_TYPES
+      : null;
+  if (!allowedActionTypes) {
     throw new Error("The Chance operator run manifest action types do not match the locked P0 action lane.");
   }
   if (!exactStringSet(input.allowedContactFields, CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS)) {
@@ -225,7 +241,7 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
     expiresAt: new Date(expiresAtMs).toISOString(),
     files,
     excludedFileNumbers: [...CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS],
-    allowedActionTypes: [...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES],
+    allowedActionTypes: [...allowedActionTypes],
     allowedContactFields: [...CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS]
   };
   return deepFreeze({ ...body, sha256: sha256(body), fileCount: files.length });
@@ -247,6 +263,8 @@ export function chanceOperatorRunManifestSummary(manifest) {
     allowedStageEvidenceSources: [...CHANCE_OPERATOR_ALLOWED_STAGE_EVIDENCE_SOURCES],
     taskCompletionAllowed: false,
     outboundSendAllowed: false,
+    existingDraftSendAllowed: manifest.allowedActionTypes.includes("gmail.send_existing_draft"),
+    rawGmailSendAllowed: false,
     noteCreationAllowed: false,
     backwardStageMovesAllowed: false,
     stageEvidenceRequired: true

@@ -79,6 +79,9 @@ test("loads and pins an exact immutable 58-file run manifest", () => {
   assert.equal(summary.fileCount, 58);
   assert.equal(summary.excludedFileNumbers.includes("2628"), true);
   assert.equal(summary.allowedActionTypes.includes("gmail.send"), false);
+  assert.equal(summary.allowedActionTypes.includes("gmail.send_existing_draft"), true);
+  assert.equal(summary.existingDraftSendAllowed, true);
+  assert.equal(summary.rawGmailSendAllowed, false);
   assert.deepEqual(summary.allowedStageEvidenceSources, [
     "jobnimbus_activity",
     "gmail_message",
@@ -95,6 +98,20 @@ test("loads and pins an exact immutable 58-file run manifest", () => {
   assert.throws(() => resolveChanceOperatorRunPolicy({ id: manifest.id, sha256: "0".repeat(64) }, manifest), /not pinned/i);
   assert.equal(Object.isFrozen(manifest), true);
   assert.equal(Object.isFrozen(manifest.files), true);
+});
+
+test("loads the immediately previous four-action manifest without enabling sends", () => {
+  const manifest = loadChanceOperatorRunManifest(manifestInput({
+    allowedActionTypes: CHANCE_OPERATOR_ALLOWED_ACTION_TYPES.filter(
+      (type) => type !== "gmail.send_existing_draft"
+    )
+  }), {
+    now: Date.parse("2026-08-23T00:00:00.000Z")
+  });
+  const summary = chanceOperatorRunManifestSummary(manifest);
+  assert.equal(summary.existingDraftSendAllowed, false);
+  assert.equal(summary.rawGmailSendAllowed, false);
+  assert.equal(summary.allowedActionTypes.includes("gmail.send_existing_draft"), false);
 });
 
 test("manifest rejects expiry, duplicates, excluded file, and non-58 rosters", () => {

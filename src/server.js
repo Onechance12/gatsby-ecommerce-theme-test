@@ -880,6 +880,10 @@ function health() {
       quoReadsRequireExactAssignedFile: true,
       broadUnmatchedCommunicationsSweep: false,
       existingDraftSendRequiresBridgeReceipt: true,
+      existingDraftSendApprovalBatched: true,
+      existingDraftSendAllowed: Boolean(
+        CHANCE_OPERATOR_RUN_MANIFEST?.allowedActionTypes.includes("gmail.send_existing_draft")
+      ),
       retainedDraftIdIsOneShot: true,
       querylessIndexIsPiiMinimized: true,
       chanceBrainClientMemory: "disabled",
@@ -7751,6 +7755,40 @@ function gmailDraftReconciliationDigest(value = {}) {
   return digest({ version: 1, draft: gmailDraftReconciliationShape(value) });
 }
 
+function gmailImmutableSendDigest(value = {}) {
+  const deliveryHeaders = value.deliveryHeaders || {};
+  const body = normalizeEmailBody(value.body || "");
+  const bodyRepresentations = Array.isArray(value.bodyRepresentations)
+    ? value.bodyRepresentations.map((representation) => ({
+      mimeType: String(representation?.mimeType || "").toLowerCase(),
+      bytes: Number(representation?.bytes || 0),
+      sha256: String(representation?.sha256 || "").toLowerCase(),
+      content: normalizeEmailBody(representation?.content || "")
+    }))
+    : [{
+      mimeType: "text/plain",
+      bytes: Buffer.byteLength(body, "utf8"),
+      sha256: createHash("sha256").update(body, "utf8").digest("hex"),
+      content: body
+    }];
+  return digest({
+    version: 1,
+    message: {
+      from: String(deliveryHeaders.from || "").trim(),
+      sender: String(deliveryHeaders.sender || "").trim(),
+      replyTo: String(deliveryHeaders.replyTo || "").trim(),
+      ...gmailDraftReconciliationShape(value),
+      bodyRepresentations,
+      attachments: (Array.isArray(value.attachments) ? value.attachments : []).map((attachment) => ({
+        filename: String(attachment?.filename || ""),
+        mimeType: String(attachment?.mimeType || attachment?.contentType || "").toLowerCase(),
+        bytes: Number(attachment?.bytes || 0),
+        sha256: String(attachment?.sha256 || "").toLowerCase()
+      }))
+    }
+  });
+}
+
 function contentContainsExactIdentifier(content, identifier) {
   const expected = String(identifier || "").normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
   if (expected.length < 6) return false;
@@ -7807,7 +7845,7 @@ async function gmailDraft(input) {
       bodyTemplate: resolvedMessage.template,
       bodyMatches,
       instruction: bodyMatches
-        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance approves sending it, use gmail.send with this exact draftId; the reviewed source draft remains for separately approved cleanup."
+        ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance separately approves sending it, use gmail.send_existing_draft with this exact draftId; the reviewed source draft remains for separately approved cleanup."
         : "A Gmail draft already exists for this file and subject, but its body does not match the current approved carrier template. Do not send it and do not create a duplicate. Show Chance the mismatch and obtain approval before replacing the existing draft.",
       sendPayload: cleanObject({
         query: input.query || input.fileQuery || "",
@@ -7855,20 +7893,43 @@ async function gmailDraft(input) {
       : ""
   });
   let result;
+  let verifiedByReadback = false;
   try {
     result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts`, {
       method: "POST",
       body: draftBody
     });
-    await completeOutboundSend(reservation.id, "completed", result.id || result.message?.id || "");
+    const externalId = String(result.id || result.message?.id || "").trim();
+    const lockedOperatorDraft = operatorFile
+      && isMacCodexOperatorRequest()
+      && !operatorCompanyScopeActive()
+      && CHANCE_OPERATOR_RUN_MANIFEST?.allowedActionTypes.includes("gmail.create_draft");
+    if (lockedOperatorDraft) {
+      await completeOutboundSend(reservation.id, "readback_pending", externalId);
+      const snapshot = await gmailDraftSnapshot(externalId);
+      if (
+        gmailDraftReconciliationDigest(snapshot) !== gmailDraftReconciliationDigest(plan)
+        || (threadId && String(snapshot.threadId || "") !== threadId)
+      ) {
+        conflictError("The Gmail provider readback does not match the approved draft content. The exact file is quarantined from retry.");
+      }
+      verifiedByReadback = true;
+    }
+    await completeOutboundSend(reservation.id, "completed", externalId);
   } catch (error) {
-    await completeOutboundSend(reservation.id, "failed_requires_review", "", error.message);
+    await completeOutboundSend(
+      reservation.id,
+      "failed_requires_review",
+      result?.id || result?.message?.id || "",
+      error.message
+    );
     throw error;
   }
   const file = operatorFile || await optionalChanceFile(input.query || input.fileQuery);
   const memoryCloseout = closeoutGmailAction(input, file, "create_draft", result.id || result.message?.id, `Created approved Gmail draft with subject ${subject} and ${attachments.length} verified attachment(s).`, "drafted");
   return {
     mode: "executed",
+    ...(verifiedByReadback ? { verifiedByReadback: true } : {}),
     ...(file ? { file } : {}),
     ...(operatorFile ? {
       fileScope: {
@@ -7883,10 +7944,14 @@ async function gmailDraft(input) {
   };
 }
 
-async function gmailSend(input) {
+async function gmailSend(input, options = {}) {
   const draftId = String(input.draftId || "").trim();
   const operatorFile = await operatorGmailActionFile(input, "Gmail send");
-  if (draftId) return gmailSendExistingDraft(input, draftId, operatorFile);
+  if (draftId) {
+    return gmailSendExistingDraft(input, draftId, operatorFile, {
+      operatorExistingDraftLane: options.operatorExistingDraftLane === true
+    });
+  }
   if (operatorFile) {
     badRequest("The Codex operator may send only a bridge-created Gmail draft that was reviewed by exact draftId.");
   }
@@ -7901,7 +7966,7 @@ async function gmailSend(input) {
   const body = resolvedMessage.body;
   const reusable = await reusableGmailDraft(input, subject);
   if (reusable) {
-    badRequest(`A verified Gmail draft already exists for this file and subject. Send the reviewed draft with gmail.send payload {draftId:'${reusable.snapshot.id}', query:'${input.query || input.fileQuery || ""}'}; do not rebuild the email or create another draft.`);
+    badRequest(`A verified Gmail draft already exists for this file and subject. Send the reviewed draft with gmail.send_existing_draft payload {draftId:'${reusable.snapshot.id}', query:'${input.query || input.fileQuery || ""}'}; do not rebuild the email or create another draft.`);
   }
   const raw = buildRawEmail({ to, cc, bcc, subject, body, attachments });
   const sendBody = cleanObject({ raw, threadId });
@@ -7998,11 +8063,29 @@ async function resolveGmailMessageBody(input, attachments) {
   return { body: required(input.body, "body"), template: "custom" };
 }
 
-async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
-  if (operatorFile) await assertOperatorDraftProvenance(operatorFile, draftId);
+async function gmailSendExistingDraft(input, draftId, operatorFile = null, options = {}) {
+  const lockedOperatorLane = options.operatorExistingDraftLane === true
+    && operatorFile
+    && isMacCodexOperatorRequest()
+    && !operatorCompanyScopeActive()
+    && CHANCE_OPERATOR_RUN_MANIFEST?.allowedActionTypes.includes("gmail.send_existing_draft");
+  if (options.operatorExistingDraftLane === true && !lockedOperatorLane) {
+    operatorScopeError("The existing-draft send lane is available only to the assigned Mac operator under the current pinned run manifest.");
+  }
+  const draftProvenance = operatorFile
+    ? await assertOperatorDraftProvenance(operatorFile, draftId, {
+      currentRunOnly: lockedOperatorLane
+    })
+    : null;
   const sourceKey = `gmail-draft:${String(draftId)}`;
   await assertOutboundSourceAvailable("gmail", sourceKey);
   const snapshot = await gmailDraftSnapshot(draftId);
+  if (lockedOperatorLane) {
+    const liveClaimNumber = String(operatorFile.claimNumber || "").trim();
+    if (!liveClaimNumber || snapshot.subject !== liveClaimNumber) {
+      conflictError("The reviewed Gmail draft subject no longer equals the live JobNimbus claim number. Nothing was sent.");
+    }
+  }
   const plan = {
     endpoint: "/gmail/v1/users/me/messages/send",
     action: "send_existing_draft",
@@ -8028,7 +8111,16 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
     contentDigest: snapshot.contentDigest,
     transmittedHeaders: ["From", "Sender", "Reply-To", "To", "Cc", "Bcc", "Subject", "MIME-Version", "Content-Type"],
     omittedOriginalHeaders: "Any original draft header not listed in transmittedHeaders is excluded from the immutable send.",
-    sourceDraftRetention: "retained_for_separate_cleanup"
+    sourceDraftRetention: "retained_for_separate_cleanup",
+    ...(lockedOperatorLane ? {
+      draftProvenance: {
+        createdByBridge: true,
+        creationRunPolicySha256: draftProvenance.runPolicySha256,
+        currentRunPolicySha256: CHANCE_OPERATOR_RUN_MANIFEST.sha256,
+        immediatePredecessorReattested: draftProvenance.immediatePredecessorReattested,
+        providerSnapshotReadback: true
+      }
+    } : {})
   };
   const approvalDigest = digest({ channel: "gmail", action: "send_existing_draft", plan });
   if (input.execute !== true) {
@@ -8036,11 +8128,13 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
       mode: "dry_run",
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After Chance approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. The bridge sends only the immutable reviewed snapshot and retains the source draft; deleting it is a separate approval-gated action."
+      instruction: "Nothing was sent. After Chance approves this exact existing draft, repeat gmail.send_existing_draft unchanged with execute:true, this draftId, and this approvalDigest. The bridge sends only the immutable reviewed snapshot and retains the source draft; deleting it is a separate approval-gated action."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
-  if (!ALLOW_GMAIL_SEND) badRequest("Gmail sending is disabled. Set ALLOW_GMAIL_SEND=true in Render.");
+  if (!lockedOperatorLane && !ALLOW_GMAIL_SEND) {
+    badRequest("General Gmail sending is disabled. Only the pinned assigned-operator existing-draft lane may bypass ALLOW_GMAIL_SEND.");
+  }
   requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail existing-draft send");
   const reservation = await reserveOutboundSend("gmail", approvalDigest, {
     to: snapshot.to,
@@ -8048,6 +8142,7 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
     sourceKey
   });
   let result;
+  let sentSnapshot;
   try {
     const raw = buildRawEmail({
       from: snapshot.deliveryHeaders.from || "",
@@ -8064,9 +8159,34 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
       method: "POST",
       body: cleanObject({ raw, threadId: snapshot.threadId })
     });
-    await completeOutboundSend(reservation.id, "completed", result.id || "");
+    const externalId = String(result.id || "").trim();
+    if (lockedOperatorLane) {
+      await completeOutboundSend(reservation.id, "readback_pending", externalId);
+      sentSnapshot = await gmailSentMessageSnapshot(externalId);
+      const labels = new Set(sentSnapshot.labelIds);
+      if (
+        !labels.has("SENT")
+        || labels.has("DRAFT")
+        || labels.has("TRASH")
+        || labels.has("SPAM")
+        || gmailImmutableSendDigest(sentSnapshot) !== gmailImmutableSendDigest(snapshot)
+        || (snapshot.threadId && sentSnapshot.threadId !== snapshot.threadId)
+      ) {
+        conflictError("The Gmail Sent-message readback does not match the approved immutable draft snapshot. Never retry this send; reconcile the exact file and provider receipt.");
+      }
+      const retainedSnapshot = await gmailDraftSnapshot(draftId);
+      if (retainedSnapshot.contentDigest !== snapshot.contentDigest) {
+        conflictError("The source Gmail draft was not retained unchanged after delivery. Never retry this send; reconcile the exact file and provider receipt.");
+      }
+    }
+    await completeOutboundSend(reservation.id, "completed", externalId);
   } catch (error) {
-    await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
+    await completeOutboundSend(
+      reservation.id,
+      "failed_requires_review",
+      result?.id || "",
+      redactSensitiveText(error.message)
+    );
     throw error;
   }
   const sourceDraftRetention = {
@@ -8084,8 +8204,9 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
   );
   return {
     mode: "executed",
+    ...(lockedOperatorLane ? { verifiedByReadback: true } : {}),
     ...(file ? { file } : {}),
-    message: compactGmailMessage(result),
+    message: sentSnapshot?.message || compactGmailMessage(result),
     sourceDraftId: draftId,
     attachments: snapshot.attachments,
     sourceDraftRetention,
@@ -8213,20 +8334,159 @@ async function reconcileGmailDraftIntent(intent) {
   };
 }
 
-async function assertOperatorDraftProvenance(file, draftId) {
+async function reconcileGmailSendIntent(intent) {
+  const expected = intent?.reconciliation || {};
+  const subject = String(expected.subject || "").trim();
+  const expectedDigest = String(expected.contentDigest || "").trim();
+  const sourceKeyHash = String(expected.sourceKeyHash || "").trim();
+  const channelApprovalDigest = String(expected.channelApprovalDigest || "").trim();
+  const draftId = String(expected.draftId || "").trim();
+  const sourceDraftContentDigest = String(expected.sourceDraftContentDigest || "").trim();
+  if (
+    !subject
+    || !expectedDigest
+    || !sourceKeyHash
+    || !channelApprovalDigest
+    || !draftId
+    || !sourceDraftContentDigest
+  ) {
+    conflictError("The interrupted Gmail existing-draft send intent is incomplete. Manual reconciliation is required.");
+  }
+  const contact = await jobNimbus(`/contacts/${encodeURIComponent(intent.fileId)}`);
+  assertOperatorContactScope(contact);
+  if (String(compactContact(contact).claimNumber || "").trim() !== subject) {
+    conflictError("The file claim number changed after the approved Gmail send. Manual reconciliation is required.");
+  }
+
+  const outbound = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+  const candidates = outbound.filter((row) => (
+    row.channel === "gmail"
+    && row.sourceKeyHash === sourceKeyHash
+    && row.approvalDigest === channelApprovalDigest
+    && row.status !== "verified_not_applied"
+  ));
+  if (candidates.length > 1) {
+    conflictError("More than one Gmail send reservation exists for this exact source draft. Manual reconciliation is required.");
+  }
+  const reservation = candidates[0] || null;
+  if (!reservation) {
+    return { applied: false, externalId: "", reservationId: "", verifiedByReadback: true };
+  }
+  const externalId = String(reservation.externalId || "").trim();
+  if (!externalId) {
+    conflictError("The Gmail send reservation has no provider message id. The outcome is ambiguous and the exact file must remain quarantined.");
+  }
+
+  const snapshot = await gmailSentMessageSnapshot(externalId);
+  const labels = new Set(snapshot.labelIds);
+  if (
+    !labels.has("SENT")
+    || labels.has("DRAFT")
+    || labels.has("TRASH")
+    || labels.has("SPAM")
+    || gmailImmutableSendDigest(snapshot) !== expectedDigest
+    || (expected.threadId && snapshot.threadId !== String(expected.threadId))
+  ) {
+    conflictError("The recorded Gmail message does not exactly match the approved existing-draft send intent. Manual reconciliation is required.");
+  }
+  const retainedSnapshot = await gmailDraftSnapshot(draftId);
+  if (retainedSnapshot.contentDigest !== sourceDraftContentDigest) {
+    conflictError("The source Gmail draft is not retained unchanged after the interrupted send. Manual reconciliation is required.");
+  }
+  await withOutboundSendMutation(async () => {
+    const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+    const row = ledger.find((item) => item.id === reservation.id);
+    if (!row) conflictError("The Gmail send reservation changed during reconciliation.");
+    row.status = "completed";
+    row.externalId = externalId;
+    row.reconciledAt = new Date().toISOString();
+    row.updatedAt = row.reconciledAt;
+    await writeOutboundSendLedger(ledger);
+  });
+  return {
+    applied: true,
+    externalId,
+    reservationId: reservation.id,
+    verifiedByReadback: true
+  };
+}
+
+function operatorDraftCreationRunPolicyShas() {
+  const current = CHANCE_OPERATOR_RUN_MANIFEST;
+  if (!current) return new Set();
+  const accepted = new Set([current.sha256]);
+  if (current.allowedActionTypes.includes("gmail.send_existing_draft")) {
+    const immediatePredecessor = loadChanceOperatorRunManifest({
+      schemaVersion: current.schemaVersion,
+      id: current.id,
+      operatorScope: current.operatorScope,
+      expiresAt: current.expiresAt,
+      files: current.files.map((row) => ({ number: row.number, fileId: row.fileId })),
+      excludedFileNumbers: current.excludedFileNumbers,
+      allowedActionTypes: current.allowedActionTypes.filter(
+        (type) => type !== "gmail.send_existing_draft"
+      ),
+      allowedContactFields: current.allowedContactFields
+    });
+    accepted.add(immediatePredecessor.sha256);
+  }
+  return accepted;
+}
+
+async function assertOperatorDraftProvenance(file, draftId, options = {}) {
   const batches = await readActionBatchLedger();
-  const receipt = batches
-    .flatMap((batch) => Array.isArray(batch.completed) ? batch.completed : [])
-    .find((row) => (
+  const currentPrincipalHash = options.currentRunOnly === true
+    ? actionApprovalIdentityHash()
+    : "";
+  const acceptedRunPolicyShas = operatorDraftCreationRunPolicyShas();
+  let matched = null;
+  for (const batch of batches) {
+    if (options.currentRunOnly === true) {
+      if (
+        batch.principalHash !== currentPrincipalHash
+        || batch.operatorScope !== "assigned"
+        || batch.runPolicyId !== CHANCE_OPERATOR_RUN_MANIFEST?.id
+        || !acceptedRunPolicyShas.has(batch.runPolicySha256)
+        || batch.status !== "completed"
+        || Number(batch.operationCount) !== 1
+        || Number(batch.fileCount) !== 1
+      ) continue;
+      const boundFile = (Array.isArray(batch.files) ? batch.files : []).find((row) => (
+        String(row?.id || "") === String(file.id)
+        && String(row?.number || "").replace(/^#/, "") === String(file.number || "").replace(/^#/, "")
+      ));
+      if (
+        !boundFile
+        || !Array.isArray(boundFile.operationTypes)
+        || boundFile.operationTypes.length !== 1
+        || boundFile.operationTypes[0] !== "gmail.create_draft"
+      ) continue;
+    }
+    const completedReceipt = (Array.isArray(batch.completed) ? batch.completed : []).find((row) => (
       row.type === "gmail.create_draft"
       && row.status === "executed"
       && String(row.receipt?.fileId || "") === String(file.id)
       && String(row.receipt?.externalId || "") === String(draftId)
+      && (
+        options.currentRunOnly !== true
+        || batch.runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST?.sha256
+        || row.receipt?.verifiedByReadback === true
+      )
+      && row.receipt?.manualVerificationRequired !== true
     ));
-  if (!receipt) {
+    if (completedReceipt) {
+      matched = { batch, completedReceipt };
+      break;
+    }
+  }
+  if (!matched) {
     operatorScopeError(`The Codex operator may send only a Gmail draft created by this bridge for the resolved ${operatorFileDescription()}.`);
   }
-  return receipt;
+  return {
+    runPolicySha256: String(matched.batch.runPolicySha256 || ""),
+    immediatePredecessorReattested: options.currentRunOnly === true
+      && matched.batch.runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST?.sha256
+  };
 }
 
 async function gmailDraftSnapshot(draftId) {
@@ -8265,6 +8525,52 @@ async function gmailDraftSnapshot(draftId) {
       attachments: mime.attachments,
       payload: draft.message?.payload || null
     })
+  };
+  Object.defineProperty(snapshot, GMAIL_DRAFT_MIME_BYTES, {
+    value: mime[GMAIL_DRAFT_MIME_BYTES],
+    enumerable: false
+  });
+  return snapshot;
+}
+
+async function gmailSentMessageSnapshot(messageId) {
+  const messageIdValue = String(messageId || "").trim();
+  if (!messageIdValue) {
+    conflictError("Gmail did not return a sent message id, so delivery cannot be verified.");
+  }
+  const rawMessage = await gmailApi(
+    `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageIdValue)}?format=full`
+  );
+  const message = compactGmailMessage(rawMessage);
+  const headers = gmailDeliveryHeaders(rawMessage);
+  const mime = await gmailDraftMimeSnapshot(rawMessage);
+  const deliveryHeaders = cleanObject({
+    from: headers.from,
+    sender: headers.sender,
+    replyTo: headers["reply-to"],
+    to: headers.to,
+    cc: headers.cc,
+    bcc: headers.bcc,
+    subject: headers.subject
+  });
+  const snapshot = {
+    id: message.id,
+    messageId: message.id,
+    message,
+    threadId: message.threadId,
+    labelIds: [...new Set(
+      (Array.isArray(rawMessage?.labelIds) ? rawMessage.labelIds : [])
+        .map((label) => String(label || "").trim().toUpperCase())
+        .filter(Boolean)
+    )],
+    to: headers.to || "",
+    cc: headers.cc || "",
+    bcc: headers.bcc || "",
+    subject: headers.subject || "",
+    deliveryHeaders,
+    body: mime.primaryBody,
+    bodyRepresentations: mime.bodyRepresentations,
+    attachments: mime.attachments
   };
   Object.defineProperty(snapshot, GMAIL_DRAFT_MIME_BYTES, {
     value: mime[GMAIL_DRAFT_MIME_BYTES],
@@ -9858,6 +10164,8 @@ function minimizedActionBatchReceipt(row, options = {}) {
         mode: item.receipt?.mode || "",
         fileNumber: item.receipt?.fileNumber || "",
         externalId: item.receipt?.externalId || "",
+        sourceDraftId: item.receipt?.sourceDraftId || "",
+        sourceDraftRetention: item.receipt?.sourceDraftRetention || "",
         verifiedByReadback: item.receipt?.verifiedByReadback,
         deliveryStatus: item.receipt?.deliveryStatus || "",
         deliveryConfirmed: item.receipt?.deliveryConfirmed,
@@ -10069,6 +10377,10 @@ async function actionBatchReconcile(input = {}) {
         const draftReconciliation = await reconcileGmailDraftIntent(intent);
         applied = draftReconciliation.applied;
         externalId = draftReconciliation.externalId;
+      } else if (intent.type === "gmail.send_existing_draft") {
+        const sendReconciliation = await reconcileGmailSendIntent(intent);
+        applied = sendReconciliation.applied;
+        externalId = sendReconciliation.externalId;
       } else {
         conflictError("This interrupted operation requires channel-specific reconciliation and cannot be automatically retried or closed.");
       }
@@ -10085,13 +10397,17 @@ async function actionBatchReconcile(input = {}) {
         index,
         type: intent.type,
         status: "executed",
-        receipt: {
-          mode: "recovered_verified",
-          fileId: intent.fileId,
-          fileNumber: intent.fileNumber,
-          externalId,
-          verifiedByReadback: true
-        }
+          receipt: {
+            mode: "recovered_verified",
+            fileId: intent.fileId,
+            fileNumber: intent.fileNumber,
+            externalId,
+            verifiedByReadback: true,
+            ...(intent.type === "gmail.send_existing_draft" ? {
+              sourceDraftId: String(intent.reconciliation?.draftId || ""),
+              sourceDraftRetention: "retained_for_separate_cleanup"
+            } : {})
+          }
       });
       row.completed.sort((left, right) => Number(left.index) - Number(right.index));
     } else {
@@ -10306,11 +10622,15 @@ async function prepareCanonicalActionBatch(operationsInput, options = {}) {
   const operations = normalizeActionOperations(operationsInput);
   const runPolicy = options.runPolicy || null;
   if (runPolicy?.enforced) {
+    const singleOperationGmailTypes = new Set([
+      "gmail.create_draft",
+      "gmail.send_existing_draft"
+    ]);
     if (
-      operations.some((operation) => operation.type === "gmail.create_draft")
-      && (operations.length !== 1 || operations[0].type !== "gmail.create_draft")
+      operations.some((operation) => singleOperationGmailTypes.has(operation.type))
+      && (operations.length !== 1 || !singleOperationGmailTypes.has(operations[0].type))
     ) {
-      badRequest("A locked-run Gmail draft must be the only operation in its action batch.");
+      badRequest("A locked-run Gmail draft must be the only operation in its action batch; an existing-draft send follows the same sole-operation rule.");
     }
     for (const [index, operation] of operations.entries()) {
       if (!runPolicy.allowedActionTypes.includes(operation.type)) {
@@ -10326,6 +10646,24 @@ async function prepareCanonicalActionBatch(operationsInput, options = {}) {
       }
       if (operation.type === "gmail.create_draft" && operation.payload?.insuranceClaimEmail !== true) {
         badRequest("Chance work-file Gmail drafts must declare insuranceClaimEmail:true so the claim-only subject rule is enforced.");
+      }
+      if (operation.type === "gmail.send_existing_draft") {
+        const payloadKeys = Object.keys(operation.payload).sort();
+        if (
+          ![2, 3].includes(payloadKeys.length)
+          || !payloadKeys.includes("draftId")
+          || !payloadKeys.includes("query")
+          || payloadKeys.some((key) => !["draftId", "operatorScope", "query"].includes(key))
+          || (
+            payloadKeys.includes("operatorScope")
+            && operation.payload.operatorScope !== "assigned"
+          )
+        ) {
+          badRequest("Locked-run existing-draft send payload must contain only {query,draftId} plus the coordinator-injected assigned scope; raw recipients, content, attachments, and fileQuery are forbidden.");
+        }
+        if (!/^[A-Za-z0-9_-]{1,512}$/.test(String(operation.payload.draftId || ""))) {
+          badRequest("Locked-run existing-draft send requires one exact Gmail draftId.");
+        }
       }
     }
   }
@@ -14070,6 +14408,7 @@ const ACTION_OPERATION_TYPES = new Set([
   "jobnimbus.update_calendar_event",
   "gmail.create_draft",
   "gmail.send",
+  "gmail.send_existing_draft",
   "quo.send_text"
 ]);
 
@@ -14091,6 +14430,9 @@ async function prepareActionOperation(operation, options = {}) {
     case "jobnimbus.update_calendar_event": plan = await updateCalendarEvent(input); break;
     case "gmail.create_draft": plan = await gmailDraft(input); break;
     case "gmail.send": plan = await gmailSend(input); break;
+    case "gmail.send_existing_draft": plan = await gmailSend(input, {
+      operatorExistingDraftLane: true
+    }); break;
     case "quo.send_text": plan = await quoSend(input); break;
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
@@ -14125,6 +14467,10 @@ async function executeActionOperation(operation, prepared) {
     case "jobnimbus.update_calendar_event": return updateCalendarEvent(input);
     case "gmail.create_draft": return gmailDraft({ ...input, approvalDigest: prepared.plan.approvalDigest });
     case "gmail.send": return gmailSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
+    case "gmail.send_existing_draft": return gmailSend(
+      { ...input, approvalDigest: prepared.plan.approvalDigest },
+      { operatorExistingDraftLane: true }
+    );
     case "quo.send_text": return quoSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
@@ -14341,6 +14687,20 @@ function actionBatchIntent(operation, prepared, file, index) {
       channelApprovalDigest: String(prepared?.plan?.approvalDigest || ""),
       threadId: String(plan.threadId || "").trim(),
       contentDigest: gmailDraftReconciliationDigest(plan)
+    };
+  } else if (operation.type === "gmail.send_existing_draft") {
+    const subject = String(plan.subject || "").trim();
+    reconciliation = {
+      draftId: String(plan.draftId || "").trim(),
+      subject,
+      subjectHash: createHash("sha256").update(subject, "utf8").digest("hex"),
+      sourceKeyHash: createHash("sha256")
+        .update(`gmail-draft:${String(plan.draftId || "").trim()}`, "utf8")
+        .digest("hex"),
+      channelApprovalDigest: String(prepared?.plan?.approvalDigest || ""),
+      threadId: String(plan.threadId || "").trim(),
+      contentDigest: gmailImmutableSendDigest(plan),
+      sourceDraftContentDigest: String(plan.contentDigest || "").trim()
     };
   }
   const stable = {
@@ -16735,13 +17095,13 @@ const OPENAPI = {
               "jobnimbus.create_note", "jobnimbus.create_task", "jobnimbus.update_task",
               "jobnimbus.ensure_current_task",
               "jobnimbus.create_calendar_event", "jobnimbus.update_calendar_event",
-              "gmail.create_draft", "gmail.send", "quo.send_text"
+              "gmail.create_draft", "gmail.send", "gmail.send_existing_draft", "quo.send_text"
             ]
           },
           payload: {
             type: "object",
             additionalProperties: true,
-            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {query:'JN',taskId:'ID',completed:true}; calendar update {query:'JN',eventId:'ID',fields:{...}}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. If that draft is approved later, send it with gmail.send {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy."
+            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {query:'JN',taskId:'ID',completed:true}; calendar update {query:'JN',eventId:'ID',fields:{...}}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. In the locked assigned-file lane, a reviewed bridge draft may be sent later only with gmail.send_existing_draft {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy."
           }
         },
         required: ["type", "payload"]
@@ -16770,7 +17130,7 @@ const OPENAPI = {
             minItems: 1,
             maxItems: 15,
             items: { $ref: "#/components/schemas/ActionOperation" },
-            description: "Every exact approved action. The dedicated Mac assigned-file lane may group contact corrections, forward stage moves, and one protected current-control task across at most five exact manifest files, ordered contact then status then task per file. Gmail drafts remain single-file. Task completion, notes, sends, calls, calendar writes, backward stages, company mutation scope, and every other effect are blocked by the locked run policy."
+            description: "Every exact approved action. The dedicated Mac assigned-file lane may group contact corrections, forward stage moves, and one protected current-control task across at most five exact manifest files, ordered contact then status then task per file. Gmail draft creation and the later reviewed existing-draft send are separate sole-operation batches. Raw/direct sends, task completion, notes, calls, calendar writes, backward stages, company mutation scope, and every other effect are blocked by the locked run policy."
           },
           approvalDigest: { type: "string", description: "Required for execution. Must match the immediately preceding unchanged batch dry run." },
           approvalChallenge: { type: "string", description: "Single-use, short-lived server challenge returned by the immediately preceding dry run. The local operator wrapper retains and forwards it; do not copy it into chat." },

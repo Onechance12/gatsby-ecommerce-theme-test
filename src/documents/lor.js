@@ -1,6 +1,25 @@
 import PDFDocument from "pdfkit";
 
 const BLUE = "#004f91";
+const WAVE_LEGAL_PAYEE_NAME = "Wave Public Adjusting LLC";
+
+function deterministicPdfDate(value) {
+  const match = String(value || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) {
+    throw new Error("letterDate must use MM/DD/YYYY to generate a deterministic LOR.");
+  }
+  const [, month, day, year] = match;
+  const timestamp = new Date(`${year}-${month}-${day}T12:00:00.000Z`);
+  if (
+    Number.isNaN(timestamp.getTime())
+    || timestamp.getUTCFullYear() !== Number(year)
+    || timestamp.getUTCMonth() + 1 !== Number(month)
+    || timestamp.getUTCDate() !== Number(day)
+  ) {
+    throw new Error("letterDate is not a valid calendar date.");
+  }
+  return timestamp;
+}
 
 export async function createLorPdf(fields) {
   const required = ["insured", "carrier", "addressLine1", "addressLine2", "dateOfLoss", "claimNumber"];
@@ -11,7 +30,17 @@ export async function createLorPdf(fields) {
     }
   }
 
-  const doc = new PDFDocument({ size: "LETTER", margin: 56, autoFirstPage: true, info: { Title: `LOR - ${fields.insured}` } });
+  const metadataDate = deterministicPdfDate(fields.letterDate);
+  const doc = new PDFDocument({
+    size: "LETTER",
+    margin: 56,
+    autoFirstPage: true,
+    info: {
+      Title: `LOR - ${fields.insured}`,
+      CreationDate: metadataDate,
+      ModDate: metadataDate
+    }
+  });
   const chunks = [];
   doc.on("data", (chunk) => chunks.push(chunk));
   const complete = new Promise((resolve, reject) => {
@@ -23,7 +52,7 @@ export async function createLorPdf(fields) {
   const right = 556;
   const width = right - left;
 
-  doc.fillColor(BLUE).font("Times-Roman").fontSize(27).text("Wave Public Adjusters LLC", left, 42, { lineBreak: false });
+  doc.fillColor(BLUE).font("Times-Roman").fontSize(27).text(WAVE_LEGAL_PAYEE_NAME, left, 42, { lineBreak: false });
   doc.fillColor("#777777").font("Helvetica").fontSize(15).text("TX License #: 3351885", left, 76, { lineBreak: false });
   doc.fillColor(BLUE).font("Times-Roman").fontSize(13);
   ["3500 Oak Lawn Ave", "Suite 460C", "Dallas, TX 75219"].forEach((line, index) => {
@@ -48,20 +77,20 @@ export async function createLorPdf(fields) {
   doc.font("Helvetica").fontSize(11.5).text("Attention Claims Department:", left, y, { width });
   y += 27;
   doc.text(
-    "Please be advised that we, Wave Public Adjusters, represent the named insured for their loss as stated above. We have previously forwarded to you a copy of our Texas Public Adjusters Agreement with the insured (FIN535). As stated by the insured, we hereby request that all further communication and correspondence regarding this claim be directed to this office.",
+    `Please be advised that we, ${WAVE_LEGAL_PAYEE_NAME}, represent the named insured for their loss as stated above. We have previously forwarded to you a copy of our Texas Public Adjusters Agreement with the insured (FIN535). As stated by the insured, we hereby request that all further communication and correspondence regarding this claim be directed to this office.`,
     left,
     y,
     { width, lineGap: 3 }
   );
   y = doc.y + 12;
   doc.text(
-    'The name "Wave Public Adjusters, LLC" must be included on all drafts, checks, and correspondence pertaining to this loss, and mailed directly to:',
+    `The name "${WAVE_LEGAL_PAYEE_NAME}" must be included on all drafts, checks, and correspondence pertaining to this loss, and mailed directly to:`,
     left,
     y,
     { width, lineGap: 3 }
   );
   y = doc.y + 8;
-  doc.text("Wave Public Adjusting LLC\n3500 Oak Lawn Ave #460C\nDallas TX 75219", left, y, { width, align: "center", lineGap: 2 });
+  doc.text(`${WAVE_LEGAL_PAYEE_NAME}\n3500 Oak Lawn Ave #460C\nDallas TX 75219`, left, y, { width, align: "center", lineGap: 2 });
   y = doc.y + 12;
   doc.text("Kindly contact me as soon as possible to discuss this loss or set an appointment to inspect this claim.", left, y, { width, lineGap: 3 });
   y = doc.y + 14;
@@ -70,7 +99,7 @@ export async function createLorPdf(fields) {
   doc.font("Times-Roman").fontSize(25).text("Chance Pearson", left, y, { width, lineBreak: false });
   y += 34;
   doc.font("Helvetica").fontSize(11.5).text(
-    "cpearson@wavepa.com\n972.573.1730\nWave Public Adjusting LLC\n3500 Oak Lawn Ave #460C\nDallas, TX 75219",
+    `cpearson@wavepa.com\n972.573.1730\n${WAVE_LEGAL_PAYEE_NAME}\n3500 Oak Lawn Ave #460C\nDallas, TX 75219`,
     left,
     y,
     { width, lineGap: 1 }

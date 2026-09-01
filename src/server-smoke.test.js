@@ -82,6 +82,74 @@ function actionBatchIntentFixture({ index, type, fileId, fileNumber, reconciliat
   return { ...stable, intentDigest: digest({ version: 1, stable }) };
 }
 
+function fixtureGmailDraftFromRaw({ draftId, messageId, threadId = "", raw }) {
+  const decoded = Buffer.from(String(raw || ""), "base64url").toString("utf8");
+  const parseHeaders = (headerText) => headerText.split("\r\n").map((line) => {
+    const colon = line.indexOf(":");
+    return colon > 0
+      ? { name: line.slice(0, colon), value: line.slice(colon + 1).trim() }
+      : null;
+  }).filter(Boolean);
+  const headerValue = (headers, name) => headers.find(
+    (header) => header.name.toLowerCase() === name.toLowerCase()
+  )?.value || "";
+  const separator = decoded.indexOf("\r\n\r\n");
+  const headerText = separator >= 0 ? decoded.slice(0, separator) : decoded;
+  const bodyText = separator >= 0 ? decoded.slice(separator + 4) : "";
+  const headers = parseHeaders(headerText);
+  const contentType = headers.find((header) => header.name.toLowerCase() === "content-type")?.value || "text/plain";
+  let payload;
+  const boundary = contentType.match(/boundary="?([^";]+)"?/i)?.[1] || "";
+  if (/multipart\//i.test(contentType) && boundary) {
+    const parts = bodyText.split(`--${boundary}`)
+      .map((part) => part.replace(/^\r\n/, "").replace(/\r\n$/, ""))
+      .filter((part) => part && part !== "--")
+      .map((part, index) => {
+        const partSeparator = part.indexOf("\r\n\r\n");
+        const partHeaders = parseHeaders(
+          partSeparator >= 0 ? part.slice(0, partSeparator) : part
+        );
+        const encodedBody = partSeparator >= 0 ? part.slice(partSeparator + 4) : "";
+        const partContentType = headerValue(partHeaders, "content-type");
+        const disposition = headerValue(partHeaders, "content-disposition");
+        const filename = disposition.match(/filename="([^"]+)"/i)?.[1]
+          || partContentType.match(/name="([^"]+)"/i)?.[1]
+          || "";
+        const transferEncoding = headerValue(partHeaders, "content-transfer-encoding").toLowerCase();
+        const bytes = transferEncoding === "base64"
+          ? Buffer.from(encodedBody.replace(/\s+/g, ""), "base64")
+          : Buffer.from(encodedBody, "utf8");
+        return {
+          partId: String(index),
+          mimeType: partContentType.split(";")[0].trim().toLowerCase() || "application/octet-stream",
+          ...(filename ? { filename } : {}),
+          headers: partHeaders,
+          body: { data: bytes.toString("base64url"), size: bytes.length }
+        };
+      });
+    payload = {
+      mimeType: contentType.split(";")[0].trim().toLowerCase(),
+      headers,
+      parts
+    };
+  } else {
+    payload = {
+      mimeType: "text/plain",
+      headers,
+      body: { data: Buffer.from(bodyText, "utf8").toString("base64url") }
+    };
+  }
+  return {
+    id: draftId,
+    message: {
+      id: messageId,
+      threadId,
+      snippet: bodyText,
+      payload
+    }
+  };
+}
+
 async function startOperatorJobNimbusFixture(t, port, options = {}) {
   const chanceOwnerId = "fc95a213f70e4c9daddc5fa366be9941";
   const chance = {
@@ -194,6 +262,8 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   const gmailThreads = new Map((Array.isArray(options.gmailThreads) ? options.gmailThreads : [])
     .map((thread) => [String(thread?.id || ""), structuredClone(thread)]));
   let gmailDraftCreateCount = 0;
+  let gmailSendCount = 0;
+  let gmailSentMessageMutation = String(options.gmailSentMessageMutation || "");
   const fixtureRelationField = (url) => {
     try {
       const filter = JSON.parse(url.searchParams.get("filter") || "{}");
@@ -242,12 +312,24 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       && req.method === "POST"
     ) {
       gmailDraftCreateCount += 1;
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const request = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const draftId = `draft-created-${gmailDraftCreateCount}`;
+      const messageId = `draft-created-message-${gmailDraftCreateCount}`;
+      const threadId = String(request?.message?.threadId || "");
+      gmailDrafts.set(draftId, fixtureGmailDraftFromRaw({
+        draftId,
+        messageId,
+        threadId,
+        raw: request?.message?.raw
+      }));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        id: `draft-created-${gmailDraftCreateCount}`,
+        id: draftId,
         message: {
-          id: `draft-created-message-${gmailDraftCreateCount}`,
-          threadId: ""
+          id: messageId,
+          threadId
         }
       }));
       return;
@@ -264,6 +346,36 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(draft));
+      return;
+    }
+    if (
+      options.communicationScope
+      && url.pathname === "/gmail/v1/users/me/messages/send"
+      && req.method === "POST"
+    ) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const request = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      gmailSendCount += 1;
+      const messageId = `sent-message-${gmailSendCount}`;
+      const parsed = fixtureGmailDraftFromRaw({
+        draftId: "",
+        messageId,
+        threadId: String(request?.threadId || ""),
+        raw: request?.raw
+      });
+      const message = { ...parsed.message, labelIds: ["SENT"] };
+      if (gmailSentMessageMutation === "subject") {
+        const subject = message.payload?.headers?.find(
+          (header) => String(header?.name || "").toLowerCase() === "subject"
+        );
+        if (subject) subject.value = `${subject.value}-PROVIDER-MUTATED`;
+      } else if (gmailSentMessageMutation === "labels") {
+        message.labelIds = ["DRAFT"];
+      }
+      gmailMessages.set(messageId, message);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: messageId, threadId: message.threadId }));
       return;
     }
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages" && req.method === "GET") {
@@ -808,6 +920,10 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     getGmailEvidenceReadCount: () => gmailEvidenceReadCount,
     getContactPageRequests: () => structuredClone(contactPageRequests),
     getGmailDraftCreateCount: () => gmailDraftCreateCount,
+    getGmailSendCount: () => gmailSendCount,
+    setGmailSentMessageMutation: (value) => {
+      gmailSentMessageMutation = String(value || "");
+    },
     addGmailDraft: (draft) => gmailDrafts.set(String(draft?.id || ""), structuredClone(draft)),
     getTaskQueryFields: () => [...taskQueryFields],
     getTaskPageRequests: () => structuredClone(taskPageRequests),
@@ -1096,6 +1212,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(chatgptSchema.paths["/jobnimbus/upload-file"].post["x-openai-isConsequential"], true);
   assert.equal(chatgptSchema.paths["/gmail/attachment-review"].post["x-openai-isConsequential"], true);
   const consolidatedActionTypes = chatgptSchema.components.schemas.ActionOperation.properties.type.enum;
+  assert.equal(consolidatedActionTypes.includes("gmail.send_existing_draft"), true);
   assert.match(
     chatgptSchema.components.schemas.ActionOperation.properties.payload.description,
     /completed:true/
@@ -1103,6 +1220,10 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.match(
     chatgptSchema.components.schemas.ActionOperation.properties.payload.description,
     /draftId:'RETURNED_DRAFT_ID'/
+  );
+  assert.match(
+    chatgptSchema.components.schemas.ActionOperation.properties.payload.description,
+    /gmail\.send_existing_draft/
   );
   assert.match(
     chatgptSchema.components.schemas.GmailMessageRequest.properties.draftId.description,
@@ -10020,7 +10141,7 @@ test("Mac reconciliation proves interrupted Gmail drafts applied or not applied 
   assert.equal(appliedResponse.status, 200);
   const applied = await appliedResponse.json();
   assert.equal(applied.mode, "reconciled");
-  assert.equal(applied.outcome, "applied_verified");
+  assert.equal(applied.outcome, "applied_verified", JSON.stringify(applied));
   assert.equal(applied.receipt.status, "completed");
   assert.equal(applied.receipt.completed[0].receipt.externalId, "draft-applied");
   assert.equal(applied.receipt.completed[0].receipt.verifiedByReadback, true);
@@ -10096,6 +10217,233 @@ test("Mac reconciliation proves interrupted Gmail drafts applied or not applied 
     )).map((row) => row.status).sort().join(","),
     "completed,verified_not_applied"
   );
+});
+
+test("Mac reconciliation proves an interrupted existing-draft send only from exact Gmail Sent readback", async (t) => {
+  const bridgePort = 19172;
+  const fakeApiPort = 19173;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-gmail-send-reconcile-"));
+  const bridgeData = path.join(memoryRoot, "bridge");
+  await mkdir(bridgeData, { recursive: true });
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const principalHash = createHash("sha256")
+    .update("codex_operator_token|codex-mac-operator||codex_operator", "utf8")
+    .digest("hex");
+  const manifest = lockedOperatorManifestFixture();
+  const to = "carrier@example.test";
+  const appliedSubject = "ABC-123";
+  const notAppliedSubject = "XYZ-999";
+  const body = "Approved interrupted send body.";
+  const sourceDraft = (draftId, subject) => ({
+    id: draftId,
+    message: {
+      id: `${draftId}-message`,
+      threadId: "",
+      snippet: body,
+      payload: {
+        mimeType: "text/plain",
+        headers: [
+          { name: "To", value: to },
+          { name: "Subject", value: subject }
+        ],
+        body: { data: Buffer.from(body, "utf8").toString("base64url") }
+      }
+    }
+  });
+  const sourceDraftDigest = (draftId, subject) => {
+    const draft = sourceDraft(draftId, subject);
+    return digest({
+      draftId,
+      messageId: draft.message.id,
+      threadId: "",
+      deliveryHeaders: { to, subject },
+      bodyRepresentations: [{
+        partId: "1",
+        mimeType: "text/plain",
+        bytes: Buffer.byteLength(body, "utf8"),
+        sha256: createHash("sha256").update(body, "utf8").digest("hex"),
+        content: body
+      }],
+      attachments: [],
+      payload: draft.message.payload
+    });
+  };
+  const immutableDigest = (subject) => digest({
+    version: 1,
+    message: {
+      from: "",
+      sender: "",
+      replyTo: "",
+      to,
+      cc: "",
+      bcc: "",
+      subject,
+      body,
+      attachments: [],
+      bodyRepresentations: [{
+        mimeType: "text/plain",
+        bytes: Buffer.byteLength(body, "utf8"),
+        sha256: createHash("sha256").update(body, "utf8").digest("hex"),
+        content: body
+      }]
+    }
+  });
+  const interruptedBatch = ({ id, fileId, fileNumber, subject, draftId, approvalDigest }) => ({
+    schemaVersion: 2,
+    id,
+    approvalId: `${id}-approval`,
+    approvalDigest: createHash("sha256").update(`${id}-batch`).digest("hex"),
+    principalHash,
+    operatorScope: "assigned",
+    bootId: "old-gmail-send-bridge-boot",
+    status: "in_progress",
+    createdAt: "2026-08-22T12:00:00.000Z",
+    operationCount: 1,
+    batchMode: "assigned_single_file_v2",
+    runPolicyId: manifest.summary.id,
+    runPolicySha256: manifest.summary.sha256,
+    runPolicyExpiresAt: manifest.summary.expiresAt,
+    fileCount: 1,
+    files: [{
+      id: fileId,
+      number: fileNumber,
+      operationIndexes: [0],
+      operationTypes: ["gmail.send_existing_draft"]
+    }],
+    intents: [actionBatchIntentFixture({
+      index: 0,
+      type: "gmail.send_existing_draft",
+      fileId,
+      fileNumber,
+      reconciliation: {
+        draftId,
+        subject,
+        subjectHash: createHash("sha256").update(subject).digest("hex"),
+        sourceKeyHash: createHash("sha256").update(`gmail-draft:${draftId}`).digest("hex"),
+        channelApprovalDigest: approvalDigest,
+        threadId: "",
+        contentDigest: immutableDigest(subject),
+        sourceDraftContentDigest: sourceDraftDigest(draftId, subject)
+      }
+    })],
+    completed: [],
+    current: {
+      index: 0,
+      type: "gmail.send_existing_draft",
+      fileId,
+      fileNumber,
+      status: "executing"
+    }
+  });
+  const appliedBatchId = "gmail-send-applied-batch";
+  const notAppliedBatchId = "gmail-send-not-applied-batch";
+  const appliedApprovalDigest = "gmail-send-applied-reservation-digest";
+  const notAppliedApprovalDigest = "gmail-send-not-applied-reservation-digest";
+  await writeFile(path.join(bridgeData, "action-batches.json"), `${JSON.stringify([
+    interruptedBatch({
+      id: appliedBatchId,
+      fileId: "contact-chance",
+      fileNumber: "2739",
+      subject: appliedSubject,
+      draftId: "source-draft-applied",
+      approvalDigest: appliedApprovalDigest
+    }),
+    interruptedBatch({
+      id: notAppliedBatchId,
+      fileId: "contact-chance-second",
+      fileNumber: "2741",
+      subject: notAppliedSubject,
+      draftId: "source-draft-not-applied",
+      approvalDigest: notAppliedApprovalDigest
+    })
+  ], null, 2)}\n`, "utf8");
+  await writeFile(path.join(bridgeData, "outbound-sends.json"), `${JSON.stringify([{
+    id: "gmail-send-applied-reservation",
+    channel: "gmail",
+    approvalDigest: appliedApprovalDigest,
+    sourceKeyHash: createHash("sha256").update("gmail-draft:source-draft-applied").digest("hex"),
+    subjectHash: createHash("sha256").update(appliedSubject).digest("hex"),
+    status: "readback_pending",
+    externalId: "sent-applied",
+    createdAt: "2026-08-22T12:00:00.000Z"
+  }], null, 2)}\n`, "utf8");
+
+  const sentMessage = {
+    id: "sent-applied",
+    threadId: "",
+    labelIds: ["SENT"],
+    snippet: body,
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "To", value: to },
+        { name: "Subject", value: appliedSubject }
+      ],
+      body: { data: Buffer.from(body, "utf8").toString("base64url") }
+    }
+  };
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    secondAssigned: true,
+    gmailMessages: [sentMessage],
+    gmailDrafts: [sourceDraft("source-draft-applied", appliedSubject)]
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const appliedResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId: appliedBatchId })
+  });
+  assert.equal(appliedResponse.status, 200);
+  const applied = await appliedResponse.json();
+  assert.equal(applied.outcome, "applied_verified", JSON.stringify(applied));
+  assert.equal(applied.receipt.completed[0].receipt.externalId, "sent-applied");
+  assert.equal(applied.receipt.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(
+    applied.receipt.completed[0].receipt.sourceDraftRetention,
+    "retained_for_separate_cleanup"
+  );
+
+  const notAppliedResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch-reconcile`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ batchId: notAppliedBatchId })
+  });
+  assert.equal(notAppliedResponse.status, 200);
+  const notApplied = await notAppliedResponse.json();
+  assert.equal(notApplied.outcome, "not_applied_verified");
+  assert.equal(notApplied.receipt.status, "partial_failure");
+  assert.equal(notApplied.receipt.automaticRetryAllowed, false);
 });
 
 test("Mac reconciliation durably quarantines a permanent task conflict without blocking unrelated files", async (t) => {
@@ -10492,6 +10840,300 @@ test("locked Chance run requires each Gmail draft to be the sole batch operation
   assert.match((await response.json()).error, /Gmail draft must be the only operation/i);
   assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
   assert.equal(fixtureApi.getContactUpdateCount(), 0);
+});
+
+test("locked Mac operator sends only a separately approved bridge-created draft and verifies Gmail Sent readback", async (t) => {
+  const bridgePort = 19170;
+  const fakeApiPort = 19171;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-locked-gmail-send-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true,
+    secondAssigned: true,
+    chanceOverrides: {
+      address_line1: "3431 Manana Dr",
+      city: "Dallas",
+      state_text: "TX",
+      zip: "75220",
+      cf_string_1: "State Farm",
+      cf_date_1: "2026-04-25"
+    }
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret",
+      GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false",
+      ALLOW_GMAIL_SEND: "false",
+      QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input),
+      BRIDGE_ALLOW_WRITES: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890",
+    "content-type": "application/json"
+  };
+
+  const draftOperation = {
+    type: "gmail.create_draft",
+    payload: {
+      query: "2739",
+      to: "carrier@example.test",
+      subject: "ABC-123",
+      body: "Approved carrier body.",
+      attachments: [{ source: "generated_lor", query: "2739" }],
+      insuranceClaimEmail: true
+    }
+  };
+  const draftPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [draftOperation],
+      execute: false
+    })
+  });
+  assert.equal(draftPlanResponse.status, 200);
+  const draftPlan = await draftPlanResponse.json();
+  const draftExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [draftOperation],
+      execute: true,
+      approvalDigest: draftPlan.approvalDigest,
+      approvalChallenge: draftPlan.approvalChallenge
+    })
+  });
+  assert.equal(draftExecuteResponse.status, 200);
+  const draftExecuted = await draftExecuteResponse.json();
+  assert.equal(draftExecuted.mode, "executed");
+  assert.equal(draftExecuted.batch.completed[0].receipt.verifiedByReadback, true);
+  const draftId = draftExecuted.batch.completed[0].receipt.externalId;
+  assert.match(draftId, /^draft-created-/);
+
+  const genericSendResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{ type: "gmail.send", payload: { query: "2739", draftId } }],
+      execute: false
+    })
+  });
+  assert.equal(genericSendResponse.status, 400);
+  assert.match((await genericSendResponse.json()).error, /run policy blocks/i);
+
+  const sendOperation = {
+    type: "gmail.send_existing_draft",
+    payload: { query: "2739", draftId }
+  };
+  const sendPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [sendOperation],
+      execute: false
+    })
+  });
+  assert.equal(sendPlanResponse.status, 200);
+  const currentManifestSendPlan = await sendPlanResponse.json();
+  assert.equal(currentManifestSendPlan.operations[0].plan.plan.action, "send_existing_draft");
+  assert.equal(currentManifestSendPlan.operations[0].plan.plan.subject, "ABC-123");
+  assert.equal(currentManifestSendPlan.operations[0].plan.plan.draftId, draftId);
+  assert.equal(
+    currentManifestSendPlan.operations[0].plan.plan.draftProvenance.immediatePredecessorReattested,
+    false
+  );
+
+  const previousManifest = loadChanceOperatorRunManifest({
+    ...manifest.input,
+    allowedActionTypes: manifest.input.allowedActionTypes.filter(
+      (type) => type !== "gmail.send_existing_draft"
+    )
+  });
+  const actionBatchStorePath = path.join(memoryRoot, "bridge", "action-batches.json");
+  const actionBatches = JSON.parse(await readFile(actionBatchStorePath, "utf8"));
+  const creationBatch = actionBatches.find((batch) => (
+    Array.isArray(batch.completed)
+    && batch.completed.some((row) => row.receipt?.externalId === draftId)
+  ));
+  assert.ok(creationBatch);
+  creationBatch.runPolicySha256 = previousManifest.sha256;
+  const creationReceipt = creationBatch.completed.find(
+    (row) => row.receipt?.externalId === draftId
+  );
+  delete creationReceipt.receipt.verifiedByReadback;
+  await writeFile(actionBatchStorePath, `${JSON.stringify(actionBatches, null, 2)}\n`, "utf8");
+
+  const migratedSendPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [sendOperation],
+      execute: false
+    })
+  });
+  assert.equal(migratedSendPlanResponse.status, 200);
+  const sendPlan = await migratedSendPlanResponse.json();
+  assert.equal(
+    sendPlan.operations[0].plan.plan.draftProvenance.immediatePredecessorReattested,
+    true
+  );
+  assert.equal(
+    sendPlan.operations[0].plan.plan.draftProvenance.creationRunPolicySha256,
+    previousManifest.sha256
+  );
+
+  const changedPayloadResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [{
+        type: "gmail.send_existing_draft",
+        payload: { query: "2739", draftId, body: "Raw send must stay blocked." }
+      }],
+      execute: false
+    })
+  });
+  assert.equal(changedPayloadResponse.status, 400);
+  assert.match((await changedPayloadResponse.json()).error, /must contain only/i);
+
+  const sendExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [sendOperation],
+      execute: true,
+      approvalDigest: sendPlan.approvalDigest,
+      approvalChallenge: sendPlan.approvalChallenge
+    })
+  });
+  assert.equal(sendExecuteResponse.status, 200);
+  const sent = await sendExecuteResponse.json();
+  assert.equal(sent.mode, "executed", JSON.stringify(sent));
+  const receipt = sent.batch.completed[0].receipt;
+  assert.equal(receipt.verifiedByReadback, true);
+  assert.match(receipt.externalId, /^sent-message-/);
+  assert.equal(receipt.sourceDraftId, draftId);
+  assert.equal(receipt.sourceDraftRetention, "retained_for_separate_cleanup");
+  assert.equal(fixtureApi.getGmailDraftCreateCount(), 1);
+  assert.equal(fixtureApi.getGmailSendCount(), 1);
+
+  const reusedSourceResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [sendOperation],
+      execute: false
+    })
+  });
+  assert.equal(reusedSourceResponse.status, 409);
+  assert.match((await reusedSourceResponse.json()).error, /source was already used/i);
+
+  const adverseDraftOperation = {
+    type: "gmail.create_draft",
+    payload: {
+      query: "2741",
+      to: "carrier@example.test",
+      subject: "XYZ-999",
+      body: "Second approved carrier body.",
+      insuranceClaimEmail: true
+    }
+  };
+  const adverseDraftPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [adverseDraftOperation],
+      execute: false
+    })
+  });
+  assert.equal(adverseDraftPlanResponse.status, 200);
+  const adverseDraftPlan = await adverseDraftPlanResponse.json();
+  const adverseDraftExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [adverseDraftOperation],
+      execute: true,
+      approvalDigest: adverseDraftPlan.approvalDigest,
+      approvalChallenge: adverseDraftPlan.approvalChallenge
+    })
+  });
+  assert.equal(adverseDraftExecuteResponse.status, 200);
+  const adverseDraftExecuted = await adverseDraftExecuteResponse.json();
+  const adverseDraftId = adverseDraftExecuted.batch.completed[0].receipt.externalId;
+  const adverseSendOperation = {
+    type: "gmail.send_existing_draft",
+    payload: { query: "2741", draftId: adverseDraftId }
+  };
+  const adverseSendPlanResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [adverseSendOperation],
+      execute: false
+    })
+  });
+  assert.equal(adverseSendPlanResponse.status, 200);
+  const adverseSendPlan = await adverseSendPlanResponse.json();
+  fixtureApi.setGmailSentMessageMutation("subject");
+  const adverseSendExecuteResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [adverseSendOperation],
+      execute: true,
+      approvalDigest: adverseSendPlan.approvalDigest,
+      approvalChallenge: adverseSendPlan.approvalChallenge
+    })
+  });
+  assert.equal(adverseSendExecuteResponse.status, 200);
+  const adverseSendExecuted = await adverseSendExecuteResponse.json();
+  assert.equal(adverseSendExecuted.mode, "partial_failure");
+  assert.match(adverseSendExecuted.batch.error, /Sent-message readback does not match/i);
+  assert.equal(fixtureApi.getGmailSendCount(), 2);
+  const adverseRetryResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      runPolicy: manifest.runPolicy,
+      operations: [adverseSendOperation],
+      execute: false
+    })
+  });
+  assert.equal(adverseRetryResponse.status, 409);
+  assert.equal(fixtureApi.getGmailSendCount(), 2);
 });
 
 test("locked Chance run fails closed when matching or mismatching Gmail drafts appear after approval", async (t) => {
