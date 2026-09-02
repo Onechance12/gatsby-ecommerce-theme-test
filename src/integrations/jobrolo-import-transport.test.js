@@ -216,21 +216,10 @@ test("selected opaque ref resolves only through a complete assigned catalog", as
   ]) assert.equal(JSON.stringify(snapshot).includes(forbidden), false);
 });
 
-test("positive numeric loss dates keep the catalog and snapshot usable without inventing a civil date", async () => {
-  const numericDateOfLoss = 1785261000;
-  const base = indexEnvelope().data.files[0];
+test("positive numeric loss dates carry their UTC civil date into the signed snapshot", async () => {
+  const numericDateOfLoss = 1777291200;
   const { readService } = service({
-    index: indexEnvelope({
-      data: {
-        files: [{
-          ...base,
-          missingFacts: {
-            ...base.missingFacts,
-            dateOfLoss: true
-          }
-        }]
-      }
-    }),
+    index: indexEnvelope(),
     file: rawFileEnvelope(numericDateOfLoss)
   });
 
@@ -239,14 +228,11 @@ test("positive numeric loss dates keep the catalog and snapshot usable without i
   assert.equal(catalog.items[0].sourceFileRef, FILE_REF);
 
   const snapshot = await readService.readSnapshot({ sourceFileRef: FILE_REF });
-  assert.equal(snapshot.file.dateOfLoss, null);
-  assert.equal(snapshot.file.missingFacts.dateOfLoss, true);
+  assert.equal(snapshot.file.dateOfLoss, "2026-04-27");
+  assert.equal(snapshot.file.missingFacts.dateOfLoss, false);
   assert.equal(canonicalJson(catalog).includes(String(numericDateOfLoss)), false);
   assert.equal(canonicalJson(snapshot).includes(String(numericDateOfLoss)), false);
-  const shiftedUtcDate = new Date(numericDateOfLoss * 1000)
-    .toISOString()
-    .slice(0, 10);
-  assert.equal(canonicalJson(snapshot).includes(shiftedUtcDate), false);
+  assert.equal(canonicalJson(snapshot).includes("2026-04-27"), true);
 });
 
 test("unknown or malformed refs never trigger an exact-file read", async () => {

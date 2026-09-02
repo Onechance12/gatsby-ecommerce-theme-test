@@ -391,11 +391,14 @@ const GOOGLE_OAUTH_SCOPES = [
 const CHANCE_GOOGLE_EMAIL = String(
   process.env.CHANCE_GOOGLE_EMAIL || "cpearson@wavepa.com"
 ).trim().toLowerCase();
+const CHANCE_GOOGLE_SUBJECT = String(
+  process.env.CHANCE_GOOGLE_SUBJECT || ""
+);
 const WAVE_AUTH_USERS = parseWaveUsers(process.env.WAVE_AUTH_USERS_JSON, [{
   email: CHANCE_GOOGLE_EMAIL,
   name: "Chance Pearson",
   role: "chance",
-  googleSubject: process.env.CHANCE_GOOGLE_SUBJECT || "",
+  googleSubject: CHANCE_GOOGLE_SUBJECT,
   jobNimbusOwnerId: process.env.CHANCE_JOBNIMBUS_OWNER_ID || "fc95a213f70e4c9daddc5fa366be9941",
   jobNimbusScope: "assigned"
 }]);
@@ -495,6 +498,7 @@ const RETELL_API_TIMEOUT_MS = Math.max(
   Math.min(positiveIntegerEnv("RETELL_API_TIMEOUT_MS", 15_000), 60_000)
 );
 const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
+const HCN_CLAIM_CALL_OPERATION_KIND = "retell.claim_filing_call";
 const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
 const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR_AGENT_ID || RETELL_HOMEOWNER_AGENT_ID;
 const RETELL_CARRIER_FOLLOWUP_AGENT_ID = process.env.RETELL_CARRIER_FOLLOWUP_AGENT_ID || "agent_66fb8a49fc6ab5a777eb9f0474";
@@ -912,6 +916,8 @@ const HCN_ASSISTANT_MAX_HISTORY_TEXT_BYTES = 8 * 1024;
 const HCN_ASSISTANT_TURN_OPERATIONS =
   createKeyedOperationQueue({ maxKeys: 512 });
 const HCN_JOBROLO_ASSISTANT_BINDING_OPERATIONS =
+  createKeyedOperationQueue({ maxKeys: 512 });
+const HCN_CLAIM_CALL_OPERATIONS =
   createKeyedOperationQueue({ maxKeys: 512 });
 const HCN_PENDING_ACTION_PLANS = createHcnPendingActionPlanStore();
 const HCN_PENDING_CLAIM_CALL_PLANS =
@@ -7551,14 +7557,20 @@ async function hcnPrepareClaimFiling(input = {}) {
     ["conversationRef", "fileRef", "confirmations"],
     "HCN claim filing prepare"
   );
-  return withHcnActionAdmission(
-    HCN_ACTION_PREPARE_ADMISSION,
-    async () => {
+  return HCN_CLAIM_CALL_OPERATIONS.run(
+    hcnClaimCallOperationBinding({
+      principalRef: hcnClaimCallReceiptPrincipalRef(),
+      fileRef: hcnAssistantConversationFileRef(input.fileRef, "file")
+    }),
+    () => withHcnActionAdmission(
+      HCN_ACTION_PREPARE_ADMISSION,
+      async () => {
       const context = await hcnClaimFilingContext({
         principal,
         conversationRef: input.conversationRef,
         fileRef: input.fileRef
       });
+      await hcnRequireNoPriorClaimCall({ context, principal });
       const confirmations = normalizeHcnClaimConfirmations(
         input.confirmations || {}
       );
@@ -7663,7 +7675,8 @@ async function hcnPrepareClaimFiling(input = {}) {
         }
         throw error;
       }
-    }
+      }
+    )
   );
 }
 
@@ -7675,9 +7688,14 @@ async function hcnExecuteClaimFiling(input = {}) {
     ["conversationRef", "fileRef", "planId", "approvalDigest"],
     "HCN claim filing execute"
   );
-  return withHcnActionAdmission(
-    HCN_ACTION_EXECUTE_ADMISSION,
-    async () => {
+  return HCN_CLAIM_CALL_OPERATIONS.run(
+    hcnClaimCallOperationBinding({
+      principalRef: hcnClaimCallReceiptPrincipalRef(),
+      fileRef: hcnAssistantConversationFileRef(input.fileRef, "file")
+    }),
+    () => withHcnActionAdmission(
+      HCN_ACTION_EXECUTE_ADMISSION,
+      async () => {
       const context = await hcnClaimFilingContext({
         principal,
         conversationRef: input.conversationRef,
@@ -7712,7 +7730,9 @@ async function hcnExecuteClaimFiling(input = {}) {
         error.statusCode = 503;
         throw error;
       }
+      await hcnRequireNoPriorClaimCall({ context, principal });
       const principalRef = hcnActionReceiptPrincipalRef();
+      const claimCallPrincipalRef = hcnClaimCallReceiptPrincipalRef();
       const fileScopeBinding = hcnClaimScopeBinding({
         principalRef,
         conversationRef: context.conversation.conversationRef,
@@ -7780,11 +7800,12 @@ async function hcnExecuteClaimFiling(input = {}) {
       let executingReceipt;
       try {
         executingReceipt = receiptIndex.appendExecuting({
-          sessionPrincipalRef: principalRef,
+          sessionPrincipalRef: claimCallPrincipalRef,
           fileRef: context.fileRef,
           planId,
           digest: approvalDigest,
-          operationCount: 1
+          operationCount: 1,
+          operationKind: HCN_CLAIM_CALL_OPERATION_KIND
         });
       } catch {
         HCN_PENDING_CLAIM_CALL_PLANS.recoverExecution({
@@ -7801,7 +7822,7 @@ async function hcnExecuteClaimFiling(input = {}) {
       }
 
       const callRef = hcnClaimCallRef({
-        principalRef,
+        principalRef: claimCallPrincipalRef,
         fileRef: context.fileRef,
         approvalDigest
       });
@@ -7836,7 +7857,7 @@ async function hcnExecuteClaimFiling(input = {}) {
       let receipt;
       try {
         receipt = receiptIndex.transition({
-          sessionPrincipalRef: principalRef,
+          sessionPrincipalRef: claimCallPrincipalRef,
           fileRef: context.fileRef,
           planId,
           digest: approvalDigest,
@@ -7887,8 +7908,9 @@ async function hcnExecuteClaimFiling(input = {}) {
         receipt,
         automaticRetry: false
       });
-    },
-    { exclusiveSession: true, globalExecution: true }
+      },
+      { exclusiveSession: true, globalExecution: true }
+    )
   );
 }
 
@@ -7902,7 +7924,7 @@ function hcnFinalizeUncertainClaimCall({
   let receipt;
   try {
     receipt = receiptIndex.transition({
-      sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
+      sessionPrincipalRef: hcnClaimCallReceiptPrincipalRef(),
       fileRef: execution.fileRef,
       planId: execution.planId,
       digest: execution.approvalDigest,
@@ -7954,13 +7976,16 @@ async function hcnReadClaimFilingResult(input = {}) {
       fileRef: input.fileRef
     });
     const callRef = assertHcnClaimCallRef(input.callRef);
-    const receipt = hcnActionReceiptIndex().get({
-      sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
-      planId: String(input.planId || "")
-    });
+    const claimReceipt = hcnGetClaimCallReceipt(input.planId);
+    const receipt = claimReceipt.receipt;
     if (
       receipt.fileRef !== context.fileRef
       || receipt.status !== "completed_pending_verification"
+      || callRef !== hcnClaimCallRef({
+        principalRef: claimReceipt.sessionPrincipalRef,
+        fileRef: context.fileRef,
+        approvalDigest: receipt.digest
+      })
     ) {
       const error = new Error(
         "A completed pending-verification receipt for this exact file is required."
@@ -8253,7 +8278,8 @@ async function hcnExecuteClaimWriteback(input = {}) {
           fileRef: context.fileRef,
           planId,
           digest: approvalDigest,
-          operationCount: 1
+          operationCount: 1,
+          operationKind: "jobnimbus.claim_filing_writeback"
         });
       } catch {
         HCN_PENDING_CLAIM_WRITEBACK_PLANS.recoverExecution({
@@ -8480,13 +8506,16 @@ async function hcnLoadClaimCallEvidence({
   callRef
 }) {
   const normalizedCallRef = assertHcnClaimCallRef(callRef);
-  const receipt = hcnActionReceiptIndex().get({
-    sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
-    planId: String(callPlanId || "")
-  });
+  const claimReceipt = hcnGetClaimCallReceipt(callPlanId);
+  const receipt = claimReceipt.receipt;
   if (
     receipt.fileRef !== context.fileRef
     || receipt.status !== "completed_pending_verification"
+    || normalizedCallRef !== hcnClaimCallRef({
+      principalRef: claimReceipt.sessionPrincipalRef,
+      fileRef: context.fileRef,
+      approvalDigest: receipt.digest
+    })
   ) {
     const error = new Error(
       "A completed pending-verification receipt for this exact claim call is required."
@@ -8616,22 +8645,126 @@ function hcnClaimCallMatches(call, {
     && Boolean(String(call?.call_id || "").trim());
 }
 
+function hcnClaimCallOperationBinding({ principalRef, fileRef }) {
+  return createHash("sha256")
+    .update("hcn-console:exact-file-claim-call-operation:v1", "utf8")
+    .update("\0", "utf8")
+    .update(String(principalRef || ""), "utf8")
+    .update("\0", "utf8")
+    .update(String(fileRef || ""), "utf8")
+    .digest("hex");
+}
+
+function hcnClaimCallReceiptPrincipalRefs() {
+  return Object.freeze([
+    hcnClaimCallReceiptPrincipalRef(),
+    ...hcnLegacyClaimCallReceiptPrincipalRefs()
+  ].filter((value, index, values) => values.indexOf(value) === index));
+}
+
+function hcnGetClaimCallReceipt(planId) {
+  const receiptIndex = hcnActionReceiptIndex();
+  let lastNotFound;
+  for (const sessionPrincipalRef of hcnClaimCallReceiptPrincipalRefs()) {
+    try {
+      const receipt = receiptIndex.get({
+        sessionPrincipalRef,
+        planId: String(planId || "")
+      });
+      if (
+        receipt.operationKind === undefined
+        || receipt.operationKind === HCN_CLAIM_CALL_OPERATION_KIND
+      ) {
+        return Object.freeze({ receipt, sessionPrincipalRef });
+      }
+    } catch (error) {
+      if (error?.code !== "receipt_not_found") throw error;
+      lastNotFound = error;
+    }
+  }
+  if (lastNotFound) throw lastNotFound;
+  const error = new Error("Action receipt not found");
+  error.statusCode = 404;
+  throw error;
+}
+
+async function hcnRequireNoPriorClaimCall({ context, principal }) {
+  const recovery = await hcnRecoverableClaimCall({ context, principal });
+  if (recovery.state === "none") return recovery;
+  const error = new Error(
+    recovery.state === "available"
+      ? "An accepted claim call already exists for this exact file. Check its result before any new call."
+      : recovery.state === "temporarily_unavailable"
+        ? "The exact-file prior-call check is temporarily unavailable. Nothing was called; do not retry automatically."
+        : "This exact file has an unresolved claim call. Reconcile it before any new call; do not retry automatically."
+  );
+  error.code = "claim_call_recovery_required";
+  error.statusCode = recovery.state === "temporarily_unavailable" ? 503 : 409;
+  throw error;
+}
+
 async function hcnRecoverableClaimCall({ context, principal }) {
-  if (context.file.claimNumber || !RETELL_API_KEY) {
+  if (context.file.claimNumber) {
     return Object.freeze({ state: "none" });
   }
-  const receipts = hcnActionReceiptIndex().list({
-    sessionPrincipalRef: hcnActionReceiptPrincipalRef(),
-    fileRef: context.fileRef,
-    status: "completed_pending_verification",
-    limit: 100
-  });
-  if (!receipts.length) return Object.freeze({ state: "none" });
+  const receiptIndex = hcnActionReceiptIndex();
+  const receiptPrincipalRefs = hcnClaimCallReceiptPrincipalRefs();
+  const listReceiptEntries = ({ status, operationKind, limit }) =>
+    receiptPrincipalRefs.flatMap((sessionPrincipalRef) =>
+      receiptIndex.list({
+        sessionPrincipalRef,
+        fileRef: context.fileRef,
+        status,
+        operationKind,
+        limit
+      }).map((receipt) => ({ receipt, sessionPrincipalRef }))
+    );
+  const unresolved = [
+    ...listReceiptEntries({
+      status: "executing",
+      operationKind: HCN_CLAIM_CALL_OPERATION_KIND,
+      limit: 1
+    }),
+    ...listReceiptEntries({
+      status: "reconciliation_required",
+      operationKind: HCN_CLAIM_CALL_OPERATION_KIND,
+      limit: 1
+    }),
+    ...listReceiptEntries({
+      status: "executing",
+      operationKind: null,
+      limit: 1
+    }),
+    ...listReceiptEntries({
+      status: "reconciliation_required",
+      operationKind: null,
+      limit: 1
+    })
+  ];
+  if (unresolved.length > 0) {
+    return Object.freeze({ state: "reconciliation_required" });
+  }
+  const acceptedEntries = [
+    ...listReceiptEntries({
+      status: "completed_pending_verification",
+      operationKind: HCN_CLAIM_CALL_OPERATION_KIND,
+      limit: 2
+    }),
+    ...listReceiptEntries({
+      status: "completed_pending_verification",
+      operationKind: null,
+      limit: 2_000
+    })
+  ];
+  if (!acceptedEntries.length) return Object.freeze({ state: "none" });
+  if (!RETELL_API_KEY) {
+    return Object.freeze({ state: "temporarily_unavailable" });
+  }
   try {
     const candidates = [];
-    for (const receipt of receipts) {
+    for (const { receipt, sessionPrincipalRef } of acceptedEntries) {
       const callRef = hcnClaimCallRef({
-        principalRef: hcnActionReceiptPrincipalRef(),
+        principalRef: sessionPrincipalRef,
         fileRef: context.fileRef,
         approvalDigest: receipt.digest
       });
@@ -8666,9 +8799,14 @@ async function hcnRecoverableClaimCall({ context, principal }) {
           callRef,
           acceptedAt: receipt.terminalAt || receipt.updatedAt || ""
         });
+      } else if (receipt.operationKind === HCN_CLAIM_CALL_OPERATION_KIND) {
+        return Object.freeze({ state: "reconciliation_required" });
       }
     }
     if (!candidates.length) return Object.freeze({ state: "none" });
+    if (candidates.length > 1) {
+      return Object.freeze({ state: "reconciliation_required" });
+    }
     candidates.sort((left, right) =>
       String(right.acceptedAt).localeCompare(String(left.acceptedAt))
     );
@@ -9140,7 +9278,8 @@ async function hcnExecuteActionPlan(input = {}) {
           fileRef: execution.fileRef,
           planId: execution.planId,
           digest: execution.approvalDigest,
-          operationCount: execution.operationCount
+          operationCount: execution.operationCount,
+          operationKind: "hcn.action_batch"
         });
       } catch {
         HCN_PENDING_ACTION_PLANS.recoverExecution({
@@ -9370,6 +9509,95 @@ function hcnActionReceiptPrincipalRef() {
         "utf8"
       );
   }
+  return `principal_${digest.digest("hex")}`;
+}
+
+function hcnClaimCallReceiptPrincipalRef() {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  if (
+    !isHcnEmployeeSessionContext(context, identity)
+    || !context.hcnSessionId
+    || !String(identity?.jobNimbusOwnerId || "")
+  ) {
+    const error = new Error(
+      "An assigned HCN employee browser session is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const stableOperatorRef = references.sourceRecordRef(
+    "hcn_operator",
+    identity.jobNimbusOwnerId
+  );
+  return hcnReceiptPrincipalRef({
+    domain: "hcn-console:claim-call-receipt-principal:v1",
+    references,
+    stableOperatorRef
+  });
+}
+
+function hcnLegacyClaimCallReceiptPrincipalRefs() {
+  const context = currentRequestAuthentication();
+  const identity = currentRequestIdentity();
+  const googleSubject = String(context?.hcnSession?.googleSubject || "");
+  if (
+    !isHcnEmployeeSessionContext(context, identity)
+    || !context.hcnSessionId
+    || !googleSubject
+  ) {
+    const error = new Error(
+      "An assigned HCN employee browser session is required."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  const subjects = new Set([googleSubject]);
+  const configuredChanceSubject = CHANCE_GOOGLE_SUBJECT;
+  if (
+    String(identity.jobNimbusOwnerId || "") === CHANCE_OWNER_ID
+    && configuredChanceSubject
+  ) {
+    subjects.add(configuredChanceSubject);
+  }
+  const principalRefs = new Set([hcnActionReceiptPrincipalRef()]);
+  for (const subject of subjects) {
+    const stableOperatorRef = references.sourceRecordRef(
+      "hcn_operator",
+      subject
+    );
+    principalRefs.add(hcnReceiptPrincipalRef({
+      domain: "hcn-console:durable-receipt-principal:v2",
+      references,
+      stableOperatorRef
+    }));
+    if (HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId) {
+      principalRefs.add(hcnReceiptPrincipalRef({
+        domain: "hcn-jobrolo:claim-filing-receipt-principal:v1",
+        references,
+        stableOperatorRef,
+        clientId: HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId
+      }));
+    }
+  }
+  return Object.freeze([...principalRefs]);
+}
+
+function hcnReceiptPrincipalRef({
+  domain,
+  references,
+  stableOperatorRef,
+  clientId = ""
+}) {
+  const digest = createHash("sha256")
+    .update(domain, "utf8")
+    .update("\0", "utf8")
+    .update(references.tenantId, "utf8")
+    .update("\0", "utf8")
+    .update(stableOperatorRef, "utf8");
+  if (clientId) digest.update("\0", "utf8").update(clientId, "utf8");
   return `principal_${digest.digest("hex")}`;
 }
 

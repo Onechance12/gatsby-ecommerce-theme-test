@@ -363,7 +363,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   assert.doesNotMatch(redirectedDocument.text, /private\.invalid|secret/);
   state.mode = "normal";
 
-  state.dateOfLoss = 1785261000;
+  state.dateOfLoss = 1777291200;
   const numericCatalog = await signedPost(
     origin,
     JOBROLO_IMPORT_CATALOG_ROUTE,
@@ -391,18 +391,16 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     `nonce_${"0".repeat(32)}`
   );
   assert.equal(numericSnapshot.response.status, 200, numericSnapshot.text);
-  assert.equal(numericSnapshot.body.payload.file.dateOfLoss, null);
+  assert.equal(
+    numericSnapshot.body.payload.file.dateOfLoss,
+    "2026-04-27"
+  );
   assert.equal(
     numericSnapshot.body.payload.file.missingFacts.dateOfLoss,
-    true
-  );
-  assert.equal(numericSnapshot.text.includes(String(state.dateOfLoss)), false);
-  assert.equal(
-    numericSnapshot.text.includes(
-      new Date(state.dateOfLoss * 1000).toISOString().slice(0, 10)
-    ),
     false
   );
+  assert.equal(numericSnapshot.text.includes(String(state.dateOfLoss)), false);
+  assert.equal(numericSnapshot.text.includes("2026-04-27"), true);
   verifyResponse(numericSnapshot, JOBROLO_IMPORT_SNAPSHOT_ROUTE);
   assertNoPrivateMaterial(numericSnapshot.text);
 
@@ -419,6 +417,27 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   assert.equal(timestampCatalog.response.status, 503, timestampCatalog.text);
   assert.equal(timestampCatalog.body.error.code, "jobrolo_import_unavailable");
   assert.doesNotMatch(timestampCatalog.text, /2026-05-17T23:00:00-05:00/);
+
+  state.dateOfLoss = 999999999;
+  const outOfRangeCatalog = await signedPost(
+    origin,
+    JOBROLO_IMPORT_CATALOG_ROUTE,
+    {
+      schema: JOBROLO_IMPORT_CATALOG_REQUEST_SCHEMA,
+      requestId: `request_${"19".repeat(16)}`
+    },
+    `nonce_${"19".repeat(16)}`
+  );
+  assert.equal(
+    outOfRangeCatalog.response.status,
+    503,
+    outOfRangeCatalog.text
+  );
+  assert.equal(
+    outOfRangeCatalog.body.error.code,
+    "jobrolo_import_unavailable"
+  );
+  assert.doesNotMatch(outOfRangeCatalog.text, /999999999/);
   state.dateOfLoss = "2026-05-17";
 
   const callsBeforeUnknown = state.calls.length;

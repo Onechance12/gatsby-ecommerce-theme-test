@@ -20,10 +20,15 @@ const FILE_REF_PATTERN = /^subject_[a-f0-9]{32}$/;
 const PLAN_ID_PATTERN = /^plan_[a-f0-9]{32}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const BATCH_REF_PATTERN = /^batch_[a-f0-9]{32}$/;
+const OPERATION_KINDS = new Set([
+  "hcn.action_batch",
+  "jobnimbus.claim_filing_writeback",
+  "retell.claim_filing_call"
+]);
 const DEFAULT_MAX_RECORDS = 2_000;
 const DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
-const MAX_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = DEFAULT_MAX_RECORDS;
 const RANDOM_ATTEMPTS = 4;
 
 const EXECUTING_STATUS = "executing";
@@ -42,7 +47,8 @@ const APPEND_KEYS = new Set([
   "fileRef",
   "planId",
   "digest",
-  "operationCount"
+  "operationCount",
+  "operationKind"
 ]);
 const TRANSITION_KEYS = new Set([
   "sessionPrincipalRef",
@@ -61,6 +67,7 @@ const LIST_KEYS = new Set([
   "sessionPrincipalRef",
   "fileRef",
   "status",
+  "operationKind",
   "limit"
 ]);
 const RECORD_KEYS = new Set([
@@ -145,7 +152,9 @@ export function createHcnActionReceiptIndex({
   records = capacityNormalized.records;
 
   function appendExecuting(input) {
-    assertExactObject(input, APPEND_KEYS, "receipt append");
+    assertExactObject(input, APPEND_KEYS, "receipt append", {
+      optional: new Set(["operationKind"])
+    });
     const sessionPrincipalRef = assertSessionPrincipalRef(
       input.sessionPrincipalRef
     );
@@ -153,6 +162,9 @@ export function createHcnActionReceiptIndex({
     const planId = assertPlanId(input.planId);
     const digest = assertDigest(input.digest);
     const operationCount = assertOperationCount(input.operationCount);
+    const operationKind = input.operationKind === undefined
+      ? undefined
+      : assertOperationKind(input.operationKind);
     const timestamp = readNow(now);
 
     let next = pruneByRetention(
@@ -195,6 +207,7 @@ export function createHcnActionReceiptIndex({
       updatedAt: at,
       executingAt: at
     };
+    if (operationKind !== undefined) record.operationKind = operationKind;
     next = canonicalRecordOrder([...next, record]);
     persistRecords(resolvedPath, next, maxFileBytes);
     records = next;
@@ -273,7 +286,12 @@ export function createHcnActionReceiptIndex({
 
   function list(input) {
     assertExactObject(input, LIST_KEYS, "receipt list", {
-      optional: new Set(["fileRef", "status", "limit"])
+      optional: new Set([
+        "fileRef",
+        "status",
+        "operationKind",
+        "limit"
+      ])
     });
     maintain();
     const sessionPrincipalRef = assertSessionPrincipalRef(
@@ -285,6 +303,11 @@ export function createHcnActionReceiptIndex({
     const status = input.status === undefined
       ? undefined
       : assertStatus(input.status);
+    const operationKind = input.operationKind === undefined
+      ? undefined
+      : input.operationKind === null
+        ? null
+        : assertOperationKind(input.operationKind);
     const limit = input.limit === undefined
       ? 50
       : assertListLimit(input.limit);
@@ -294,6 +317,14 @@ export function createHcnActionReceiptIndex({
         record.sessionPrincipalRef === sessionPrincipalRef
         && (fileRef === undefined || record.fileRef === fileRef)
         && (status === undefined || record.status === status)
+        && (
+          operationKind === undefined
+          || (
+            operationKind === null
+              ? record.operationKind === undefined
+              : record.operationKind === operationKind
+          )
+        )
       ))
       .sort(compareProjectionOrder)
       .slice(0, limit)
@@ -387,9 +418,12 @@ function loadRecords(filePath, maxFileBytes) {
 function validateStoredRecord(value) {
   if (!isPlainObject(value)) throw corruptIndex();
   const status = assertStoredStatus(value.status);
-  const expectedKeys = status === EXECUTING_STATUS
+  const baseExpectedKeys = status === EXECUTING_STATUS
     ? EXECUTING_RECORD_KEYS
     : RECORD_KEYS;
+  const expectedKeys = Object.hasOwn(value, "operationKind")
+    ? new Set([...baseExpectedKeys, "operationKind"])
+    : baseExpectedKeys;
   if (!hasExactKeys(value, expectedKeys)) throw corruptIndex();
 
   const record = {
@@ -420,6 +454,11 @@ function validateStoredRecord(value) {
     updatedAt: assertStored(() => canonicalIso(value.updatedAt)),
     executingAt: assertStored(() => canonicalIso(value.executingAt))
   };
+  if (Object.hasOwn(value, "operationKind")) {
+    record.operationKind = assertStored(
+      () => assertOperationKind(value.operationKind)
+    );
+  }
   if (status !== EXECUTING_STATUS) {
     record.terminalAt = assertStored(() => canonicalIso(value.terminalAt));
   }
@@ -481,7 +520,8 @@ function recoverInterrupted(records, timestamp) {
 
 function pruneByRetention(records, timestamp, retentionMs) {
   const retained = records.filter((record) => (
-    !TERMINAL_STATUSES.has(record.status)
+    isProtectedClaimCallReceipt(record)
+    || !TERMINAL_STATUSES.has(record.status)
     || timestamp - parseCanonicalIso(record.terminalAt) < retentionMs
   ));
   return {
@@ -500,7 +540,10 @@ function trimToLength(records, targetLength) {
     return { changed: false, records };
   }
   const terminal = records
-    .filter((record) => TERMINAL_STATUSES.has(record.status))
+    .filter((record) => (
+      TERMINAL_STATUSES.has(record.status)
+      && !isProtectedClaimCallReceipt(record)
+    ))
     .sort((left, right) => (
       parseCanonicalIso(left.terminalAt) - parseCanonicalIso(right.terminalAt)
       || left.planId.localeCompare(right.planId)
@@ -521,6 +564,15 @@ function trimToLength(records, targetLength) {
       records.filter((record) => !removed.has(record.planId))
     )
   };
+}
+
+function isProtectedClaimCallReceipt(record) {
+  return record.operationKind === "retell.claim_filing_call"
+    && [
+      EXECUTING_STATUS,
+      "completed_pending_verification",
+      "reconciliation_required"
+    ].includes(record.status);
 }
 
 function persistRecords(filePath, records, maxFileBytes) {
@@ -719,6 +771,9 @@ function projectRecord(record) {
   if (record.terminalAt !== undefined) {
     projection.terminalAt = record.terminalAt;
   }
+  if (record.operationKind !== undefined) {
+    projection.operationKind = record.operationKind;
+  }
   return deepFreeze(projection);
 }
 
@@ -861,6 +916,17 @@ function assertOperationCount(value) {
       "invalid_operation_count",
       400,
       "operationCount must be an integer from 1 through 12"
+    );
+  }
+  return value;
+}
+
+function assertOperationKind(value) {
+  if (typeof value !== "string" || !OPERATION_KINDS.has(value)) {
+    throw receiptError(
+      "invalid_operation_kind",
+      400,
+      "operationKind must identify a supported HCN operation family"
     );
   }
   return value;
