@@ -157,6 +157,164 @@ test("append durably records executing before returning and projects metadata on
   });
 });
 
+test("typed operation family survives durable recovery without descriptive data", async () => {
+  await withFixture(async ({ filePath }) => {
+    const first = makeIndex(filePath);
+    const executing = first.index.appendExecuting({
+      ...appendInput(),
+      operationKind: "retell.claim_filing_call"
+    });
+    assert.equal(executing.operationKind, "retell.claim_filing_call");
+
+    const restarted = createHcnActionReceiptIndex({
+      filePath,
+      now: () => START + 1_000,
+      randomBatchRef: () => BATCH_B
+    }).get({
+      sessionPrincipalRef: PRINCIPAL_A,
+      planId: PLAN_A
+    });
+    assert.equal(restarted.status, "reconciliation_required");
+    assert.equal(restarted.operationKind, "retell.claim_filing_call");
+
+    assert.throws(
+      () => first.index.appendExecuting({
+        ...appendInput({ planId: PLAN_B }),
+        operationKind: "retell.unbounded_call"
+      }),
+      expectReceiptError("invalid_operation_kind", 400)
+    );
+  });
+});
+
+test("typed list filtering happens before the bounded result limit", async () => {
+  await withFixture(async ({ filePath }) => {
+    let timestamp = START;
+    let batchNumber = 0;
+    const index = createHcnActionReceiptIndex({
+      filePath,
+      now: () => timestamp,
+      randomBatchRef: () => {
+        batchNumber += 1;
+        return `batch_${batchNumber.toString(16).padStart(32, "0")}`;
+      },
+      maxRecords: 150
+    });
+    const claim = index.appendExecuting({
+      ...appendInput({
+        planId: `plan_${"f".repeat(32)}`,
+        operationCount: 1
+      }),
+      operationKind: "retell.claim_filing_call"
+    });
+    index.transition(transitionInput(claim, {
+      status: "completed_pending_verification"
+    }));
+
+    for (let value = 1; value <= 105; value += 1) {
+      timestamp += 1;
+      const hexadecimal = value.toString(16);
+      const receipt = index.appendExecuting({
+        ...appendInput({
+          planId: `plan_${hexadecimal.padStart(32, "0")}`,
+          digest: hexadecimal.padStart(64, "0"),
+          operationCount: 1
+        }),
+        operationKind: "hcn.action_batch"
+      });
+      index.transition(transitionInput(receipt, {
+        status: "completed_pending_verification"
+      }));
+    }
+
+    const claims = index.list({
+      sessionPrincipalRef: PRINCIPAL_A,
+      fileRef: FILE_A,
+      status: "completed_pending_verification",
+      operationKind: "retell.claim_filing_call",
+      limit: 2
+    });
+    assert.equal(claims.length, 1);
+    assert.equal(claims[0].planId, claim.planId);
+  });
+});
+
+test("accepted and unresolved claim-call receipts survive retention and capacity", async () => {
+  await withFixture(async ({ filePath }) => {
+    const retentionMs = 180 * 24 * 60 * 60 * 1_000;
+    const clock = makeIndex(filePath, {
+      index: {
+        maxRecords: 2,
+        retentionMs
+      }
+    });
+    const accepted = clock.index.appendExecuting({
+      ...appendInput({ operationCount: 1 }),
+      operationKind: "retell.claim_filing_call"
+    });
+    clock.index.transition(transitionInput(accepted, {
+      status: "completed_pending_verification"
+    }));
+    clock.advance(retentionMs + 1);
+
+    const unrelated = clock.index.appendExecuting({
+      ...appendInput({
+        planId: PLAN_B,
+        digest: DIGEST_B,
+        operationCount: 1
+      }),
+      operationKind: "hcn.action_batch"
+    });
+    clock.index.transition(transitionInput(unrelated, {
+      status: "completed_pending_verification"
+    }));
+    const unresolved = clock.index.appendExecuting({
+      ...appendInput({
+        planId: PLAN_C,
+        digest: "f".repeat(64),
+        operationCount: 1
+      }),
+      operationKind: "retell.claim_filing_call"
+    });
+    clock.index.transition(transitionInput(unresolved, {
+      status: "reconciliation_required",
+      succeededCount: 0,
+      unknownCount: 1
+    }));
+    clock.advance(retentionMs + 1);
+
+    const protectedReceipts = clock.index.list({
+      sessionPrincipalRef: PRINCIPAL_A,
+      fileRef: FILE_A,
+      operationKind: "retell.claim_filing_call",
+      limit: 2
+    });
+    assert.deepEqual(
+      protectedReceipts.map((receipt) => receipt.planId).sort(),
+      [PLAN_A, PLAN_C].sort()
+    );
+    assert.throws(
+      () => clock.index.appendExecuting({
+        ...appendInput({
+          planId: `plan_${"9".repeat(32)}`,
+          digest: "9".repeat(64),
+          operationCount: 1
+        }),
+        operationKind: "hcn.action_batch"
+      }),
+      expectReceiptError("receipt_capacity_exhausted", 429)
+    );
+    assert.throws(
+      () => createHcnActionReceiptIndex({
+        filePath,
+        now: () => START + (2 * (retentionMs + 1)),
+        maxRecords: 1
+      }),
+      expectReceiptError("receipt_index_capacity_exceeded", 500)
+    );
+  });
+});
+
 test("restart atomically converts unresolved executions to reconciliation required", async () => {
   await withFixture(async ({ filePath }) => {
     const first = makeIndex(filePath);

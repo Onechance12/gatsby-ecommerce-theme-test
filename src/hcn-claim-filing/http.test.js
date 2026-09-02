@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -8,12 +9,15 @@ import path from "node:path";
 import test from "node:test";
 
 import { createHcnInvitationStore } from "../auth/hcn-invitation-store.js";
+import { createHcnActionReceiptIndex } from "../hcn-actions/receipt-index.js";
+import { createHcnReferenceFactory } from "../hcn-ops/references.js";
 import { signJobroloHcnRequest } from "../integrations/jobrolo-service-auth.js";
 
 const EMAIL = "claim.pilot@wavepa.com";
 const SUBJECT = "claim-pilot-google-subject";
 const SECOND_PILOT_SUBJECT = "claim-pilot-second-google-subject";
 const OWNER_ID = "claim-pilot-jobnimbus-owner";
+const TENANT_ID = "tenant_0123456789abcdef";
 const REFERENCE_KEY = Buffer.alloc(32, 0x61).toString("base64url");
 const JOBROLO_CLAIM_CLIENT_ID = "jobrolo-claim-filing-http-fixture";
 const JOBROLO_CLAIM_SHARED_SECRET =
@@ -198,7 +202,7 @@ test("claim preparation is exact-file, missing-fact, assignment, and stale-plan 
   assert.deepEqual(fixture.providerMutations, []);
 });
 
-test("approved call is single-use, opaque, result-only, and stale plans never call", async (t) => {
+test("approved call is single-use, opaque, result-only, and blocks new preparation", async (t) => {
   const fixture = await startFixture(t, {
     pilot: true,
     callsEnabled: true
@@ -253,6 +257,23 @@ test("approved call is single-use, opaque, result-only, and stale plans never ca
     acceptedAt: recoveredStatus.recovery.acceptedAt
   });
   assert.match(recoveredStatus.recovery.acceptedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  const duplicatePrepareResponse = await postHcn(
+    fixture,
+    session,
+    "/hcn/api/v1/claim-filings/prepare",
+    {
+      conversationRef: session.fileConversationRef,
+      fileRef: session.fileRef,
+      confirmations: CONFIRMATIONS
+    }
+  );
+  assert.equal(duplicatePrepareResponse.status, 409);
+  assert.match(
+    (await duplicatePrepareResponse.json()).error,
+    /accepted claim call already exists/i
+  );
+  assert.equal(fixture.retellCalls.length, 1);
 
   const repeatResponse = await postHcn(
     fixture,
@@ -339,7 +360,286 @@ test("approved call is single-use, opaque, result-only, and stale plans never ca
   assert.equal(blockedWriteback.plan, null);
   assert.match(blockedWriteback.review.blockers[0], /mapping/i);
 
-  const stalePreparedResponse = await postHcn(
+  assert.deepEqual(fixture.providerMutations, []);
+});
+
+test("two approved executions for one exact file serialize and only one can dial", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: false,
+    callsEnabled: true,
+    jobroloClaim: true
+  });
+  const workCenter = await signedJobroloGeneralPost(
+    fixture,
+    "/integrations/jobrolo/v1/work-center",
+    { offset: 0, limit: 1 },
+    "0"
+  );
+  const fileRef = workCenter.body.result.files[0].fileRef;
+  const firstSession = { sessionRef: `session_${"a".repeat(32)}` };
+  const secondSession = { sessionRef: `session_${"b".repeat(32)}` };
+  const firstPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "1",
+    firstSession
+  );
+  const secondPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "2",
+    secondSession
+  );
+  assert.equal(firstPrepared.response.status, 200, firstPrepared.text);
+  assert.equal(secondPrepared.response.status, 200, secondPrepared.text);
+  fixture.retellState.createDelayMs = 50;
+
+  const acceptedExecution = signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: secondPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        secondPrepared.body.result.plan.planId,
+        secondPrepared.body.result.review.planDigest,
+        "second-race"
+      )
+    },
+    "3",
+    secondSession
+  );
+  await waitForCondition(() => fixture.retellState.createStarted === true);
+  const blockedExecution = signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: firstPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        firstPrepared.body.result.plan.planId,
+        firstPrepared.body.result.review.planDigest,
+        "first-race"
+      )
+    },
+    "4",
+    firstSession
+  );
+  const responses = await Promise.all([
+    acceptedExecution,
+    blockedExecution
+  ]);
+  assert.deepEqual(
+    responses.map(({ response }) => response.status).sort(),
+    [200, 409]
+  );
+  const blocked = responses.find(({ response }) => response.status === 409);
+  assert.match(blocked.body.error, /accepted claim call already exists/i);
+  assert.equal(fixture.retellCalls.length, 1);
+});
+
+test("browser and Jobrolo claim executions share one exact-file call gate", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: true,
+    callsEnabled: true,
+    jobroloClaim: true
+  });
+  const browserSession = await loginAndCreateFileChat(fixture);
+  const workCenter = await signedJobroloGeneralPost(
+    fixture,
+    "/integrations/jobrolo/v1/work-center",
+    { offset: 0, limit: 1 },
+    "0"
+  );
+  const fileRef = workCenter.body.result.files[0].fileRef;
+  assert.equal(fileRef, browserSession.fileRef);
+
+  const browserPreparedResponse = await postHcn(
+    fixture,
+    browserSession,
+    "/hcn/api/v1/claim-filings/prepare",
+    {
+      conversationRef: browserSession.fileConversationRef,
+      fileRef,
+      confirmations: CONFIRMATIONS
+    }
+  );
+  assert.equal(browserPreparedResponse.status, 200);
+  const browserPrepared = await browserPreparedResponse.json();
+  const jobroloPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "1"
+  );
+  assert.equal(jobroloPrepared.response.status, 200, jobroloPrepared.text);
+  fixture.retellState.createDelayMs = 50;
+
+  const acceptedExecution = signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: jobroloPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        jobroloPrepared.body.result.plan.planId,
+        jobroloPrepared.body.result.review.planDigest,
+        "cross-surface"
+      )
+    },
+    "2"
+  );
+  await waitForCondition(() => fixture.retellState.createStarted === true);
+  const blockedExecution = postHcn(
+    fixture,
+    browserSession,
+    "/hcn/api/v1/claim-filings/execute",
+    {
+      conversationRef: browserSession.fileConversationRef,
+      fileRef,
+      planId: browserPrepared.plan.planId,
+      approvalDigest: browserPrepared.review.planDigest
+    }
+  );
+
+  const [accepted, blockedResponse] = await Promise.all([
+    acceptedExecution,
+    blockedExecution
+  ]);
+  assert.equal(accepted.response.status, 200, accepted.text);
+  assert.equal(blockedResponse.status, 409);
+  assert.match(
+    (await blockedResponse.json()).error,
+    /accepted claim call already exists/i
+  );
+  assert.equal(fixture.retellCalls.length, 1);
+});
+
+test("an unresolved exact-file claim receipt blocks prepare and execute without retry", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: false,
+    callsEnabled: true,
+    jobroloClaim: true
+  });
+  const workCenter = await signedJobroloGeneralPost(
+    fixture,
+    "/integrations/jobrolo/v1/work-center",
+    { offset: 0, limit: 1 },
+    "0"
+  );
+  const fileRef = workCenter.body.result.files[0].fileRef;
+  const firstSession = { sessionRef: `session_${"a".repeat(32)}` };
+  const secondSession = { sessionRef: `session_${"b".repeat(32)}` };
+  const firstPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "1",
+    firstSession
+  );
+  const secondPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "2",
+    secondSession
+  );
+  assert.equal(firstPrepared.response.status, 200, firstPrepared.text);
+  assert.equal(secondPrepared.response.status, 200, secondPrepared.text);
+  fixture.retellState.createFails = true;
+
+  const uncertain = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: secondPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        secondPrepared.body.result.plan.planId,
+        secondPrepared.body.result.review.planDigest,
+        "uncertain"
+      )
+    },
+    "3",
+    secondSession
+  );
+  assert.equal(uncertain.response.status, 200, uncertain.text);
+  assert.equal(
+    uncertain.body.result.receipt.status,
+    "reconciliation_required"
+  );
+  assert.equal(uncertain.body.result.automaticRetry, false);
+  assert.equal(fixture.retellCalls.length, 0);
+
+  const status = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "4",
+    firstSession
+  );
+  assert.equal(status.response.status, 200, status.text);
+  assert.deepEqual(
+    status.body.result.recovery,
+    { state: "reconciliation_required" }
+  );
+
+  const blockedPrepare = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "5",
+    firstSession
+  );
+  assert.equal(blockedPrepare.response.status, 409);
+  assert.match(blockedPrepare.body.error, /unresolved claim call/i);
+
+  const blockedExecute = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: firstPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        firstPrepared.body.result.plan.planId,
+        firstPrepared.body.result.review.planDigest,
+        "blocked-reconcile"
+      )
+    },
+    "6",
+    firstSession
+  );
+  assert.equal(blockedExecute.response.status, 409);
+  assert.match(blockedExecute.body.error, /unresolved claim call/i);
+  assert.equal(fixture.retellCalls.length, 0);
+});
+
+test("browser restart recovers a legacy untyped claim execution and blocks preparation", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: true,
+    callsEnabled: true,
+    legacyInterruptedBrowserClaim: true
+  });
+  const session = await loginAndCreateFileChat(fixture);
+
+  const statusResponse = await postHcn(
+    fixture,
+    session,
+    "/hcn/api/v1/claim-filings/status",
+    {
+      conversationRef: session.fileConversationRef,
+      fileRef: session.fileRef
+    }
+  );
+  assert.equal(statusResponse.status, 200);
+  assert.deepEqual(
+    (await statusResponse.json()).recovery,
+    { state: "reconciliation_required" }
+  );
+
+  const prepareResponse = await postHcn(
     fixture,
     session,
     "/hcn/api/v1/claim-filings/prepare",
@@ -349,22 +649,140 @@ test("approved call is single-use, opaque, result-only, and stale plans never ca
       confirmations: CONFIRMATIONS
     }
   );
-  const stalePrepared = await stalePreparedResponse.json();
+  assert.equal(prepareResponse.status, 409);
+  assert.match(
+    (await prepareResponse.json()).error,
+    /unresolved claim call/i
+  );
+  assert.equal(fixture.retellCalls.length, 0);
+  assert.equal(fixture.retellListRequests.length, 0);
+});
+
+test("unavailable accepted-call recovery blocks prepare and execute", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: false,
+    callsEnabled: true,
+    jobroloClaim: true
+  });
+  const workCenter = await signedJobroloGeneralPost(
+    fixture,
+    "/integrations/jobrolo/v1/work-center",
+    { offset: 0, limit: 1 },
+    "0"
+  );
+  const fileRef = workCenter.body.result.files[0].fileRef;
+  const firstSession = { sessionRef: `session_${"a".repeat(32)}` };
+  const secondSession = { sessionRef: `session_${"b".repeat(32)}` };
+  const firstPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "1",
+    firstSession
+  );
+  const secondPrepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "2",
+    secondSession
+  );
+  assert.equal(firstPrepared.response.status, 200, firstPrepared.text);
+  assert.equal(secondPrepared.response.status, 200, secondPrepared.text);
+  const accepted = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: secondPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        secondPrepared.body.result.plan.planId,
+        secondPrepared.body.result.review.planDigest,
+        "accepted-outage"
+      )
+    },
+    "3",
+    secondSession
+  );
+  assert.equal(accepted.response.status, 200, accepted.text);
+  assert.equal(fixture.retellCalls.length, 1);
+  fixture.retellState.listFails = true;
+
+  const status = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "4",
+    firstSession
+  );
+  assert.equal(status.response.status, 200, status.text);
+  assert.deepEqual(
+    status.body.result.recovery,
+    { state: "temporarily_unavailable" }
+  );
+
+  const blockedPrepare = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "5",
+    firstSession
+  );
+  assert.equal(blockedPrepare.response.status, 503);
+  assert.match(blockedPrepare.body.error, /temporarily unavailable/i);
+
+  const blockedExecute = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: firstPrepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        firstPrepared.body.result.plan.planId,
+        firstPrepared.body.result.review.planDigest,
+        "blocked-outage"
+      )
+    },
+    "6",
+    firstSession
+  );
+  assert.equal(blockedExecute.response.status, 503);
+  assert.match(blockedExecute.body.error, /temporarily unavailable/i);
+  assert.equal(fixture.retellCalls.length, 1);
+});
+
+test("a stale exact-file plan still cannot dial", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: true,
+    callsEnabled: true
+  });
+  const session = await loginAndCreateFileChat(fixture);
+  const prepared = await (
+    await postHcn(
+      fixture,
+      session,
+      "/hcn/api/v1/claim-filings/prepare",
+      {
+        conversationRef: session.fileConversationRef,
+        fileRef: session.fileRef,
+        confirmations: CONFIRMATIONS
+      }
+    )
+  ).json();
   fixture.contact.cf_date_1 = "2026-05-03";
-  const staleExecuteResponse = await postHcn(
+  const response = await postHcn(
     fixture,
     session,
     "/hcn/api/v1/claim-filings/execute",
     {
       conversationRef: session.fileConversationRef,
       fileRef: session.fileRef,
-      planId: stalePrepared.plan.planId,
-      approvalDigest: stalePrepared.review.planDigest
+      planId: prepared.plan.planId,
+      approvalDigest: prepared.review.planDigest
     }
   );
-  assert.equal(staleExecuteResponse.status, 409);
-  assert.equal(fixture.retellCalls.length, 1);
-  assert.deepEqual(fixture.providerMutations, []);
+  assert.equal(response.status, 409);
+  assert.equal(fixture.retellCalls.length, 0);
 });
 
 test("human-approved mapped writeback completes only after exact JobNimbus readback", async (t) => {
@@ -862,7 +1280,8 @@ async function startFixture(t, {
   callsEnabled = false,
   writesEnabled = false,
   fieldMapping = false,
-  jobroloClaim = false
+  jobroloClaim = false,
+  legacyInterruptedBrowserClaim = false
 }) {
   const temporaryRoot = await realpath(await mkdtemp(
     path.join(tmpdir(), "hcn-claim-filing-http-")
@@ -897,13 +1316,54 @@ async function startFixture(t, {
     inviteToken: invitation.inviteToken
   });
 
+  if (legacyInterruptedBrowserClaim) {
+    const references = createHcnReferenceFactory({
+      hmacKey: Buffer.from(REFERENCE_KEY, "base64url"),
+      tenantId: TENANT_ID
+    });
+    const stableOperatorRef = references.sourceRecordRef(
+      "hcn_operator",
+      SUBJECT
+    );
+    const sessionPrincipalRef = `principal_${createHash("sha256")
+      .update("hcn-console:durable-receipt-principal:v2", "utf8")
+      .update("\0", "utf8")
+      .update(TENANT_ID, "utf8")
+      .update("\0", "utf8")
+      .update(stableOperatorRef, "utf8")
+      .digest("hex")}`;
+    const fileRef = references.subjectId(
+      "jobnimbus",
+      "claim-file-provider-id"
+    );
+    createHcnActionReceiptIndex({
+      filePath: path.join(
+        temporaryRoot,
+        "platform",
+        "action-receipts.json"
+      )
+    }).appendExecuting({
+      sessionPrincipalRef,
+      fileRef,
+      planId: `plan_${"d".repeat(32)}`,
+      digest: "d".repeat(64),
+      operationCount: 1
+    });
+  }
+
   const providerMutations = [];
   const retellCalls = [];
   const retellListRequests = [];
+  const retellState = {
+    createFails: false,
+    createDelayMs: 0,
+    createStarted: false,
+    listFails: false
+  };
   const activities = [];
   const writebackState = { applyContactWrites: true };
-  const fixedJobroloEmail = "cpearson@wavepa.com";
-  const fixedJobroloSubject = "chance-jobrolo-google-subject";
+  const fixedJobroloEmail = EMAIL;
+  const fixedJobroloSubject = SUBJECT;
   const contact = {
     jnid: "claim-file-provider-id",
     number: 3010,
@@ -1016,6 +1476,15 @@ async function startFixture(t, {
       url.pathname === "/v2/create-phone-call"
       && req.method === "POST"
     ) {
+      retellState.createStarted = true;
+      if (retellState.createDelayMs > 0) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, retellState.createDelayMs);
+        });
+      }
+      if (retellState.createFails) {
+        return json(res, 503, { error: "synthetic Retell create failure" });
+      }
       const body = JSON.parse(await readRequestBody(req));
       const call = {
         call_id: `retell-provider-call-${retellCalls.length + 1}`,
@@ -1031,6 +1500,9 @@ async function startFixture(t, {
       return json(res, 200, { call_id: call.call_id });
     }
     if (url.pathname === "/v3/list-calls" && req.method === "POST") {
+      if (retellState.listFails) {
+        return json(res, 503, { error: "synthetic Retell list failure" });
+      }
       const body = JSON.parse(await readRequestBody(req));
       retellListRequests.push(body);
       const metadataFilters = Array.isArray(body.filter_criteria?.metadata)
@@ -1077,7 +1549,7 @@ async function startFixture(t, {
       PUBLIC_BASE_URL: bridgeOrigin,
       HCN_CONSOLE_ENABLED: "true",
       HCN_CONSOLE_ORIGIN: bridgeOrigin,
-      HCN_TENANT_ID: "tenant_0123456789abcdef",
+      HCN_TENANT_ID: TENANT_ID,
       HCN_REFERENCE_KEY: REFERENCE_KEY,
       HCN_GOOGLE_GRANT_KEY: Buffer.alloc(32, 0x62).toString("base64url"),
       HCN_QUO_LINK_KEY: Buffer.alloc(32, 0x63).toString("base64url"),
@@ -1152,6 +1624,7 @@ async function startFixture(t, {
     providerMutations,
     retellCalls,
     retellListRequests,
+    retellState,
     activities,
     writebackState
   };
@@ -1246,13 +1719,16 @@ async function signedJobroloClaimPost(
   fixture,
   pathname,
   input,
-  nonceDigit
+  nonceDigit,
+  {
+    sessionRef = "session_abcdefabcdefabcdefabcdefabcdefab"
+  } = {}
 ) {
   const body = {
     schema: "jobrolo.hcn.request.v1",
     requestId: `request_${nonceDigit.repeat(32)}`,
     actor: {
-      sessionRef: "session_abcdefabcdefabcdefabcdefabcdefab"
+      sessionRef
     },
     input
   };
@@ -1355,6 +1831,14 @@ function cookieStartingWith(setCookies, prefix) {
   const value = setCookies.find((cookie) => cookie.startsWith(prefix));
   assert.ok(value, `Missing cookie ${prefix}`);
   return value.split(";", 1)[0];
+}
+
+async function waitForCondition(predicate, { attempts = 300, delayMs = 10 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  throw new Error("Timed out waiting for fixture condition.");
 }
 
 async function waitForServer(child, port) {
