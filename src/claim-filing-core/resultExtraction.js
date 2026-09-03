@@ -140,7 +140,9 @@ function carrierAdjusterName(value, dynamicVariables) {
   const text = firstNonEmpty(value);
   const normalized = text.toLowerCase().replace(/[^a-z0-9]/g, "");
   const insured = firstNonEmpty(dynamicVariables?.insuredName).toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (!text || normalized === "chancepearson" || normalized.includes("wavepublicadjusting") || (insured && normalized === insured)) return "";
+  const publicAdjuster = firstNonEmpty(dynamicVariables?.publicAdjusterName, "Chance Pearson").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const firm = firstNonEmpty(dynamicVariables?.firmName, "Wave Public Adjusting").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!text || (publicAdjuster && normalized === publicAdjuster) || (firm && normalized.includes(firm)) || (insured && normalized === insured)) return "";
   return text;
 }
 
@@ -148,13 +150,21 @@ function carrierAdjusterPhone(value, dynamicVariables) {
   const text = firstNonEmpty(value);
   const digits = text.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   const homeowner = firstNonEmpty(dynamicVariables?.homeownerPhone).replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
-  if (!digits || digits === "9725731730" || (homeowner && digits === homeowner)) return "";
+  const publicAdjuster = firstNonEmpty(dynamicVariables?.officePhone, "9725731730").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  const queueCallback = firstNonEmpty(dynamicVariables?.queueCallbackPhone).replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  if (
+    !digits
+    || (publicAdjuster && digits === publicAdjuster)
+    || (queueCallback && digits === queueCallback)
+    || (homeowner && digits === homeowner)
+  ) return "";
   return text;
 }
 
 function carrierAdjusterEmail(value, dynamicVariables) {
   const text = firstNonEmpty(value).toLowerCase();
   const homeowner = firstNonEmpty(dynamicVariables?.homeownerEmail).toLowerCase();
-  if (!text || text === "cpearson@wavepa.com" || (homeowner && text === homeowner)) return "";
+  const publicAdjuster = firstNonEmpty(dynamicVariables?.publicAdjusterEmail, "cpearson@wavepa.com").toLowerCase();
+  if (!text || (publicAdjuster && text === publicAdjuster) || (homeowner && text === homeowner)) return "";
   return text;
 }

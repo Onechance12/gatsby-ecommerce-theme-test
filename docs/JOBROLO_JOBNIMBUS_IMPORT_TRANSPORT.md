@@ -123,13 +123,22 @@ rest of Jobrolo's 120-second execution lease for malware scanning and storage.
 
 ## Configuration and rollout
 
-The five transport variables are deliberately separate:
+The five legacy transport variables are deliberately separate:
 
 - `HCN_JOBROLO_IMPORT_TRANSPORT_ENABLED`
 - `HCN_JOBROLO_IMPORT_CLIENT_ID`
 - `HCN_JOBROLO_IMPORT_SHARED_SECRET`
 - `HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL`
 - `HCN_JOBROLO_IMPORT_CONNECTION_REF`
+
+Additional public adjusters use the optional server-only
+`HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON` registry with the exact schema
+`hcn.jobrolo.import-profiles.v1`. Each profile contains only `clientId`,
+`sharedSecret`, normalized `principalEmail`, and opaque `connectionRef`. All
+four values must be unique across profiles. The authenticated client id is the
+only selector; request bodies, query strings, and browser state cannot choose
+an HCN principal or connection. The original five variables remain the
+backward-compatible primary profile.
 
 The transport also requires the existing tenant-scoped opaque-reference inputs
 `HCN_TENANT_ID` and `HCN_REFERENCE_KEY`, plus an absolute durable
@@ -140,11 +149,13 @@ OAuth, operator, storage, Thresher, AI, and communications credential checked
 at startup.
 
 `render.yaml` keeps the transport disabled and supplies no client, secret,
-principal, or connection value. Enabling with a missing/malformed value,
+principal, connection, or additional-profile value. Enabling with a missing/malformed value,
 reused credential, unavailable opaque-reference factory, or missing durable
 operations root fails closed. Runtime principal admission additionally requires
-the configured employee to remain enabled, assigned-scope authorized, and an
-exactly matching active JobNimbus user.
+each configured employee to remain enabled, assigned-scope authorized, and an
+exactly matching active JobNimbus user. A duplicate client id, secret,
+principal email, connection reference, or cross-capability credential fails
+startup closed.
 
 The kill switch is non-disruptive: an unset or exact `false` enable flag keeps
 the route inert even if Render retains staged values. Only exact `true` parses

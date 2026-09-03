@@ -6,7 +6,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { signJobroloHcnRequest } from "./jobrolo-service-auth.js";
+import { createHcnInvitationStore } from "../auth/hcn-invitation-store.js";
+import {
+  JOBROLO_HCN_GENERAL_EFFECT_ROUTES,
+  signJobroloHcnRequest
+} from "./jobrolo-service-auth.js";
+import {
+  JOBROLO_HCN_CARRIER_EMAIL_CONTRACT
+} from "./jobrolo-carrier-email.js";
 
 const EMAIL = "chance@wavepa.com";
 const SUBJECT = "chance-google-subject-fixture";
@@ -15,14 +22,46 @@ const SECOND_OWNER_ID = "second-jobnimbus-owner-fixture";
 const THIRD_OWNER_ID = "third-jobnimbus-owner-fixture";
 const CLIENT_ID = "jobrolo-http-fixture";
 const SHARED_SECRET = "jobrolo-http-fixture-shared-secret-123456789";
+const SECOND_GENERAL_CLIENT_ID = "jobrolo-http-second-pa";
+const SECOND_GENERAL_SHARED_SECRET =
+  "jobrolo-http-second-pa-shared-secret-123456789";
 const NOTE_CLIENT_ID = "jobrolo-note-writeback-http-fixture";
 const NOTE_SHARED_SECRET =
   "jobrolo-note-writeback-http-fixture-secret-123456789";
 const QUO_CLIENT_PHONE = "+12145550199";
+const REFERENCE_KEY = Buffer.alloc(32, 0x61).toString("base64url");
 
 test("signed adapter fixes principal scope and requires both approval gates for one synthetic action", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hcn-jobrolo-http-"));
   t.after(() => rm(root, { recursive: true, force: true }));
+  const invitationTimestamp = Date.now();
+  const invitationStore = createHcnInvitationStore({
+    filePath: path.join(
+      root,
+      "platform",
+      "employee-invitations.enc.json"
+    ),
+    key: REFERENCE_KEY,
+    allowedDomain: "",
+    now: () => invitationTimestamp
+  });
+  const secondInvitation = await invitationStore.createInvitation({
+    email: "second@wavepa.com",
+    displayName: "Second Adjuster",
+    role: "employee",
+    jobNimbusOwnerId: SECOND_OWNER_ID,
+    jobNimbusScope: "assigned",
+    invitedByRef: `principal_${"a".repeat(64)}`,
+    expiresAt: new Date(
+      invitationTimestamp + 24 * 60 * 60_000
+    ).toISOString()
+  });
+  await invitationStore.acceptInvitation({
+    invitationRef: secondInvitation.invitationRef,
+    email: "second@wavepa.com",
+    googleSubject: "second-google-subject-fixture",
+    inviteToken: secondInvitation.inviteToken
+  });
   const providerCalls = [];
   const providerWrites = [];
   let createdNote = null;
@@ -288,17 +327,33 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       CHANCE_GOOGLE_EMAIL: EMAIL,
       CHANCE_GOOGLE_SUBJECT: SUBJECT,
       CHANCE_JOBNIMBUS_OWNER_ID: OWNER_ID,
-      WAVE_AUTH_USERS_JSON: "[]",
+      WAVE_AUTH_USERS_JSON: JSON.stringify([{
+        email: "second@wavepa.com",
+        name: "Second Adjuster",
+        role: "employee",
+        googleSubject: "second-google-subject-fixture",
+        jobNimbusOwnerId: SECOND_OWNER_ID,
+        jobNimbusScope: "assigned"
+      }]),
       JOBNIMBUS_API_KEY: "jobnimbus-http-fixture-key",
       JOBNIMBUS_API_BASE_URL:
         `http://127.0.0.1:${provider.address().port}`,
       HCN_TENANT_ID: "tenant_0123456789abcdef",
-      HCN_REFERENCE_KEY: Buffer.alloc(32, 0x61).toString("base64url"),
+      HCN_REFERENCE_KEY: REFERENCE_KEY,
       HCN_OPERATIONS_ROOT: root,
       HCN_JOBROLO_ADAPTER_ENABLED: "true",
       HCN_JOBROLO_CLIENT_ID: CLIENT_ID,
       HCN_JOBROLO_SHARED_SECRET: SHARED_SECRET,
       HCN_JOBROLO_PRINCIPAL_EMAIL: EMAIL,
+      HCN_JOBROLO_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+        schema: "hcn.jobrolo.general-profiles.v1",
+        profiles: [{
+          clientId: SECOND_GENERAL_CLIENT_ID,
+          sharedSecret: SECOND_GENERAL_SHARED_SECRET,
+          principalEmail: "second@wavepa.com",
+          effectMode: "read_only"
+        }]
+      }),
       HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
       HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: NOTE_CLIENT_ID,
       HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET: NOTE_SHARED_SECRET,
@@ -366,6 +421,86 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(status.body.result.adapter.managementSweepReady, true);
   assert.equal(status.body.result.adapter.communicationSweepReady, true);
   assert.equal(status.body.result.adapter.quoPhoneHistoryReady, true);
+  const secondStatus = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/status",
+    {
+      requestId: `request_${"1a".repeat(16)}`,
+      sessionRef: `session_${"2b".repeat(16)}`,
+      nonce: `nonce_${"3c".repeat(16)}`,
+      input: {},
+      clientId: SECOND_GENERAL_CLIENT_ID,
+      secret: SECOND_GENERAL_SHARED_SECRET
+    }
+  );
+  assert.equal(secondStatus.response.status, 200, secondStatus.text);
+  assert.equal(secondStatus.body.result.profile.email, "second@wavepa.com");
+  includeActiveForeignDuplicate = true;
+  const secondWorkCenter = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/work-center",
+    {
+      requestId: `request_${"4d".repeat(16)}`,
+      sessionRef: `session_${"2b".repeat(16)}`,
+      nonce: `nonce_${"5e".repeat(16)}`,
+      input: { offset: 0, limit: 10 },
+      clientId: SECOND_GENERAL_CLIENT_ID,
+      secret: SECOND_GENERAL_SHARED_SECRET
+    }
+  );
+  includeActiveForeignDuplicate = false;
+  assert.equal(secondWorkCenter.response.status, 200, secondWorkCenter.text);
+  assert.equal(secondWorkCenter.body.result.files.length, 1);
+  assert.equal(
+    secondWorkCenter.body.result.files[0].displayName,
+    "Active Foreign Duplicate Fixture"
+  );
+  assert.doesNotMatch(secondWorkCenter.text, /Assigned File Fixture B/);
+  assert.equal(secondStatus.body.result.adapter.effectMode, "read_only");
+  assert.equal(secondStatus.body.result.adapter.actions, "read_only");
+  const secondCarrierStatus = await signedPost(
+    origin,
+    "/integrations/jobrolo/v1/carrier-emails/status",
+    {
+      requestId: `request_${"6a".repeat(16)}`,
+      sessionRef: `session_${"2b".repeat(16)}`,
+      nonce: `nonce_${"6b".repeat(16)}`,
+      input: { contract: JOBROLO_HCN_CARRIER_EMAIL_CONTRACT },
+      clientId: SECOND_GENERAL_CLIENT_ID,
+      secret: SECOND_GENERAL_SHARED_SECRET
+    }
+  );
+  assert.equal(
+    secondCarrierStatus.response.status,
+    200,
+    secondCarrierStatus.text
+  );
+  assert.equal(secondCarrierStatus.body.result.effectMode, "read_only");
+  assert.equal(secondCarrierStatus.body.result.ready, false);
+  assert.equal(secondCarrierStatus.body.result.draft.ready, false);
+  assert.equal(secondCarrierStatus.body.result.send.ready, false);
+  const providerCallCountBeforeReadOnlyEffects = providerCalls.length;
+  const providerWriteCountBeforeReadOnlyEffects = providerWrites.length;
+  for (
+    let index = 0;
+    index < JOBROLO_HCN_GENERAL_EFFECT_ROUTES.length;
+    index += 1
+  ) {
+    const route = JOBROLO_HCN_GENERAL_EFFECT_ROUTES[index];
+    const requestToken = (0x80 + index).toString(16).padStart(2, "0");
+    const nonceToken = (0xa0 + index).toString(16).padStart(2, "0");
+    const rejected = await signedPost(origin, route, {
+      requestId: `request_${requestToken.repeat(16)}`,
+      sessionRef: `session_${"2b".repeat(16)}`,
+      nonce: `nonce_${nonceToken.repeat(16)}`,
+      input: {},
+      clientId: SECOND_GENERAL_CLIENT_ID,
+      secret: SECOND_GENERAL_SHARED_SECRET
+    });
+    assert.equal(rejected.response.status, 403, `${route}: ${rejected.text}`);
+  }
+  assert.equal(providerCalls.length, providerCallCountBeforeReadOnlyEffects);
+  assert.equal(providerWrites.length, providerWriteCountBeforeReadOnlyEffects);
   assert.deepEqual(status.body.result.adapter.readRoutes, [
     "/integrations/jobrolo/v1/status",
     "/integrations/jobrolo/v1/work-center",

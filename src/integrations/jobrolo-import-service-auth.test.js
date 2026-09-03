@@ -29,7 +29,9 @@ import {
   JOBROLO_IMPORT_TRANSPORT_LIMITS,
   JOBROLO_IMPORT_TRANSPORT_RESPONSE_SCHEMA,
   loadJobroloImportTransportConfiguration,
+  loadJobroloImportTransportRegistry,
   projectJobroloImportError,
+  resolveJobroloImportTransportProfile,
   signJobroloImportRequest,
   verifyJobroloImportTransportResponse
 } from "./jobrolo-import-service-auth.js";
@@ -44,6 +46,10 @@ const NONCE = "nonce_0123456789abcdef0123456789abcdef";
 const SOURCE_FILE_REF = "subject_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SOURCE_RECORD_REF = "ref_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MANIFEST_DIGEST = "d".repeat(64);
+const SECOND_CLIENT_ID = "jobrolo-import-second-pa";
+const SECOND_SECRET = "jobrolo-import-second-pa-secret-0123456789abcdef";
+const SECOND_CONNECTION_REF =
+  "connection_dddddddddddddddddddddddddddddddd";
 
 test("document transport reserves execution-lease time for scan and storage", () => {
   assert.equal(
@@ -145,6 +151,153 @@ test("import configuration is separate, exact, and rejects reused credentials", 
   }, {
     disallowedClientIds: [CLIENT_ID]
   }), /configuration is invalid/);
+});
+
+test("multi-principal registry binds each signed client to one server profile", async () => {
+  const environment = {
+    HCN_JOBROLO_IMPORT_TRANSPORT_ENABLED: "true",
+    HCN_JOBROLO_IMPORT_CLIENT_ID: CLIENT_ID,
+    HCN_JOBROLO_IMPORT_SHARED_SECRET: SECRET,
+    HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_IMPORT_CONNECTION_REF: CONNECTION_REF,
+    HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.import-profiles.v1",
+      profiles: [{
+        clientId: SECOND_CLIENT_ID,
+        sharedSecret: SECOND_SECRET,
+        principalEmail: "second.adjuster@wavepa.com",
+        connectionRef: SECOND_CONNECTION_REF
+      }]
+    })
+  };
+  const registry = loadJobroloImportTransportRegistry(environment);
+  assert.equal(registry.ready, true);
+  assert.equal(registry.profiles.length, 2);
+  assert.equal(
+    resolveJobroloImportTransportProfile(registry, SECOND_CLIENT_ID)
+      .principalEmail,
+    "second.adjuster@wavepa.com"
+  );
+  assert.equal(
+    resolveJobroloImportTransportProfile(registry, "unknown-client"),
+    null
+  );
+
+  const body = catalogBody();
+  const signed = signJobroloImportRequest({
+    clientId: SECOND_CLIENT_ID,
+    secret: SECOND_SECRET,
+    pathname: JOBROLO_IMPORT_CATALOG_ROUTE,
+    timestamp: TIMESTAMP,
+    nonce: NONCE,
+    body
+  });
+  const verified = await createJobroloImportAuthenticator({
+    configuration: registry,
+    now: () => NOW
+  }).authenticate({
+    method: "POST",
+    pathname: JOBROLO_IMPORT_CATALOG_ROUTE,
+    headers: signed.headers,
+    body,
+    rawBody: signed.bodyText
+  });
+  assert.deepEqual(
+    {
+      clientId: verified.clientId,
+      principalEmail: verified.principalEmail,
+      connectionRef: verified.connectionRef
+    },
+    {
+      clientId: SECOND_CLIENT_ID,
+      principalEmail: "second.adjuster@wavepa.com",
+      connectionRef: SECOND_CONNECTION_REF
+    }
+  );
+
+  const wrongSecret = signJobroloImportRequest({
+    clientId: SECOND_CLIENT_ID,
+    secret: SECRET,
+    pathname: JOBROLO_IMPORT_CATALOG_ROUTE,
+    timestamp: TIMESTAMP,
+    nonce: `nonce_${"f".repeat(32)}`,
+    body
+  });
+  await assert.rejects(
+    createJobroloImportAuthenticator({
+      configuration: registry,
+      now: () => NOW
+    }).authenticate({
+      method: "POST",
+      pathname: JOBROLO_IMPORT_CATALOG_ROUTE,
+      headers: wrongSecret.headers,
+      body,
+      rawBody: wrongSecret.bodyText
+    }),
+    (error) => error.code === "invalid_jobrolo_import_authentication"
+  );
+});
+
+test("multi-principal registry rejects ambiguous and cross-family bindings", () => {
+  const base = {
+    HCN_JOBROLO_IMPORT_TRANSPORT_ENABLED: "true",
+    HCN_JOBROLO_IMPORT_CLIENT_ID: CLIENT_ID,
+    HCN_JOBROLO_IMPORT_SHARED_SECRET: SECRET,
+    HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_IMPORT_CONNECTION_REF: CONNECTION_REF
+  };
+  const additional = (profile) => ({
+    ...base,
+    HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.import-profiles.v1",
+      profiles: [{
+        clientId: SECOND_CLIENT_ID,
+        sharedSecret: SECOND_SECRET,
+        principalEmail: "second.adjuster@wavepa.com",
+        connectionRef: SECOND_CONNECTION_REF,
+        ...profile
+      }]
+    })
+  });
+  for (const duplicate of [
+    { clientId: CLIENT_ID },
+    { sharedSecret: SECRET },
+    { principalEmail: "chance@wavepa.com" },
+    { connectionRef: CONNECTION_REF }
+  ]) {
+    assert.throws(
+      () => loadJobroloImportTransportRegistry(additional(duplicate)),
+      /configuration is invalid/
+    );
+  }
+  assert.throws(
+    () => loadJobroloImportTransportRegistry(additional({}), {
+      disallowedClientIds: [SECOND_CLIENT_ID]
+    }),
+    /configuration is invalid/
+  );
+  assert.throws(
+    () => loadJobroloImportTransportRegistry(additional({}), {
+      disallowedSecrets: [{ name: "other capability", value: SECOND_SECRET }]
+    }),
+    /configuration is invalid/
+  );
+  assert.throws(
+    () => loadJobroloImportTransportRegistry({
+      ...base,
+      HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+        schema: "hcn.jobrolo.import-profiles.v1",
+        profiles: [{
+          clientId: SECOND_CLIENT_ID,
+          sharedSecret: SECOND_SECRET,
+          principalEmail: "second.adjuster@wavepa.com",
+          connectionRef: SECOND_CONNECTION_REF,
+          callerSelectedPrincipal: true
+        }]
+      })
+    }),
+    /configuration is invalid/
+  );
 });
 
 test("request signing vector freezes exact header names, bytes, and domain", () => {

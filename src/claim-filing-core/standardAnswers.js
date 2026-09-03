@@ -1,20 +1,20 @@
 // Company-approved standard filing answers, damage categorization, and cause
 // inference — pure, dependency-free. These are the four intentional business
-// defaults Chance confirmed for routine residential storm claims. They are the
+// defaults confirmed for routine residential storm claims. They are the
 // DEFAULTS and are overrideable per call when a specific file/homeowner/carrier
 // establishes an exception. They must NOT be copied into routine JobNimbus notes.
 
-// The four Chance-approved defaults, expressed as the exact phrasing the agent
+// The four approved defaults, expressed as the exact phrasing the agent
 // speaks. Keyed by the standard-answer field name.
 export const STANDARD_FILING_ANSWERS = {
   injuries: "No injuries reported",
   homeLivable: "Yes, the home is livable",
   temporaryRepairs: "Yes, temporary repairs have been made",
-  contractorHired: "Yes, Titan Reconstruction is the contractor on the project"
+  contractorHired: "Yes, a contractor has been hired"
 };
 
 // Resolve the standard answers for a call: an explicit override always wins; the
-// company default fills the rest. Per Chance, ALL FOUR defaults are standard for
+// company default fills the rest. All four defaults are standard for
 // routine residential claims — including habitability — unless a specific file
 // establishes an exception (passed as an override). We do NOT downgrade
 // habitability to "Missing" for non-storm losses; that would silently drop an

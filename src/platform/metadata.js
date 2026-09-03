@@ -70,7 +70,7 @@ export function buildPlatformMeta({
             "jobrolo.jobnimbus-import.transport-response.v1",
           authentication:
             "dedicated_import_hmac_exact_bytes_timestamp_durable_nonce",
-          principalMode: "fixed_server_side_approved_employee",
+          principalMode: "signed_client_bound_server_side_approved_employee",
           principalSelectableByCaller: false,
           fileScope: "assigned_only",
           photoManifests: availability(

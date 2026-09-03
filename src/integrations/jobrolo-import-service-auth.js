@@ -106,6 +106,7 @@ const CONNECTION_REF = /^connection_[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SECRET = /^[\x21-\x7e]{32,512}$/;
+const ADDITIONAL_PROFILES_SCHEMA = "hcn.jobrolo.import-profiles.v1";
 
 export function isJobroloImportRoute(pathname) {
   return ROUTES.has(String(pathname || ""));
@@ -165,6 +166,125 @@ export function loadJobroloImportTransportConfiguration(
     principalEmail,
     connectionRef
   });
+}
+
+/**
+ * Loads the legacy import credential plus any additional, server-owned PA
+ * profiles. The signed client id is the only selector at request time; no
+ * principal, connection, or credential value is accepted from request JSON.
+ */
+export function loadJobroloImportTransportRegistry(
+  environment = {},
+  { disallowedSecrets = [], disallowedClientIds = [] } = {}
+) {
+  const primary = loadJobroloImportTransportConfiguration(environment, {
+    disallowedSecrets,
+    disallowedClientIds
+  });
+  if (!primary.ready) {
+    return Object.freeze({
+      enabled: false,
+      ready: false,
+      profiles: Object.freeze([])
+    });
+  }
+
+  const rawAdditional = String(
+    environment.HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON || ""
+  ).trim();
+  let additional = [];
+  if (rawAdditional) {
+    let parsed;
+    try {
+      parsed = JSON.parse(rawAdditional);
+    } catch {
+      configurationFailure();
+    }
+    if (
+      !isPlainRecord(parsed)
+      || parsed.schema !== ADDITIONAL_PROFILES_SCHEMA
+      || !Array.isArray(parsed.profiles)
+      || parsed.profiles.length < 1
+      || parsed.profiles.length > 50
+      || Object.keys(parsed).sort().join(",") !== "profiles,schema"
+    ) {
+      configurationFailure();
+    }
+    additional = parsed.profiles.map((profile) => {
+      if (
+        !isPlainRecord(profile)
+        || Object.keys(profile).sort().join(",")
+          !== "clientId,connectionRef,principalEmail,sharedSecret"
+      ) {
+        configurationFailure();
+      }
+      const clientId = String(profile.clientId || "").trim();
+      const secret = String(profile.sharedSecret || "");
+      const principalEmail = String(profile.principalEmail || "").trim();
+      const connectionRef = String(profile.connectionRef || "").trim();
+      if (
+        !CLIENT_ID.test(clientId)
+        || !SECRET.test(secret)
+        || !JOBROLO_JOBNIMBUS_NORMALIZED_EMAIL_PATTERN.test(principalEmail)
+        || principalEmail !== principalEmail.toLowerCase()
+        || !CONNECTION_REF.test(connectionRef)
+      ) {
+        configurationFailure();
+      }
+      for (const candidate of disallowedSecrets) {
+        const value = String(candidate?.value || "");
+        if (value && secureTextEqual(secret, value)) configurationFailure();
+      }
+      for (const candidate of disallowedClientIds) {
+        const value = String(candidate?.value ?? candidate ?? "");
+        if (value && secureTextEqual(clientId, value)) configurationFailure();
+      }
+      return Object.freeze({
+        enabled: true,
+        ready: true,
+        clientId,
+        secret,
+        principalEmail,
+        connectionRef
+      });
+    });
+  }
+
+  const profiles = [primary, ...additional];
+  for (let index = 0; index < profiles.length; index += 1) {
+    const profile = profiles[index];
+    for (let otherIndex = index + 1; otherIndex < profiles.length; otherIndex += 1) {
+      const other = profiles[otherIndex];
+      if (
+        secureTextEqual(profile.clientId, other.clientId)
+        || secureTextEqual(profile.secret, other.secret)
+        || secureTextEqual(profile.principalEmail, other.principalEmail)
+        || secureTextEqual(profile.connectionRef, other.connectionRef)
+      ) {
+        configurationFailure();
+      }
+    }
+  }
+  return Object.freeze({
+    enabled: true,
+    ready: true,
+    profiles: Object.freeze(profiles)
+  });
+}
+
+export function resolveJobroloImportTransportProfile(
+  configuration,
+  clientId
+) {
+  if (!configuration?.ready || !configuration?.enabled) return null;
+  const profiles = Array.isArray(configuration.profiles)
+    ? configuration.profiles
+    : [configuration];
+  const requestedClientId = String(clientId || "");
+  const matches = profiles.filter(
+    (profile) => secureTextEqual(profile.clientId, requestedClientId)
+  );
+  return matches.length === 1 ? matches[0] : null;
 }
 
 export function createJobroloImportMemoryNonceGuard({
@@ -278,10 +398,16 @@ export function createJobroloImportAuthenticator({
       ) {
         authenticationFailure();
       }
-      if (
-        exactHeader(headers, "authorization")
-        !== `Jobrolo-Import-HMAC ${configuration.clientId}`
-      ) {
+      const authorization = exactHeader(headers, "authorization");
+      const authorizationMatch = /^Jobrolo-Import-HMAC ([A-Za-z0-9._-]{3,64})$/
+        .exec(authorization);
+      const profile = authorizationMatch
+        ? resolveJobroloImportTransportProfile(
+            configuration,
+            authorizationMatch[1]
+          )
+        : null;
+      if (!profile) {
         authenticationFailure();
       }
 
@@ -328,7 +454,7 @@ export function createJobroloImportAuthenticator({
         authenticationFailure();
       }
       const expectedSignature = hmac(
-        configuration.secret,
+        profile.secret,
         jobroloImportRequestSigningMaterial({
           method: normalizedMethod,
           pathname: normalizedPath,
@@ -343,14 +469,14 @@ export function createJobroloImportAuthenticator({
 
       const request = validateImportRequest(normalizedPath, body);
       await nonceGuard.consume(
-        configuration.clientId,
+        profile.clientId,
         nonce,
         timestampMs + maximumSkewMs + 1
       );
       return Object.freeze({
-        clientId: configuration.clientId,
-        principalEmail: configuration.principalEmail,
-        connectionRef: configuration.connectionRef,
+        clientId: profile.clientId,
+        principalEmail: profile.principalEmail,
+        connectionRef: profile.connectionRef,
         requestId: request.requestId,
         requestNonce: nonce,
         requestTimestamp: timestamp,
