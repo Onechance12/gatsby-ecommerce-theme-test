@@ -18,6 +18,7 @@ import {
   digest,
   retellCallBody,
   callbackCandidateFromCall,
+  callbackCandidatesForProfile,
   selectCallbackCandidate,
   validateRetellCallChainOwnership
 } from "./claim-filing-adapter.js";
@@ -279,9 +280,14 @@ import {
   HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
   HCN_JOBROLO_REQUEST_SCHEMA,
   HCN_JOBROLO_READ_ROUTES,
-  loadJobroloHcnClaimFilingConfiguration,
-  loadJobroloHcnIntegrationConfiguration,
-  loadJobroloHcnNoteWritebackConfiguration
+  jobroloHcnGeneralProfileAllowsRoute,
+  LEGACY_JOBROLO_CLAIM_CALLER_PROFILE,
+  loadJobroloHcnClaimFilingRegistry,
+  loadJobroloHcnIntegrationRegistry,
+  loadJobroloHcnNoteWritebackRegistry,
+  resolveJobroloHcnClaimFilingProfile,
+  resolveJobroloHcnIntegrationProfile,
+  resolveJobroloHcnNoteWritebackProfile
 } from "./integrations/jobrolo-service-auth.js";
 import {
   jobroloHcnResponse,
@@ -290,6 +296,16 @@ import {
   validateJobroloAssistantTurnInput,
   validateJobroloReceiptDetailInput
 } from "./integrations/jobrolo-contracts.js";
+import {
+  assertJobroloCarrierPlan,
+  HCN_JOBROLO_CARRIER_EMAIL_ROUTES,
+  projectJobroloCarrierEnvelope,
+  validateJobroloCarrierDraftPrepareInput,
+  validateJobroloCarrierExecuteInput,
+  validateJobroloCarrierReceiptInput,
+  validateJobroloCarrierSendPrepareInput,
+  validateJobroloCarrierStatusInput
+} from "./integrations/jobrolo-carrier-email.js";
 import {
   canonicalJson,
   createJobroloImportAuthenticator,
@@ -302,7 +318,8 @@ import {
   HCN_JOBROLO_IMPORT_SNAPSHOT_ROUTE,
   HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS,
   isJobroloImportRoute,
-  loadJobroloImportTransportConfiguration,
+  loadJobroloImportTransportRegistry,
+  resolveJobroloImportTransportProfile,
   projectJobroloImportError
 } from "./integrations/jobrolo-import-service-auth.js";
 import {
@@ -592,60 +609,31 @@ const QUO_API_KEY = process.env.QUO_API_KEY || "";
 const QUO_API_BASE_URL = stripTrailingSlash(process.env.QUO_API_BASE_URL || "https://api.quo.com/v1");
 const QUO_DEFAULT_FROM_NUMBER = process.env.QUO_DEFAULT_FROM_NUMBER || "";
 const ALLOW_QUO_SEND = RELEASE_GATES.ALLOW_QUO_SEND;
-const HCN_JOBROLO_CONFIGURATION =
-  loadJobroloHcnIntegrationConfiguration(process.env, {
+const HCN_JOBROLO_REGISTRY =
+  loadJobroloHcnIntegrationRegistry(process.env, {
+    disallowedClientIds: [
+      {
+        name: "HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID",
+        value: process.env.HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID || ""
+      },
+      {
+        name: "HCN_JOBROLO_CLAIM_FILING_CLIENT_ID",
+        value: process.env.HCN_JOBROLO_CLAIM_FILING_CLIENT_ID || ""
+      },
+      {
+        name: "HCN_JOBROLO_IMPORT_CLIENT_ID",
+        value: process.env.HCN_JOBROLO_IMPORT_CLIENT_ID || ""
+      }
+    ],
     disallowedSecrets: [
       [
         "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
         process.env.HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET || ""
       ],
-      ["JOBNIMBUS_API_KEY", API_KEY],
-      ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
-      ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
-      ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
-      ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
-      ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
-      ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
-      ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
-      ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
-      ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
-      ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
-      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
-      ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
-      ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
-      ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
-      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY],
-      ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
-      ["QUO_API_KEY", QUO_API_KEY],
-      ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
-      ["RETELL_API_KEY", RETELL_API_KEY],
-      ["RETELL_INBOUND_WEBHOOK_TOKEN", process.env.RETELL_INBOUND_WEBHOOK_TOKEN || ""],
-      ["VOICE_STREAM_TOKEN", process.env.VOICE_STREAM_TOKEN || ""],
-      ["OPENAI_API_KEY", OPENAI_API_KEY]
-    ].map(([name, value]) => ({ name, value }))
-  });
-const HCN_JOBROLO_AUTHENTICATOR = createJobroloHcnAuthenticator({
-  configuration: HCN_JOBROLO_CONFIGURATION
-});
-if (
-  HCN_JOBROLO_CONFIGURATION.ready
-  && HCN_JOBROLO_CONFIGURATION.principalEmail !== CHANCE_GOOGLE_EMAIL
-) {
-  throw new Error(
-    "The owner-pilot Jobrolo adapter principal must exactly match CHANCE_GOOGLE_EMAIL."
-  );
-}
-const HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION =
-  loadJobroloHcnNoteWritebackConfiguration(process.env, {
-    disallowedClientIds: [{
-      name: "HCN_JOBROLO_CLIENT_ID",
-      value: HCN_JOBROLO_CONFIGURATION.clientId
-    }, {
-      name: "HCN_JOBROLO_IMPORT_CLIENT_ID",
-      value: process.env.HCN_JOBROLO_IMPORT_CLIENT_ID || ""
-    }],
-    disallowedSecrets: [
-      ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
+      [
+        "HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET",
+        process.env.HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET || ""
+      ],
       [
         "HCN_JOBROLO_IMPORT_SHARED_SECRET",
         process.env.HCN_JOBROLO_IMPORT_SHARED_SECRET || ""
@@ -675,11 +663,83 @@ const HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION =
       ["OPENAI_API_KEY", OPENAI_API_KEY]
     ].map(([name, value]) => ({ name, value }))
   });
-const HCN_JOBROLO_NOTE_WRITEBACK_AUTHENTICATOR =
-  createJobroloHcnAuthenticator({
-    configuration: HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION,
-    allowedRoutes: HCN_JOBROLO_NOTE_WRITEBACK_ROUTES
+const HCN_JOBROLO_CONFIGURATION = HCN_JOBROLO_REGISTRY.primary;
+const HCN_JOBROLO_AUTHENTICATORS = new Map(
+  HCN_JOBROLO_REGISTRY.profiles.map((configuration) => [
+    configuration.clientId,
+    createJobroloHcnAuthenticator({ configuration })
+  ])
+);
+if (
+  HCN_JOBROLO_CONFIGURATION.ready
+  && HCN_JOBROLO_CONFIGURATION.principalEmail !== CHANCE_GOOGLE_EMAIL
+) {
+  throw new Error(
+    "The owner-pilot Jobrolo adapter principal must exactly match CHANCE_GOOGLE_EMAIL."
+  );
+}
+const HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY =
+  loadJobroloHcnNoteWritebackRegistry(process.env, {
+    disallowedClientIds: [
+      ...HCN_JOBROLO_REGISTRY.profiles.map((profile) => ({
+        name: `HCN_JOBROLO_PROFILE_${profile.clientId}`,
+        value: profile.clientId
+      })), {
+      name: "HCN_JOBROLO_CLAIM_FILING_CLIENT_ID",
+      value: process.env.HCN_JOBROLO_CLAIM_FILING_CLIENT_ID || ""
+    }, {
+      name: "HCN_JOBROLO_IMPORT_CLIENT_ID",
+      value: process.env.HCN_JOBROLO_IMPORT_CLIENT_ID || ""
+    }],
+    disallowedSecrets: [
+      ...HCN_JOBROLO_REGISTRY.profiles.map((profile) => [
+        `HCN_JOBROLO_PROFILE_${profile.clientId}`,
+        profile.secret
+      ]),
+      [
+        "HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET",
+        process.env.HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET || ""
+      ],
+      [
+        "HCN_JOBROLO_IMPORT_SHARED_SECRET",
+        process.env.HCN_JOBROLO_IMPORT_SHARED_SECRET || ""
+      ],
+      ["JOBNIMBUS_API_KEY", API_KEY],
+      ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
+      ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
+      ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+      ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+      ["HCN_GOOGLE_CLIENT_SECRET", HCN_GOOGLE_CLIENT_SECRET],
+      ["GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN],
+      ["OAUTH_SESSION_SECRET", OAUTH_SESSION_SECRET],
+      ["GPT_OAUTH_CLIENT_SECRET", GPT_OAUTH_CLIENT_SECRET],
+      ["HCN_REFERENCE_KEY", HCN_REFERENCE_KEY],
+      ["HCN_GOOGLE_GRANT_KEY", HCN_GOOGLE_GRANT_KEY],
+      ["HCN_ASSISTANT_HISTORY_KEY", HCN_ASSISTANT_HISTORY_KEY],
+      ["HCN_THRESHER_STORE_KEY", process.env.HCN_THRESHER_STORE_KEY || ""],
+      ["HCN_THRESHER_REFERENCE_KEY", process.env.HCN_THRESHER_REFERENCE_KEY || ""],
+      ["HCN_THRESHER_SIGNING_KEY", process.env.HCN_THRESHER_SIGNING_KEY || ""],
+      ["HCN_THRESHER_AI_GROQ_API_KEY", HCN_THRESHER_AI_GROQ_API_KEY],
+      ["HCN_QUO_LINK_KEY", HCN_QUO_LINK_KEY],
+      ["QUO_API_KEY", QUO_API_KEY],
+      ["TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN],
+      ["RETELL_API_KEY", RETELL_API_KEY],
+      ["RETELL_INBOUND_WEBHOOK_TOKEN", process.env.RETELL_INBOUND_WEBHOOK_TOKEN || ""],
+      ["VOICE_STREAM_TOKEN", process.env.VOICE_STREAM_TOKEN || ""],
+      ["OPENAI_API_KEY", OPENAI_API_KEY]
+    ].map(([name, value]) => ({ name, value }))
   });
+const HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION =
+  HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY.primary;
+const HCN_JOBROLO_NOTE_WRITEBACK_AUTHENTICATORS = new Map(
+  HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY.profiles.map((configuration) => [
+    configuration.clientId,
+    createJobroloHcnAuthenticator({
+      configuration,
+      allowedRoutes: HCN_JOBROLO_NOTE_WRITEBACK_ROUTES
+    })
+  ])
+);
 const HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE =
   "jobrolo_general_thresher_v1";
 const HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE =
@@ -693,24 +753,29 @@ if (
     "The owner-pilot Jobrolo note-writeback principal must exactly match CHANCE_GOOGLE_EMAIL."
   );
 }
-const HCN_JOBROLO_CLAIM_FILING_CONFIGURATION =
-  loadJobroloHcnClaimFilingConfiguration(process.env, {
-    disallowedClientIds: [{
-      name: "HCN_JOBROLO_CLIENT_ID",
-      value: HCN_JOBROLO_CONFIGURATION.clientId
-    }, {
-      name: "HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID",
-      value: HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId
-    }, {
+const HCN_JOBROLO_CLAIM_FILING_REGISTRY =
+  loadJobroloHcnClaimFilingRegistry(process.env, {
+    disallowedClientIds: [
+      ...HCN_JOBROLO_REGISTRY.profiles.map((profile) => ({
+        name: `HCN_JOBROLO_PROFILE_${profile.clientId}`,
+        value: profile.clientId
+      })),
+      ...HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY.profiles.map((profile) => ({
+        name: `HCN_JOBROLO_NOTE_PROFILE_${profile.clientId}`,
+        value: profile.clientId
+      })), {
       name: "HCN_JOBROLO_IMPORT_CLIENT_ID",
       value: process.env.HCN_JOBROLO_IMPORT_CLIENT_ID || ""
     }],
     disallowedSecrets: [
-      ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
-      [
-        "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
-        HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.secret
-      ],
+      ...HCN_JOBROLO_REGISTRY.profiles.map((profile) => [
+        `HCN_JOBROLO_PROFILE_${profile.clientId}`,
+        profile.secret
+      ]),
+      ...HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY.profiles.map((profile) => [
+        `HCN_JOBROLO_NOTE_PROFILE_${profile.clientId}`,
+        profile.secret
+      ]),
       [
         "HCN_JOBROLO_IMPORT_SHARED_SECRET",
         process.env.HCN_JOBROLO_IMPORT_SHARED_SECRET || ""
@@ -740,11 +805,17 @@ const HCN_JOBROLO_CLAIM_FILING_CONFIGURATION =
       ["OPENAI_API_KEY", OPENAI_API_KEY]
     ].map(([name, value]) => ({ name, value }))
   });
-const HCN_JOBROLO_CLAIM_FILING_AUTHENTICATOR =
-  createJobroloHcnAuthenticator({
-    configuration: HCN_JOBROLO_CLAIM_FILING_CONFIGURATION,
-    allowedRoutes: HCN_JOBROLO_CLAIM_FILING_ROUTES
-  });
+const HCN_JOBROLO_CLAIM_FILING_CONFIGURATION =
+  HCN_JOBROLO_CLAIM_FILING_REGISTRY.primary;
+const HCN_JOBROLO_CLAIM_FILING_AUTHENTICATORS = new Map(
+  HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles.map((configuration) => [
+    configuration.clientId,
+    createJobroloHcnAuthenticator({
+      configuration,
+      allowedRoutes: HCN_JOBROLO_CLAIM_FILING_ROUTES
+    })
+  ])
+);
 const HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE =
   "claim_filing_v1";
 if (
@@ -757,22 +828,33 @@ if (
   );
 }
 const HCN_JOBROLO_IMPORT_CONFIGURATION =
-  loadJobroloImportTransportConfiguration(process.env, {
+  loadJobroloImportTransportRegistry(process.env, {
     disallowedClientIds: [
-      HCN_JOBROLO_CONFIGURATION.clientId,
-      HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId,
-      HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId
+      ...HCN_JOBROLO_REGISTRY.profiles.map((profile) => profile.clientId),
+      ...HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY.profiles.map(
+        (profile) => profile.clientId
+      ),
+      ...HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles.map(
+        (profile) => profile.clientId
+      )
     ],
     disallowedSecrets: [
-      ["HCN_JOBROLO_SHARED_SECRET", HCN_JOBROLO_CONFIGURATION.secret],
-      [
-        "HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET",
-        HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.secret
-      ],
-      [
-        "HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET",
-        HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.secret
-      ],
+      ...HCN_JOBROLO_REGISTRY.profiles.map((profile) => [
+        `HCN_JOBROLO_PROFILE_${profile.clientId}`,
+        profile.secret
+      ]),
+      ...HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY.profiles.map(
+        (profile) => [
+          `HCN_JOBROLO_NOTE_PROFILE_${profile.clientId}`,
+          profile.secret
+        ]
+      ),
+      ...HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles.map(
+        (profile) => [
+          `HCN_JOBROLO_CLAIM_FILING_PROFILE_${profile.clientId}`,
+          profile.secret
+        ]
+      ),
       ["JOBNIMBUS_API_KEY", API_KEY],
       ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
       ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
@@ -1304,6 +1386,12 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/action-plans/prepare", jobroloHcnPrepareActionPlan],
   ["POST /integrations/jobrolo/v1/action-plans/execute", jobroloHcnExecuteActionPlan],
   ["POST /integrations/jobrolo/v1/action-receipts/detail", jobroloHcnReadActionReceipt],
+  [`POST ${HCN_JOBROLO_CARRIER_EMAIL_ROUTES.status}`, jobroloHcnCarrierEmailStatus],
+  [`POST ${HCN_JOBROLO_CARRIER_EMAIL_ROUTES.draftPrepare}`, jobroloHcnPrepareCarrierDraft],
+  [`POST ${HCN_JOBROLO_CARRIER_EMAIL_ROUTES.draftExecute}`, jobroloHcnExecuteCarrierDraft],
+  [`POST ${HCN_JOBROLO_CARRIER_EMAIL_ROUTES.sendPrepare}`, jobroloHcnPrepareCarrierSend],
+  [`POST ${HCN_JOBROLO_CARRIER_EMAIL_ROUTES.sendExecute}`, jobroloHcnExecuteCarrierSend],
+  [`POST ${HCN_JOBROLO_CARRIER_EMAIL_ROUTES.receiptDetail}`, jobroloHcnCarrierReceiptDetail],
   ["POST /integrations/jobrolo/v1/claim-filings/status", jobroloHcnClaimFilingStatus],
   ["POST /integrations/jobrolo/v1/claim-filings/prepare", jobroloHcnPrepareClaimFiling],
   ["POST /integrations/jobrolo/v1/claim-filings/execute", jobroloHcnExecuteClaimFiling],
@@ -1429,6 +1517,20 @@ const server = createServer(async (req, res) => {
         headers: req.headers,
         body
       });
+      if (
+        capability.capabilityProfile
+          === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+        && !jobroloHcnGeneralProfileAllowsRoute(
+          capability.configuration,
+          url.pathname
+        )
+      ) {
+        const error = new Error(
+          "This signed Jobrolo employee profile is configured for read-only HCN access."
+        );
+        error.statusCode = 403;
+        throw error;
+      }
       const authentication =
         await authenticateJobroloHcnPrincipal(verified, capability);
       const result = await REQUEST_CONTEXT.run(
@@ -1890,7 +1992,7 @@ function health() {
       contract: "jobrolo.jobnimbus-import.transport-response.v1",
       authentication:
         "dedicated_import_hmac_exact_bytes_timestamp_durable_nonce",
-      principalMode: "fixed_server_side_approved_employee",
+      principalMode: "signed_client_bound_server_side_approved_employee",
       principalSelectableByCaller: false,
       fileScope: "assigned_only",
       readRoutes: [...HCN_JOBROLO_IMPORT_ROUTES],
@@ -3514,6 +3616,7 @@ async function hcnConnectorStatus(input = {}) {
 
 async function jobroloHcnStatus(input = {}) {
   const connectors = await hcnConnectorStatus(input);
+  const approvedEffects = jobroloGeneralApprovedEffectsActive();
   return Object.freeze({
     ...connectors,
     adapter: Object.freeze({
@@ -3524,10 +3627,17 @@ async function jobroloHcnStatus(input = {}) {
         ? "connected"
         : "unavailable",
       actions: (
+        approvedEffects
+        &&
         ALLOW_WRITES
         && HCN_ACTION_EXECUTION_ENABLED
         && HCN_ACTION_RECEIPT_STORE_PATH
-      ) ? "approval_gated" : "unavailable",
+      )
+        ? "approval_gated"
+        : approvedEffects
+          ? "unavailable"
+          : "read_only",
+      effectMode: approvedEffects ? "approved_effects" : "read_only",
       claimFilingExposed:
         HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready === true,
       communicationSweepExposed: true,
@@ -7979,7 +8089,8 @@ async function hcnReadClaimFilingResult(input = {}) {
     const claimReceipt = hcnGetClaimCallReceipt(input.planId);
     const receipt = claimReceipt.receipt;
     if (
-      receipt.fileRef !== context.fileRef
+      receipt.planId !== input.planId
+      || receipt.fileRef !== context.fileRef
       || receipt.status !== "completed_pending_verification"
       || callRef !== hcnClaimCallRef({
         principalRef: claimReceipt.sessionPrincipalRef,
@@ -8009,6 +8120,7 @@ async function hcnReadClaimFilingResult(input = {}) {
           schema: "hcn.claim-filing.result-review.v2",
           callRef,
           fileRef: context.fileRef,
+          planId: receipt.planId,
           callStatus,
           terminal: false,
           humanConfirmationRequired: false,
@@ -8020,6 +8132,7 @@ async function hcnReadClaimFilingResult(input = {}) {
     const evidence = createHcnServerClaimEvidence({
       callRef,
       fileRef: context.fileRef,
+      callPlanId: input.planId,
       planDigest: receipt.digest,
       terminalReceipt: receipt,
       rawCall,
@@ -8509,7 +8622,8 @@ async function hcnLoadClaimCallEvidence({
   const claimReceipt = hcnGetClaimCallReceipt(callPlanId);
   const receipt = claimReceipt.receipt;
   if (
-    receipt.fileRef !== context.fileRef
+    receipt.planId !== callPlanId
+    || receipt.fileRef !== context.fileRef
     || receipt.status !== "completed_pending_verification"
     || normalizedCallRef !== hcnClaimCallRef({
       principalRef: claimReceipt.sessionPrincipalRef,
@@ -8533,6 +8647,7 @@ async function hcnLoadClaimCallEvidence({
   const evidence = createHcnServerClaimEvidence({
     callRef: normalizedCallRef,
     fileRef: context.fileRef,
+    callPlanId,
     planDigest: receipt.digest,
     terminalReceipt: receipt,
     rawCall,
@@ -8598,17 +8713,50 @@ async function hcnFindClaimCall({
       ownerId
     });
   });
-  if (matches.length !== 1 || response.has_more === true) {
+  const resolvedCall = hcnResolveClaimCallLeg(
+    matches,
+    response.has_more === true
+  );
+  if (!resolvedCall) {
     const error = new Error(
       "The exact claim call could not be uniquely resolved from Retell."
     );
-    error.statusCode = matches.length ? 409 : 404;
+    error.statusCode = matches.length || response.has_more === true ? 409 : 404;
     throw error;
   }
   return retellApi(
     "GET",
-    `/v2/get-call/${encodeURIComponent(matches[0].call_id)}`
+    `/v2/get-call/${encodeURIComponent(resolvedCall.call_id)}`
   );
+}
+
+function hcnResolveClaimCallLeg(matches, hasMore = false) {
+  const rows = Array.isArray(matches) ? matches : [];
+  if (
+    hasMore
+    || rows.length < 1
+    || rows.length > 2
+    || new Set(rows.map((call) => String(call?.call_id || ""))).size
+      !== rows.length
+  ) return null;
+  const callbackLegs = rows.filter(
+    (call) => call?.metadata?.callLeg === "carrier_callback"
+  );
+  const outboundLegs = rows.filter(
+    (call) => call?.metadata?.callLeg !== "carrier_callback"
+  );
+  if (callbackLegs.length === 0 && outboundLegs.length === 1) {
+    return outboundLegs[0].direction === "outbound" ? outboundLegs[0] : null;
+  }
+  if (callbackLegs.length !== 1 || outboundLegs.length !== 1) return null;
+  const callback = callbackLegs[0];
+  const outbound = outboundLegs[0];
+  return callback.direction === "inbound"
+    && outbound.direction === "outbound"
+    && String(callback.metadata?.originalCallId || "")
+      === String(outbound.call_id || "")
+    ? callback
+    : null;
 }
 
 function hcnClaimCallMetadataFilters({
@@ -8790,10 +8938,14 @@ async function hcnRecoverableClaimCall({ context, principal }) {
           ownerId: principal.jobNimbusOwnerId
         })
       );
-      if (matches.length > 1 || response.has_more === true) {
+      const resolvedCall = hcnResolveClaimCallLeg(
+        matches,
+        response.has_more === true
+      );
+      if (matches.length > 0 && !resolvedCall) {
         return Object.freeze({ state: "reconciliation_required" });
       }
-      if (matches.length === 1) {
+      if (resolvedCall) {
         candidates.push({
           planId: receipt.planId,
           callRef,
@@ -8824,6 +8976,7 @@ function hcnBuildClaimCorePlan(context, confirmations) {
       fileNumber: context.file.number,
       agentId: RETELL_AGENT_ID,
       from: RETELL_FROM_NUMBER,
+      callerProfile: hcnClaimCallerProfileForRequest(),
       goal: "file_new_claim",
       carrierPhone: confirmations.carrierPhone,
       damageOpening: confirmations.damageOpening,
@@ -8831,6 +8984,55 @@ function hcnBuildClaimCorePlan(context, confirmations) {
       ...hcnClaimSpokenAnswers(confirmations)
     }
   );
+}
+
+function hcnClaimCallerProfileForRequest() {
+  if (jobroloClaimFilingProfileActive()) {
+    const profile = currentRequestAuthentication()?.jobroloClaimCallerProfile;
+    if (
+      profile
+      && typeof profile === "object"
+      && !Array.isArray(profile)
+    ) return profile;
+    throw hcnClaimCallerProfileUnavailableError();
+  }
+
+  const identity = currentRequestIdentity();
+  const email = String(identity?.email || "").trim().toLowerCase();
+  const displayName = String(identity?.name || "").trim();
+  const registryMatches = HCN_JOBROLO_CLAIM_FILING_REGISTRY.ready
+    && Array.isArray(HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles)
+    ? HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles.filter(
+        (configuration) =>
+          configuration.principalEmail === email
+          && configuration.callerProfile?.publicAdjusterName === displayName
+      )
+    : [];
+  if (registryMatches.length === 1) {
+    return registryMatches[0].callerProfile;
+  }
+  if (registryMatches.length > 1) {
+    throw hcnClaimCallerProfileUnavailableError();
+  }
+
+  const exactChanceBrowser = Boolean(
+    identity?.type === "hcn_browser_session"
+    && CHANCE_GOOGLE_SUBJECT
+    && identity.subject === CHANCE_GOOGLE_SUBJECT
+    && email === CHANCE_GOOGLE_EMAIL
+    && String(identity.jobNimbusOwnerId || "") === CHANCE_OWNER_ID
+    && displayName === LEGACY_JOBROLO_CLAIM_CALLER_PROFILE.publicAdjusterName
+  );
+  if (exactChanceBrowser) return LEGACY_JOBROLO_CLAIM_CALLER_PROFILE;
+  throw hcnClaimCallerProfileUnavailableError();
+}
+
+function hcnClaimCallerProfileUnavailableError() {
+  const error = new Error(
+    "The exact server-owned claim caller profile is unavailable for this employee."
+  );
+  error.statusCode = 503;
+  return error;
 }
 
 async function hcnClaimFilingContext({
@@ -8978,6 +9180,31 @@ function jobroloClaimFilingProfileActive() {
     === HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE;
 }
 
+function jobroloGeneralApprovedEffectsActive() {
+  const context = currentRequestAuthentication();
+  return Boolean(
+    context?.authenticationMethod === "jobrolo_hmac"
+    && context?.jobroloCapabilityProfile
+      === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    && context?.jobroloEffectMode === "approved_effects"
+  );
+}
+
+function assertJobroloGeneralApprovedEffects() {
+  const context = currentRequestAuthentication();
+  if (
+    context?.jobroloCapabilityProfile
+      === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    && !jobroloGeneralApprovedEffectsActive()
+  ) {
+    const error = new Error(
+      "This signed Jobrolo employee profile is configured for read-only HCN access."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
 function jobroloGeneralChanceAllLineQuoReadActive() {
   const context = currentRequestAuthentication();
   const identity = currentRequestIdentity();
@@ -9031,7 +9258,275 @@ function assertExactJobroloNoteWritebackOperations(operations) {
   }
 }
 
+function assertJobroloCarrierFacadeSession({ requireEffects = false } = {}) {
+  const context = currentRequestAuthentication();
+  if (
+    context?.authenticationMethod !== "jobrolo_hmac"
+    || context?.jobroloCapabilityProfile
+      !== HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+  ) {
+    const error = new Error(
+      "The carrier-email facade requires the current signed general Jobrolo employee profile."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (requireEffects) assertJobroloGeneralApprovedEffects();
+  return assertHcnActionSession();
+}
+
+async function jobroloHcnCarrierEmailStatus(input = {}) {
+  validateJobroloCarrierStatusInput(input);
+  assertJobroloCarrierFacadeSession();
+  const connectors = await hcnConnectorStatus({});
+  const gmailConnected = connectors.google?.gmail === "connected";
+  const approvedEffects = jobroloGeneralApprovedEffectsActive();
+  const draftReady = Boolean(
+    approvedEffects
+    && API_KEY
+    && gmailConnected
+    && ALLOW_WRITES
+    && HCN_ACTION_EXECUTION_ENABLED
+    && HCN_ACTION_RECEIPT_STORE_PATH
+  );
+  return projectJobroloCarrierEnvelope({
+    ready: draftReady && ALLOW_GMAIL_SEND,
+    profile: connectors.profile,
+    effectMode: approvedEffects ? "approved_effects" : "read_only",
+    fileScope: "active_assigned_only",
+    recipientEvidence: "fresh_jobnimbus_adjuster_email_exactly_one",
+    subject: "fresh_jobnimbus_claim_number_exact",
+    attachment: "exactly_one_fresh_same_file_jobnimbus_document_ref",
+    draft: {
+      ready: draftReady,
+      actionType: "gmail.create_draft",
+      soleOperation: true,
+      providerReadbackRequired: true
+    },
+    send: {
+      ready: draftReady && ALLOW_GMAIL_SEND,
+      actionType: "gmail.send_existing_draft",
+      soleOperation: true,
+      separateApprovalRequired: true,
+      immutableProviderSnapshot: true,
+      sentReadbackRequired: true,
+      sourceDraftRetainedAndReread: true
+    },
+    automaticRetry: false,
+    providerIdentifiersExposed: false
+  });
+}
+
+async function jobroloHcnPrepareCarrierDraft(input = {}) {
+  const request = validateJobroloCarrierDraftPrepareInput(input);
+  const principal = assertJobroloCarrierFacadeSession({
+    requireEffects: true
+  });
+  const review = await hcnConsoleFreshReadService(principal).readFile({
+    fileRef: request.fileRef,
+    recentLimit: 20
+  });
+  if (
+    review?.sources?.jobnimbus?.status !== "fresh"
+    || review?.sources?.gmail?.status !== "fresh"
+  ) {
+    const error = new Error(
+      "Fresh JobNimbus, document, and Gmail evidence is required before preparing a carrier draft."
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+  const scope = await withHcnRestrictedEffects(() =>
+    resolveHcnActionScope({
+      fileRef: request.fileRef,
+      documentRefs: [request.documentRef]
+    })
+  );
+  const file = compactContact(scope.contact);
+  const claimNumber = String(file.claimNumber || "").trim();
+  const recipient = String(file.adjusterEmail || "").trim().toLowerCase();
+  if (
+    !claimNumber
+    || !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(recipient)
+  ) {
+    const error = new Error(
+      "The active assigned file must contain one verified adjuster email and a current claim number."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  const result = await hcnPrepareActionPlan({
+    fileRef: request.fileRef,
+    operations: [{
+      type: "gmail.create_draft",
+      input: {
+        insuranceClaimEmail: true,
+        to: recipient,
+        subject: claimNumber,
+        body: request.body,
+        attachments: [{
+          source: "jobnimbus",
+          documentRef: request.documentRef
+        }]
+      }
+    }]
+  });
+  assertJobroloCarrierPlan(result.plan, "gmail.create_draft");
+  return projectJobroloCarrierEnvelope({ stage: "draft", ...result });
+}
+
+async function jobroloHcnPrepareCarrierSend(input = {}) {
+  const request = validateJobroloCarrierSendPrepareInput(input);
+  assertJobroloCarrierFacadeSession({ requireEffects: true });
+  const result = await hcnPrepareActionPlan({
+    fileRef: request.fileRef,
+    operations: [{
+      type: "gmail.send_existing_draft",
+      input: { draftRef: request.draftRef }
+    }]
+  });
+  assertJobroloCarrierPlan(result.plan, "gmail.send_existing_draft");
+  return projectJobroloCarrierEnvelope({ stage: "send", ...result });
+}
+
+async function jobroloHcnExecuteCarrierPlan(input, expectedType, stage) {
+  const request = validateJobroloCarrierExecuteInput(input);
+  assertJobroloCarrierFacadeSession({ requireEffects: true });
+  const pending = HCN_PENDING_ACTION_PLANS.get({
+    sessionBinding: hcnActionSessionBinding(),
+    planId: request.planId
+  });
+  assertJobroloCarrierPlan(pending, expectedType);
+  const approved = validateJobroloActionExecuteInput({
+    planId: request.planId,
+    approval: request.approval
+  }, { plan: pending });
+  const result = await hcnExecuteActionPlan({ planId: approved.planId });
+  return projectJobroloCarrierEnvelope({ stage, ...result });
+}
+
+function jobroloHcnExecuteCarrierDraft(input = {}) {
+  return jobroloHcnExecuteCarrierPlan(
+    input,
+    "gmail.create_draft",
+    "draft"
+  );
+}
+
+function jobroloHcnExecuteCarrierSend(input = {}) {
+  return jobroloHcnExecuteCarrierPlan(
+    input,
+    "gmail.send_existing_draft",
+    "send"
+  );
+}
+
+async function jobroloHcnCarrierReceiptDetail(input = {}) {
+  const request = validateJobroloCarrierReceiptInput(input);
+  assertJobroloCarrierFacadeSession();
+  const result = hcnReadActionReceipt({ planId: request.planId });
+  if (result.receipt?.status === "executed") {
+    result.plan = await recoverJobroloCarrierExecutionPlan(
+      result.receipt
+    );
+  }
+  return projectJobroloCarrierEnvelope({ ...result });
+}
+
+async function recoverJobroloCarrierExecutionPlan(receipt) {
+  const principalRef = hcnActionReceiptPrincipalRef();
+  if (
+    receipt?.operationKind !== "hcn.action_batch"
+    || receipt?.status !== "executed"
+    || receipt?.operationCount !== 1
+    || receipt?.succeededCount !== 1
+    || receipt?.failedCount !== 0
+    || receipt?.blockedCount !== 0
+    || receipt?.unknownCount !== 0
+  ) {
+    throw hcnCarrierReceiptRecoveryUnavailable();
+  }
+
+  let batches;
+  try {
+    batches = await readActionBatchLedger();
+  } catch {
+    throw hcnCarrierReceiptRecoveryUnavailable();
+  }
+  const candidates = (Array.isArray(batches) ? batches : []).filter(
+    (batch) => (
+      String(batch?.principalRef || "") === principalRef
+      && String(batch?.approvalDigest || "") === receipt.digest
+      && String(batch?.hcnReceiptBatchRef || "") === receipt.batchRef
+      && batch?.operationCount === receipt.operationCount
+      && batch?.status === "completed"
+      && Array.isArray(batch?.completed)
+      && batch.completed.length === receipt.operationCount
+    )
+  );
+  if (candidates.length !== 1) {
+    throw hcnCarrierReceiptRecoveryUnavailable();
+  }
+
+  const [batch] = candidates;
+  const [completed] = batch.completed;
+  const providerJobId = String(completed?.receipt?.fileId || "").trim();
+  if (
+    completed?.index !== 0
+    || completed?.status !== "executed"
+    || ![
+      "gmail.create_draft",
+      "gmail.send_existing_draft"
+    ].includes(completed?.type)
+    || !providerJobId
+  ) {
+    throw hcnCarrierReceiptRecoveryUnavailable();
+  }
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  if (
+    references.subjectId("jobnimbus", providerJobId)
+      !== receipt.fileRef
+  ) {
+    throw hcnCarrierReceiptRecoveryUnavailable();
+  }
+  const operations = [{ type: completed.type }];
+  const publicCompletedActions = hcnPublicCompletedActions(
+    { batch },
+    operations,
+    { providerJobId }
+  );
+  if (publicCompletedActions.length !== 1) {
+    throw hcnCarrierReceiptRecoveryUnavailable();
+  }
+  return {
+    planId: receipt.planId,
+    fileRef: receipt.fileRef,
+    approvalDigest: receipt.digest,
+    status: "executed",
+    operationCount: 1,
+    operations,
+    createdAt: receipt.createdAt,
+    updatedAt: receipt.updatedAt,
+    result: hcnPendingExecutionResult(
+      {
+        status: "executed",
+        succeededCount: 1
+      },
+      publicCompletedActions
+    )
+  };
+}
+
+function hcnCarrierReceiptRecoveryUnavailable() {
+  const error = new Error(
+    "The exact carrier-email completion receipt could not be reconstructed. Do not retry the provider effect; reconcile from fresh evidence."
+  );
+  error.statusCode = 409;
+  return error;
+}
+
 async function jobroloHcnPrepareActionPlan(input = {}) {
+  assertJobroloGeneralApprovedEffects();
   if (jobroloNoteWritebackProfileActive()) {
     assertExactJobroloNoteWritebackOperations(input?.operations);
   }
@@ -9061,6 +9556,7 @@ async function hcnPrepareActionPlan(input = {}) {
           fileRef: prepareInput.fileRef,
           taskRefs: hcnTaskRefsFromPrepareInput(prepareInput),
           eventRefs: hcnEventRefsFromPrepareInput(prepareInput),
+          documentRefs: hcnDocumentRefsFromPrepareInput(prepareInput),
           draftRefs: hcnDraftRefsFromPrepareInput(prepareInput)
         });
         const privateEngineRequest =
@@ -9097,6 +9593,22 @@ async function hcnPrepareActionPlan(input = {}) {
                   scope.providerEventIds.get(eventRef);
                 if (!providerEventId) throw hcnActionScopeChanged();
                 return providerEventId;
+              },
+              resolveProviderDocumentId: ({
+                fileRef,
+                documentRef,
+                providerJobId
+              }) => {
+                if (
+                  fileRef !== scope.fileRef
+                  || providerJobId !== scope.providerJobId
+                ) {
+                  throw hcnActionScopeChanged();
+                }
+                const providerDocumentId =
+                  scope.providerDocumentIds.get(documentRef);
+                if (!providerDocumentId) throw hcnActionScopeChanged();
+                return providerDocumentId;
               },
               resolveProviderDraftId: ({
                 fileRef,
@@ -9233,6 +9745,7 @@ async function hcnExecuteActionPlan(input = {}) {
         fileRef: pending.fileRef,
         taskRefs: hcnTaskRefsFromPresentation(pending.operations),
         eventRefs: hcnEventRefsFromPresentation(pending.operations),
+        documentRefs: hcnDocumentRefsFromPresentation(pending.operations),
         draftRefs: hcnDraftRefsFromPresentation(pending.operations)
       });
       const execution = HCN_PENDING_ACTION_PLANS.beginExecution({
@@ -9301,7 +9814,8 @@ async function hcnExecuteActionPlan(input = {}) {
           operations: execution.operations,
           execute: true,
           approvalDigest: execution.approvalDigest,
-          approvalChallenge: execution.approvalChallenge
+          approvalChallenge: execution.approvalChallenge,
+          hcnReceiptBatchRef: executingReceipt.batchRef
         });
       } catch {
         return reconcileHcnExecution({
@@ -9333,6 +9847,20 @@ async function hcnExecuteActionPlan(input = {}) {
         execution.operations,
         scope
       );
+      if (
+        execution.operations.some((operation) =>
+          String(operation?.type || "").startsWith("gmail."))
+        && publicCompletedActions.length !== execution.operationCount
+      ) {
+        return reconcileHcnExecution({
+          receiptIndex,
+          executingReceipt,
+          execution,
+          sessionBinding,
+          sessionPrincipalRef,
+          succeededCount: outcome.succeededCount
+        });
+      }
 
       let receipt;
       try {
@@ -9398,6 +9926,7 @@ async function hcnExecuteActionPlan(input = {}) {
 }
 
 async function jobroloHcnExecuteActionPlan(input = {}) {
+  assertJobroloGeneralApprovedEffects();
   const planRequest = validateJobroloReceiptDetailInput({
     planId: input?.planId
   });
@@ -9435,6 +9964,7 @@ function hcnReadActionReceipt(input = {}) {
 }
 
 function jobroloHcnReadActionReceipt(input = {}) {
+  assertJobroloGeneralApprovedEffects();
   const request = validateJobroloReceiptDetailInput(input);
   return hcnReadActionReceipt(request);
 }
@@ -9502,12 +10032,7 @@ function hcnActionReceiptPrincipalRef() {
   if (noteWritebackProfile || claimFilingProfile) {
     digest
       .update("\0", "utf8")
-      .update(
-        noteWritebackProfile
-          ? HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId
-          : HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId,
-        "utf8"
-      );
+      .update(String(context?.jobroloClientId || ""), "utf8");
   }
   return `principal_${digest.digest("hex")}`;
 }
@@ -9700,6 +10225,7 @@ async function resolveHcnActionScope({
   fileRef,
   taskRefs = [],
   eventRefs = [],
+  documentRefs = [],
   draftRefs = []
 } = {}) {
   const principal = assertHcnActionSession();
@@ -9829,6 +10355,44 @@ async function resolveHcnActionScope({
     }
   }
 
+  const uniqueDocumentRefs = [...new Set(documentRefs)];
+  if (uniqueDocumentRefs.length !== documentRefs.length) {
+    throw new HcnBrowserActionContractError(
+      "duplicate_document_action",
+      400,
+      "A JobNimbus document may be attached only once in an exact HCN action plan."
+    );
+  }
+  const providerDocumentIds = new Map();
+  if (uniqueDocumentRefs.length) {
+    let documentPage;
+    try {
+      documentPage = await listHcnResourceComplete("/files", {
+        maxRecords: 500,
+        relatedContactId: providerJobId
+      });
+    } catch {
+      throw hcnActionScopeUnavailable();
+    }
+    if (!documentPage.complete) throw hcnActionScopeUnavailable();
+    for (const documentRef of uniqueDocumentRefs) {
+      const documentMatches = documentPage.rows.filter((document) => {
+        const id = String(document?.jnid || document?.id || "");
+        return Boolean(
+          id
+          && isOperationalDocumentMetadata(document)
+          && referencesContact(document, providerJobId)
+          && references.sourceRecordRef("jobnimbus", id) === documentRef
+        );
+      });
+      if (documentMatches.length !== 1) throw hcnActionScopeChanged();
+      providerDocumentIds.set(
+        documentRef,
+        String(documentMatches[0].jnid || documentMatches[0].id)
+      );
+    }
+  }
+
   const uniqueDraftRefs = [...new Set(draftRefs)];
   if (uniqueDraftRefs.length !== draftRefs.length) {
     throw new HcnBrowserActionContractError(
@@ -9863,6 +10427,8 @@ async function resolveHcnActionScope({
           completed?.type !== "gmail.create_draft"
           || completed?.status !== "executed"
           || String(completed?.receipt?.fileId || "") !== providerJobId
+          || completed?.receipt?.verifiedByReadback !== true
+          || completed?.receipt?.manualVerificationRequired === true
           || !providerDraftId
         ) {
           continue;
@@ -9911,6 +10477,8 @@ async function resolveHcnActionScope({
           .sort(([left], [right]) => left.localeCompare(right)),
         events: [...providerEventIds.entries()]
           .sort(([left], [right]) => left.localeCompare(right)),
+        documents: [...providerDocumentIds.entries()]
+          .sort(([left], [right]) => left.localeCompare(right)),
         drafts: [...providerDraftIds.entries()]
           .sort(([left], [right]) => left.localeCompare(right))
       }),
@@ -9920,8 +10488,10 @@ async function resolveHcnActionScope({
   return {
     fileRef,
     providerJobId,
+    contact,
     providerTaskIds,
     providerEventIds,
+    providerDocumentIds,
     providerDraftIds,
     fileDisplayLabel,
     fileScopeBinding
@@ -9932,6 +10502,18 @@ function hcnTaskRefsFromPrepareInput(input) {
   return input.operations
     .filter((operation) => operation.type === "jobnimbus.update_task")
     .map((operation) => operation.input.taskRef);
+}
+
+function hcnDocumentRefsFromPrepareInput(input) {
+  return input.operations.flatMap((operation) =>
+    operation.type === "gmail.create_draft"
+      ? (Array.isArray(operation.input.attachments)
+        ? operation.input.attachments.map(
+          (attachment) => attachment.documentRef
+        )
+        : [])
+      : []
+  );
 }
 
 function hcnTaskRefsFromPresentation(operations) {
@@ -9962,16 +10544,39 @@ function hcnEventRefsFromPresentation(operations) {
     .filter(Boolean);
 }
 
+function hcnDocumentRefsFromPresentation(operations) {
+  if (!Array.isArray(operations)) throw hcnActionScopeChanged();
+  return operations.flatMap((operation) =>
+    operation?.type === "gmail.create_draft"
+      ? (Array.isArray(operation?.material?.attachments)
+        ? operation.material.attachments.map(
+          (attachment) => String(attachment?.documentRef || "")
+        ).filter(Boolean)
+        : [])
+      : []
+  );
+}
+
 function hcnDraftRefsFromPrepareInput(input) {
   return input.operations
-    .filter((operation) => operation.type === "gmail.send")
+    .filter(
+      (operation) => (
+        operation.type === "gmail.send"
+        || operation.type === "gmail.send_existing_draft"
+      )
+    )
     .map((operation) => operation.input.draftRef);
 }
 
 function hcnDraftRefsFromPresentation(operations) {
   if (!Array.isArray(operations)) throw hcnActionScopeChanged();
   return operations
-    .filter((operation) => operation?.type === "gmail.send")
+    .filter(
+      (operation) => (
+        operation?.type === "gmail.send"
+        || operation?.type === "gmail.send_existing_draft"
+      )
+    )
     .map((operation) => String(operation?.material?.draftRef || ""))
     .filter(Boolean);
 }
@@ -10126,7 +10731,7 @@ function hcnValidatedCompletedBatchCount(batch, operationCount) {
       || Array.isArray(completed)
       || completed.index !== index
       || completed.status !== "executed"
-      || !HCN_BROWSER_ACTION_TYPES.includes(completed.type)
+      || !hcnActionTypeAllowed(completed.type)
     ) {
       return null;
     }
@@ -10333,7 +10938,9 @@ function hcnPublicCompletedActions(result, operations, scope) {
           item.receipt?.externalId || ""
         ).trim();
         if (
-          !providerDraftId
+          item.receipt?.verifiedByReadback !== true
+          || item.receipt?.manualVerificationRequired === true
+          || !providerDraftId
           || String(item.receipt?.fileId || "")
             !== String(scope.providerJobId)
         ) {
@@ -10344,16 +10951,30 @@ function hcnPublicCompletedActions(result, operations, scope) {
           providerDraftId
         );
       }
-      if (item.type === "gmail.send") {
+      if (item.type === "gmail.send_existing_draft") {
         const providerDraftId = String(
           item.receipt?.sourceDraftId || ""
         ).trim();
-        if (!providerDraftId) {
+        const providerMessageId = String(
+          item.receipt?.externalId || ""
+        ).trim();
+        if (
+          item.receipt?.verifiedByReadback !== true
+          || item.receipt?.manualVerificationRequired === true
+          || String(item.receipt?.fileId || "")
+            !== String(scope.providerJobId)
+          || !providerDraftId
+          || !providerMessageId
+        ) {
           throw new Error("HCN source draft receipt is missing");
         }
         receipt.sourceDraftRef = references.sourceRecordRef(
           "gmail",
           providerDraftId
+        );
+        receipt.sentMessageRef = references.sourceRecordRef(
+          "gmail",
+          providerMessageId
         );
         if (
           item.receipt?.sourceDraftRetention
@@ -10361,6 +10982,8 @@ function hcnPublicCompletedActions(result, operations, scope) {
         ) {
           receipt.sourceDraftRetention =
             "retained_for_separate_cleanup";
+        } else {
+          throw new Error("HCN source draft retention is unverified");
         }
       }
       if (item.type === "quo.send_text") {
@@ -12878,7 +13501,16 @@ async function retellInbound(input) {
     badRequest("Expected a Retell call_inbound webhook payload.");
   }
 
-  const candidates = await recentCallbackCandidates(inbound.from_number);
+  const callbackBinding = await resolveAuthorizedClaimCallbackBinding({
+    queueCallbackPhone: inbound.to_number
+  });
+  const candidates = await recentCallbackCandidates({
+    fromNumber: inbound.from_number,
+    ownerId: callbackBinding.ownerId,
+    queueCallbackPhone:
+      callbackBinding.configuration.callerProfile.queueCallbackPhone,
+    callerProfile: callbackBinding.configuration.callerProfile
+  });
   const { selected, match } = selectCallbackCandidate(candidates, inbound.from_number);
   const dynamicVariables = selected
     ? buildCallbackDynamicVariables(selected, match)
@@ -12887,8 +13519,17 @@ async function retellInbound(input) {
         insuredName: "Unknown",
         propertyAddress: "Unknown",
         policyNumberSpoken: "Unknown",
-        claimNumber: "Unknown"
+        claimNumber: "Unknown",
+        dynamicVariables: claimCallbackCallerVariables(
+          callbackBinding.configuration.callerProfile
+        )
       }, match);
+  Object.assign(
+    dynamicVariables,
+    claimCallbackCallerVariables(
+      callbackBinding.configuration.callerProfile
+    )
+  );
 
   if (String(dynamicVariables.goal || "") === "inspection_scheduling") {
     const availability = await collectUnifiedSchedulingAvailability();
@@ -12899,7 +13540,7 @@ async function retellInbound(input) {
     dynamicVariables.pendingCallbackCases = candidates.slice(0, 8).map(callbackCaseLabel).join(" | ");
   }
   const metadata = buildCallbackMetadata(selected, match);
-  if (!metadata.ownerId) metadata.ownerId = CHANCE_OWNER_ID;
+  metadata.ownerId = callbackBinding.ownerId;
 
   return {
     call_inbound: {
@@ -12910,7 +13551,12 @@ async function retellInbound(input) {
   };
 }
 
-async function recentCallbackCandidates(fromNumber) {
+async function recentCallbackCandidates({
+  fromNumber = "",
+  ownerId,
+  queueCallbackPhone,
+  callerProfile
+} = {}) {
   if (!RETELL_API_KEY) return [];
   const response = await retellApi("POST", "/v3/list-calls", {
     filter_criteria: {},
@@ -12928,14 +13574,19 @@ async function recentCallbackCandidates(fromNumber) {
     .filter(Boolean)
     .filter((candidate) => candidate.callbackRequested)
     .filter((candidate) => !continuedCallIds.has(candidate.callId))
-    .filter((candidate) => !candidate.createdAt || candidate.createdAt >= cutoff)
+    .filter((candidate) => !candidate.createdAt || candidate.createdAt >= cutoff);
+  const scopedCandidates = callbackCandidatesForProfile(candidates, {
+    ownerId,
+    queueCallbackPhone,
+    callerProfile
+  })
     .sort((a, b) => {
       const aExact = samePhone(a.carrierPhone, fromNumber) ? 1 : 0;
       const bExact = samePhone(b.carrierPhone, fromNumber) ? 1 : 0;
       return bExact - aExact || b.createdAt - a.createdAt;
     });
   const seenContacts = new Set();
-  return candidates.filter((candidate) => {
+  return scopedCandidates.filter((candidate) => {
     if (seenContacts.has(candidate.contactId)) return false;
     seenContacts.add(candidate.contactId);
     return true;
@@ -12950,7 +13601,19 @@ function callbackCaseLabel(candidate) {
 }
 
 async function pendingClaimCallbacks() {
-  const candidates = await recentCallbackCandidates("");
+  const callbackBinding = await resolveAuthorizedClaimCallbackBinding({
+    principalEmail: currentRequestIdentity()?.email,
+    ownerId: currentRequestIdentity()?.jobNimbusOwnerId,
+    clientId: jobroloClaimFilingProfileActive()
+      ? currentRequestAuthentication()?.jobroloClientId
+      : ""
+  });
+  const candidates = await recentCallbackCandidates({
+    ownerId: callbackBinding.ownerId,
+    queueCallbackPhone:
+      callbackBinding.configuration.callerProfile.queueCallbackPhone,
+    callerProfile: callbackBinding.configuration.callerProfile
+  });
   return {
     mode: "read_only",
     callbackTtlHours: RETELL_CALLBACK_TTL_HOURS,
@@ -12969,6 +13632,110 @@ async function pendingClaimCallbacks() {
       requestedAt: candidate.createdAt ? new Date(candidate.createdAt).toISOString() : ""
     }))
   };
+}
+
+async function resolveAuthorizedClaimCallbackBinding({
+  queueCallbackPhone = "",
+  principalEmail = "",
+  ownerId = "",
+  clientId = ""
+} = {}) {
+  const callbackPhone = normalizePhone(queueCallbackPhone);
+  const normalizedEmail = String(principalEmail || "").trim().toLowerCase();
+  const normalizedOwnerId = String(ownerId || "").trim();
+  const normalizedClientId = String(clientId || "").trim();
+  const profiles = HCN_JOBROLO_CLAIM_FILING_REGISTRY.ready
+    && Array.isArray(HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles)
+    ? HCN_JOBROLO_CLAIM_FILING_REGISTRY.profiles
+    : [];
+  const matches = profiles.filter((configuration) => {
+    if (
+      callbackPhone
+      && (
+        !/^\+1\d{10}$/.test(callbackPhone)
+        || normalizePhone(configuration.callerProfile?.queueCallbackPhone)
+          !== callbackPhone
+      )
+    ) return false;
+    if (
+      normalizedEmail
+      && configuration.principalEmail !== normalizedEmail
+    ) return false;
+    if (
+      normalizedClientId
+      && configuration.clientId !== normalizedClientId
+    ) return false;
+    return Boolean(callbackPhone || normalizedEmail || normalizedClientId);
+  });
+  if (matches.length !== 1) throw claimCallbackAuthorizationError();
+  const configuration = matches[0];
+  const email = configuration.principalEmail;
+  let approvedUser = WAVE_AUTH_USERS.get(email);
+  if (
+    approvedUser?.invitationManaged === true
+    && !await hcnInvitationAuthorizationMatchesUser(approvedUser)
+  ) {
+    WAVE_AUTH_USERS.delete(email);
+    approvedUser = null;
+  }
+  let principal = null;
+  try {
+    principal = approvedUser && approvedUser.enabled !== false
+      ? hcnPrincipalForWaveUser(approvedUser)
+      : null;
+  } catch {
+    principal = null;
+  }
+  const activeJobNimbusUser = principal
+    ? await findActiveJobNimbusUser(email, { fresh: true })
+    : null;
+  if (
+    !principal
+    || !principal.googleSubject
+    || principal.jobNimbusScope !== "assigned"
+    || !activeJobNimbusUser
+    || String(activeJobNimbusUser.id || "").trim()
+      !== String(principal.jobNimbusOwnerId || "").trim()
+    || configuration.callerProfile?.publicAdjusterName
+      !== principal.displayName
+    || (
+      normalizedOwnerId
+      && normalizedOwnerId !== String(principal.jobNimbusOwnerId || "").trim()
+    )
+  ) {
+    throw claimCallbackAuthorizationError();
+  }
+  return Object.freeze({
+    configuration,
+    ownerId: String(principal.jobNimbusOwnerId)
+  });
+}
+
+function claimCallbackCallerVariables(callerProfile) {
+  const queueCallbackPhone = String(
+    callerProfile?.queueCallbackPhone || ""
+  );
+  return {
+    publicAdjusterName: String(callerProfile?.publicAdjusterName || ""),
+    licenseJurisdiction: String(callerProfile?.licenseJurisdiction || ""),
+    licenseNumber: String(callerProfile?.licenseNumber || ""),
+    firmName: String(callerProfile?.firmName || ""),
+    officeAddress: String(callerProfile?.officeAddress || ""),
+    officePhone: String(callerProfile?.officePhone || ""),
+    publicAdjusterEmail: String(callerProfile?.email || ""),
+    queueCallbackPhone,
+    queueCallbackDigits: queueCallbackPhone
+      .replace(/\D/g, "")
+      .replace(/^1(?=\d{10}$)/, "")
+      .split("")
+      .join(" ")
+  };
+}
+
+function claimCallbackAuthorizationError() {
+  const error = new Error("The inbound claim callback profile is unavailable.");
+  error.statusCode = 403;
+  return error;
 }
 
 function samePhone(a, b) {
@@ -14228,17 +14995,111 @@ function contentContainsExactIdentifier(content, identifier) {
   ));
 }
 
+function gmailDraftReconciliationShape(value = {}) {
+  return {
+    to: String(value.to || "").trim(),
+    cc: String(value.cc || "").trim(),
+    bcc: String(value.bcc || "").trim(),
+    subject: String(value.subject || "").trim(),
+    body: normalizeEmailBody(value.body || ""),
+    attachments: (Array.isArray(value.attachments)
+      ? value.attachments
+      : []).map((attachment) => ({
+        filename: String(attachment?.filename || ""),
+        bytes: Number(attachment?.bytes || 0),
+        sha256: String(attachment?.sha256 || "").toLowerCase()
+      }))
+  };
+}
+
+function gmailDraftReconciliationDigest(value = {}) {
+  return digest({ version: 1, draft: gmailDraftReconciliationShape(value) });
+}
+
+function gmailImmutableSendDigest(value = {}) {
+  const deliveryHeaders = value.deliveryHeaders || {};
+  const body = normalizeEmailBody(value.body || "");
+  const bodyRepresentations = Array.isArray(value.bodyRepresentations)
+    ? value.bodyRepresentations.map((representation) => ({
+        mimeType: String(representation?.mimeType || "").toLowerCase(),
+        bytes: Number(representation?.bytes || 0),
+        sha256: String(representation?.sha256 || "").toLowerCase(),
+        content: normalizeEmailBody(representation?.content || "")
+      }))
+    : [{
+        mimeType: "text/plain",
+        bytes: Buffer.byteLength(body, "utf8"),
+        sha256: createHash("sha256").update(body, "utf8").digest("hex"),
+        content: body
+      }];
+  return digest({
+    version: 1,
+    message: {
+      from: String(deliveryHeaders.from || "").trim(),
+      sender: String(deliveryHeaders.sender || "").trim(),
+      replyTo: String(deliveryHeaders.replyTo || "").trim(),
+      ...gmailDraftReconciliationShape(value),
+      bodyRepresentations,
+      attachments: (Array.isArray(value.attachments)
+        ? value.attachments
+        : []).map((attachment) => ({
+          filename: String(attachment?.filename || ""),
+          mimeType: String(
+            attachment?.mimeType || attachment?.contentType || ""
+          ).toLowerCase(),
+          bytes: Number(attachment?.bytes || 0),
+          sha256: String(attachment?.sha256 || "").toLowerCase()
+        }))
+    }
+  });
+}
+
 async function gmailDraft(input) {
   const operatorFile = await operatorGmailActionFile(input, "Gmail draft");
   const to = validateEmailAddressList(required(input.to, "to"), "to", { required: true });
   const subject = validateEmailHeaderValue(required(input.subject, "subject"), "subject");
   const cc = validateEmailAddressList(input.cc, "cc");
   const bcc = validateEmailAddressList(input.bcc, "bcc");
+  const hcnRestrictedDraft = Boolean(
+    operatorFile && isHcnRestrictedEffectRequest()
+  );
+  const hcnCarrierDraft = Boolean(
+    hcnRestrictedDraft && input.insuranceClaimEmail === true
+  );
+  if (hcnCarrierDraft) {
+    const claimNumber = String(operatorFile.claimNumber || "").trim();
+    const adjusterEmail = String(operatorFile.adjusterEmail || "")
+      .trim()
+      .toLowerCase();
+    if (input.insuranceClaimEmail !== true) {
+      badRequest("HCN carrier Gmail drafts must declare insuranceClaimEmail:true.");
+    }
+    if (!claimNumber || subject !== claimNumber) {
+      badRequest("Carrier Gmail draft subject must exactly equal the fresh JobNimbus claim number.");
+    }
+    if (
+      !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(adjusterEmail)
+      || to.toLowerCase() !== adjusterEmail
+      || cc
+      || bcc
+    ) {
+      badRequest("Carrier Gmail draft recipient must be the one fresh JobNimbus adjuster email, with no additional recipients.");
+    }
+  }
   const threadId = String(input.threadId || "").trim();
   const attachments = await loadEmailAttachments(operatorFile
     ? { ...input, [INTERNAL_GMAIL_ACTION_SCOPE]: { file: operatorFile } }
     : input);
   const resolvedMessage = await resolveGmailMessageBody(input, attachments);
+  if (
+    hcnCarrierDraft
+    && (
+      attachments.length !== 1
+      || attachments[0]?.source !== "jobnimbus"
+    )
+  ) {
+    badRequest("A carrier Gmail draft must contain exactly one freshly resolved JobNimbus document attachment.");
+  }
   const body = resolvedMessage.body;
   const reusable = operatorFile ? null : await reusableGmailDraft(input, subject);
   if (reusable) {
@@ -14263,11 +15124,7 @@ async function gmailDraft(input) {
   const plan = {
     endpoint: "/gmail/v1/users/me/drafts",
     ...(operatorFile ? {
-      fileScope: {
-        id: operatorFile.id,
-        number: operatorFile.number,
-        name: operatorFile.name
-      }
+      fileScope: gmailActionFileScope(operatorFile)
     } : {}),
     to,
     cc,
@@ -14289,22 +15146,53 @@ async function gmailDraft(input) {
   }
   requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail draft");
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to create Gmail drafts.");
-  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, { to, subject });
+  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, {
+    to,
+    subject,
+    ...(hcnCarrierDraft ? {
+      sourceKey: `claim-draft:${operatorFile.id}:${subject}`
+    } : {})
+  });
   let result;
+  let verifiedByReadback = false;
   try {
     result = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/drafts`, {
       method: "POST",
       body: draftBody
     });
-    await completeOutboundSend(reservation.id, "completed", result.id || result.message?.id || "");
+    const externalId = String(
+      result.id || result.message?.id || ""
+    ).trim();
+    if (hcnRestrictedDraft) {
+      if (!externalId) {
+        conflictError("Gmail did not return a draft id, so provider readback cannot be verified.");
+      }
+      await completeOutboundSend(reservation.id, "readback_pending", externalId);
+      const snapshot = await gmailDraftSnapshot(externalId);
+      if (
+        gmailDraftReconciliationDigest(snapshot)
+          !== gmailDraftReconciliationDigest(plan)
+        || (threadId && String(snapshot.threadId || "") !== threadId)
+      ) {
+        conflictError("The Gmail provider readback does not match the approved carrier draft. Never retry this operation; reconcile the exact file and provider receipt.");
+      }
+      verifiedByReadback = true;
+    }
+    await completeOutboundSend(reservation.id, "completed", externalId);
   } catch (error) {
-    await completeOutboundSend(reservation.id, "failed_requires_review", "", error.message);
+    await completeOutboundSend(
+      reservation.id,
+      "failed_requires_review",
+      result?.id || result?.message?.id || "",
+      error.message
+    );
     throw error;
   }
   const file = operatorFile || await optionalChanceFile(input.query || input.fileQuery);
   const memoryCloseout = closeoutGmailAction(input, file, "create_draft", result.id || result.message?.id, `Created approved Gmail draft with subject ${subject} and ${attachments.length} verified attachment(s).`, "drafted");
   return {
     mode: "executed",
+    ...(verifiedByReadback ? { verifiedByReadback: true } : {}),
     ...(file ? { file } : {}),
     ...(operatorFile ? {
       fileScope: {
@@ -14319,10 +15207,14 @@ async function gmailDraft(input) {
   };
 }
 
-async function gmailSend(input) {
+async function gmailSend(input, options = {}) {
   const draftId = String(input.draftId || "").trim();
   const operatorFile = await operatorGmailActionFile(input, "Gmail send");
-  if (draftId) return gmailSendExistingDraft(input, draftId, operatorFile);
+  if (draftId) {
+    return gmailSendExistingDraft(input, draftId, operatorFile, {
+      operatorExistingDraftLane: options.operatorExistingDraftLane === true
+    });
+  }
   if (operatorFile) {
     badRequest("The Codex operator may send only a bridge-created Gmail draft that was reviewed by exact draftId.");
   }
@@ -14434,21 +15326,52 @@ async function resolveGmailMessageBody(input, attachments) {
   return { body: required(input.body, "body"), template: "custom" };
 }
 
-async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
+async function gmailSendExistingDraft(
+  input,
+  draftId,
+  operatorFile = null,
+  options = {}
+) {
+  const reviewedCarrierLane = Boolean(
+    options.operatorExistingDraftLane === true
+    && operatorFile
+    && isHcnRestrictedEffectRequest()
+  );
+  if (
+    options.operatorExistingDraftLane === true
+    && isHcnRestrictedEffectRequest()
+    && !reviewedCarrierLane
+  ) {
+    operatorScopeError("The existing-draft carrier send lane requires an assigned HCN action session.");
+  }
   if (operatorFile) await assertOperatorDraftProvenance(operatorFile, draftId);
   const sourceKey = `gmail-draft:${String(draftId)}`;
   await assertOutboundSourceAvailable("gmail", sourceKey);
   const snapshot = await gmailDraftSnapshot(draftId);
+  if (reviewedCarrierLane) {
+    const claimNumber = String(operatorFile.claimNumber || "").trim();
+    const adjusterEmail = String(operatorFile.adjusterEmail || "")
+      .trim()
+      .toLowerCase();
+    if (
+      !claimNumber
+      || snapshot.subject !== claimNumber
+      || !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(adjusterEmail)
+      || String(snapshot.to || "").trim().toLowerCase() !== adjusterEmail
+      || snapshot.cc
+      || snapshot.bcc
+      || !Array.isArray(snapshot.attachments)
+      || snapshot.attachments.length !== 1
+    ) {
+      conflictError("The reviewed Gmail draft no longer matches the fresh claim number, adjuster recipient, and one-attachment carrier-email contract. Nothing was sent.");
+    }
+  }
   const plan = {
     endpoint: "/gmail/v1/users/me/messages/send",
     action: "send_existing_draft",
     deliveryMode: "immutable_reviewed_snapshot_source_draft_retained",
     ...(operatorFile ? {
-      fileScope: {
-        id: operatorFile.id,
-        number: operatorFile.number,
-        name: operatorFile.name
-      }
+      fileScope: gmailActionFileScope(operatorFile)
     } : {}),
     draftId: snapshot.id,
     messageId: snapshot.messageId,
@@ -14472,7 +15395,7 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
       mode: "dry_run",
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After the signed-in user approves this exact existing draft, repeat gmail.send unchanged with execute:true, this draftId, and this approvalDigest. The bridge sends only the immutable reviewed snapshot and retains the source draft; deleting it is a separate approval-gated action."
+      instruction: "Nothing was sent. A separate human approval is required for this exact immutable existing-draft snapshot. The source draft remains for separately approved cleanup."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Gmail messages.");
@@ -14484,6 +15407,7 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
     sourceKey
   });
   let result;
+  let sentSnapshot;
   try {
     const raw = buildRawEmail({
       from: snapshot.deliveryHeaders.from || "",
@@ -14500,9 +15424,35 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
       method: "POST",
       body: cleanObject({ raw, threadId: snapshot.threadId })
     });
-    await completeOutboundSend(reservation.id, "completed", result.id || "");
+    const externalId = String(result.id || "").trim();
+    if (reviewedCarrierLane) {
+      await completeOutboundSend(reservation.id, "readback_pending", externalId);
+      sentSnapshot = await gmailSentMessageSnapshot(externalId);
+      const labels = new Set(sentSnapshot.labelIds);
+      if (
+        !labels.has("SENT")
+        || labels.has("DRAFT")
+        || labels.has("TRASH")
+        || labels.has("SPAM")
+        || gmailImmutableSendDigest(sentSnapshot)
+          !== gmailImmutableSendDigest(snapshot)
+        || (snapshot.threadId && sentSnapshot.threadId !== snapshot.threadId)
+      ) {
+        conflictError("The Gmail Sent-message readback does not match the approved immutable draft. Never retry this send; reconcile the exact file and provider receipt.");
+      }
+      const retainedSnapshot = await gmailDraftSnapshot(draftId);
+      if (retainedSnapshot.contentDigest !== snapshot.contentDigest) {
+        conflictError("The source Gmail draft was not retained unchanged after delivery. Never retry this send; reconcile the exact file and provider receipt.");
+      }
+    }
+    await completeOutboundSend(reservation.id, "completed", externalId);
   } catch (error) {
-    await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
+    await completeOutboundSend(
+      reservation.id,
+      "failed_requires_review",
+      result?.id || "",
+      redactSensitiveText(error.message)
+    );
     throw error;
   }
   const sourceDraftRetention = {
@@ -14520,8 +15470,9 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null) {
   );
   return {
     mode: "executed",
+    ...(reviewedCarrierLane ? { verifiedByReadback: true } : {}),
     ...(file ? { file } : {}),
-    message: compactGmailMessage(result),
+    message: sentSnapshot?.message || compactGmailMessage(result),
     sourceDraftId: draftId,
     attachments: snapshot.attachments,
     sourceDraftRetention,
@@ -14536,20 +15487,65 @@ async function reusableGmailDraft() {
   return null;
 }
 
+function gmailActionFileScope(file) {
+  return {
+    id: String(file?.id || ""),
+    number: isHcnRestrictedEffectRequest()
+      ? String(file?.number || "")
+      : file?.number || "",
+    name: String(file?.name || "")
+  };
+}
+
 async function assertOperatorDraftProvenance(file, draftId) {
   const batches = await readActionBatchLedger();
-  const receipt = batches
-    .flatMap((batch) => Array.isArray(batch.completed) ? batch.completed : [])
-    .find((row) => (
-      row.type === "gmail.create_draft"
-      && row.status === "executed"
-      && String(row.receipt?.fileId || "") === String(file.id)
-      && String(row.receipt?.externalId || "") === String(draftId)
-    ));
-  if (!receipt) {
+  if (!isHcnRestrictedEffectRequest()) {
+    const receipt = batches
+      .flatMap((batch) => (
+        Array.isArray(batch?.completed) ? batch.completed : []
+      ))
+      .find((row) => (
+        row?.type === "gmail.create_draft"
+        && row?.status === "executed"
+        && String(row?.receipt?.fileId || "") === String(file.id)
+        && String(row?.receipt?.externalId || "") === String(draftId)
+      ));
+    if (!receipt) {
+      operatorScopeError(`This restricted action may send only a Gmail draft created by this bridge for the resolved ${operatorFileDescription()}.`);
+    }
+    return receipt;
+  }
+  const principalRef = hcnActionReceiptPrincipalRef();
+  const receipts = batches.flatMap((batch) => {
+    const completed = Array.isArray(batch?.completed)
+      ? batch.completed
+      : [];
+    if (
+      String(batch?.principalRef || "") !== principalRef
+      || batch?.status !== "completed"
+      || batch?.operationCount !== 1
+      || completed.length !== 1
+    ) {
+      return [];
+    }
+    const [row] = completed;
+    if (
+      row?.index !== 0
+      || row?.type !== "gmail.create_draft"
+      || row?.status !== "executed"
+      || String(row?.receipt?.fileId || "") !== String(file.id)
+      || String(row?.receipt?.externalId || "") !== String(draftId)
+      || row?.receipt?.verifiedByReadback !== true
+      || row?.receipt?.manualVerificationRequired === true
+    ) {
+      return [];
+    }
+    return [row];
+  });
+  if (receipts.length !== 1) {
     operatorScopeError(`This restricted action may send only a Gmail draft created by this bridge for the resolved ${operatorFileDescription()}.`);
   }
-  return receipt;
+  return receipts[0];
 }
 
 async function gmailDraftSnapshot(draftId) {
@@ -14585,8 +15581,7 @@ async function gmailDraftSnapshot(draftId) {
       threadId: message.threadId,
       deliveryHeaders,
       bodyRepresentations: mime.bodyRepresentations,
-      attachments: mime.attachments,
-      payload: draft.message?.payload || null
+      attachments: mime.attachments
     })
   };
   Object.defineProperty(snapshot, GMAIL_DRAFT_MIME_BYTES, {
@@ -14594,6 +15589,46 @@ async function gmailDraftSnapshot(draftId) {
     enumerable: false
   });
   return snapshot;
+}
+
+async function gmailSentMessageSnapshot(messageId) {
+  const id = String(messageId || "").trim();
+  if (!id) {
+    conflictError("Gmail did not return a sent message id, so delivery cannot be verified.");
+  }
+  const rawMessage = await gmailApi(
+    `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(id)}?format=full`
+  );
+  const message = compactGmailMessage(rawMessage);
+  const headers = gmailDeliveryHeaders(rawMessage);
+  const mime = await gmailDraftMimeSnapshot(rawMessage);
+  return {
+    id: message.id,
+    messageId: message.id,
+    message,
+    threadId: message.threadId,
+    labelIds: [...new Set(
+      (Array.isArray(rawMessage?.labelIds) ? rawMessage.labelIds : [])
+        .map((label) => String(label || "").trim().toUpperCase())
+        .filter(Boolean)
+    )],
+    to: headers.to || "",
+    cc: headers.cc || "",
+    bcc: headers.bcc || "",
+    subject: headers.subject || "",
+    deliveryHeaders: cleanObject({
+      from: headers.from,
+      sender: headers.sender,
+      replyTo: headers["reply-to"],
+      to: headers.to,
+      cc: headers.cc,
+      bcc: headers.bcc,
+      subject: headers.subject
+    }),
+    body: mime.primaryBody,
+    bodyRepresentations: mime.bodyRepresentations,
+    attachments: mime.attachments
+  };
 }
 
 async function gmailDraftMimeSnapshot(message) {
@@ -15682,15 +16717,28 @@ async function processActionBatch(input = {}) {
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true before executing an approved batch.");
   requireApprovalDigest(input.approvalDigest, approvalDigest, "action batch");
   const approval = await consumeActionApprovalChallenge(input.approvalChallenge, approvalDigest);
+  const restrictedPrincipalRef = isHcnRestrictedEffectRequest()
+    ? hcnActionReceiptPrincipalRef()
+    : "";
+  const hcnReceiptBatchRef = restrictedPrincipalRef
+    ? String(input.hcnReceiptBatchRef || "")
+    : "";
+  if (
+    restrictedPrincipalRef
+    && !/^batch_[a-f0-9]{32}$/.test(hcnReceiptBatchRef)
+  ) {
+    badRequest(
+      "The durable HCN action receipt binding is unavailable. Nothing was executed."
+    );
+  }
 
   const reservation = await reserveActionBatch(
     approval.id,
     approvalDigest,
     operations.length,
     {
-      principalRef: isHcnRestrictedEffectRequest()
-        ? hcnActionReceiptPrincipalRef()
-        : ""
+      principalRef: restrictedPrincipalRef,
+      hcnReceiptBatchRef
     }
   );
   if (reservation.existing) {
@@ -18560,7 +19608,8 @@ function walkGmailParts(part, visitor) {
 async function loadEmailAttachments(input = {}) {
   const specs = Array.isArray(input.attachments) ? input.attachments : [];
   if (specs.length > 8) badRequest("A Gmail message may include at most 8 attachments through this bridge.");
-  const isOperator = currentRequestIdentity()?.type === "codex_operator_token";
+  const isOperator = currentRequestIdentity()?.type === "codex_operator_token"
+    || isHcnRestrictedEffectRequest();
   const operatorFile = input?.[INTERNAL_GMAIL_ACTION_SCOPE]?.file || null;
   if (isOperator && !operatorFile?.id) {
     operatorScopeError("The Codex operator requires an internally verified top-level file before loading Gmail attachments.");
@@ -18588,7 +19637,9 @@ async function loadEmailAttachments(input = {}) {
         source,
         sourceId: document.jnid || document.id || "",
         sourceFileId: sourceFile.id,
-        sourceFileNumber: sourceFile.number,
+        sourceFileNumber: isHcnRestrictedEffectRequest()
+          ? String(sourceFile.number || "")
+          : sourceFile.number,
         sourceFileName: sourceFile.name
       }));
       continue;
@@ -19560,7 +20611,7 @@ function normalizeActionOperations(value) {
     }
     if (
       isHcnRestrictedEffectRequest()
-      && !HCN_BROWSER_ACTION_TYPES.includes(type)
+      && !hcnActionTypeAllowed(type)
     ) {
       badRequest(`Unsupported HCN action type: ${type}`);
     }
@@ -19580,8 +20631,14 @@ const ACTION_OPERATION_TYPES = new Set([
   "jobnimbus.update_calendar_event",
   "gmail.create_draft",
   "gmail.send",
+  "gmail.send_existing_draft",
   "quo.send_text"
 ]);
+
+function hcnActionTypeAllowed(type) {
+  return HCN_BROWSER_ACTION_TYPES.includes(type)
+    || type === "gmail.send_existing_draft";
+}
 
 async function prepareActionOperation(operation) {
   const input = { ...operation.payload, execute: false };
@@ -19597,6 +20654,7 @@ async function prepareActionOperation(operation) {
     case "jobnimbus.update_calendar_event": plan = await updateCalendarEvent(input); break;
     case "gmail.create_draft": plan = await gmailDraft(input); break;
     case "gmail.send": plan = await gmailSend(input); break;
+    case "gmail.send_existing_draft": plan = await gmailSend(input, { operatorExistingDraftLane: true }); break;
     case "quo.send_text": plan = await quoSend(input); break;
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
@@ -19616,6 +20674,7 @@ async function executeActionOperation(operation, prepared) {
     case "jobnimbus.update_calendar_event": return updateCalendarEvent(input);
     case "gmail.create_draft": return gmailDraft({ ...input, approvalDigest: prepared.plan.approvalDigest });
     case "gmail.send": return gmailSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
+    case "gmail.send_existing_draft": return gmailSend({ ...input, approvalDigest: prepared.plan.approvalDigest }, { operatorExistingDraftLane: true });
     case "quo.send_text": return quoSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
@@ -19758,7 +20817,7 @@ async function reserveActionBatch(
   approvalId,
   approvalDigest,
   operationCount,
-  { principalRef = "" } = {}
+  { principalRef = "", hcnReceiptBatchRef = "" } = {}
 ) {
   return withActionBatchMutation(async () => {
     const ledger = await readActionBatchLedger();
@@ -19779,7 +20838,8 @@ async function reserveActionBatch(
       createdAt: new Date().toISOString(),
       operationCount,
       completed: [],
-      ...(principalRef ? { principalRef } : {})
+      ...(principalRef ? { principalRef } : {}),
+      ...(hcnReceiptBatchRef ? { hcnReceiptBatchRef } : {})
     };
     ledger.push(batch);
     await writeActionBatchLedger(ledger);
@@ -20067,6 +21127,17 @@ async function handleJobroloImportHttpRequest(req, res, url) {
     body,
     rawBody
   });
+  const transportProfile = resolveJobroloImportTransportProfile(
+    HCN_JOBROLO_IMPORT_CONFIGURATION,
+    verified.clientId
+  );
+  if (
+    !transportProfile
+    || transportProfile.principalEmail !== verified.principalEmail
+    || transportProfile.connectionRef !== verified.connectionRef
+  ) {
+    jobroloImportAuthorizationFailure();
+  }
   const providerReadBudget = {
     maximum: routeBounds.maximumProviderRequests,
     used: 0,
@@ -20074,19 +21145,21 @@ async function handleJobroloImportHttpRequest(req, res, url) {
   };
   const principal = await authenticateJobroloImportPrincipal(
     verified,
-    providerReadBudget
+    providerReadBudget,
+    transportProfile
   );
   if (url.pathname === HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE) {
     return handleJobroloImportDocumentContent({
       res,
       verified,
       principal,
+      transportProfile,
       providerReadBudget,
       requestedAt: new Date(startedAt).toISOString()
     });
   }
   const readService = createJobroloImportReadService({
-    connectionRef: HCN_JOBROLO_IMPORT_CONFIGURATION.connectionRef,
+    connectionRef: verified.connectionRef,
     referenceFactory: HCN_REFERENCE_CONFIGURATION.requireFactory(),
     loadAssignedIndex: ({ requestedAt }) =>
       loadJobroloImportAssignedIndex({
@@ -20112,7 +21185,7 @@ async function handleJobroloImportHttpRequest(req, res, url) {
       });
   assertJobroloImportRouteDeadline(providerReadBudget);
   const signed = createJobroloImportTransportResponse({
-    configuration: HCN_JOBROLO_IMPORT_CONFIGURATION,
+    configuration: transportProfile,
     verifiedRequest: verified,
     pathname: url.pathname,
     kind,
@@ -20131,6 +21204,7 @@ async function handleJobroloImportDocumentContent({
   res,
   verified,
   principal,
+  transportProfile,
   providerReadBudget,
   requestedAt
 }) {
@@ -20171,7 +21245,7 @@ async function handleJobroloImportDocumentContent({
   assertJobroloImportRouteDeadline(providerReadBudget);
   const responseTimestamp = new Date().toISOString();
   const headers = createJobroloImportDocumentResponseHeaders({
-    configuration: HCN_JOBROLO_IMPORT_CONFIGURATION,
+    configuration: transportProfile,
     verifiedRequest: verified,
     responseTimestamp,
     contentLength: downloaded.contentLength,
@@ -20369,14 +21443,19 @@ function sendJobroloImportJson(
   res.end(bytes);
 }
 
-async function authenticateJobroloImportPrincipal(verified, requestBudget) {
-  const email = HCN_JOBROLO_IMPORT_CONFIGURATION.principalEmail;
+async function authenticateJobroloImportPrincipal(
+  verified,
+  requestBudget,
+  transportProfile
+) {
+  const email = transportProfile?.principalEmail;
   if (
     !verified
-    || verified.clientId !== HCN_JOBROLO_IMPORT_CONFIGURATION.clientId
+    || !transportProfile
+    || verified.clientId !== transportProfile.clientId
     || verified.principalEmail !== email
     || verified.connectionRef
-      !== HCN_JOBROLO_IMPORT_CONFIGURATION.connectionRef
+      !== transportProfile.connectionRef
   ) {
     jobroloImportAuthorizationFailure();
   }
@@ -20756,32 +21835,59 @@ function assertJobroloImportRouteDeadline(budget) {
 
 function selectJobroloHcnCapability(headers) {
   const authorization = headers?.authorization;
-  if (
-    HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.ready
-    && typeof authorization === "string"
-    && authorization
-      === `Jobrolo-HMAC ${HCN_JOBROLO_CLAIM_FILING_CONFIGURATION.clientId}`
-  ) {
+  const clientId = typeof authorization === "string"
+    ? /^Jobrolo-HMAC ([A-Za-z0-9._-]{3,64})$/.exec(authorization)?.[1]
+    : "";
+  const claimConfiguration = resolveJobroloHcnClaimFilingProfile(
+    HCN_JOBROLO_CLAIM_FILING_REGISTRY,
+    clientId
+  );
+  const claimAuthenticator = claimConfiguration
+    ? HCN_JOBROLO_CLAIM_FILING_AUTHENTICATORS.get(
+        claimConfiguration.clientId
+      )
+    : null;
+  if (claimConfiguration && claimAuthenticator) {
     return Object.freeze({
-      authenticator: HCN_JOBROLO_CLAIM_FILING_AUTHENTICATOR,
-      configuration: HCN_JOBROLO_CLAIM_FILING_CONFIGURATION,
+      authenticator: claimAuthenticator,
+      configuration: claimConfiguration,
       capabilityProfile: HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE
     });
   }
-  if (
-    HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.ready
-    && typeof authorization === "string"
-    && authorization
-      === `Jobrolo-HMAC ${HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION.clientId}`
-  ) {
+  const noteConfiguration = resolveJobroloHcnNoteWritebackProfile(
+    HCN_JOBROLO_NOTE_WRITEBACK_REGISTRY,
+    clientId
+  );
+  const noteAuthenticator = noteConfiguration
+    ? HCN_JOBROLO_NOTE_WRITEBACK_AUTHENTICATORS.get(
+        noteConfiguration.clientId
+      )
+    : null;
+  if (noteConfiguration && noteAuthenticator) {
     return Object.freeze({
-      authenticator: HCN_JOBROLO_NOTE_WRITEBACK_AUTHENTICATOR,
-      configuration: HCN_JOBROLO_NOTE_WRITEBACK_CONFIGURATION,
+      authenticator: noteAuthenticator,
+      configuration: noteConfiguration,
       capabilityProfile: HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE
     });
   }
+  const generalConfiguration = resolveJobroloHcnIntegrationProfile(
+    HCN_JOBROLO_REGISTRY,
+    clientId
+  );
+  const generalAuthenticator = generalConfiguration
+    ? HCN_JOBROLO_AUTHENTICATORS.get(generalConfiguration.clientId)
+    : null;
+  if (generalConfiguration && generalAuthenticator) {
+    return Object.freeze({
+      authenticator: generalAuthenticator,
+      configuration: generalConfiguration,
+      capabilityProfile: HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    });
+  }
   return Object.freeze({
-    authenticator: HCN_JOBROLO_AUTHENTICATOR,
+    authenticator: createJobroloHcnAuthenticator({
+      configuration: HCN_JOBROLO_CONFIGURATION
+    }),
     configuration: HCN_JOBROLO_CONFIGURATION,
     capabilityProfile: HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
   });
@@ -20836,7 +21942,7 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
       !== String(principal.jobNimbusOwnerId || "").trim()
   ) {
     const error = new Error(
-      "The fixed Jobrolo HCN principal is not currently authorized."
+      "The server-bound Jobrolo HCN principal is not currently authorized."
     );
     error.statusCode = 403;
     throw error;
@@ -20845,6 +21951,31 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
     === HCN_JOBROLO_NOTE_WRITEBACK_CAPABILITY_PROFILE;
   const claimFilingProfile = capabilityProfile
     === HCN_JOBROLO_CLAIM_FILING_CAPABILITY_PROFILE;
+  const generalEffectMode = capabilityProfile
+    === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    ? String(configuration?.effectMode || "")
+    : "";
+  if (
+    capabilityProfile === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    && !["read_only", "approved_effects"].includes(generalEffectMode)
+  ) {
+    const error = new Error(
+      "The signed Jobrolo employee profile has no valid effect mode."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
+  if (
+    claimFilingProfile
+    && String(configuration?.callerProfile?.publicAdjusterName || "")
+      !== String(principal.displayName || "")
+  ) {
+    const error = new Error(
+      "The claim caller profile does not match the approved HCN employee."
+    );
+    error.statusCode = 403;
+    throw error;
+  }
   const sessionDigest = createHash("sha256")
     .update(
       noteWritebackProfile
@@ -20858,7 +21989,10 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
     .update(email, "utf8")
     .update("\0", "utf8")
     .update(verified.sessionRef, "utf8");
-  if (noteWritebackProfile || claimFilingProfile) {
+  const additionalGeneralProfile = capabilityProfile
+    === HCN_JOBROLO_GENERAL_CAPABILITY_PROFILE
+    && verified.clientId !== HCN_JOBROLO_CONFIGURATION.clientId;
+  if (noteWritebackProfile || claimFilingProfile || additionalGeneralProfile) {
     sessionDigest
       .update("\0", "utf8")
       .update(verified.clientId, "utf8");
@@ -20883,8 +22017,11 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
       hostedDomain: HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN,
       scopes: [
         "assigned_file:read",
-        "approval_plan:prepare",
-        "approved_action:execute"
+        ...(
+          generalEffectMode === "read_only"
+            ? []
+            : ["approval_plan:prepare", "approved_action:execute"]
+        )
       ],
       googleAccessToken: "",
       jobNimbusOwnerId: principal.jobNimbusOwnerId,
@@ -20900,7 +22037,12 @@ async function authenticateJobroloHcnPrincipal(verified, capability) {
     hcnSessionId: sessionId,
     jobroloAssistantSessionBindingRef,
     jobroloRequestId: verified.requestId,
+    jobroloClientId: verified.clientId,
     jobroloCapabilityProfile: capabilityProfile,
+    ...(generalEffectMode ? { jobroloEffectMode: generalEffectMode } : {}),
+    ...(claimFilingProfile
+      ? { jobroloClaimCallerProfile: configuration.callerProfile }
+      : {}),
     operatorScope: "assigned"
   };
 }
@@ -23066,7 +24208,7 @@ const OPENAPI = {
                   availability: { $ref: "#/components/schemas/JobroloIntegrationAvailability" },
                   contract: { type: "string", const: "jobrolo.jobnimbus-import.transport-response.v1" },
                   authentication: { type: "string", const: "dedicated_import_hmac_exact_bytes_timestamp_durable_nonce" },
-                  principalMode: { type: "string", const: "fixed_server_side_approved_employee" },
+                  principalMode: { type: "string", const: "signed_client_bound_server_side_approved_employee" },
                   principalSelectableByCaller: { type: "boolean", const: false },
                   fileScope: { type: "string", const: "assigned_only" },
                   photoManifests: { $ref: "#/components/schemas/JobroloIntegrationAvailability" },

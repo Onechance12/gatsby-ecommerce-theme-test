@@ -10,6 +10,7 @@ const GOOGLE_SUBJECT_PATTERN = /^[A-Za-z0-9._~-]{1,255}$/;
 const FILE_REF_PATTERN = /^subject_[a-f0-9]{32}$/;
 const CONVERSATION_REF_PATTERN = /^conversation_[a-f0-9]{32}$/;
 const CALL_REF_PATTERN = /^claim_call_[a-f0-9]{32}$/;
+const PLAN_ID_PATTERN = /^plan_[a-f0-9]{32}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const VERIFIED_OUTCOMES = new Set([
   "claim_filed",
@@ -320,6 +321,7 @@ export function buildHcnClaimReviewPresentation({
       file: publicFile(file),
       objective: "File one new property insurance claim for this exact assigned file.",
       carrierDestination: null,
+      callerIdentity: null,
       verifiedFacts: verifiedFacts(file),
       employeeConfirmedFacts: confirmedFacts(confirmations),
       missingFacts: [...missingFacts],
@@ -337,12 +339,28 @@ export function buildHcnClaimReviewPresentation({
       carrier: String(plan.carrier?.display || file.carrier || ""),
       phone: String(plan.callPlan?.to || "")
     }),
+    callerIdentity: approvedCallerIdentity(plan),
     verifiedFacts: verifiedFacts(file),
     employeeConfirmedFacts: confirmedFacts(confirmations),
     missingFacts: [...missingFacts],
     warnings: [...(plan.readiness?.warnings || [])],
     stopRules: [...(plan.packet?.stopRules || [])],
     planDigest: String(plan.planDigest || "")
+  });
+}
+
+function approvedCallerIdentity(plan) {
+  const variables = plan?.callPlan?.dynamicVariables || {};
+  return Object.freeze({
+    authority: "server_bound_approved_call_plan",
+    publicAdjusterName: String(variables.publicAdjusterName || ""),
+    licenseJurisdiction: String(variables.licenseJurisdiction || ""),
+    licenseNumber: String(variables.licenseNumber || ""),
+    firmName: String(variables.firmName || ""),
+    officeAddress: String(variables.officeAddress || ""),
+    officePhone: String(variables.officePhone || ""),
+    email: String(variables.publicAdjusterEmail || ""),
+    queueCallbackPhone: String(variables.queueCallbackPhone || "")
   });
 }
 
@@ -423,6 +441,7 @@ export function assertHcnClaimCallRef(value) {
 export function createHcnServerClaimEvidence({
   callRef,
   fileRef,
+  callPlanId,
   planDigest,
   terminalReceipt,
   rawCall,
@@ -432,7 +451,7 @@ export function createHcnServerClaimEvidence({
   assertHcnClaimCallRef(callRef);
   assertFileRef(fileRef);
   assertDigest(planDigest, "planDigest");
-  assertTerminalCallReceipt(terminalReceipt, planDigest, fileRef);
+  assertTerminalCallReceipt(terminalReceipt, planDigest, fileRef, callPlanId);
   assertPlainObject(rawCall, "rawCall");
   const metadata = rawCall.metadata;
   if (
@@ -518,6 +537,7 @@ export function createHcnServerClaimEvidence({
     schema: "hcn.claim-filing.evidence.v1",
     callRef,
     fileRef,
+    planId: callPlanId,
     planDigest,
     receiptBatchRef: terminalReceipt.batchRef,
     receiptStatus: terminalReceipt.status,
@@ -532,6 +552,7 @@ export function createHcnServerClaimEvidence({
     schema: "hcn.claim-filing.server-evidence.v1",
     callRef,
     fileRef,
+    planId: callPlanId,
     planDigest,
     evidenceDigest,
     terminalReceipt: Object.freeze({
@@ -558,6 +579,7 @@ export function projectHcnClaimResult(evidence) {
     schema: "hcn.claim-filing.result-review.v2",
     callRef: evidence.callRef,
     fileRef: evidence.fileRef,
+    planId: evidence.planId,
     planDigest: evidence.planDigest,
     evidenceDigest: evidence.evidenceDigest,
     callStatus: evidence.callStatus,
@@ -778,10 +800,12 @@ function immutablePilotRegistry(subjects) {
   });
 }
 
-function assertTerminalCallReceipt(receipt, planDigest, fileRef) {
+function assertTerminalCallReceipt(receipt, planDigest, fileRef, callPlanId) {
   assertPlainObject(receipt, "terminalReceipt");
   if (
-    receipt.fileRef !== fileRef
+    !PLAN_ID_PATTERN.test(String(callPlanId || ""))
+    || receipt.planId !== callPlanId
+    || receipt.fileRef !== fileRef
     || receipt.digest !== planDigest
     || receipt.operationCount !== 1
     || receipt.status !== "completed_pending_verification"

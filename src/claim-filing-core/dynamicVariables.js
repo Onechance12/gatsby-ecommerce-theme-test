@@ -47,7 +47,19 @@ export const PROMPT_PLACEHOLDERS = [
   "availableAppointmentWindows",
   "availabilityTimeZone",
   "appointmentDurationMinutes",
-  "availabilitySources"
+  "availabilitySources",
+  "publicAdjusterName",
+  "licenseJurisdiction",
+  "licenseNumber",
+  "firmName",
+  "officeAddress",
+  "officePhone",
+  "publicAdjusterEmail",
+  "queueCallbackPhone",
+  "queueCallbackDigits",
+  "homeownerOutreachOpening",
+  "homeownerOutreachMessage",
+  "appointmentAccessRequirement"
 ];
 
 export function flattenFactsForDynamicVariables(packet) {
@@ -78,6 +90,23 @@ export function flattenFactsForDynamicVariables(packet) {
   out.availabilityTimeZone = "America/Chicago";
   out.appointmentDurationMinutes = "120";
   out.availabilitySources = "Not checked for this call";
+  const callerProfile = packet.callerProfile || {};
+  out.publicAdjusterName = String(callerProfile.publicAdjusterName || "");
+  out.licenseJurisdiction = String(callerProfile.licenseJurisdiction || "");
+  out.licenseNumber = String(callerProfile.licenseNumber || "");
+  out.firmName = String(callerProfile.firmName || "");
+  out.officeAddress = String(callerProfile.officeAddress || "");
+  out.officePhone = String(callerProfile.officePhone || "");
+  out.publicAdjusterEmail = String(callerProfile.email || "");
+  out.queueCallbackPhone = String(callerProfile.queueCallbackPhone || "");
+  out.queueCallbackDigits = String(callerProfile.queueCallbackPhone || "")
+    .replace(/\D/g, "")
+    .replace(/^1(?=\d{10}$)/, "")
+    .split("")
+    .join(" ");
+  out.homeownerOutreachOpening = "Not applicable to this carrier call";
+  out.homeownerOutreachMessage = "Not applicable to this carrier call";
+  out.appointmentAccessRequirement = "Not applicable to this carrier call";
   // The goal rides along so post-call extraction can tell a new filing from a
   // status follow-up even without call metadata.
   if (packet.goal) out.goal = String(packet.goal);

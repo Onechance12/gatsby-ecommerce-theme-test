@@ -55,6 +55,12 @@ services:
         sync: false
       - key: HCN_JOBROLO_PRINCIPAL_EMAIL
         value: cpearson@wavepa.com
+      # Optional exact-schema registry for additional PA general HCN clients.
+      # Keep unset until each employee invitation, Google identity, and exact
+      # active JobNimbus owner binding has been independently verified. Every
+      # entry requires effectMode; onboard as read_only before approved_effects.
+      - key: HCN_JOBROLO_ADDITIONAL_PROFILES_JSON
+        sync: false
       # Independent dormant credential for the ordinary-chat, one-note-only
       # writeback pilot. Keep disabled until Jobrolo has the matching dedicated
       # client credential; never reuse the general adapter or import secret.
@@ -65,6 +71,8 @@ services:
       - key: HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET
         sync: false
       - key: HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL
+        sync: false
+      - key: HCN_JOBROLO_NOTE_WRITEBACK_ADDITIONAL_PROFILES_JSON
         sync: false
       # Dedicated owner-only claim-filing credential. This profile can call
       # only the six signed claim routes and every call/write still requires
@@ -77,6 +85,11 @@ services:
         sync: false
       - key: HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL
         value: cpearson@wavepa.com
+      # Optional exact-schema registry for additional PA claim-filing clients.
+      # Each entry includes its own caller name/license/contact identity. Keep
+      # unset until the PA and JobNimbus owner binding are independently attested.
+      - key: HCN_JOBROLO_CLAIM_FILING_ADDITIONAL_PROFILES_JSON
+        sync: false
       # Separate dormant HCN -> Jobrolo read-only JobNimbus import transport.
       # Enabling is fail-closed until every synced value is present and
       # distinct from the general Jobrolo/Thresher seam. Durable replay
@@ -90,6 +103,11 @@ services:
       - key: HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL
         sync: false
       - key: HCN_JOBROLO_IMPORT_CONNECTION_REF
+        sync: false
+      # Optional exact-schema JSON registry for additional read-only PA
+      # principals. Each signed client id maps to one server-owned HCN employee
+      # and one distinct Jobrolo connection; requests cannot select identities.
+      - key: HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON
         sync: false
       - key: HCN_OPERATIONS_ROOT
         value: /var/data/hcn-operations

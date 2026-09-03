@@ -8,6 +8,16 @@ import { resolveStandardAnswers, inferCause, inferDamageCategories } from "./sta
 
 export const DEFAULT_GOAL = "file_new_claim";
 export const DEFAULT_DAMAGE_OPENING = "It has roof damage along with collateral on the exterior of the home, mostly paint, window screens, and gutters. I also believe there is some interior damage.";
+export const DEFAULT_CALLER_PROFILE = Object.freeze({
+  publicAdjusterName: "Chance Pearson",
+  licenseJurisdiction: "Texas",
+  licenseNumber: "3351885",
+  firmName: "Wave Public Adjusting",
+  officeAddress: "3500 Oak Lawn Avenue, Suite 460C, Dallas, Texas 75219",
+  officePhone: "+19725731730",
+  email: "cpearson@wavepa.com",
+  queueCallbackPhone: "+18176867361"
+});
 
 const ALLOWED_GOALS = new Set([
   "file_new_claim",
@@ -35,6 +45,7 @@ export function buildClaimCallPacket(input, options = {}) {
   const goal = normalizeGoal(options.goal || overrides.goal || DEFAULT_GOAL, file);
   const causeOfLoss = file.typeOfLoss || inferCause(file, normalized.evidence);
   const standard = resolveStandardAnswers(overrides);
+  const callerProfile = normalizeCallerProfile(options.callerProfile);
 
   const facts = {
     insuredName: file.customer || "Missing",
@@ -50,7 +61,7 @@ export function buildClaimCallPacket(input, options = {}) {
     currentStatus: file.status || "Missing",
     adjuster: formatAdjuster(file),
     mortgageCompany: file.mortgageCompany || "Missing",
-    // The four Chance-approved standard answers (overrideable per call).
+    // The four approved standard answers (overrideable per call).
     injuries: standard.injuries,
     homeLivable: standard.homeLivable,
     temporaryRepairs: standard.temporaryRepairs,
@@ -82,14 +93,15 @@ export function buildClaimCallPacket(input, options = {}) {
     scriptAuthority: "retell_fixed_carrier_workflow",
     scriptInstruction: "Do not invent or rewrite an opening script. Retell handles the IVR with short answers and uses the fixed human-representative opening only after a live person answers.",
     quoLearnedCallPattern: buildQuoLearnedPattern(goal),
-    callScript: buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails),
+    callerProfile,
+    callScript: buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails, callerProfile),
     shortIvrAnswers: buildIvrAnswers(goal, facts),
-    humanRepresentativeScript: buildHumanScript(goal, facts, damageCategories, damageOpening, damageDetails),
+    humanRepresentativeScript: buildHumanScript(goal, facts, damageCategories, damageOpening, damageDetails, callerProfile),
     informationToCapture: captureFieldsFor(goal),
     stopRules: buildStopRules(goal),
     resultFormat: buildResultFormat(goal),
     postCallJobNimbusReminder: [
-      "Do not update JobNimbus from the call result until Chance approves.",
+      `Do not update JobNimbus from the call result until ${callerProfile.publicAdjusterName} approves.`,
       "After approval, update claim number/status/adjuster fields and leave one short file-specific note."
     ]
   };
@@ -154,13 +166,13 @@ function objectiveFor(goal, facts) {
   return `Follow up on the claim status for ${facts.insuredName}.`;
 }
 
-function buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails) {
+function buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails, callerProfile) {
   return [
     "Use strict IVR discipline: listen to the complete prompt, take a short natural beat, then answer only what the IVR asked or press the explicitly requested digit.",
     "Do not identify as the homeowner.",
     "Only give the full public adjuster introduction to a human representative.",
     "",
-    buildHumanScript(goal, facts, damageCategories, damageOpening, damageDetails)
+    buildHumanScript(goal, facts, damageCategories, damageOpening, damageDetails, callerProfile)
   ].join("\n");
 }
 
@@ -176,9 +188,9 @@ function buildIvrAnswers(goal, facts) {
   return answers;
 }
 
-function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT_DAMAGE_OPENING, damageDetails = damageCategories) {
-  const filingIntro = "Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting. We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf.";
-  const intro = `Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting calling regarding the property claim for ${facts.insuredName}.`;
+function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT_DAMAGE_OPENING, damageDetails = damageCategories, callerProfile = DEFAULT_CALLER_PROFILE) {
+  const filingIntro = `Hi, this is ${callerProfile.publicAdjusterName}'s AI assistant with ${callerProfile.firmName}. We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf.`;
+  const intro = `Hi, this is ${callerProfile.publicAdjusterName}'s AI assistant with ${callerProfile.firmName} calling regarding the property claim for ${facts.insuredName}.`;
   if (goal === "file_new_claim") {
     return [
       filingIntro,
@@ -197,6 +209,38 @@ function buildHumanScript(goal, facts, damageCategories, damageOpening = DEFAULT
     return [intro, `The claim number I have is ${facts.claimNumber}.`, "Can you confirm the assigned desk or field adjuster name, phone, email, and current next step?"].join("\n");
   }
   return [intro, `The claim number I have is ${facts.claimNumber}.`, "I need to check the current status, confirm assigned adjuster information, and confirm next steps."].join("\n");
+}
+
+function normalizeCallerProfile(value) {
+  if (value === undefined || value === null) return DEFAULT_CALLER_PROFILE;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("callerProfile must be a complete server-owned object");
+  }
+  const expected = Object.keys(DEFAULT_CALLER_PROFILE).sort();
+  const actual = Object.keys(value).sort();
+  if (
+    actual.length !== expected.length
+    || actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new TypeError("callerProfile must contain only the exact approved fields");
+  }
+  const normalized = {};
+  for (const key of expected) {
+    const text = String(value[key] || "").trim();
+    if (!text || text.length > 254 || /[\u0000-\u001f\u007f]/.test(text)) {
+      throw new TypeError(`callerProfile.${key} is invalid`);
+    }
+    normalized[key] = text;
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized.email)) {
+    throw new TypeError("callerProfile.email is invalid");
+  }
+  for (const key of ["officePhone", "queueCallbackPhone"]) {
+    if (!/^\+1\d{10}$/.test(normalized[key])) {
+      throw new TypeError(`callerProfile.${key} is invalid`);
+    }
+  }
+  return Object.freeze(normalized);
 }
 
 function captureFieldsFor(goal) {

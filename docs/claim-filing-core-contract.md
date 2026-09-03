@@ -50,7 +50,7 @@ goal per call.
 | `normalizeClaimFileInput(raw)` | Coerce a raw shape to the canonical input. |
 | `buildClaimCallPacket(input, options)` | The goal-specific call packet (objective, verified facts incl. resolved standard answers, damage summary, scripts, capture list, stop rules, result format). |
 | `normalizeGoal(value, file)` / `cleanClaimNumber(v)` | Goal + claim-number helpers. |
-| `STANDARD_FILING_ANSWERS`, `resolveStandardAnswers(overrides, {stormLike})` | The four Chance-approved defaults, overrideable per call. |
+| `STANDARD_FILING_ANSWERS`, `resolveStandardAnswers(overrides, {stormLike})` | The four approved defaults, overrideable per call. |
 | `inferCause(file, evidence)`, `inferDamageCategories(file, evidence)` | Cause + damage categorization from evidence. |
 | `lookupCarrier(name)`, `knownCarriers()` | Data-driven carrier directory (incl. `requiresPolicyNumber`). |
 | `assessReadiness(packet, to, carrier)` | Carrier-aware readiness (missing policy is a warning unless `carrier.requiresPolicyNumber`). |
@@ -71,10 +71,15 @@ call, not a new generic inbound call.
   was actually requested are eligible callback candidates.
 - Callback candidates expire after the configured TTL and are removed once an
   inbound continuation exists.
+- The inbound `to_number` must resolve exactly one active PA callback profile;
+  candidates are filtered by that PA's owner id, callback number, and complete
+  caller identity before any client label can enter the prompt.
 - The inbound webhook restores every approved claim fact, including DOL, cause,
   damage, standard answers, batch data, goal, and contact facts.
-- The callback metadata carries the original contact, owner, plan digest, and
-  call id so result review and approval-gated writeback work on either call leg.
+- The callback metadata carries the original contact, owner, call id, and exact
+  HCN call/file/approval references. Result review accepts either one exact
+  outbound leg or one outbound plus its uniquely linked inbound continuation;
+  missing, duplicated, or ambiguously linked legs fail closed.
 - A callback packet must report `callbackPacketStatus=READY`. An incomplete
   packet fails closed and may collect only the representative's callback details.
 - `listPendingClaimCallbacks` is the read-only operational check for queued
@@ -85,7 +90,7 @@ call, not a new generic inbound call.
 ## Company rules preserved
 
 - **The four standard filing answers are the defaults** — no injuries reported,
-  home habitable, temporary repairs made, Titan Reconstruction as contractor —
+  home habitable, temporary repairs made, and a contractor hired —
   and are overrideable per call. They are **not** copied into routine notes.
 - **Policy-number requirement is data-driven** via the carrier directory
   (`requiresPolicyNumber`), not hard-coded.

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   callbackCandidateFromCall,
+  callbackCandidatesForProfile,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
   buildPostClaimWorkflow,
@@ -122,7 +123,12 @@ test("confirmed callbacks restore the complete approved claim packet", () => {
     to_number: "+18002557828",
     start_timestamp: 1770000000000,
     transcript: "Your request for a callback has been confirmed.",
-    metadata: outbound.callPlan.metadata,
+    metadata: {
+      ...outbound.callPlan.metadata,
+      hcnCallRef: `claim_call_${"a".repeat(32)}`,
+      hcnFileRef: `subject_${"b".repeat(32)}`,
+      hcnApprovalDigest: "c".repeat(64)
+    },
     retell_llm_dynamic_variables: outbound.callPlan.dynamicVariables
   };
   const candidate = callbackCandidateFromCall(call);
@@ -143,7 +149,7 @@ test("confirmed callbacks restore the complete approved claim packet", () => {
   assert.equal(callback.injuries, "No injuries reported");
   assert.equal(callback.homeLivable, "Yes, the home is livable");
   assert.equal(callback.temporaryRepairs, "Yes, temporary repairs have been made");
-  assert.match(callback.contractorHired, /Titan Reconstruction/);
+  assert.equal(callback.contractorHired, "Yes, a contractor has been hired");
   assert.equal(metadata.source, "hcn-wave-jobnimbus-bridge");
   assert.equal(metadata.ownerId, OWNER_ID);
   assert.equal(metadata.contactId, "contact-2739");
@@ -151,6 +157,9 @@ test("confirmed callbacks restore the complete approved claim packet", () => {
   assert.equal(metadata.planDigest, outbound.planDigest);
   assert.equal(metadata.originalCallId, "call-alice-outbound");
   assert.equal(metadata.callLeg, "carrier_callback");
+  assert.equal(metadata.hcnCallRef, `claim_call_${"a".repeat(32)}`);
+  assert.equal(metadata.hcnFileRef, `subject_${"b".repeat(32)}`);
+  assert.equal(metadata.hcnApprovalDigest, "c".repeat(64));
   assert.doesNotThrow(() => validateRetellCallOwnership({ raw: { metadata } }, OWNER_ID));
 });
 
@@ -189,6 +198,69 @@ test("callback matching requires a unique safe association", () => {
     selected: null,
     match: "needs_identity_confirmation"
   });
+});
+
+test("callback candidates stay inside one owner and queue-phone profile", () => {
+  const secondProfile = {
+    ownerId: "second-owner",
+    queueCallbackPhone: "+18175550112"
+  };
+  const second = {
+    contactId: "second-file",
+    ownerId: "second-owner",
+    dynamicVariables: { queueCallbackPhone: "+18175550112" }
+  };
+  const wrongOwner = {
+    contactId: "chance-file",
+    ownerId: "chance-owner",
+    dynamicVariables: { queueCallbackPhone: "+18175550112" }
+  };
+  const wrongQueue = {
+    contactId: "other-second-file",
+    ownerId: "second-owner",
+    dynamicVariables: { queueCallbackPhone: "+18175550113" }
+  };
+  const legacyMissingQueue = {
+    contactId: "legacy-file",
+    ownerId: "second-owner",
+    dynamicVariables: {}
+  };
+  assert.deepEqual(
+    callbackCandidatesForProfile(
+      [wrongOwner, second, wrongQueue, legacyMissingQueue],
+      secondProfile
+    ),
+    [second]
+  );
+  assert.deepEqual(
+    callbackCandidatesForProfile([second], {
+      ownerId: "",
+      queueCallbackPhone: secondProfile.queueCallbackPhone
+    }),
+    []
+  );
+  assert.deepEqual(
+    callbackCandidatesForProfile([{
+      ...second,
+      dynamicVariables: {
+        ...second.dynamicVariables,
+        publicAdjusterName: "Wrong Adjuster"
+      }
+    }], {
+      ...secondProfile,
+      callerProfile: {
+        publicAdjusterName: "Second Adjuster",
+        licenseJurisdiction: "Texas",
+        licenseNumber: "PA-20002",
+        firmName: "Wave Public Adjusting",
+        officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+        officePhone: "+19725550111",
+        email: "second.adjuster@wavepa.com",
+        queueCallbackPhone: "+18175550112"
+      }
+    }),
+    []
+  );
 });
 
 test("callback eligibility requires carrier confirmation, not merely an offer", () => {
@@ -296,6 +368,9 @@ test("carrier prompt stays silent for IVR openings and accepts transfers", () =>
   assert.match(prompt, /Never substitute a made-up noon, morning, afternoon, or evening/i);
   assert.match(prompt, /A transfer is not a completed objective/i);
   assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
+  assert.match(prompt, /public adjuster with \{\{firmName\}\}/);
+  assert.match(prompt, /firm name exactly as \{\{firmName\}\}/);
+  assert.doesNotMatch(prompt, /Titan Reconstruction|Never say 'LLC'/);
 });
 
 test("claim packet exposes only the fixed Retell-owned human opening", () => {
@@ -472,6 +547,58 @@ test("builds deterministic approval-gated State Farm plan", () => {
   assert.equal(retellCallBody(first).override_agent_id, "agent-1");
 });
 
+test("caller identity is server-profile-bound and changes the approved plan", () => {
+  const baseOptions = {
+    ownerId: OWNER_ID,
+    fileNumber: "2739",
+    from: "+12145550100",
+    agentId: "agent-1"
+  };
+  const chance = buildClaimFilingPlan(fixture(), baseOptions);
+  const second = buildClaimFilingPlan(fixture(), {
+    ...baseOptions,
+    ownerId: "second-pa-owner",
+    callerProfile: {
+      publicAdjusterName: "Second Adjuster",
+      licenseJurisdiction: "Texas",
+      licenseNumber: "PA-20002",
+      firmName: "Wave Public Adjusting",
+      officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+      officePhone: "+19725550111",
+      email: "second.adjuster@wavepa.com",
+      queueCallbackPhone: "+18175550112"
+    }
+  });
+  assert.notEqual(chance.planDigest, second.planDigest);
+  assert.deepEqual(
+    {
+      name: second.callPlan.dynamicVariables.publicAdjusterName,
+      license: second.callPlan.dynamicVariables.licenseNumber,
+      email: second.callPlan.dynamicVariables.publicAdjusterEmail,
+      officePhone: second.callPlan.dynamicVariables.officePhone,
+      queueDigits: second.callPlan.dynamicVariables.queueCallbackDigits
+    },
+    {
+      name: "Second Adjuster",
+      license: "PA-20002",
+      email: "second.adjuster@wavepa.com",
+      officePhone: "+19725550111",
+      queueDigits: "8 1 7 5 5 5 0 1 1 2"
+    }
+  );
+  assert.match(
+    second.packet.humanRepresentativeScript,
+    /Second Adjuster's AI assistant with Wave Public Adjusting/
+  );
+  assert.throws(
+    () => buildClaimFilingPlan(fixture(), {
+      ...baseOptions,
+      callerProfile: { publicAdjusterName: "Incomplete" }
+    }),
+    /exact approved fields/
+  );
+});
+
 test("uses the verified National General homeowners claims number", () => {
   const input = fixture();
   input.file.carrier = "National General Insurance Company";
@@ -579,7 +706,8 @@ test("post-call extraction rejects Wave contact details as carrier adjuster fiel
       retell_llm_dynamic_variables: {
         insuredName: "Emigdio Lejia",
         homeownerPhone: "4694635168",
-        homeownerEmail: "ezleija1025@yahoo.com"
+        homeownerEmail: "ezleija1025@yahoo.com",
+        queueCallbackPhone: "+18176867361"
       },
       call_analysis: {
         custom_analysis_data: {
@@ -598,6 +726,24 @@ test("post-call extraction rejects Wave contact details as carrier adjuster fiel
   assert.equal(extracted.source.adjusterName, "none");
   assert.equal(extracted.source.adjusterPhone, "none");
   assert.equal(extracted.source.adjusterEmail, "none");
+
+  const queuePhone = extractCallResults({
+    transcript: "",
+    raw: {
+      metadata: { goal: "file_new_claim" },
+      retell_llm_dynamic_variables: {
+        officePhone: "+19725731730",
+        queueCallbackPhone: "+18176867361"
+      },
+      call_analysis: {
+        custom_analysis_data: {
+          adjuster_phone: "+18176867361"
+        }
+      }
+    }
+  });
+  assert.equal(queuePhone.adjusterPhone, "");
+  assert.equal(queuePhone.source.adjusterPhone, "none");
 });
 
 test("call completion review confirms the representation destination was captured", () => {

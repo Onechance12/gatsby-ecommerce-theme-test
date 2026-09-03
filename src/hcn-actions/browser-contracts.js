@@ -11,6 +11,7 @@
 const FILE_REF_PATTERN = /^subject_[a-f0-9]{32}$/;
 const TASK_REF_PATTERN = /^ref_[a-f0-9]{32}$/;
 const EVENT_REF_PATTERN = /^ref_[a-f0-9]{32}$/;
+const DOCUMENT_REF_PATTERN = /^ref_[a-f0-9]{32}$/;
 const DRAFT_REF_PATTERN = /^ref_[a-f0-9]{32}$/;
 const PLAN_ID_PATTERN = /^plan_[a-f0-9]{32}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
@@ -49,7 +50,10 @@ export const HCN_BROWSER_ACTION_TYPES = Object.freeze([
   "quo.send_text"
 ]);
 
-const ACTION_TYPES = new Set(HCN_BROWSER_ACTION_TYPES);
+const ACTION_TYPES = new Set([
+  ...HCN_BROWSER_ACTION_TYPES,
+  "gmail.send_existing_draft"
+]);
 
 /**
  * Validate and immutably copy an HCN action-prepare browser request.
@@ -75,6 +79,19 @@ export function validateHcnBrowserActionPrepareInput(value) {
   const operations = value.operations.map((operation, index) =>
     validateBrowserOperation(operation, `operations[${index}]`)
   );
+  const carrierEmailOperation = operations.some((operation) => (
+    operation.type === "gmail.send_existing_draft"
+    || (
+      operation.type === "gmail.create_draft"
+      && operation.input.insuranceClaimEmail === true
+    )
+  ));
+  if (carrierEmailOperation && operations.length !== 1) {
+    invalid(
+      "invalid_gmail_batch",
+      "A Gmail draft or existing-draft send must be the only action in its approval plan"
+    );
+  }
   return immutableCopy({ fileRef, operations });
 }
 
@@ -113,6 +130,7 @@ export async function translateHcnBrowserActionsToPrivateEngineRequest(
     resolveProviderJobId,
     resolveProviderTaskId,
     resolveProviderEventId,
+    resolveProviderDocumentId,
     resolveProviderDraftId
   } = {}
 ) {
@@ -141,9 +159,21 @@ export async function translateHcnBrowserActionsToPrivateEngineRequest(
     );
   }
   if (
-    request.operations.some(
-      (operation) => operation.type === "gmail.send"
-    )
+    request.operations.some((operation) => (
+      operation.type === "gmail.create_draft"
+      && operation.input.insuranceClaimEmail === true
+    ))
+    && typeof resolveProviderDocumentId !== "function"
+  ) {
+    throw new TypeError(
+      "resolveProviderDocumentId must be a function for Gmail attachments"
+    );
+  }
+  if (
+    request.operations.some((operation) => (
+      operation.type === "gmail.send"
+      || operation.type === "gmail.send_existing_draft"
+    ))
     && typeof resolveProviderDraftId !== "function"
   ) {
     throw new TypeError(
@@ -162,6 +192,7 @@ export async function translateHcnBrowserActionsToPrivateEngineRequest(
     let providerTaskId = "";
     let providerEventId = "";
     let providerDraftId = "";
+    const providerDocumentIds = [];
     if (operation.type === "jobnimbus.update_task") {
       providerTaskId = await resolvePrivateIdentifier(
         resolveProviderTaskId,
@@ -184,7 +215,26 @@ export async function translateHcnBrowserActionsToPrivateEngineRequest(
         "event"
       );
     }
-    if (operation.type === "gmail.send") {
+    if (
+      operation.type === "gmail.create_draft"
+      && operation.input.insuranceClaimEmail === true
+    ) {
+      for (const attachment of operation.input.attachments) {
+        providerDocumentIds.push(await resolvePrivateIdentifier(
+          resolveProviderDocumentId,
+          Object.freeze({
+            fileRef: request.fileRef,
+            documentRef: attachment.documentRef,
+            providerJobId
+          }),
+          "document"
+        ));
+      }
+    }
+    if (
+      operation.type === "gmail.send"
+      || operation.type === "gmail.send_existing_draft"
+    ) {
       providerDraftId = await resolvePrivateIdentifier(
         resolveProviderDraftId,
         Object.freeze({
@@ -201,6 +251,7 @@ export async function translateHcnBrowserActionsToPrivateEngineRequest(
         providerJobId,
         providerTaskId,
         providerEventId,
+        providerDocumentIds,
         providerDraftId
       )
     );
@@ -463,17 +514,40 @@ function validateBrowserOperationInput(type, value, label) {
     }
 
     case "gmail.create_draft": {
-      exactRecord(
-        value,
-        ["to", "subject", "body"],
-        ["cc", "bcc"],
-        `${label}.input`
-      );
+      const carrierEmail = Object.hasOwn(value, "insuranceClaimEmail");
+      if (carrierEmail) {
+        exactRecord(
+          value,
+          ["insuranceClaimEmail", "to", "subject", "body", "attachments"],
+          ["cc", "bcc"],
+          `${label}.input`
+        );
+        if (value.insuranceClaimEmail !== true) {
+          invalid(
+            "invalid_insurance_claim_email",
+            "insuranceClaimEmail must be true for an HCN carrier draft"
+          );
+        }
+      } else {
+        exactRecord(
+          value,
+          ["to", "subject", "body"],
+          ["cc", "bcc"],
+          `${label}.input`
+        );
+      }
       const result = {
         to: emailAddressList(value.to, "to", true),
         subject: emailSubject(value.subject),
         body: emailBody(value.body)
       };
+      if (carrierEmail) {
+        result.insuranceClaimEmail = true;
+        result.attachments = gmailJobNimbusAttachments(
+          value.attachments,
+          label
+        );
+      }
       if (Object.hasOwn(value, "cc")) {
         result.cc = emailAddressList(value.cc, "cc", false);
       }
@@ -483,7 +557,8 @@ function validateBrowserOperationInput(type, value, label) {
       return result;
     }
 
-    case "gmail.send": {
+    case "gmail.send":
+    case "gmail.send_existing_draft": {
       exactRecord(value, ["draftRef"], [], `${label}.input`);
       return {
         draftRef: opaqueReference(
@@ -534,6 +609,7 @@ function privateEngineOperation(
   providerJobId,
   providerTaskId,
   providerEventId,
+  providerDocumentIds,
   providerDraftId
 ) {
   const input = operation.input;
@@ -613,19 +689,26 @@ function privateEngineOperation(
           })
         }
       };
-    case "gmail.create_draft":
-      return {
-        type: operation.type,
-        payload: compactDefined({
-          query: providerJobId,
-          to: input.to,
-          cc: input.cc,
-          bcc: input.bcc,
-          subject: input.subject,
-          body: input.body
-        })
-      };
+    case "gmail.create_draft": {
+      const payload = compactDefined({
+        query: providerJobId,
+        to: input.to,
+        cc: input.cc,
+        bcc: input.bcc,
+        subject: input.subject,
+        body: input.body
+      });
+      if (input.insuranceClaimEmail === true) {
+        payload.insuranceClaimEmail = true;
+        payload.attachments = input.attachments.map((_attachment, index) => ({
+          source: "jobnimbus",
+          documentQuery: providerDocumentIds[index]
+        }));
+      }
+      return { type: operation.type, payload };
+    }
     case "gmail.send":
+    case "gmail.send_existing_draft":
       return {
         type: operation.type,
         payload: {
@@ -811,23 +894,72 @@ function validatePrivatePayload(value, browserOperation) {
       };
     }
 
-    case "gmail.create_draft":
+    case "gmail.create_draft": {
+      if (input.insuranceClaimEmail !== true) {
+        driftRecord(
+          value,
+          ["query", "to", "subject", "body"],
+          ["cc", "bcc"],
+          "private Gmail draft payload"
+        );
+        equalMaterial(value.to, input.to);
+        equalMaterial(value.subject, input.subject);
+        equalMaterial(value.body, input.body);
+        equalOptionalMaterial(value, input, "cc");
+        equalOptionalMaterial(value, input, "bcc");
+        return {
+          providerJobId: providerIdentifier(value.query)
+        };
+      }
       driftRecord(
         value,
-        ["query", "to", "subject", "body"],
+        [
+          "query",
+          "insuranceClaimEmail",
+          "to",
+          "subject",
+          "body",
+          "attachments"
+        ],
         ["cc", "bcc"],
         "private Gmail draft payload"
       );
+      if (value.insuranceClaimEmail !== true) {
+        drift("Private Gmail draft is not an insurance-claim email");
+      }
       equalMaterial(value.to, input.to);
       equalMaterial(value.subject, input.subject);
       equalMaterial(value.body, input.body);
       equalOptionalMaterial(value, input, "cc");
       equalOptionalMaterial(value, input, "bcc");
+      if (
+        !Array.isArray(value.attachments)
+        || value.attachments.length !== input.attachments.length
+      ) {
+        drift("Private Gmail attachments differ from the browser request");
+      }
+      const providerDocumentIds = value.attachments.map(
+        (attachment, index) => {
+          driftRecord(
+            attachment,
+            ["source", "documentQuery"],
+            [],
+            `private Gmail attachment ${index}`
+          );
+          if (attachment.source !== "jobnimbus") {
+            drift("Private Gmail attachment source is not allowlisted");
+          }
+          return providerIdentifier(attachment.documentQuery);
+        }
+      );
       return {
-        providerJobId: providerIdentifier(value.query)
+        providerJobId: providerIdentifier(value.query),
+        providerDocumentIds
       };
+    }
 
     case "gmail.send":
+    case "gmail.send_existing_draft":
       driftRecord(
         value,
         ["query", "draftId"],
@@ -1052,31 +1184,39 @@ function projectEngineOperation({
       };
     }
 
-    case "gmail.create_draft":
-      validateEngineGmailDraftPlan(
+    case "gmail.create_draft": {
+      const material = validateEngineGmailDraftPlan(
         engineOperation.plan,
         browserOperation.input,
         privateOperation
       );
+      const carrierEmail = browserOperation.input.insuranceClaimEmail === true;
       return {
         index,
         type: browserOperation.type,
-        action: "Create Gmail draft (nothing sent)",
-        material: compactDefined({
-          to: browserOperation.input.to,
-          cc: browserOperation.input.cc,
-          bcc: browserOperation.input.bcc,
-          subject: browserOperation.input.subject,
-          body: browserOperation.input.body,
-          attachments: []
-        })
+        action: carrierEmail
+          ? "Create Gmail carrier draft (nothing sent)"
+          : "Create Gmail draft (nothing sent)",
+        material: carrierEmail
+          ? material
+          : compactDefined({
+            to: browserOperation.input.to,
+            cc: browserOperation.input.cc,
+            bcc: browserOperation.input.bcc,
+            subject: browserOperation.input.subject,
+            body: browserOperation.input.body,
+            attachments: []
+          })
       };
+    }
 
-    case "gmail.send": {
+    case "gmail.send":
+    case "gmail.send_existing_draft": {
       const material = validateEngineGmailSendPlan(
         engineOperation.plan,
         browserOperation.input,
-        privateOperation
+        privateOperation,
+        browserOperation.type === "gmail.send_existing_draft"
       );
       return {
         index,
@@ -1426,6 +1566,7 @@ function validateEngineCalendarSchedule(value, { hasStart, hasEnd }) {
 }
 
 function validateEngineGmailDraftPlan(value, input, privateOperation) {
+  const carrierEmail = input.insuranceClaimEmail === true;
   driftRecord(
     value,
     ["mode", "plan", "approvalDigest"],
@@ -1462,10 +1603,19 @@ function validateEngineGmailDraftPlan(value, input, privateOperation) {
     || value.plan.bodyTemplate !== "custom"
     || value.plan.threadId !== ""
     || value.plan.attemptId !== "initial"
-    || !Array.isArray(value.plan.attachments)
-    || value.plan.attachments.length !== 0
+    || (
+      !carrierEmail
+      && (
+        !Array.isArray(value.plan.attachments)
+        || value.plan.attachments.length !== 0
+      )
+    )
   ) {
-    drift("Gmail draft plan is not the allowlisted no-attachment shape");
+    drift(
+      carrierEmail
+        ? "Gmail draft plan is not the allowlisted carrier-email shape"
+        : "Gmail draft plan is not the allowlisted no-attachment shape"
+    );
   }
   validateEngineGmailFileScope(
     value.plan.fileScope,
@@ -1476,9 +1626,80 @@ function validateEngineGmailDraftPlan(value, input, privateOperation) {
   equalMaterial(value.plan.bcc, input.bcc || "");
   equalMaterial(value.plan.subject, input.subject);
   equalMaterial(value.plan.body, input.body);
+  if (!carrierEmail) return null;
+  const attachments = validateEngineJobNimbusAttachments(
+    value.plan.attachments,
+    input.attachments,
+    privateOperation
+  );
+  return compactDefined({
+    insuranceClaimEmail: true,
+    to: input.to,
+    cc: input.cc,
+    bcc: input.bcc,
+    subject: input.subject,
+    body: input.body,
+    attachments
+  });
 }
 
-function validateEngineGmailSendPlan(value, input, privateOperation) {
+function validateEngineJobNimbusAttachments(
+  value,
+  browserAttachments,
+  privateOperation
+) {
+  if (
+    !Array.isArray(value)
+    || value.length !== 1
+    || browserAttachments.length !== 1
+    || privateOperation.providerDocumentIds.length !== 1
+  ) {
+    drift("A carrier Gmail draft must contain exactly one chosen attachment");
+  }
+  return value.map((attachment, index) => {
+    driftRecord(
+      attachment,
+      [
+        "filename",
+        "contentType",
+        "bytes",
+        "sha256",
+        "source",
+        "sourceId",
+        "sourceFileId",
+        "sourceFile"
+      ],
+      [],
+      `Gmail attachment descriptor ${index}`
+    );
+    if (
+      attachment.source !== "jobnimbus"
+      || providerIdentifier(attachment.sourceId)
+        !== privateOperation.providerDocumentIds[index]
+      || providerIdentifier(attachment.sourceFileId)
+        !== privateOperation.providerJobId
+    ) {
+      drift("Gmail attachment is not bound to the selected JobNimbus file");
+    }
+    validateEngineGmailFileScope(
+      attachment.sourceFile,
+      privateOperation.providerJobId
+    );
+    const safe = validateSafeAttachmentMaterial(attachment, "contentType");
+    return {
+      source: "jobnimbus",
+      documentRef: browserAttachments[index].documentRef,
+      ...safe
+    };
+  });
+}
+
+function validateEngineGmailSendPlan(
+  value,
+  input,
+  privateOperation,
+  carrierEmail = false
+) {
   driftRecord(
     value,
     ["mode", "plan", "approvalDigest", "instruction"],
@@ -1557,8 +1778,12 @@ function validateEngineGmailSendPlan(value, input, privateOperation) {
   });
   validateGmailBodyRepresentations(value.plan.bodyRepresentations, body);
   const attachments = validateGmailAttachmentDescriptors(
-    value.plan.attachments
+    value.plan.attachments,
+    { includeProviderPartId: !carrierEmail }
   );
+  if (carrierEmail && attachments.length !== 1) {
+    drift("A carrier Gmail draft snapshot must retain exactly one attachment");
+  }
   const transmittedHeaders = [
     "From",
     "Sender",
@@ -1579,7 +1804,7 @@ function validateEngineGmailSendPlan(value, input, privateOperation) {
   ) {
     drift("Gmail transmitted-header allowlist changed");
   }
-  return compactDefined({
+  const material = compactDefined({
     draftRef: input.draftRef,
     to,
     cc: cc || undefined,
@@ -1590,6 +1815,8 @@ function validateEngineGmailSendPlan(value, input, privateOperation) {
     contentDigest: value.plan.contentDigest,
     sourceDraftRetention: value.plan.sourceDraftRetention
   });
+  if (carrierEmail) material.providerSnapshotVerified = true;
+  return material;
 }
 
 function validateEngineQuoSendPlan(value, input, privateOperation) {
@@ -1738,7 +1965,10 @@ function validateGmailBodyRepresentations(value, body) {
   }
 }
 
-function validateGmailAttachmentDescriptors(value) {
+function validateGmailAttachmentDescriptors(
+  value,
+  { includeProviderPartId = true } = {}
+) {
   if (
     !Array.isArray(value)
     || value.length > MAX_GMAIL_ATTACHMENTS
@@ -1785,7 +2015,7 @@ function validateGmailAttachmentDescriptors(value) {
       );
     }
     return compactDefined({
-      partId,
+      partId: includeProviderPartId ? partId : undefined,
       filename,
       mimeType: descriptor.mimeType,
       disposition: disposition || undefined,
@@ -1793,6 +2023,32 @@ function validateGmailAttachmentDescriptors(value) {
       sha256: descriptor.sha256
     });
   });
+}
+
+function validateSafeAttachmentMaterial(value, contentTypeKey) {
+  const filename = boundedEngineText(
+    value.filename,
+    512,
+    "Gmail attachment filename"
+  );
+  const contentType = value[contentTypeKey];
+  if (
+    typeof contentType !== "string"
+    || !MIME_TYPE_PATTERN.test(contentType)
+    || !Number.isSafeInteger(value.bytes)
+    || value.bytes < 1
+    || value.bytes > MAX_GMAIL_ATTACHMENT_BYTES
+    || typeof value.sha256 !== "string"
+    || !DIGEST_PATTERN.test(value.sha256)
+  ) {
+    drift("Gmail attachment descriptor is malformed");
+  }
+  return {
+    filename,
+    contentType,
+    bytes: value.bytes,
+    sha256: value.sha256
+  };
 }
 
 function enginePlanWrapper(value, fileRequired) {
@@ -1886,6 +2142,36 @@ function providerIdentifier(value) {
     drift("A private provider reference is malformed");
   }
   return value;
+}
+
+function gmailJobNimbusAttachments(value, label) {
+  if (!Array.isArray(value) || value.length !== 1) {
+    invalid(
+      "invalid_gmail_attachments",
+      "attachments must contain exactly one chosen JobNimbus document reference"
+    );
+  }
+  const attachment = value[0];
+  exactRecord(
+    attachment,
+    ["source", "documentRef"],
+    [],
+    `${label}.input.attachments[0]`
+  );
+  if (attachment.source !== "jobnimbus") {
+    invalid(
+      "invalid_gmail_attachment_source",
+      "HCN Gmail drafts accept only a verified JobNimbus attachment"
+    );
+  }
+  return [{
+    source: "jobnimbus",
+    documentRef: opaqueReference(
+      attachment.documentRef,
+      DOCUMENT_REF_PATTERN,
+      "documentRef"
+    )
+  }];
 }
 
 function taskTitle(value) {

@@ -8,10 +8,20 @@ import {
   deriveJobroloAssistantSessionBindingRef,
   HCN_JOBROLO_CLAIM_FILING_ROUTES,
   HCN_JOBROLO_NOTE_WRITEBACK_ROUTES,
+  JOBROLO_HCN_GENERAL_EFFECT_ROUTES,
+  JOBROLO_HCN_GENERAL_READ_ONLY_ROUTES,
   JOBROLO_HCN_READ_ROUTES,
+  JOBROLO_HCN_ROUTES,
+  jobroloHcnGeneralProfileAllowsRoute,
   loadJobroloHcnClaimFilingConfiguration,
+  loadJobroloHcnClaimFilingRegistry,
   loadJobroloHcnIntegrationConfiguration,
+  loadJobroloHcnIntegrationRegistry,
   loadJobroloHcnNoteWritebackConfiguration,
+  loadJobroloHcnNoteWritebackRegistry,
+  resolveJobroloHcnClaimFilingProfile,
+  resolveJobroloHcnIntegrationProfile,
+  resolveJobroloHcnNoteWritebackProfile,
   signJobroloHcnRequest,
   stableCanonicalJson
 } from "./jobrolo-service-auth.js";
@@ -25,6 +35,8 @@ const NOTE_SECRET =
 const CLAIM_PATH = "/integrations/jobrolo/v1/claim-filings/prepare";
 const CLAIM_SECRET =
   "jobrolo-claim-filing-test-secret-unique-123456";
+const SECOND_CLAIM_SECRET =
+  "jobrolo-claim-filing-second-pa-secret-123456";
 
 test("general adapter read surface is explicit and excludes every effect route", () => {
   assert.deepEqual(JOBROLO_HCN_READ_ROUTES, [
@@ -40,6 +52,20 @@ test("general adapter read surface is explicit and excludes every effect route",
       /(?:execute|prepare|writeback|send|call)/.test(route)
     ),
     false
+  );
+  assert.equal(
+    JOBROLO_HCN_GENERAL_READ_ONLY_ROUTES.some((route) =>
+      JOBROLO_HCN_GENERAL_EFFECT_ROUTES.includes(route)
+    ),
+    false
+  );
+  assert.deepEqual(
+    [...new Set([
+      ...JOBROLO_HCN_GENERAL_READ_ONLY_ROUTES,
+      ...JOBROLO_HCN_GENERAL_EFFECT_ROUTES
+    ])].sort(),
+    [...JOBROLO_HCN_ROUTES].sort(),
+    "read-only and effect routes must exactly partition the general adapter"
   );
 });
 
@@ -360,6 +386,71 @@ test("note-writeback credential cannot reuse a client id or secret", () => {
   );
 });
 
+test("additional note-only profiles are exact, distinct, and principal-bound", () => {
+  const env = {
+    HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
+    HCN_JOBROLO_NOTE_WRITEBACK_CLIENT_ID: "jobrolo-note-writeback",
+    HCN_JOBROLO_NOTE_WRITEBACK_SHARED_SECRET: NOTE_SECRET,
+    HCN_JOBROLO_NOTE_WRITEBACK_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_NOTE_WRITEBACK_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.note-writeback-profiles.v1",
+      profiles: [{
+        clientId: "jobrolo-note-joel",
+        sharedSecret: "jobrolo-note-joel-secret-that-is-unique-123456",
+        principalEmail: "joel@wavepa.com"
+      }]
+    })
+  };
+  const registry = loadJobroloHcnNoteWritebackRegistry(env, {
+    disallowedClientIds: [{
+      name: "HCN_JOBROLO_CLIENT_ID",
+      value: "jobrolo-general"
+    }],
+    disallowedSecrets: [{
+      name: "HCN_JOBROLO_SHARED_SECRET",
+      value: SECRET
+    }]
+  });
+  assert.equal(registry.profiles.length, 2);
+  assert.equal(registry.primary.principalEmail, "chance@wavepa.com");
+  assert.equal(
+    resolveJobroloHcnNoteWritebackProfile(
+      registry,
+      "jobrolo-note-joel"
+    ).principalEmail,
+    "joel@wavepa.com"
+  );
+  assert.equal(
+    resolveJobroloHcnNoteWritebackProfile(registry, "missing"),
+    null
+  );
+
+  const duplicatePrincipal = structuredClone(env);
+  duplicatePrincipal.HCN_JOBROLO_NOTE_WRITEBACK_ADDITIONAL_PROFILES_JSON =
+    JSON.stringify({
+      schema: "hcn.jobrolo.note-writeback-profiles.v1",
+      profiles: [{
+        clientId: "jobrolo-note-joel",
+        sharedSecret: "jobrolo-note-joel-secret-that-is-unique-123456",
+        principalEmail: "chance@wavepa.com"
+      }]
+    });
+  assert.throws(
+    () => loadJobroloHcnNoteWritebackRegistry(duplicatePrincipal),
+    /distinct client ids, secrets, and principals/
+  );
+  assert.throws(
+    () => loadJobroloHcnNoteWritebackRegistry({
+      ...env,
+      HCN_JOBROLO_NOTE_WRITEBACK_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+        schema: "wrong.v1",
+        profiles: []
+      })
+    }),
+    /invalid schema/
+  );
+});
+
 test("note-writeback authenticator accepts only its three action routes", () => {
   const configuration = loadJobroloHcnNoteWritebackConfiguration({
     HCN_JOBROLO_NOTE_WRITEBACK_ENABLED: "true",
@@ -509,4 +600,278 @@ test("claim-filing credential is default-off, distinct, and route-limited", () =
     }),
     /route is not allowed/i
   );
+});
+
+test("claim-filing registry binds distinct PA callers to signed clients", () => {
+  const environment = {
+    HCN_JOBROLO_CLAIM_FILING_ENABLED: "true",
+    HCN_JOBROLO_CLAIM_FILING_CLIENT_ID: "jobrolo-claim-filing",
+    HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET: CLAIM_SECRET,
+    HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_CLAIM_FILING_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.claim-filing-profiles.v1",
+      profiles: [{
+        clientId: "jobrolo-claim-second-pa",
+        sharedSecret: SECOND_CLAIM_SECRET,
+        principalEmail: "second.adjuster@wavepa.com",
+        publicAdjusterName: "Second Adjuster",
+        licenseJurisdiction: "Texas",
+        licenseNumber: "PA-20002",
+        firmName: "Wave Public Adjusting",
+        officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+        officePhone: "+19725550111",
+        email: "second.adjuster@wavepa.com",
+        queueCallbackPhone: "+18175550112"
+      }]
+    })
+  };
+  const registry = loadJobroloHcnClaimFilingRegistry(environment);
+  assert.equal(registry.profiles.length, 2);
+  const second = resolveJobroloHcnClaimFilingProfile(
+    registry,
+    "jobrolo-claim-second-pa"
+  );
+  assert.deepEqual(second.callerProfile, {
+    publicAdjusterName: "Second Adjuster",
+    licenseJurisdiction: "Texas",
+    licenseNumber: "PA-20002",
+    firmName: "Wave Public Adjusting",
+    officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+    officePhone: "+19725550111",
+    email: "second.adjuster@wavepa.com",
+    queueCallbackPhone: "+18175550112"
+  });
+  assert.equal(
+    resolveJobroloHcnClaimFilingProfile(registry, "not-configured"),
+    null
+  );
+});
+
+test("claim-filing registry rejects duplicate or caller-selected identity fields", () => {
+  const baseProfile = {
+    clientId: "jobrolo-claim-second-pa",
+    sharedSecret: SECOND_CLAIM_SECRET,
+    principalEmail: "second.adjuster@wavepa.com",
+    publicAdjusterName: "Second Adjuster",
+    licenseJurisdiction: "Texas",
+    licenseNumber: "PA-20002",
+    firmName: "Wave Public Adjusting",
+    officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+    officePhone: "+19725550111",
+    email: "second.adjuster@wavepa.com",
+    queueCallbackPhone: "+18175550112"
+  };
+  const environment = (profile) => ({
+    HCN_JOBROLO_CLAIM_FILING_ENABLED: "true",
+    HCN_JOBROLO_CLAIM_FILING_CLIENT_ID: "jobrolo-claim-filing",
+    HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET: CLAIM_SECRET,
+    HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_CLAIM_FILING_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.claim-filing-profiles.v1",
+      profiles: [{ ...baseProfile, ...profile }]
+    })
+  });
+  for (const duplicate of [
+    { clientId: "jobrolo-claim-filing" },
+    { sharedSecret: CLAIM_SECRET },
+    { principalEmail: "chance@wavepa.com" },
+    { licenseJurisdiction: "TX", licenseNumber: "3-351-885" },
+    { email: "CPEARSON@WAVEPA.COM" },
+    { queueCallbackPhone: "+18176867361" }
+  ]) {
+    assert.throws(
+      () => loadJobroloHcnClaimFilingRegistry(environment(duplicate)),
+      /distinct|reuses/i
+    );
+  }
+  assert.doesNotThrow(
+    () => loadJobroloHcnClaimFilingRegistry(environment({
+      officeAddress:
+        "3500 Oak Lawn Avenue, Suite 460C, Dallas, Texas 75219",
+      officePhone: "+19725731730"
+    }))
+  );
+  assert.throws(
+    () => loadJobroloHcnClaimFilingRegistry(environment({
+      callerSelectedPrincipal: "attacker@wavepa.com"
+    })),
+    /exact approved fields/i
+  );
+  assert.throws(
+    () => loadJobroloHcnClaimFilingRegistry(environment({}), {
+      disallowedClientIds: [{
+        name: "another capability",
+        value: "jobrolo-claim-second-pa"
+      }]
+    }),
+    /reuses/i
+  );
+});
+
+test("general HCN registry binds each signed client to one server principal", () => {
+  const secondSecret = "jobrolo-general-second-pa-secret-unique-123456";
+  const environment = {
+    HCN_JOBROLO_ADAPTER_ENABLED: "true",
+    HCN_JOBROLO_CLIENT_ID: "jobrolo-production",
+    HCN_JOBROLO_SHARED_SECRET: SECRET,
+    HCN_JOBROLO_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.general-profiles.v1",
+      profiles: [{
+        clientId: "jobrolo-general-second-pa",
+        sharedSecret: secondSecret,
+        principalEmail: "second.adjuster@wavepa.com",
+        effectMode: "read_only"
+      }]
+    })
+  };
+  const registry = loadJobroloHcnIntegrationRegistry(environment);
+  assert.equal(registry.profiles.length, 2);
+  assert.equal(registry.primary.effectMode, "approved_effects");
+  assert.equal(
+    resolveJobroloHcnIntegrationProfile(
+      registry,
+      "jobrolo-general-second-pa"
+    )?.principalEmail,
+    "second.adjuster@wavepa.com"
+  );
+  const readOnlyProfile = resolveJobroloHcnIntegrationProfile(
+    registry,
+    "jobrolo-general-second-pa"
+  );
+  assert.equal(readOnlyProfile?.effectMode, "read_only");
+  assert.equal(
+    jobroloHcnGeneralProfileAllowsRoute(
+      readOnlyProfile,
+      "/integrations/jobrolo/v1/file-review"
+    ),
+    true
+  );
+  assert.equal(
+    jobroloHcnGeneralProfileAllowsRoute(
+      readOnlyProfile,
+      "/integrations/jobrolo/v1/carrier-emails/receipts/detail"
+    ),
+    true,
+    "receipt reconciliation must survive an effect-mode demotion"
+  );
+  assert.equal(
+    jobroloHcnGeneralProfileAllowsRoute(
+      readOnlyProfile,
+      "/integrations/jobrolo/v1/carrier-emails/sends/prepare"
+    ),
+    false,
+    "effect-mode demotion must still block a new send plan"
+  );
+  for (const route of JOBROLO_HCN_GENERAL_EFFECT_ROUTES) {
+    assert.equal(
+      jobroloHcnGeneralProfileAllowsRoute(readOnlyProfile, route),
+      false,
+      `read-only PA must not access ${route}`
+    );
+    assert.equal(
+      jobroloHcnGeneralProfileAllowsRoute(registry.primary, route),
+      true,
+      `legacy primary must preserve approved effects for ${route}`
+    );
+  }
+  const crossProfileBody = {
+    schema: "jobrolo.hcn.request.v1",
+    requestId: `request_${"7".repeat(32)}`,
+    actor: { sessionRef: `session_${"8".repeat(32)}` },
+    input: {}
+  };
+  const primaryHeaders = signJobroloHcnRequest({
+    clientId: registry.primary.clientId,
+    secret: registry.primary.secret,
+    pathname: PATH,
+    timestamp: NOW,
+    nonce: `nonce_${"9".repeat(32)}`,
+    body: crossProfileBody
+  });
+  const secondAuthenticator = createJobroloHcnAuthenticator({
+    configuration: readOnlyProfile,
+    now: () => NOW,
+    nonceGuard: createJobroloHcnNonceGuard({ now: () => NOW })
+  });
+  assert.throws(
+    () => secondAuthenticator.authenticate({
+      method: "POST",
+      pathname: PATH,
+      headers: primaryHeaders,
+      body: crossProfileBody
+    }),
+    /authentication failed/i,
+    "one PA's signed credential cannot select another PA's principal"
+  );
+  assert.equal(resolveJobroloHcnIntegrationProfile(registry, "unknown"), null);
+});
+
+test("general HCN registry rejects ambiguity and cross-capability credentials", () => {
+  const secondSecret = "jobrolo-general-second-pa-secret-unique-123456";
+  const environment = (profile = {}) => ({
+    HCN_JOBROLO_ADAPTER_ENABLED: "true",
+    HCN_JOBROLO_CLIENT_ID: "jobrolo-production",
+    HCN_JOBROLO_SHARED_SECRET: SECRET,
+    HCN_JOBROLO_PRINCIPAL_EMAIL: "chance@wavepa.com",
+    HCN_JOBROLO_ADDITIONAL_PROFILES_JSON: JSON.stringify({
+      schema: "hcn.jobrolo.general-profiles.v1",
+      profiles: [{
+        clientId: "jobrolo-general-second-pa",
+        sharedSecret: secondSecret,
+        principalEmail: "second.adjuster@wavepa.com",
+        effectMode: "read_only",
+        ...profile
+      }]
+    })
+  });
+  for (const duplicate of [
+    { clientId: "jobrolo-production" },
+    { sharedSecret: SECRET },
+    { principalEmail: "chance@wavepa.com" }
+  ]) {
+    assert.throws(
+      () => loadJobroloHcnIntegrationRegistry(environment(duplicate)),
+      /distinct|reuses/i
+    );
+  }
+  assert.throws(
+    () => loadJobroloHcnIntegrationRegistry(environment(), {
+      disallowedSecrets: [secondSecret]
+    }),
+    /reuses/i
+  );
+  assert.throws(
+    () => loadJobroloHcnIntegrationRegistry(environment({
+      callerSelectedOwnerId: "attacker"
+    })),
+    /exact approved fields/i
+  );
+  assert.throws(
+    () => loadJobroloHcnIntegrationRegistry(environment({
+      effectMode: "inherit_global"
+    })),
+    /invalid/i
+  );
+  assert.throws(
+    () => loadJobroloHcnIntegrationRegistry(environment({
+      effectMode: undefined
+    })),
+    /invalid|exact approved fields/i
+  );
+  const approvedRegistry = loadJobroloHcnIntegrationRegistry(
+    environment({ effectMode: "approved_effects" })
+  );
+  const approvedSecond = resolveJobroloHcnIntegrationProfile(
+    approvedRegistry,
+    "jobrolo-general-second-pa"
+  );
+  assert.equal(approvedSecond?.effectMode, "approved_effects");
+  for (const route of JOBROLO_HCN_GENERAL_EFFECT_ROUTES) {
+    assert.equal(
+      jobroloHcnGeneralProfileAllowsRoute(approvedSecond, route),
+      true,
+      `switching only PA-B to approved_effects must enable ${route}`
+    );
+  }
 });

@@ -11,7 +11,7 @@ import {
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-07-16.2";
+export const CLAIM_PLAN_VERSION = "2026-09-03.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export function buildClaimFilingPlan(input, options = {}) {
@@ -35,7 +35,8 @@ export function buildClaimFilingPlan(input, options = {}) {
     injuries: options.injuries,
     homeLivable: options.homeLivable,
     temporaryRepairs: options.temporaryRepairs,
-    contractorHired: options.contractorHired
+    contractorHired: options.contractorHired,
+    callerProfile: options.callerProfile
   });
   const packet = buildClaimCallPacket(verifiedInput, packetOptions);
   const carrier = lookupCarrier(packet.verifiedFileFacts.carrier, packet.verifiedFileFacts.policyNumber);
@@ -167,6 +168,7 @@ export function callbackCandidateFromCall(call) {
     createdAt: Number(call.start_timestamp || 0),
     ownerId: String(metadata.ownerId || ""),
     planDigest: String(metadata.planDigest || ""),
+    ...exactHcnCallbackBinding(metadata),
     version: String(metadata.version || ""),
     batchContactIds: String(metadata.batchContactIds || ""),
     dynamicVariables: stringifyDynamicVariables(variables)
@@ -192,7 +194,7 @@ export function buildCallbackDynamicVariables(candidate, match = "matched") {
 }
 
 export function buildCallbackMetadata(candidate, match = "matched") {
-  return {
+  const metadata = {
     source: candidate ? CLAIM_BRIDGE_SOURCE : "hcn-wave-retell-callback-unmatched",
     version: String(candidate?.version || ""),
     ownerId: String(candidate?.ownerId || ""),
@@ -205,6 +207,21 @@ export function buildCallbackMetadata(candidate, match = "matched") {
     originalCallId: String(candidate?.callId || ""),
     callbackMatch: String(match || "matched")
   };
+  Object.assign(metadata, exactHcnCallbackBinding(candidate));
+  return metadata;
+}
+
+function exactHcnCallbackBinding(value) {
+  const binding = {
+    hcnCallRef: String(value?.hcnCallRef || ""),
+    hcnFileRef: String(value?.hcnFileRef || ""),
+    hcnApprovalDigest: String(value?.hcnApprovalDigest || "")
+  };
+  return /^claim_call_[a-f0-9]{32}$/.test(binding.hcnCallRef)
+    && /^subject_[a-f0-9]{32}$/.test(binding.hcnFileRef)
+    && /^[a-f0-9]{64}$/.test(binding.hcnApprovalDigest)
+    ? binding
+    : {};
 }
 
 export function selectCallbackCandidate(candidates, fromNumber) {
@@ -213,6 +230,62 @@ export function selectCallbackCandidate(candidates, fromNumber) {
   if (exact.length === 1) return { selected: exact[0], match: "matched" };
   if (rows.length === 1) return { selected: rows[0], match: "single_pending_case_requires_carrier_confirmation" };
   return { selected: null, match: rows.length ? "needs_identity_confirmation" : "no_pending_case" };
+}
+
+export function callbackCandidatesForProfile(
+  candidates,
+  { ownerId, queueCallbackPhone, callerProfile } = {}
+) {
+  const owner = String(ownerId || "").trim();
+  const callbackPhone = normalizePhoneOrBlank(queueCallbackPhone);
+  if (!owner || !callbackPhone) return [];
+  return (Array.isArray(candidates) ? candidates : []).filter((candidate) =>
+    candidate
+    && typeof candidate === "object"
+    && String(candidate.ownerId || "").trim() === owner
+    && samePhone(
+      candidate.dynamicVariables?.queueCallbackPhone,
+      callbackPhone
+    )
+    && callbackCallerProfileMatches(
+      candidate.dynamicVariables,
+      callerProfile
+    )
+  );
+}
+
+function callbackCallerProfileMatches(variables, callerProfile) {
+  if (callerProfile === undefined) return true;
+  if (
+    !callerProfile
+    || typeof callerProfile !== "object"
+    || Array.isArray(callerProfile)
+  ) return false;
+  const expected = {
+    publicAdjusterName: callerProfile.publicAdjusterName,
+    licenseJurisdiction: callerProfile.licenseJurisdiction,
+    licenseNumber: callerProfile.licenseNumber,
+    firmName: callerProfile.firmName,
+    officeAddress: callerProfile.officeAddress,
+    officePhone: normalizePhoneOrBlank(callerProfile.officePhone),
+    publicAdjusterEmail: String(callerProfile.email || "").trim().toLowerCase(),
+    queueCallbackPhone: normalizePhoneOrBlank(
+      callerProfile.queueCallbackPhone
+    )
+  };
+  if (Object.values(expected).some((value) => !String(value || "").trim())) {
+    return false;
+  }
+  return Object.entries(expected).every(([key, value]) => {
+    const actual = String(variables?.[key] || "").trim();
+    if (["officePhone", "queueCallbackPhone"].includes(key)) {
+      return samePhone(actual, value);
+    }
+    if (key === "publicAdjusterEmail") {
+      return actual.toLowerCase() === value;
+    }
+    return actual === String(value);
+  });
 }
 
 export function confirmedCallbackRequest(call) {
@@ -305,7 +378,7 @@ export function buildPostClaimWorkflow(analysis = {}) {
       requiredDocuments: ["Letter of Representation", "TDI/FIN535", "W-9"],
       emailSubjectRule: "Claim number only",
       emailTemplate: "payment_redirection",
-      emailBodyRule: "Use Richard's standard payment-redirection wording: request payment to the office with Wave Public Adjusting LLC included as a payee. Do not substitute generic correspondence-only language."
+      emailBodyRule: "Use the approved payment-redirection wording: request payment to the assigned public adjuster's office with the exact approved firm name included as a payee. Do not substitute generic correspondence-only language."
     },
     {
       id: "representation_send",
@@ -330,7 +403,7 @@ export function buildPostClaimWorkflow(analysis = {}) {
     claimNumber: extracted.claimNumber,
     documentSubmission: extracted.documentSubmission || "",
     primaryAction: destinationCaptured
-      ? "Prepare the verified LOR, TDI/FIN535, and W-9 carrier package for Chance's approval, then send it using the claim number as the subject."
+      ? "Prepare the verified LOR, TDI/FIN535, and W-9 carrier package for the assigned public adjuster's approval, then send it using the claim number as the subject."
       : "Obtain a verified representation-document destination, then prepare the LOR package for approval.",
     steps
   };
@@ -350,7 +423,7 @@ export function proposalToProcessUpdate(proposal) {
 export function validateRetellCallOwnership(call, ownerId) {
   const metadata = call?.raw?.metadata || call?.metadata || {};
   if (metadata.source !== CLAIM_BRIDGE_SOURCE) throw validationError("This Retell call was not created by the JobNimbus claim-filing bridge.");
-  if (String(metadata.ownerId || "") !== String(ownerId || "")) throw validationError("This Retell call is not scoped to Chance Pearson.");
+  if (String(metadata.ownerId || "") !== String(ownerId || "")) throw validationError("This Retell call is not scoped to the assigned public adjuster.");
   if (!metadata.contactId || !metadata.planDigest) throw validationError("This Retell call is missing its JobNimbus approval metadata.");
   return metadata;
 }

@@ -17,11 +17,13 @@ import {
 const FILE_REF = `subject_${"a".repeat(32)}`;
 const TASK_REF = `ref_${"b".repeat(32)}`;
 const EVENT_REF = `ref_${"e".repeat(32)}`;
+const DOCUMENT_REF = `ref_${"7".repeat(32)}`;
 const DRAFT_REF = `ref_${"f".repeat(32)}`;
 const PLAN_ID = `plan_${"c".repeat(32)}`;
 const PROVIDER_JOB_ID = "provider-job-private-17";
 const PROVIDER_TASK_ID = "provider-task-private-99";
 const PROVIDER_EVENT_ID = "provider-event-private-77";
+const PROVIDER_DOCUMENT_ID = "provider-document-private-44";
 const PROVIDER_DRAFT_ID = "provider-draft-private-55";
 const APPROVAL_DIGEST = "d".repeat(64);
 const APPROVAL_CHALLENGE =
@@ -270,7 +272,7 @@ test("prepare validation rejects unsupported, arbitrary, and provider-shaped fie
       value.operations[4].input.fields = { dateOfLoss: "2026-04-25" };
     },
     (value) => {
-      value.operations[0].type = "gmail.send";
+      value.operations[0].type = "gmail.send_carrier_now";
     }
   ]) {
     const input = prepareFixture();
@@ -1049,19 +1051,6 @@ test("expanded work-file actions translate opaque references and project exact r
         }
       },
       {
-        type: "gmail.create_draft",
-        input: {
-          to: "carrier@example.test",
-          cc: "manager@example.test",
-          subject: "Claim documents",
-          body: "Please review the attached claim documents."
-        }
-      },
-      {
-        type: "gmail.send",
-        input: { draftRef: DRAFT_REF }
-      },
-      {
         type: "quo.send_text",
         input: {
           to: "+12145550100",
@@ -1080,10 +1069,6 @@ test("expanded work-file actions translate opaque references and project exact r
         async resolveProviderEventId({ eventRef }) {
           assert.equal(eventRef, EVENT_REF);
           return PROVIDER_EVENT_ID;
-        },
-        async resolveProviderDraftId({ draftRef }) {
-          assert.equal(draftRef, DRAFT_REF);
-          return PROVIDER_DRAFT_ID;
         }
       }
     );
@@ -1108,23 +1093,6 @@ test("expanded work-file actions translate opaque references and project exact r
           dateStart: startsAt,
           dateEnd: endsAt
         }
-      }
-    },
-    {
-      type: "gmail.create_draft",
-      payload: {
-        query: PROVIDER_JOB_ID,
-        to: "carrier@example.test",
-        cc: "manager@example.test",
-        subject: "Claim documents",
-        body: "Please review the attached claim documents."
-      }
-    },
-    {
-      type: "gmail.send",
-      payload: {
-        query: PROVIDER_JOB_ID,
-        draftId: PROVIDER_DRAFT_ID
       }
     },
     {
@@ -1157,12 +1125,9 @@ test("expanded work-file actions translate opaque references and project exact r
     adjusterPhone: "+12145550102",
     adjusterEmail: "private-adjuster@example.test"
   };
-  const body =
-    "This reviewed draft is the immutable message that will be sent.";
-  const bodyBytes = Buffer.byteLength(body, "utf8");
   const engineDryRun = {
     mode: "dry_run",
-    operationCount: 5,
+    operationCount: 3,
     operations: [
       {
         type: "jobnimbus.create_calendar_event",
@@ -1212,84 +1177,6 @@ test("expanded work-file actions translate opaque references and project exact r
         }
       },
       {
-        type: "gmail.create_draft",
-        plan: {
-          mode: "dry_run",
-          plan: {
-            endpoint: "/gmail/v1/users/me/drafts",
-            fileScope,
-            to: "carrier@example.test",
-            cc: "manager@example.test",
-            bcc: "",
-            subject: "Claim documents",
-            body: "Please review the attached claim documents.",
-            bodyTemplate: "custom",
-            threadId: "",
-            attemptId: "initial",
-            attachments: []
-          },
-          approvalDigest: "1".repeat(64)
-        }
-      },
-      {
-        type: "gmail.send",
-        plan: {
-          mode: "dry_run",
-          plan: {
-            endpoint: "/gmail/v1/users/me/messages/send",
-            action: "send_existing_draft",
-            deliveryMode:
-              "immutable_reviewed_snapshot_source_draft_retained",
-            fileScope,
-            draftId: PROVIDER_DRAFT_ID,
-            messageId: "private-message-id",
-            threadId: "private-thread-id",
-            to: "carrier@example.test",
-            cc: "",
-            bcc: "",
-            subject: "Reviewed claim update",
-            deliveryHeaders: {
-              from: "Chance <chance@example.test>",
-              to: "carrier@example.test",
-              subject: "Reviewed claim update"
-            },
-            body,
-            bodyRepresentations: [{
-              partId: "0",
-              mimeType: "text/plain",
-              bytes: bodyBytes,
-              sha256: "2".repeat(64),
-              content: body
-            }],
-            attachments: [{
-              partId: "1",
-              filename: "claim.pdf",
-              mimeType: "application/pdf",
-              disposition: "attachment",
-              bytes: 1200,
-              sha256: "3".repeat(64)
-            }],
-            contentDigest: "4".repeat(64),
-            transmittedHeaders: [
-              "From",
-              "Sender",
-              "Reply-To",
-              "To",
-              "Cc",
-              "Bcc",
-              "Subject",
-              "MIME-Version",
-              "Content-Type"
-            ],
-            omittedOriginalHeaders:
-              "Any original draft header not listed in transmittedHeaders is excluded from the immutable send.",
-            sourceDraftRetention: "retained_for_separate_cleanup"
-          },
-          approvalDigest: "5".repeat(64),
-          instruction: "Nothing was sent."
-        }
-      },
-      {
         type: "quo.send_text",
         plan: {
           mode: "dry_run",
@@ -1317,47 +1204,19 @@ test("expanded work-file actions translate opaque references and project exact r
     engineDryRun,
     fileDisplayLabel: "Selected file"
   });
-  assert.equal(presentation.operationCount, 5);
-  assert.deepEqual(presentation.operations[2].material, {
-    to: "carrier@example.test",
-    cc: "manager@example.test",
-    subject: "Claim documents",
-    body: "Please review the attached claim documents.",
-    attachments: []
-  });
-  assert.deepEqual(presentation.operations[3].material, {
-    draftRef: DRAFT_REF,
-    to: "carrier@example.test",
-    subject: "Reviewed claim update",
-    body,
-    attachments: [{
-      partId: "1",
-      filename: "claim.pdf",
-      mimeType: "application/pdf",
-      disposition: "attachment",
-      bytes: 1200,
-      sha256: "3".repeat(64)
-    }],
-    contentDigest: "4".repeat(64),
-    sourceDraftRetention: "retained_for_separate_cleanup"
-  });
+  assert.equal(presentation.operationCount, 3);
   const serialized = JSON.stringify(presentation);
   for (const privateValue of [
     PROVIDER_JOB_ID,
     PROVIDER_EVENT_ID,
-    PROVIDER_DRAFT_ID,
-    "private-message-id",
-    "private-thread-id",
     "private-owner"
   ]) {
     assert.equal(serialized.includes(privateValue), false);
   }
 
-  for (const operationIndex of [2, 3, 4]) {
+  for (const operationIndex of [2]) {
     const changed = structuredClone(engineDryRun);
-    const scopedFile = operationIndex === 4
-      ? changed.operations[operationIndex].plan.file
-      : changed.operations[operationIndex].plan.plan.fileScope;
+    const scopedFile = changed.operations[operationIndex].plan.file;
     scopedFile.unreviewed = "private";
     assert.throws(
       () => projectHcnBrowserActionDryRun({
@@ -1367,6 +1226,225 @@ test("expanded work-file actions translate opaque references and project exact r
         fileDisplayLabel: "Selected file"
       }),
       contractError(502, "action_engine_contract_drift")
+    );
+  }
+});
+
+test("carrier email binds one JobNimbus attachment and requires a separate opaque-draft approval", async () => {
+  const createInput = {
+    fileRef: FILE_REF,
+    operations: [{
+      type: "gmail.create_draft",
+      input: {
+        insuranceClaimEmail: true,
+        to: "adjuster@example.test",
+        subject: "CLAIM-123456",
+        body: "Please review Patricia's attached supplement.",
+        attachments: [{
+          source: "jobnimbus",
+          documentRef: DOCUMENT_REF
+        }]
+      }
+    }]
+  };
+  const createPrivate = await translateHcnBrowserActionsToPrivateEngineRequest(
+    createInput,
+    {
+      async resolveProviderJobId() {
+        return PROVIDER_JOB_ID;
+      },
+      async resolveProviderDocumentId({ documentRef, providerJobId }) {
+        assert.equal(documentRef, DOCUMENT_REF);
+        assert.equal(providerJobId, PROVIDER_JOB_ID);
+        return PROVIDER_DOCUMENT_ID;
+      }
+    }
+  );
+  assert.deepEqual(createPrivate.operations, [{
+    type: "gmail.create_draft",
+    payload: {
+      query: PROVIDER_JOB_ID,
+      insuranceClaimEmail: true,
+      to: "adjuster@example.test",
+      subject: "CLAIM-123456",
+      body: "Please review Patricia's attached supplement.",
+      attachments: [{
+        source: "jobnimbus",
+        documentQuery: PROVIDER_DOCUMENT_ID
+      }]
+    }
+  }]);
+  const fileScope = {
+    id: PROVIDER_JOB_ID,
+    number: "private-number",
+    name: "private-name"
+  };
+  const createPresentation = projectHcnBrowserActionDryRun({
+    prepareInput: createInput,
+    privateEngineRequest: createPrivate,
+    engineDryRun: {
+      mode: "dry_run",
+      operationCount: 1,
+      operations: [{
+        type: "gmail.create_draft",
+        plan: {
+          mode: "dry_run",
+          plan: {
+            endpoint: "/gmail/v1/users/me/drafts",
+            fileScope,
+            to: "adjuster@example.test",
+            cc: "",
+            bcc: "",
+            subject: "CLAIM-123456",
+            body: "Please review Patricia's attached supplement.",
+            bodyTemplate: "custom",
+            threadId: "",
+            attemptId: "initial",
+            attachments: [{
+              filename: "Patricia Supplement.pdf",
+              contentType: "application/pdf",
+              bytes: 1200,
+              sha256: "1".repeat(64),
+              source: "jobnimbus",
+              sourceId: PROVIDER_DOCUMENT_ID,
+              sourceFileId: PROVIDER_JOB_ID,
+              sourceFile: fileScope
+            }]
+          },
+          approvalDigest: "2".repeat(64)
+        }
+      }],
+      approvalDigest: APPROVAL_DIGEST,
+      approvalChallenge: APPROVAL_CHALLENGE,
+      approvalExpiresAt: APPROVAL_EXPIRES_AT
+    },
+    fileDisplayLabel: "Patricia file"
+  });
+  assert.deepEqual(createPresentation.operations[0].material, {
+    insuranceClaimEmail: true,
+    to: "adjuster@example.test",
+    subject: "CLAIM-123456",
+    body: "Please review Patricia's attached supplement.",
+    attachments: [{
+      source: "jobnimbus",
+      documentRef: DOCUMENT_REF,
+      filename: "Patricia Supplement.pdf",
+      contentType: "application/pdf",
+      bytes: 1200,
+      sha256: "1".repeat(64)
+    }]
+  });
+  assert.doesNotMatch(
+    JSON.stringify(createPresentation),
+    /provider-(?:job|document)-private/
+  );
+
+  const sendInput = {
+    fileRef: FILE_REF,
+    operations: [{
+      type: "gmail.send_existing_draft",
+      input: { draftRef: DRAFT_REF }
+    }]
+  };
+  const sendPrivate = await translateHcnBrowserActionsToPrivateEngineRequest(
+    sendInput,
+    {
+      async resolveProviderJobId() {
+        return PROVIDER_JOB_ID;
+      },
+      async resolveProviderDraftId({ draftRef }) {
+        assert.equal(draftRef, DRAFT_REF);
+        return PROVIDER_DRAFT_ID;
+      }
+    }
+  );
+  const body = "Please review Patricia's attached supplement.";
+  const sendPresentation = projectHcnBrowserActionDryRun({
+    prepareInput: sendInput,
+    privateEngineRequest: sendPrivate,
+    engineDryRun: {
+      mode: "dry_run",
+      operationCount: 1,
+      operations: [{
+        type: "gmail.send_existing_draft",
+        plan: {
+          mode: "dry_run",
+          plan: {
+            endpoint: "/gmail/v1/users/me/messages/send",
+            action: "send_existing_draft",
+            deliveryMode:
+              "immutable_reviewed_snapshot_source_draft_retained",
+            fileScope,
+            draftId: PROVIDER_DRAFT_ID,
+            messageId: "private-message-id",
+            threadId: "private-thread-id",
+            to: "adjuster@example.test",
+            cc: "",
+            bcc: "",
+            subject: "CLAIM-123456",
+            deliveryHeaders: {
+              to: "adjuster@example.test",
+              subject: "CLAIM-123456"
+            },
+            body,
+            bodyRepresentations: [{
+              partId: "0",
+              mimeType: "text/plain",
+              bytes: Buffer.byteLength(body, "utf8"),
+              sha256: "3".repeat(64),
+              content: body
+            }],
+            attachments: [{
+              partId: "1",
+              filename: "Patricia Supplement.pdf",
+              mimeType: "application/pdf",
+              disposition: "attachment",
+              bytes: 1200,
+              sha256: "1".repeat(64)
+            }],
+            contentDigest: "4".repeat(64),
+            transmittedHeaders: [
+              "From", "Sender", "Reply-To", "To", "Cc", "Bcc",
+              "Subject", "MIME-Version", "Content-Type"
+            ],
+            omittedOriginalHeaders:
+              "Any original draft header not listed in transmittedHeaders is excluded from the immutable send.",
+            sourceDraftRetention: "retained_for_separate_cleanup"
+          },
+          approvalDigest: "5".repeat(64),
+          instruction: "Nothing was sent."
+        }
+      }],
+      approvalDigest: APPROVAL_DIGEST,
+      approvalChallenge: APPROVAL_CHALLENGE,
+      approvalExpiresAt: APPROVAL_EXPIRES_AT
+    },
+    fileDisplayLabel: "Patricia file"
+  });
+  assert.equal(
+    sendPresentation.operations[0].material.providerSnapshotVerified,
+    true
+  );
+  assert.equal(sendPresentation.operations[0].material.draftRef, DRAFT_REF);
+  assert.equal(sendPresentation.operations[0].material.attachments.length, 1);
+  assert.doesNotMatch(
+    JSON.stringify(sendPresentation),
+    /provider-draft-private|private-message-id|private-thread-id/
+  );
+
+  for (const operations of [
+    [
+      createInput.operations[0],
+      { type: "jobnimbus.create_note", input: { note: "Do not batch." } }
+    ],
+    [
+      sendInput.operations[0],
+      { type: "jobnimbus.create_note", input: { note: "Do not batch." } }
+    ]
+  ]) {
+    assert.throws(
+      () => validateHcnBrowserActionPrepareInput({ fileRef: FILE_REF, operations }),
+      contractError(400, "invalid_gmail_batch")
     );
   }
 });
@@ -1393,23 +1471,44 @@ test("expanded contracts reject unsafe dates, draft ids, recipients, and oversiz
       }
     },
     {
-      type: "gmail.send",
+      type: "gmail.send_existing_draft",
       input: { draftRef: PROVIDER_DRAFT_ID }
     },
     {
       type: "gmail.create_draft",
       input: {
+        insuranceClaimEmail: true,
         to: "carrier@example.test\r\nBcc: attacker@example.test",
         subject: "Claim",
-        body: "Exact body"
+        body: "Exact body",
+        attachments: [{ source: "jobnimbus", documentRef: DOCUMENT_REF }]
       }
     },
     {
       type: "gmail.create_draft",
       input: {
+        insuranceClaimEmail: true,
         to: "carrier@example.test",
         subject: "Claim\u0001hidden",
-        body: "Exact body"
+        body: "Exact body",
+        attachments: [{ source: "jobnimbus", documentRef: DOCUMENT_REF }]
+      }
+    },
+    {
+      type: "gmail.create_draft",
+      input: {
+        insuranceClaimEmail: true,
+        to: "carrier@example.test",
+        subject: "Claim",
+        body: "Exact body",
+        attachments: []
+      }
+    },
+    {
+      type: "gmail.send_existing_draft",
+      input: {
+        draftRef: DRAFT_REF,
+        to: "carrier@example.test"
       }
     },
     {
@@ -1445,7 +1544,7 @@ test("expanded contracts reject unsafe dates, draft ids, recipients, and oversiz
     translateHcnBrowserActionsToPrivateEngineRequest({
       fileRef: FILE_REF,
       operations: [{
-        type: "gmail.send",
+        type: "gmail.send_existing_draft",
         input: { draftRef: DRAFT_REF }
       }]
     }, {

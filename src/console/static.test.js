@@ -1598,6 +1598,10 @@ test("exact-file claim filing is pilot-hidden, approval-gated, and provider-opaq
   assert.match(script, /Do not retry automatically/);
   assert.match(script, /model analyzed; human confirmation required/);
   assert.match(script, /Fresh exact-field readback required: Yes/);
+  assert.match(
+    script,
+    /"Carrier call identity",\s*\.\.\.claimObjectLines\(review\.callerIdentity\)/
+  );
   assert.doesNotMatch(
     script,
     /(?:Writeback authorized|Transcript guesses|Callback requested)[^"\n]* \? /

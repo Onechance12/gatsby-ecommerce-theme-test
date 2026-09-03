@@ -18,6 +18,7 @@ import {
 const FILE_REF = `subject_${"a".repeat(32)}`;
 const CONVERSATION_REF = `conversation_${"b".repeat(32)}`;
 const PRINCIPAL_REF = `principal_${"c".repeat(64)}`;
+const PLAN_ID = `plan_${"1".repeat(32)}`;
 const FIELD_MAPPING = parseHcnClaimWritebackMapping(JSON.stringify({
   version: "hcn.jobnimbus.claim-fields.v1",
   verified: true,
@@ -273,6 +274,7 @@ test("result review uses only server-built terminal call evidence and labels mod
   );
   const evidence = claimEvidence();
   const review = projectHcnClaimResult(evidence);
+  assert.equal(review.planId, PLAN_ID);
   assert.deepEqual(review.modelAnalyzedSuggestions.claimNumber, {
     value: "CONFIRMED-1",
     provenance: "retell_post_call_model",
@@ -420,6 +422,10 @@ test("claim normalization, adjusted values, and status advancement are exact", (
 
 test("missing or partial terminal receipts cannot create trusted call evidence", () => {
   assert.throws(
+    () => claimEvidence({ receiptOverrides: { planId: "plan_wrong" } }),
+    { code: "terminal_receipt_mismatch", statusCode: 409 }
+  );
+  assert.throws(
     () => claimEvidence({ receiptOverrides: { unknownCount: 1 } }),
     { code: "terminal_receipt_mismatch", statusCode: 409 }
   );
@@ -481,8 +487,10 @@ function claimEvidence({
   return createHcnServerClaimEvidence({
     callRef: `claim_call_${"e".repeat(32)}`,
     fileRef: FILE_REF,
+    callPlanId: PLAN_ID,
     planDigest,
     terminalReceipt: {
+      planId: PLAN_ID,
       fileRef: FILE_REF,
       digest: planDigest,
       batchRef: `batch_${"f".repeat(32)}`,

@@ -25,6 +25,16 @@ const JOBROLO_CLAIM_SHARED_SECRET =
 const JOBROLO_GENERAL_CLIENT_ID = "jobrolo-general-http-fixture";
 const JOBROLO_GENERAL_SHARED_SECRET =
   "jobrolo-general-http-fixture-secret-123456789";
+const SECOND_JOBROLO_CLAIM_CLIENT_ID =
+  "jobrolo-claim-filing-second-pa-http";
+const SECOND_JOBROLO_CLAIM_SHARED_SECRET =
+  "jobrolo-claim-filing-second-pa-http-secret-123456789";
+const SECOND_JOBROLO_EMAIL = "second.adjuster@wavepa.com";
+const SECOND_JOBROLO_SUBJECT = "second-adjuster-google-subject";
+const SECOND_JOBROLO_OWNER_ID = "second-adjuster-jobnimbus-owner";
+const UNREGISTERED_PILOT_EMAIL = "unregistered.pilot@wavepa.com";
+const UNREGISTERED_PILOT_SUBJECT = "unregistered-pilot-google-subject";
+const UNREGISTERED_PILOT_OWNER_ID = "unregistered-pilot-jobnimbus-owner";
 const CONFIRMATIONS = Object.freeze({
   damageOpening: "Hail damaged the roof and exterior soft metals.",
   damageDetails: ["roof hail damage", "gutter dents"],
@@ -68,6 +78,62 @@ test("non-pilot employee is denied by the dedicated claim preparation route", as
     /not enabled for the internal claim-filing pilot/i
   );
   assert.deepEqual(fixture.providerMutations, []);
+});
+
+test("browser pilot resolves its exact registered PA caller profile", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: true,
+    jobroloClaim: true,
+    jobroloSecondClaim: true
+  });
+  const session = await loginAndCreateFileChat(fixture);
+  const response = await postHcn(
+    fixture,
+    session,
+    "/hcn/api/v1/claim-filings/prepare",
+    {
+      conversationRef: session.fileConversationRef,
+      fileRef: session.fileRef,
+      confirmations: CONFIRMATIONS
+    }
+  );
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  const body = JSON.parse(text);
+  assert.equal(body.review.ready, true);
+  assert.deepEqual(body.review.callerIdentity, {
+    authority: "server_bound_approved_call_plan",
+    publicAdjusterName: "Second Adjuster",
+    licenseJurisdiction: "Texas",
+    licenseNumber: "PA-20002",
+    firmName: "Wave Public Adjusting",
+    officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+    officePhone: "+19725550111",
+    email: SECOND_JOBROLO_EMAIL,
+    queueCallbackPhone: "+18175550112"
+  });
+});
+
+test("browser pilot without an exact caller profile fails before approval", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: true,
+    unregisteredBrowserPilot: true
+  });
+  const session = await loginAndCreateFileChat(fixture);
+  const response = await postHcn(
+    fixture,
+    session,
+    "/hcn/api/v1/claim-filings/prepare",
+    {
+      conversationRef: session.fileConversationRef,
+      fileRef: session.fileRef,
+      confirmations: CONFIRMATIONS
+    }
+  );
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.match(body.error, /exact server-owned claim caller profile/i);
+  assert.equal(fixture.retellCalls.length, 0);
 });
 
 test("claim preparation is exact-file, missing-fact, assignment, and stale-plan fail closed", async (t) => {
@@ -297,7 +363,9 @@ test("approved call is single-use, opaque, result-only, and blocks new preparati
     resultInput
   );
   assert.equal(pendingResultResponse.status, 200);
-  assert.equal((await pendingResultResponse.json()).result.terminal, false);
+  const pendingResult = await pendingResultResponse.json();
+  assert.equal(pendingResult.result.terminal, false);
+  assert.equal(pendingResult.result.planId, prepared.plan.planId);
 
   fixture.retellCalls[0].call_status = "ended";
   fixture.retellCalls[0].call_analysis = {
@@ -317,6 +385,7 @@ test("approved call is single-use, opaque, result-only, and blocks new preparati
   const terminalResult = await terminalResultResponse.json();
   assert.equal(terminalResult.result.humanConfirmationRequired, true);
   assert.equal(terminalResult.result.writebackEligible, false);
+  assert.equal(terminalResult.result.planId, prepared.plan.planId);
   assert.equal(
     terminalResult.result.modelAnalyzedSuggestions.claimNumber.humanConfirmed,
     false
@@ -1127,6 +1196,18 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
   );
   assert.equal(prepared.response.status, 200, prepared.text);
   assert.equal(prepared.body.result.review.ready, true);
+  assert.deepEqual(prepared.body.result.review.callerIdentity, {
+    authority: "server_bound_approved_call_plan",
+    publicAdjusterName: "Chance Pearson",
+    licenseJurisdiction: "Texas",
+    licenseNumber: "3351885",
+    firmName: "Wave Public Adjusting",
+    officeAddress:
+      "3500 Oak Lawn Avenue, Suite 460C, Dallas, Texas 75219",
+    officePhone: "+19725731730",
+    email: "cpearson@wavepa.com",
+    queueCallbackPhone: "+18176867361"
+  });
   assert.match(prepared.body.result.plan.planId, /^plan_[a-f0-9]{32}$/);
 
   const executed = await signedJobroloClaimPost(
@@ -1147,6 +1228,23 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
   assert.match(executed.body.result.callRef, /^claim_call_[a-f0-9]{32}$/);
   assert.equal(fixture.retellCalls.length, 1);
 
+  const pendingResult = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/result",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      callRef: executed.body.result.callRef
+    },
+    "4"
+  );
+  assert.equal(pendingResult.response.status, 200, pendingResult.text);
+  assert.equal(pendingResult.body.result.result.terminal, false);
+  assert.equal(
+    pendingResult.body.result.result.planId,
+    prepared.body.result.plan.planId
+  );
+
   fixture.retellCalls[0].call_status = "ended";
   fixture.retellCalls[0].transcript =
     "The carrier confirmed claim number JOBROLO-CLAIM-1 and the assigned adjuster.";
@@ -1165,11 +1263,15 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
       planId: prepared.body.result.plan.planId,
       callRef: executed.body.result.callRef
     },
-    "4"
+    "5"
   );
   assert.equal(result.response.status, 200, result.text);
   assert.equal(result.body.result.result.callStatus, "ended");
   assert.equal(result.body.result.result.humanConfirmationRequired, true);
+  assert.equal(
+    result.body.result.result.planId,
+    prepared.body.result.plan.planId
+  );
 
   const writebackPrepared = await signedJobroloClaimPost(
     fixture,
@@ -1188,7 +1290,7 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
         adjusterEmail: ""
       }
     },
-    "5"
+    "6"
   );
   assert.equal(
     writebackPrepared.response.status,
@@ -1209,7 +1311,7 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
         "writeback"
       )
     },
-    "6"
+    "7"
   );
   assert.equal(
     writebackExecuted.response.status,
@@ -1219,6 +1321,315 @@ test("dedicated signed Jobrolo profile reuses the full two-approval claim workfl
   assert.equal(writebackExecuted.body.result.verifiedByReadback, true);
   assert.equal(fixture.contact.cf_string_10, "JOBROLO-CLAIM-1");
   assert.equal(fixture.activities.length, 1);
+});
+
+test("additional PA claim profile stays assigned-file and caller-identity isolated", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: false,
+    callsEnabled: true,
+    jobroloClaim: true,
+    jobroloSecondClaim: true
+  });
+  const references = createHcnReferenceFactory({
+    hmacKey: Buffer.from(REFERENCE_KEY, "base64url"),
+    tenantId: TENANT_ID
+  });
+  const fileRef = references.subjectId(
+    "jobnimbus",
+    "claim-file-provider-id"
+  );
+  const credentials = {
+    clientId: SECOND_JOBROLO_CLAIM_CLIENT_ID,
+    secret: SECOND_JOBROLO_CLAIM_SHARED_SECRET,
+    sessionRef: "session_22222222222222222222222222222222"
+  };
+  const status = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "1",
+    credentials
+  );
+  assert.equal(status.response.status, 200, status.text);
+  assert.equal(status.body.result.eligible, true);
+
+  const prepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "2",
+    credentials
+  );
+  assert.equal(prepared.response.status, 200, prepared.text);
+  assert.equal(prepared.body.result.review.ready, true);
+  assert.deepEqual(prepared.body.result.review.callerIdentity, {
+    authority: "server_bound_approved_call_plan",
+    publicAdjusterName: "Second Adjuster",
+    licenseJurisdiction: "Texas",
+    licenseNumber: "PA-20002",
+    firmName: "Wave Public Adjusting",
+    officeAddress: "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+    officePhone: "+19725550111",
+    email: SECOND_JOBROLO_EMAIL,
+    queueCallbackPhone: "+18175550112"
+  });
+  const {
+    authority: callerIdentityAuthority,
+    ...reviewedCallerIdentity
+  } = prepared.body.result.review.callerIdentity;
+  assert.equal(
+    callerIdentityAuthority,
+    "server_bound_approved_call_plan"
+  );
+  const executed = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        prepared.body.result.plan.planId,
+        prepared.body.result.review.planDigest,
+        "second"
+      )
+    },
+    "3",
+    credentials
+  );
+  assert.equal(executed.response.status, 200, executed.text);
+  assert.equal(fixture.retellCalls.length, 1);
+  const variables = fixture.retellCalls[0].retell_llm_dynamic_variables;
+  assert.deepEqual(
+    {
+      name: variables.publicAdjusterName,
+      license: variables.licenseNumber,
+      email: variables.publicAdjusterEmail,
+      officePhone: variables.officePhone,
+      queuePhone: variables.queueCallbackPhone
+    },
+    {
+      name: "Second Adjuster",
+      license: "PA-20002",
+      email: SECOND_JOBROLO_EMAIL,
+      officePhone: "+19725550111",
+      queuePhone: "+18175550112"
+    }
+  );
+  assert.deepEqual(
+    {
+      publicAdjusterName: variables.publicAdjusterName,
+      licenseJurisdiction: variables.licenseJurisdiction,
+      licenseNumber: variables.licenseNumber,
+      firmName: variables.firmName,
+      officeAddress: variables.officeAddress,
+      officePhone: variables.officePhone,
+      email: variables.publicAdjusterEmail,
+      queueCallbackPhone: variables.queueCallbackPhone
+    },
+    reviewedCallerIdentity
+  );
+  assert.equal(
+    Object.values(variables).some((value) =>
+      /Chance Pearson|cpearson@wavepa\.com|3351885/.test(String(value))
+    ),
+    false
+  );
+
+  const wrongPrincipal = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/status",
+    { fileRef },
+    "4"
+  );
+  assert.equal(wrongPrincipal.response.status, 403, wrongPrincipal.text);
+});
+
+test("inbound callbacks resolve one active PA queue and never load another owner's case", async (t) => {
+  const fixture = await startFixture(t, {
+    pilot: false,
+    callsEnabled: true,
+    jobroloClaim: true,
+    jobroloSecondClaim: true
+  });
+  const references = createHcnReferenceFactory({
+    hmacKey: Buffer.from(REFERENCE_KEY, "base64url"),
+    tenantId: TENANT_ID
+  });
+  const fileRef = references.subjectId(
+    "jobnimbus",
+    "claim-file-provider-id"
+  );
+  const credentials = {
+    clientId: SECOND_JOBROLO_CLAIM_CLIENT_ID,
+    secret: SECOND_JOBROLO_CLAIM_SHARED_SECRET,
+    sessionRef: "session_33333333333333333333333333333333"
+  };
+  const prepared = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/prepare",
+    { fileRef, confirmations: CONFIRMATIONS },
+    "5",
+    credentials
+  );
+  assert.equal(prepared.response.status, 200, prepared.text);
+  const executed = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/execute",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      approval: jobroloApproval(
+        prepared.body.result.plan.planId,
+        prepared.body.result.review.planDigest,
+        "callback"
+      )
+    },
+    "6",
+    credentials
+  );
+  assert.equal(executed.response.status, 200, executed.text);
+  assert.equal(fixture.retellCalls.length, 1);
+  const secondOutbound = fixture.retellCalls[0];
+  secondOutbound.call_status = "ended";
+  secondOutbound.to_number = "+18007328300";
+  secondOutbound.start_timestamp = Date.now();
+  secondOutbound.transcript =
+    "Your request for a callback has been confirmed.";
+  fixture.retellCalls.push({
+    ...structuredClone(secondOutbound),
+    call_id: "foreign-owner-pending-callback",
+    metadata: {
+      ...secondOutbound.metadata,
+      ownerId: OWNER_ID,
+      contactId: "foreign-owner-file"
+    },
+    retell_llm_dynamic_variables: {
+      ...secondOutbound.retell_llm_dynamic_variables,
+      insuredName: "Foreign Owner Client",
+      propertyAddress: "999 Foreign Owner Street",
+      publicAdjusterName: "Chance Pearson",
+      licenseJurisdiction: "Texas",
+      licenseNumber: "3351885",
+      firmName: "Wave Public Adjusting",
+      officeAddress:
+        "3500 Oak Lawn Avenue, Suite 460C, Dallas, Texas 75219",
+      officePhone: "+19725731730",
+      publicAdjusterEmail: "cpearson@wavepa.com",
+      queueCallbackPhone: "+18176867361",
+      queueCallbackDigits: "8 1 7 6 8 6 7 3 6 1"
+    }
+  });
+
+  const inbound = await fetch(
+    `${fixture.bridgeOrigin}/retell/inbound?token=retell-inbound-claim-test`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        event: "call_inbound",
+        call_inbound: {
+          from_number: secondOutbound.to_number,
+          to_number: "+18175550112"
+        }
+      })
+    }
+  );
+  const inboundText = await inbound.text();
+  assert.equal(inbound.status, 200, inboundText);
+  const inboundBody = JSON.parse(inboundText);
+  assert.equal(
+    inboundBody.call_inbound.metadata.ownerId,
+    SECOND_JOBROLO_OWNER_ID
+  );
+  assert.equal(
+    inboundBody.call_inbound.metadata.originalCallId,
+    secondOutbound.call_id
+  );
+  assert.equal(
+    inboundBody.call_inbound.metadata.hcnCallRef,
+    executed.body.result.callRef
+  );
+  assert.equal(inboundBody.call_inbound.metadata.hcnFileRef, fileRef);
+  assert.equal(
+    inboundBody.call_inbound.metadata.hcnApprovalDigest,
+    prepared.body.result.review.planDigest
+  );
+  assert.equal(
+    inboundBody.call_inbound.dynamic_variables.publicAdjusterName,
+    "Second Adjuster"
+  );
+  assert.doesNotMatch(
+    JSON.stringify(inboundBody),
+    /Foreign Owner Client|999 Foreign Owner Street|Chance Pearson|3351885|cpearson@wavepa\.com/
+  );
+
+  fixture.retellCalls.push({
+    call_id: "retell-provider-inbound-callback-1",
+    call_status: "ended",
+    direction: "inbound",
+    metadata: inboundBody.call_inbound.metadata,
+    retell_llm_dynamic_variables:
+      inboundBody.call_inbound.dynamic_variables,
+    transcript:
+      "The carrier callback completed the filing as claim CALLBACK-200.",
+    call_analysis: {
+      custom_analysis_data: {
+        filing_outcome: "claim_filed",
+        claim_number: "CALLBACK-200",
+        adjuster_name: "Callback Adjuster"
+      }
+    }
+  });
+  const result = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/result",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      callRef: executed.body.result.callRef
+    },
+    "7",
+    credentials
+  );
+  assert.equal(result.response.status, 200, result.text);
+  assert.equal(
+    result.body.result.result.modelAnalyzedSuggestions.claimNumber.value,
+    "CALLBACK-200"
+  );
+  fixture.retellCalls.push({
+    ...structuredClone(fixture.retellCalls.at(-1)),
+    call_id: "retell-provider-ambiguous-inbound-callback"
+  });
+  const ambiguousResult = await signedJobroloClaimPost(
+    fixture,
+    "/integrations/jobrolo/v1/claim-filings/result",
+    {
+      fileRef,
+      planId: prepared.body.result.plan.planId,
+      callRef: executed.body.result.callRef
+    },
+    "8",
+    credentials
+  );
+  assert.equal(ambiguousResult.response.status, 409, ambiguousResult.text);
+
+  const listCount = fixture.retellListRequests.length;
+  const unknownQueue = await fetch(
+    `${fixture.bridgeOrigin}/retell/inbound?token=retell-inbound-claim-test`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        event: "call_inbound",
+        call_inbound: {
+          from_number: secondOutbound.to_number,
+          to_number: "+18175559999"
+        }
+      })
+    }
+  );
+  assert.equal(unknownQueue.status, 403);
+  assert.equal(fixture.retellListRequests.length, listCount);
 });
 
 async function prepareTerminalClaim(
@@ -1281,6 +1692,8 @@ async function startFixture(t, {
   writesEnabled = false,
   fieldMapping = false,
   jobroloClaim = false,
+  jobroloSecondClaim = false,
+  unregisteredBrowserPilot = false,
   legacyInterruptedBrowserClaim = false
 }) {
   const temporaryRoot = await realpath(await mkdtemp(
@@ -1298,11 +1711,34 @@ async function startFixture(t, {
     allowedDomain: "",
     now: () => invitationTimestamp
   });
+  if (jobroloSecondClaim && unregisteredBrowserPilot) {
+    throw new Error("The claim fixture cannot select two browser principals.");
+  }
+  const invitedEmail = jobroloSecondClaim
+    ? SECOND_JOBROLO_EMAIL
+    : unregisteredBrowserPilot
+      ? UNREGISTERED_PILOT_EMAIL
+      : EMAIL;
+  const invitedName = jobroloSecondClaim
+    ? "Second Adjuster"
+    : unregisteredBrowserPilot
+      ? "Unregistered Adjuster"
+      : "Chance Pearson";
+  const invitedSubject = jobroloSecondClaim
+    ? SECOND_JOBROLO_SUBJECT
+    : unregisteredBrowserPilot
+      ? UNREGISTERED_PILOT_SUBJECT
+      : SUBJECT;
+  const invitedOwnerId = jobroloSecondClaim
+    ? SECOND_JOBROLO_OWNER_ID
+    : unregisteredBrowserPilot
+      ? UNREGISTERED_PILOT_OWNER_ID
+      : OWNER_ID;
   const invitation = await invitationStore.createInvitation({
-    email: EMAIL,
-    displayName: "Claim Pilot",
+    email: invitedEmail,
+    displayName: invitedName,
     role: "employee",
-    jobNimbusOwnerId: OWNER_ID,
+    jobNimbusOwnerId: invitedOwnerId,
     jobNimbusScope: "assigned",
     invitedByRef: `principal_${"a".repeat(64)}`,
     expiresAt: new Date(
@@ -1311,8 +1747,8 @@ async function startFixture(t, {
   });
   await invitationStore.acceptInvitation({
     invitationRef: invitation.invitationRef,
-    email: EMAIL,
-    googleSubject: SUBJECT,
+    email: invitedEmail,
+    googleSubject: invitedSubject,
     inviteToken: invitation.inviteToken
   });
 
@@ -1364,11 +1800,14 @@ async function startFixture(t, {
   const writebackState = { applyContactWrites: true };
   const fixedJobroloEmail = EMAIL;
   const fixedJobroloSubject = SUBJECT;
+  const activeOwnerId = invitedOwnerId;
+  const activeJobroloEmail = invitedEmail;
+  const activeJobroloName = invitedName;
   const contact = {
     jnid: "claim-file-provider-id",
     number: 3010,
     record_type_name: "Insurance",
-    owners: [{ id: OWNER_ID }],
+    owners: [{ id: activeOwnerId }],
     display_name: "Claim Filing Fixture",
     status_name: "Ready for PA Review",
     stage_name: "Estimating",
@@ -1405,20 +1844,20 @@ async function startFixture(t, {
     }
     if (url.pathname === "/userinfo" && req.method === "GET") {
       return json(res, 200, {
-        sub: SUBJECT,
-        email: EMAIL,
+        sub: invitedSubject,
+        email: invitedEmail,
         email_verified: true,
         hd: "wavepa.com",
-        name: "Claim Pilot"
+        name: invitedName
       });
     }
     if (url.pathname === "/account/users" && req.method === "GET") {
       return json(res, 200, {
         total: 1,
         users: [{
-          jnid: OWNER_ID,
-          email: jobroloClaim ? fixedJobroloEmail : EMAIL,
-          display_name: jobroloClaim ? "Chance Pearson" : "Claim Pilot",
+          jnid: activeOwnerId,
+          email: activeJobroloEmail,
+          display_name: activeJobroloName,
           is_active: true
         }]
       });
@@ -1567,15 +2006,24 @@ async function startFixture(t, {
       GOOGLE_OAUTH_ALLOWED_DOMAIN: "wavepa.com",
       HCN_GOOGLE_LOGIN_ALLOWED_DOMAIN: "wavepa.com",
       OAUTH_SESSION_SECRET: "hcn-claim-pilot-session-sealing-secret-12345",
-      WAVE_AUTH_USERS_JSON: "[]",
+      WAVE_AUTH_USERS_JSON: jobroloSecondClaim
+        ? JSON.stringify([{
+            email: SECOND_JOBROLO_EMAIL,
+            name: "Second Adjuster",
+            role: "employee",
+            googleSubject: SECOND_JOBROLO_SUBJECT,
+            jobNimbusOwnerId: SECOND_JOBROLO_OWNER_ID,
+            jobNimbusScope: "assigned"
+          }])
+        : "[]",
       JOBNIMBUS_API_KEY: "hcn-claim-pilot-jobnimbus-key",
       JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${provider.address().port}`,
       JOBNIMBUS_BRIDGE_TOKEN: "",
       CODEX_OPERATOR_TOKEN: "",
+      CHANCE_GOOGLE_EMAIL: fixedJobroloEmail,
+      CHANCE_GOOGLE_SUBJECT: fixedJobroloSubject,
+      CHANCE_JOBNIMBUS_OWNER_ID: OWNER_ID,
       ...(jobroloClaim ? {
-        CHANCE_GOOGLE_EMAIL: fixedJobroloEmail,
-        CHANCE_GOOGLE_SUBJECT: fixedJobroloSubject,
-        CHANCE_JOBNIMBUS_OWNER_ID: OWNER_ID,
         HCN_JOBROLO_ADAPTER_ENABLED: "true",
         HCN_JOBROLO_CLIENT_ID: JOBROLO_GENERAL_CLIENT_ID,
         HCN_JOBROLO_SHARED_SECRET: JOBROLO_GENERAL_SHARED_SECRET,
@@ -1584,17 +2032,45 @@ async function startFixture(t, {
         HCN_JOBROLO_CLAIM_FILING_CLIENT_ID: JOBROLO_CLAIM_CLIENT_ID,
         HCN_JOBROLO_CLAIM_FILING_SHARED_SECRET:
           JOBROLO_CLAIM_SHARED_SECRET,
-        HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL: fixedJobroloEmail
+        HCN_JOBROLO_CLAIM_FILING_PRINCIPAL_EMAIL: fixedJobroloEmail,
+        ...(jobroloSecondClaim ? {
+          HCN_JOBROLO_CLAIM_FILING_ADDITIONAL_PROFILES_JSON:
+            JSON.stringify({
+              schema: "hcn.jobrolo.claim-filing-profiles.v1",
+              profiles: [{
+                clientId: SECOND_JOBROLO_CLAIM_CLIENT_ID,
+                sharedSecret: SECOND_JOBROLO_CLAIM_SHARED_SECRET,
+                principalEmail: SECOND_JOBROLO_EMAIL,
+                publicAdjusterName: "Second Adjuster",
+                licenseJurisdiction: "Texas",
+                licenseNumber: "PA-20002",
+                firmName: "Wave Public Adjusting",
+                officeAddress:
+                  "3500 Oak Lawn Avenue, Dallas, Texas 75219",
+                officePhone: "+19725550111",
+                email: SECOND_JOBROLO_EMAIL,
+                queueCallbackPhone: "+18175550112"
+              }]
+            })
+        } : {})
       } : {}),
       RETELL_AGENT_ID: "agent_claim_pilot_fixture",
       RETELL_FROM_NUMBER: "+19725550100",
       RETELL_API_BASE_URL:
         `http://127.0.0.1:${provider.address().port}`,
+      RETELL_INBOUND_WEBHOOK_TOKEN: "retell-inbound-claim-test",
       RETELL_API_KEY: callsEnabled
         ? "retell_claim_test_key"
         : "",
       HCN_CLAIM_FILING_PILOT_SUBJECTS_JSON: pilot
-        ? JSON.stringify([SUBJECT, SECOND_PILOT_SUBJECT])
+        ? JSON.stringify([
+            SUBJECT,
+            jobroloSecondClaim
+              ? SECOND_JOBROLO_SUBJECT
+              : unregisteredBrowserPilot
+                ? UNREGISTERED_PILOT_SUBJECT
+                : SECOND_PILOT_SUBJECT
+          ])
         : "[]",
       HCN_JOBNIMBUS_CLAIM_FIELD_MAPPING_JSON: fieldMapping
         ? JSON.stringify({
@@ -1721,7 +2197,9 @@ async function signedJobroloClaimPost(
   input,
   nonceDigit,
   {
-    sessionRef = "session_abcdefabcdefabcdefabcdefabcdefab"
+    sessionRef = "session_abcdefabcdefabcdefabcdefabcdefab",
+    clientId = JOBROLO_CLAIM_CLIENT_ID,
+    secret = JOBROLO_CLAIM_SHARED_SECRET
   } = {}
 ) {
   const body = {
@@ -1733,8 +2211,8 @@ async function signedJobroloClaimPost(
     input
   };
   const headers = signJobroloHcnRequest({
-    clientId: JOBROLO_CLAIM_CLIENT_ID,
-    secret: JOBROLO_CLAIM_SHARED_SECRET,
+    clientId,
+    secret,
     pathname,
     timestamp: Date.now(),
     nonce: `nonce_${nonceDigit.repeat(32)}`,

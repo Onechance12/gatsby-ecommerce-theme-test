@@ -205,6 +205,29 @@ equal `CHANCE_GOOGLE_EMAIL`; the client id and secret must differ from the
 general Jobrolo adapter, the import transport, and every provider, OAuth,
 model, storage, and encryption credential.
 
+Additional PA note-only identities use
+`HCN_JOBROLO_NOTE_WRITEBACK_ADDITIONAL_PROFILES_JSON` with schema
+`hcn.jobrolo.note-writeback-profiles.v1` and exact fields `clientId`,
+`sharedSecret`, and `principalEmail`. Client ids, secrets, and principals are
+unique across the registry and distinct from general, claim-filing, import,
+and provider credentials. Only the singleton variables are the legacy
+Chance bootstrap; additional profiles resolve their own active HCN employee
+and remain limited to exactly one `jobnimbus.create_note` operation.
+
+### Versioned carrier-email facade
+
+`jobrolo.hcn.carrier-email.v1` exposes dedicated status, draft prepare/execute,
+send prepare/execute, and receipt-detail paths below
+`/integrations/jobrolo/v1/carrier-emails/`. The signed general employee
+profile supplies only the active assigned `fileRef`, one opaque JobNimbus
+`documentRef`, and exact body text. HCN freshly resolves the adjuster email,
+claim-number subject, and same-file document. Draft creation and
+`gmail.send_existing_draft` are separate sole-operation plans with separate
+approval attestations. Both require provider readback; send transmits the
+reviewed immutable snapshot, re-reads the Sent message, and proves the source
+draft remains unchanged. Provider ids never cross the facade, and uncertain
+outcomes are durable no-retry receipts.
+
 ## Configuration
 
 HCN requires four dedicated variables:
@@ -221,6 +244,38 @@ The independent import transport requires:
 - `HCN_JOBROLO_IMPORT_SHARED_SECRET`
 - `HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL`
 - `HCN_JOBROLO_IMPORT_CONNECTION_REF`
+- optional `HCN_JOBROLO_IMPORT_ADDITIONAL_PROFILES_JSON` using exact schema
+  `hcn.jobrolo.import-profiles.v1` for additional, distinct server-bound PA
+  principals
+
+Additional general Thresher/Gmail/Quo principals use
+`HCN_JOBROLO_ADDITIONAL_PROFILES_JSON` with exact schema
+`hcn.jobrolo.general-profiles.v1`. Each signed client id resolves to exactly
+one already-approved HCN employee; the request body cannot select an employee,
+owner, mailbox, Quo line, or file scope. Every additional entry has exactly
+`clientId`, `sharedSecret`, `principalEmail`, and `effectMode`. New PAs begin
+with `effectMode: "read_only"`: assigned-file reads remain available, while
+generic action prepare/execute/receipt and carrier draft/send routes fail
+before plan or provider effects. Carrier status and receipt-detail remain
+read-only so an employee can reconcile an earlier uncertain send after an
+effect-mode demotion. Promote only that exact reviewed entry to
+`approved_effects` after its cross-profile isolation canary passes. The legacy
+primary credential retains `approved_effects` behavior for compatibility.
+
+Additional Retell claim callers use the separate exact-schema
+`HCN_JOBROLO_CLAIM_FILING_ADDITIONAL_PROFILES_JSON` registry. Every entry has
+exactly `clientId`, `sharedSecret`, `principalEmail`, `publicAdjusterName`,
+`licenseJurisdiction`, `licenseNumber`, `firmName`, `officeAddress`,
+`officePhone`, `email`, and `queueCallbackPhone`. Client id, secret, HCN
+principal, canonical jurisdiction-plus-license identity, PA email, and callback
+number must be unique across profiles. A verified firm, office address, or
+office phone may be shared by multiple PAs. Those identity facts are
+inserted into the call plan and plan digest server-side; a request cannot
+select or override them. A missing or mismatched caller profile blocks the
+call before Retell. Browser-pilot calls resolve the current authenticated HCN
+employee against this same registry; only the exact configured Chance bootstrap
+identity may use the legacy Chance profile. Any other unregistered pilot fails
+before approval.
 
 Its durable nonce store also requires the isolated `HCN_OPERATIONS_ROOT`.
 Management-report readiness additionally requires the reviewed fixed-adjuster
