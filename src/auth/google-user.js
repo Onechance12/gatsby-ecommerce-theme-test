@@ -2,6 +2,7 @@ import {
   fetchBoundedProviderJson,
   resolveGoogleProviderEndpoint
 } from "./google-provider-http.js";
+import { DOCUMENT_RESEARCH_ROUTES } from "../documents/research-access.js";
 
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
@@ -279,6 +280,13 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (identity.type === "document_research_token") {
+    return identity.subject === "codex-document-research"
+      && identity.role === "document_research"
+      && DOCUMENT_RESEARCH_ROUTES.includes(route);
+  }
+  // Even broad legacy/admin roles may not borrow the separate research grant.
+  if (pathname.startsWith("/document-research/")) return false;
   if (HCN_BROWSER_CHANCE_ONLY_ROUTES.has(route)) {
     return identity.type === "hcn_browser_session" && identity.role === "chance";
   }

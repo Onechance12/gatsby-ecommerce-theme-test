@@ -72,6 +72,9 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { createLorPdf } from "./documents/lor.js";
+import { createDocumentResearchService, DOCUMENT_RESEARCH_ROUTES } from "./documents/research-access.js";
+import { createDocumentResearchProvider } from "./documents/research-provider.js";
+import { getBuildInfo } from "./platform/build-info.js";
 import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } from "./documents/photo-review.js";
 import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
 import { buildCommunicationRecoveryQueue } from "./operations/communication-recovery.js";
@@ -167,6 +170,9 @@ const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
+// Unconfigured by default; independent of every operational credential/gate.
+const DOCUMENT_RESEARCH_TOKEN = process.env.DOCUMENT_RESEARCH_TOKEN || "";
+const DOCUMENT_RESEARCH_API_KEY = process.env.DOCUMENT_RESEARCH_JOBNIMBUS_API_KEY || "";
 const RETELL_GUARDED_END_CALL_TOKEN = process.env.RETELL_GUARDED_END_CALL_TOKEN || "";
 const RETELL_INBOUND_WEBHOOK_TOKEN = process.env.RETELL_INBOUND_WEBHOOK_TOKEN || "";
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
@@ -512,7 +518,8 @@ const ACTION_RECEIPT_RECOVERY_STATE = {
 
 for (const [name, token] of [
   ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
-  ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN]
+  ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+  ["DOCUMENT_RESEARCH_TOKEN", DOCUMENT_RESEARCH_TOKEN]
 ]) {
   if (token && !/^[\x21-\x7E]{32,512}$/.test(token)) {
     throw new Error(`${name} must contain 32 to 512 printable non-space ASCII characters.`);
@@ -548,6 +555,7 @@ const RETELL_BOUNDARY_TOKENS = [
   ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
   ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
   ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+  ["DOCUMENT_RESEARCH_TOKEN", DOCUMENT_RESEARCH_TOKEN],
   ["RETELL_GUARDED_END_CALL_TOKEN", RETELL_GUARDED_END_CALL_TOKEN],
   ["RETELL_INBOUND_WEBHOOK_TOKEN", RETELL_INBOUND_WEBHOOK_TOKEN]
 ].filter(([, token]) => Boolean(token));
@@ -560,6 +568,48 @@ for (let left = 0; left < RETELL_BOUNDARY_TOKENS.length; left += 1) {
     }
   }
 }
+if (DOCUMENT_RESEARCH_TOKEN && VOICE_STREAM_TOKEN && secureEqual(DOCUMENT_RESEARCH_TOKEN, VOICE_STREAM_TOKEN)) {
+  throw new Error("Document research and voice streaming must use distinct credentials.");
+}
+const DOCUMENT_RESEARCH = initializeDocumentResearch();
+
+function initializeDocumentResearch() {
+  const raw = String(process.env.DOCUMENT_RESEARCH_GRANT_JSON || "").trim();
+  if (!raw) return createDocumentResearchService({ grant: null });
+  try {
+    const grant = JSON.parse(raw);
+    if (grant?.enabled === true && (!DOCUMENT_RESEARCH_TOKEN || !DOCUMENT_RESEARCH_API_KEY)) {
+      throw new Error("Missing research credentials.");
+    }
+    const provider = grant?.enabled === true ? createDocumentResearchProvider({
+      apiKey: DOCUMENT_RESEARCH_API_KEY,
+      apiBase: process.env.DOCUMENT_RESEARCH_API_BASE_URL,
+      fileBase: process.env.DOCUMENT_RESEARCH_FILE_BASE_URL,
+      allowLoopbackForTests: process.env.NODE_ENV === "test" && process.env.DOCUMENT_RESEARCH_ALLOW_LOOPBACK_TESTS === "true"
+    }) : undefined;
+    return createDocumentResearchService({ grant, provider });
+  } catch {
+    // A broken optional grant disables research, never the existing operator.
+    // Do not log grant contents or provider credential/configuration values.
+    return createDocumentResearchService({ grant: null });
+  }
+}
+
+function isDocumentResearchBearer(req) {
+  return Boolean(DOCUMENT_RESEARCH_TOKEN && secureEqual(bearerToken(req), DOCUMENT_RESEARCH_TOKEN));
+}
+
+function documentResearchIdentity() {
+  return {
+    type: "document_research_token", subject: "codex-document-research",
+    role: "document_research", scopes: ["documents:inventory_read", "documents:original_read"],
+    jobNimbusScope: "document_research", jobNimbusOwnerId: "", googleAccessToken: "", quoLineId: ""
+  };
+}
+
+function documentResearchSession() {
+  return { ...DOCUMENT_RESEARCH.session(), build: getBuildInfo() };
+}
 if (
   ALLOW_RETELL_CALLS
   && ALLOW_RETELL_CLAIM_CALLS
@@ -569,6 +619,9 @@ if (
 }
 
 const routes = new Map([
+  ["GET /document-research/session", documentResearchSession],
+  ["POST /document-research/inventory", (body) => DOCUMENT_RESEARCH.inventory(body)],
+  ["POST /document-research/original", (body) => DOCUMENT_RESEARCH.original(body)],
   ["GET /health", health],
   ["GET /api/v1/meta", hcnPlatformMeta],
   ["GET /api/v1/session", hcnPlatformSession],
@@ -666,6 +719,12 @@ await initializeOperatorReceiptBoundary();
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
+    // Before OAuth, static assets, public routes and even unknown-route dispatch.
+    // A research bearer can never borrow those earlier unauthenticated lanes.
+    if (isDocumentResearchBearer(req)
+      && (!DOCUMENT_RESEARCH_ROUTES.includes(`${req.method} ${url.pathname}`) || url.search)) {
+      return send(res, 403, { error: "Document research permits only its exact read-only routes." });
+    }
     if (req.method === "GET" && url.pathname === "/oauth/authorize") return oauthAuthorize(res, url);
     if (req.method === "GET" && url.pathname === "/oauth/google/callback") {
       return oauthGoogleCallback(req, res, url);
@@ -711,7 +770,7 @@ const server = createServer(async (req, res) => {
       ? { body: {}, rawBody: Buffer.alloc(0) }
       : await readJsonEnvelope(
           req,
-          url.pathname.startsWith("/hcn/api/")
+          url.pathname.startsWith("/document-research/") ? 4096 : url.pathname.startsWith("/hcn/api/")
             ? hcnApiBodyLimit(url.pathname)
             : MAX_JSON_BODY_BYTES
         );
@@ -786,6 +845,10 @@ const server = createServer(async (req, res) => {
 const voiceWebSocketServer = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+  if (isDocumentResearchBearer(req)) {
+    socket.destroy();
+    return;
+  }
   const url = new URL(req.url || "/", "http://localhost");
   if (url.pathname !== VOICE_STREAM_PATH && !url.pathname.startsWith(`${VOICE_STREAM_PATH}/`)) {
     socket.destroy();
@@ -14996,7 +15059,7 @@ function requireApprovalDigest(provided, expected, label) {
 
 function redactSensitiveText(value) {
   let text = String(value || "");
-  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, RETELL_GUARDED_END_CALL_TOKEN, RETELL_INBOUND_WEBHOOK_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, DOCUMENT_RESEARCH_TOKEN, DOCUMENT_RESEARCH_API_KEY, RETELL_GUARDED_END_CALL_TOKEN, RETELL_INBOUND_WEBHOOK_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
     text = text.split(secret).join("[REDACTED]");
   }
   return text
@@ -15072,6 +15135,7 @@ async function authenticateRequest(req) {
 async function authenticateBearerRequest(req) {
   const token = bearerToken(req);
   if (!token) return null;
+  if (isDocumentResearchBearer(req)) return documentResearchIdentity();
   if (RETELL_GUARDED_END_CALL_TOKEN && secureEqual(token, RETELL_GUARDED_END_CALL_TOKEN)) {
     return {
       type: "retell_guarded_end_token",
@@ -15570,6 +15634,15 @@ function assertIdentityRequestScope(
     const error = new Error("Retell claim filing is available only to the dedicated Mac operator approval lane.");
     error.statusCode = 403;
     throw error;
+  }
+  if (identity?.type === "document_research_token") {
+    if (identity.subject !== "codex-document-research"
+      || !DOCUMENT_RESEARCH_ROUTES.includes(`${method} ${pathname}`)) {
+      const error = new Error("Document research permits only its exact read-only routes.");
+      error.statusCode = 403;
+      throw error;
+    }
+    return;
   }
   if (identity?.type !== "codex_operator_token") return;
   if (["/claim-filing/prepare", "/claim-filing/call"].includes(pathname)) {
