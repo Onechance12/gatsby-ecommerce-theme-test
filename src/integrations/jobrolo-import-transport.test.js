@@ -235,6 +235,25 @@ test("positive numeric loss dates carry their UTC civil date into the signed sna
   assert.equal(canonicalJson(snapshot).includes("2026-04-27"), true);
 });
 
+test("activity text opt-in follows the existing assigned exact-file read", async () => {
+  const file = structuredClone(rawFileEnvelope());
+  file.data.activities[0].activityText = { text: "Actual note", truncated: false };
+  const { readService, calls } = service({ file });
+  const snapshot = await readService.readSnapshot({ sourceFileRef: FILE_REF, includeActivityText: true });
+  assert.equal(calls[1].input.includeActivityText, true);
+  assert.equal(snapshot.activityText.items[0].text, "Actual note");
+  assert.equal(snapshot.activityText.complete, true);
+  for (const includeActivityText of [undefined, false]) {
+    const legacy = await readService.readSnapshot({ sourceFileRef: FILE_REF, includeActivityText });
+    assert.equal(createHash("sha256").update(canonicalJson(legacy)).digest("hex"), GOLDEN_SNAPSHOT_SHA);
+  }
+  await assert.rejects(readService.readSnapshot({ sourceFileRef: FILE_REF, includeActivityText: "true" }));
+  await assert.rejects(readService.readSnapshot({ sourceFileRef: "raw-id", includeActivityText: true }));
+  const changed = service({ fileError: Object.assign(new Error("private"), { code: "scope_mismatch" }) });
+  await assert.rejects(changed.readService.readSnapshot({ sourceFileRef: FILE_REF, includeActivityText: true }),
+    (error) => error.code === "jobrolo_import_source_changed");
+});
+
 test("unknown or malformed refs never trigger an exact-file read", async () => {
   for (const sourceFileRef of [
     `subject_${"f".repeat(32)}`,

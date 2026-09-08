@@ -265,6 +265,20 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   }
   assert.equal(state.writes, 0);
 
+  const notesSnapshot = await signedPost(origin, JOBROLO_IMPORT_SNAPSHOT_ROUTE, {
+    schema: JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA,
+    requestId: `request_${"3a".repeat(16)}`,
+    sourceFileRef, includeActivityText: true
+  }, `nonce_${"3a".repeat(16)}`);
+  assert.equal(notesSnapshot.response.status, 200, notesSnapshot.text);
+  verifyResponse(notesSnapshot, JOBROLO_IMPORT_SNAPSHOT_ROUTE);
+  assert.equal(notesSnapshot.body.payload.activityText.items.length, 2);
+  assert(notesSnapshot.body.payload.activityText.items.some(item =>
+    item.text === "Carrier confirmed claim receipt. Inspection is scheduled; do not file a duplicate."));
+  assert.equal(notesSnapshot.body.payload.activityText.complete, false, "missing body is explicit, not replaced by its activity label");
+  assert.equal(Object.hasOwn(snapshot.body.payload, "activityText"), false);
+  assert.equal(state.writes, 0, "note-text opt-in performs provider reads only");
+
   const manifest = {
     schema: "jobrolo.jobnimbus-import.document-manifest.v1",
     sourceFileRef,
@@ -659,6 +673,7 @@ function collection(kind, mode) {
       status_name: "Complete",
       occurred_at: "2026-08-08T14:30:00.000Z",
       actor_role: "Employee",
+      note: "Carrier confirmed claim receipt. Inspection is scheduled; do not file a duplicate.",
       label: mode === "oversize" ? "😀".repeat(160) : "Carrier review opened"
     };
     if (kind === "tasks") return {

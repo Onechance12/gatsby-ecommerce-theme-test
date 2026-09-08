@@ -11,6 +11,7 @@ export const HCN_PROVIDER_MAPPER_LIMITS = Object.freeze({
   maximumIndexContacts: 5000,
   maximumCollectionItems: 500,
   maximumProviderIdCharacters: 512,
+  maximumActivityTextCharacters: 4000,
 });
 
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -318,7 +319,8 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
     expectedProviderFileId,
     knownProviderFileIds,
     mapper: (record) =>
-      mapActivity(record, assignedOwnerId, legacyChanceField),
+      mapActivity(record, assignedOwnerId, legacyChanceField,
+        options.includeActivityText === true),
     allowedExactReferenceFields: ['primary', 'related'],
     dedupeIdenticalProviderIds: true,
     requireExactContactReferences,
@@ -1130,7 +1132,8 @@ function collectReferenceIds(value, ids) {
   }
 }
 
-function mapActivity(record, assignedOwnerId, legacyChanceField = false) {
+function mapActivity(record, assignedOwnerId, legacyChanceField = false,
+  includeActivityText = false) {
   if (!isPlainObject(record)) return null;
   const providerRecordId = normalizeProviderId(
     field(record, ACTIVITY_FIELDS.id),
@@ -1150,6 +1153,22 @@ function mapActivity(record, assignedOwnerId, legacyChanceField = false) {
         ? legacyChanceField ? 'chance' : 'employee'
         : 'team'),
     label: boundedText(field(record, ACTIVITY_FIELDS.label), 160),
+    ...(includeActivityText ? { activityText: mapActivityText(record) } : {}),
+  };
+}
+
+function mapActivityText(record) {
+  const raw = ['note', 'content', 'body', 'description']
+    .map((key) => record[key])
+    .find((value) => typeof value === 'string' && value.trim());
+  if (!raw) return { text: null, truncated: false };
+  const normalized = raw.replace(/[\s\u0000-\u001f\u007f-\u009f]+/gu, ' ').trim();
+  const maximum = HCN_PROVIDER_MAPPER_LIMITS.maximumActivityTextCharacters;
+  let text = normalized.slice(0, maximum);
+  if (/[\ud800-\udbff]$/u.test(text)) text = text.slice(0, -1);
+  return {
+    text: text.trim() || null,
+    truncated: normalized.length > text.length,
   };
 }
 
