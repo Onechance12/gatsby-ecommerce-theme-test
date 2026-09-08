@@ -139,10 +139,11 @@ export function createJobroloImportReadService({
       return catalog;
     },
 
-    async readSnapshot({ sourceFileRef } = {}) {
-      if (!SOURCE_FILE_REF.test(String(sourceFileRef || ""))) {
+    async readSnapshot({ sourceFileRef, includeActivityText = false } = {}) {
+      if (typeof sourceFileRef !== "string" || !SOURCE_FILE_REF.test(sourceFileRef)) {
         invalidRequest();
       }
+      if (typeof includeActivityText !== "boolean") invalidRequest();
       const currentMs = currentTime(now);
       const requestedAt = new Date(currentMs).toISOString();
       const scope = await loadScope(requestedAt, currentMs);
@@ -160,6 +161,7 @@ export function createJobroloImportReadService({
             (file) => file.providerFileId
           ),
           requestedAt,
+          ...(includeActivityText ? { includeActivityText: true } : {}),
           maximumCollectionItems:
             JOBROLO_IMPORT_READ_LIMITS.maximumCollectionItems
         });
@@ -178,7 +180,8 @@ export function createJobroloImportReadService({
       try {
         snapshot = adaptJobNimbusFileEnvelopeToImportSnapshot(envelope, {
           connectionRef,
-          referenceFactory
+          referenceFactory,
+          includeActivityText
         });
       } catch (error) {
         if (

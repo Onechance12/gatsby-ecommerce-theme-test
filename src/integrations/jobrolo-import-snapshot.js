@@ -20,6 +20,7 @@ export const JOBROLO_JOBNIMBUS_NORMALIZED_EMAIL_SCHEMA =
 export const JOBROLO_JOBNIMBUS_IMPORT_ADAPTER_LIMITS = Object.freeze({
   maximumCollectionItems: HCN_PROVIDER_MAPPER_LIMITS.maximumCollectionItems,
   maximumCanonicalSnapshotUtf8Bytes: 512 * 1024,
+  maximumActivityTextUtf8Bytes: 128 * 1024,
   maximumFreshnessWindowMs: 15 * 60_000,
   maximumClockSkewMs: 60_000,
   maximumCanonicalDepth: 24,
@@ -160,11 +161,13 @@ export function issueJobNimbusImportReferences(
 /**
  * Project one normalized provider envelope with already-issued opaque refs.
  * The result is the exact Jobrolo jobrolo.jobnimbus-import.snapshot.v1 wire
- * shape and contains metadata only (never document bytes or provider URLs).
+ * shape, with bounded actual activity text only when explicitly requested.
+ * Document bytes and provider URLs are never projected.
  */
 export function projectJobNimbusFileEnvelopeToImportSnapshot(
   providerEnvelope,
-  issuedReferences
+  issuedReferences,
+  { includeActivityText = false } = {}
 ) {
   const normalized = normalizeProviderEnvelope(providerEnvelope);
   const references = normalizeIssuedReferences(issuedReferences, normalized);
@@ -226,6 +229,9 @@ export function projectJobNimbusFileEnvelopeToImportSnapshot(
     )
   };
 
+  if (includeActivityText === true) {
+    snapshot.activityText = projectActivityText(normalized.activities, references.activities);
+  }
   const canonicalBytes = Buffer.byteLength(canonicalJson(snapshot), "utf8");
   if (
     canonicalBytes
@@ -247,8 +253,37 @@ export function adaptJobNimbusFileEnvelopeToImportSnapshot(
 ) {
   return projectJobNimbusFileEnvelopeToImportSnapshot(
     providerEnvelope,
-    issueJobNimbusImportReferences(providerEnvelope, options)
+    issueJobNimbusImportReferences(providerEnvelope, options),
+    options
   );
+}
+
+function projectActivityText(activities, references) {
+  let remaining = JOBROLO_JOBNIMBUS_IMPORT_ADAPTER_LIMITS.maximumActivityTextUtf8Bytes;
+  const items = new Array(activities.length);
+  activities.map((item, index) => ({ item, index }))
+    .sort((left, right) => right.item.occurredAt.localeCompare(left.item.occurredAt)
+      || references[left.index].localeCompare(references[right.index]))
+    .forEach(({ item, index }) => {
+    const source = item.activityText || { text: null, truncated: false };
+    let text = source.text;
+    let truncated = source.truncated;
+    if (text !== null && Buffer.byteLength(text, "utf8") > remaining) {
+      let prefix = "";
+      for (const character of text) {
+        const bytes = Buffer.byteLength(character, "utf8");
+        if (bytes > remaining) break;
+        prefix += character;
+        remaining -= bytes;
+      }
+      text = prefix.trim() || null;
+      truncated = true;
+    } else if (text !== null) {
+      remaining -= Buffer.byteLength(text, "utf8");
+    }
+    items[index] = { sourceRecordRef: references[index], text, truncated };
+  });
+  return { items, complete: items.every((item) => item.text !== null && !item.truncated) };
 }
 
 /** Project one normalized non-photo document into its stable transfer proof. */
@@ -524,10 +559,23 @@ function normalizeActivities(value) {
       state: requireCode(item.state, "activity state"),
       occurredAt: requireIsoUtc(item.occurredAt, "activity occurredAt"),
       actorRole: requireCode(item.actorRole, "activity actorRole"),
-      label: requireNullableSafeText(item.label, 160, 640)
+      label: requireNullableSafeText(item.label, 160, 640),
+      ...(Object.hasOwn(item, "activityText")
+        ? { activityText: normalizeActivityText(item.activityText) } : {})
     }),
-    "activities"
+    "activities",
+    ["activityText"]
   );
+}
+
+function normalizeActivityText(value) {
+  exactRecord(value, ["text", "truncated"], "activity text");
+  const text = requireNullableSafeText(value.text,
+    HCN_PROVIDER_MAPPER_LIMITS.maximumActivityTextCharacters, 16_000);
+  if (text !== null && /[\u0080-\u009f\u2028\u2029]/u.test(text)) {
+    fail("invalid_provider_envelope", "Activity text contains unsupported controls.");
+  }
+  return { text, truncated: requireBoolean(value.truncated, "activity text truncation") };
 }
 
 function normalizeTasks(value) {
@@ -580,7 +628,7 @@ function normalizeDocuments(value) {
   );
 }
 
-function normalizeProviderCollection(value, fields, normalize, label) {
+function normalizeProviderCollection(value, fields, normalize, label, optionalFields = []) {
   if (!Array.isArray(value)) {
     fail("invalid_provider_envelope", `Provider ${label} must be an array.`);
   }
@@ -591,7 +639,9 @@ function normalizeProviderCollection(value, fields, normalize, label) {
     fail("provider_bounds_exceeded", `Provider ${label} exceed their bound.`);
   }
   return value.map((item) => {
-    exactRecord(item, fields, `provider ${label} item`);
+    exactRecord(item, [...fields, ...optionalFields.filter((key) =>
+      isPlainRecord(item) && Object.hasOwn(item, key))],
+      `provider ${label} item`);
     return normalize(item);
   });
 }

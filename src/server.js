@@ -21181,7 +21181,8 @@ async function handleJobroloImportHttpRequest(req, res, url) {
   const payload = kind === "catalog"
     ? await readService.readCatalog()
     : await readService.readSnapshot({
-        sourceFileRef: verified.sourceFileRef
+        sourceFileRef: verified.sourceFileRef,
+        includeActivityText: verified.includeActivityText === true
       });
   assertJobroloImportRouteDeadline(providerReadBudget);
   const signed = createJobroloImportTransportResponse({
@@ -21546,6 +21547,7 @@ async function loadJobroloImportExactFile({
   providerFileId,
   knownProviderFileIds,
   requestedAt,
+  includeActivityText = false,
   assignedOwnerId,
   knownProviderUserIds,
   requestBudget
@@ -21594,6 +21596,7 @@ async function loadJobroloImportExactFile({
     knownProviderFileIds,
     knownProviderUserIds,
     includePhotoDocuments: true,
+    includeActivityText,
     // This import-only boundary may disclose mapped activity/task/document
     // labels. Require every provider contact-typed reference to identify the
     // selected assigned file. Only ids from the complete account-user
@@ -25300,10 +25303,11 @@ const OPENAPI = {
     }),
     "/integrations/jobrolo-import/v1/snapshot": jobroloImportReadOpenApi({
       operationId: "readJobroloImportSnapshot",
-      description: "Returns one normalized assigned-file snapshot with bounded activities, tasks, operational documents, and photo manifests. It never transfers document bytes on this route.",
+      description: "Returns one normalized assigned-file snapshot with bounded activities, tasks, operational documents, and photo manifests. Optional activityText contains bounded actual note text with truncation and completeness markers. No Gmail, Quo or document bytes are transferred.",
       requestSchema: openApiStrictObject({
         schema: { type: "string", const: "jobrolo.jobnimbus-import.snapshot-request.v1" },
         requestId: { type: "string", pattern: "^request_[a-f0-9]{32}$" },
+        includeActivityText: { type: "boolean", description: "Opt in to bounded activity note text; absent or false preserves the legacy metadata-only response." },
         sourceFileRef: { type: "string", pattern: "^subject_[a-f0-9]{32}$" }
       }, ["schema", "requestId", "sourceFileRef"])
     }),

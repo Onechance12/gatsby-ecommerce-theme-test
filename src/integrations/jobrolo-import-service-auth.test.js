@@ -392,6 +392,35 @@ test("snapshot request accepts only an opaque source ref and no caller scope", a
   assert.equal(Object.hasOwn(body, "principal"), false);
 });
 
+test("snapshot activity text flag is boolean, signed, and cannot widen caller scope", async () => {
+  const base = { schema: JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA,
+    requestId: REQUEST_ID, sourceFileRef: SOURCE_FILE_REF };
+  const verify = (signed, overrides = {}) => authenticator().authenticate({
+    method: "POST", pathname: signed.pathname, headers: signed.headers,
+    body: signed.body, rawBody: signed.bodyText, ...overrides
+  });
+  for (const includeActivityText of [true, false]) {
+    const signed = signedFixture({ pathname: JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+      body: { ...base, includeActivityText } });
+    assert.equal((await verify(signed)).includeActivityText === true, includeActivityText);
+    const changed = { ...signed.body, includeActivityText: !includeActivityText };
+    await assert.rejects(verify(signed, { body: changed, rawBody: canonicalJson(changed) }),
+      (error) => error.code === "invalid_jobrolo_import_authentication");
+  }
+  for (const extra of [
+    { includeActivityText: "true" }, { includeActivityText: null },
+    { includeActivityText: true, sourceFileRef: "raw-provider-id" },
+    { includeActivityText: true, sourceFileRef: [SOURCE_FILE_REF] },
+    { includeActivityText: true, connectionRef: CONNECTION_REF },
+    { includeActivityText: true, principal: "another-user" },
+    { includeActivityText: true, scope: "all" }
+  ]) {
+    await assert.rejects(verify(signedFixture({ pathname: JOBROLO_IMPORT_SNAPSHOT_ROUTE,
+      body: { ...base, ...extra } })),
+    (error) => error.code === "invalid_jobrolo_import_request");
+  }
+});
+
 test("document request binds exact file, record, and manifest proof", async () => {
   const body = {
     schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,

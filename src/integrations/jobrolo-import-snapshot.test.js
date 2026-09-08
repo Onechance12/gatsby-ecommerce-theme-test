@@ -197,6 +197,90 @@ test("provider label truncation cannot leave adapter-invalid edge whitespace", (
   assert.equal(snapshot.activities.items[0].label, mappedLabel);
 });
 
+test("opt-in activity text retains actual notes while default wire stays identical", () => {
+  const input = rawProviderInput();
+  const actual = `Actual note ${"verified evidence ".repeat(80)}end`;
+  input.activities[0].note = ` \n${actual}\t\u0000 `;
+  const envelope = mapJobNimbusFileEnvelope(input, {
+    assignedOwnerId: OWNER_ID, expectedProviderFileId: RAW_FILE_ID,
+    includeActivityText: true
+  });
+  for (const includeActivityText of [undefined, false]) {
+    assert.equal(stableCanonicalJson(projectJobNimbusFileEnvelopeToImportSnapshot(
+      envelope, goldenReferences(), { includeActivityText }
+    )), GOLDEN_JOBNIMBUS_SNAPSHOT_WIRE_V1);
+  }
+  const snapshot = projectJobNimbusFileEnvelopeToImportSnapshot(
+    envelope, goldenReferences(), { includeActivityText: true }
+  );
+  assert.deepEqual(snapshot.activityText, {
+    items: [{ sourceRecordRef: ACTIVITY_REF, text: actual, truncated: false }], complete: true
+  });
+  assert.equal(snapshot.activities.items[0].label, "Carrier review opened");
+  assert.equal(Object.isFrozen(snapshot.activityText.items), true);
+  for (const field of ["note", "content", "body", "description"]) {
+    const variant = rawProviderInput();
+    delete variant.activities[0].body;
+    variant.activities[0][field] = "Actual body";
+    const mapped = mapJobNimbusFileEnvelope(variant, {
+      assignedOwnerId: OWNER_ID, expectedProviderFileId: RAW_FILE_ID,
+      includeActivityText: true
+    });
+    assert.equal(mapped.data.activities[0].activityText.text, "Actual body");
+  }
+});
+
+test("activity text reports missing bodies, character limits, and UTF-8 budget exhaustion", () => {
+  const input = rawProviderInput();
+  const seed = input.activities[0];
+  input.activities = Array.from({ length: 40 }, (_, index) => ({
+    ...seed, jnid: `activity-${index}`, body: index === 0 ? undefined : "😀".repeat(4100),
+    occurred_at: index === 39 ? "2026-08-08T14:31:00.000Z" : seed.occurred_at
+  }));
+  const envelope = mapJobNimbusFileEnvelope(input, {
+    assignedOwnerId: OWNER_ID, expectedProviderFileId: RAW_FILE_ID,
+    includeActivityText: true
+  });
+  const refs = { ...goldenReferences(), activities: input.activities.map((_, index) =>
+    `ref_${(index + 100).toString(16).padStart(32, "0")}`) };
+  const snapshot = projectJobNimbusFileEnvelopeToImportSnapshot(envelope, refs,
+    { includeActivityText: true });
+  const { items, complete } = snapshot.activityText;
+  assert.equal(complete, false);
+  assert.equal(items.length, snapshot.activities.items.length);
+  assert.deepEqual(items.map((item) => item.sourceRecordRef), refs.activities);
+  assert.deepEqual(items[0], { sourceRecordRef: refs.activities[0], text: null, truncated: false });
+  assert.equal(items[1].text.length, 4000);
+  assert.equal(Array.from(items[1].text).length, 2000);
+  assert.equal(items[1].truncated, true);
+  assert.equal(items.at(-1).text.length, 4000);
+  assert.equal(items[20].text, null);
+  assert.equal(items.at(-1).truncated, true);
+  assert.equal(items.reduce((sum, item) => sum + Buffer.byteLength(item.text || "", "utf8"), 0), 128 * 1024);
+  assert.equal(Buffer.byteLength(stableCanonicalJson(snapshot), "utf8") <= 512 * 1024, true);
+  const reversed = structuredClone(envelope);
+  reversed.data.activities.reverse();
+  const reverseItems = projectJobNimbusFileEnvelopeToImportSnapshot(reversed,
+    { ...refs, activities: [...refs.activities].reverse() },
+    { includeActivityText: true }).activityText.items;
+  assert.deepEqual(reverseItems, [...items].reverse());
+});
+
+test("activity text opt-in preserves exact-contact and provider-id validation", () => {
+  for (const change of [
+    { primary: { id: "foreign-contact" } },
+    { jnid: "invalid\nactivity-id" }
+  ]) {
+    const input = rawProviderInput();
+    Object.assign(input.activities[0], change);
+    assert.throws(() => mapJobNimbusFileEnvelope(input, {
+      assignedOwnerId: OWNER_ID, expectedProviderFileId: RAW_FILE_ID,
+      knownProviderFileIds: [RAW_FILE_ID], requireExactContactReferences: true,
+      includeActivityText: true
+    }));
+  }
+});
+
 test("adapter mirrors the Jobrolo normalized ASCII email v1 language", () => {
   assert.equal(
     JOBROLO_JOBNIMBUS_NORMALIZED_EMAIL_SCHEMA,

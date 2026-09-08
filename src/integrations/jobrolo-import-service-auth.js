@@ -482,6 +482,7 @@ export function createJobroloImportAuthenticator({
         requestTimestamp: timestamp,
         requestBodyHash: bodyHash,
         sourceFileRef: request.sourceFileRef || null,
+        ...(request.includeActivityText === true ? { includeActivityText: true } : {}),
         sourceRecordRef: request.sourceRecordRef || null,
         manifestDigest: request.manifestDigest || null
       });
@@ -831,11 +832,15 @@ function validateImportRequest(pathname, value) {
     ) requestFailure();
     return value;
   }
-  exactRecord(value, ["schema", "requestId", "sourceFileRef"]);
+  const hasActivityText = isPlainRecord(value) && Object.hasOwn(value, "includeActivityText");
+  exactRecord(value, ["schema", "requestId", "sourceFileRef",
+    ...(hasActivityText ? ["includeActivityText"] : [])]);
   if (
     value.schema !== JOBROLO_IMPORT_SNAPSHOT_REQUEST_SCHEMA
     || !REQUEST_ID.test(value.requestId)
+    || typeof value.sourceFileRef !== "string"
     || !SOURCE_FILE_REF.test(value.sourceFileRef)
+    || (hasActivityText && typeof value.includeActivityText !== "boolean")
   ) requestFailure();
   return value;
 }
