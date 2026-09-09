@@ -2441,6 +2441,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   let serveWrongManagementReferenceField = false;
   let hcnBoundedHistoryMode = false;
   let hcnDisjointActivityOverflowMode = false;
+  let hcnGmailFailureMode = "";
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-console-memory-canary-"));
   t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   const legacyCanaryPath = path.join(
@@ -2902,6 +2903,16 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       );
       assert.match(url.searchParams.get("q"), /HCN-CLAIM-1001/);
       hcnProviderRequests.push(`gmail:${url.pathname}`);
+      if (hcnGmailFailureMode === "list") {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "PRIVATE-GMAIL-FAILURE" }));
+        return;
+      }
+      if (hcnGmailFailureMode === "malformed") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ messages: [{ id: "same" }, { id: "same" }] }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         messages: [
@@ -2921,6 +2932,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       );
       assert.equal(url.searchParams.get("format"), "full");
       hcnProviderRequests.push(`gmail:${url.pathname}`);
+      if (hcnGmailFailureMode === "detail") {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "PRIVATE-GMAIL-FAILURE" }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         id: "gmail-message-1",
@@ -5305,6 +5321,74 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(unknownWrapperBody.error, "Fresh JobNimbus evidence is unavailable.");
   assert.doesNotMatch(JSON.stringify(unknownWrapperBody), /unknownWrapper/);
 
+  // Blank unrelated fields cannot conceal an identifier and must not disable
+  // Gmail for every file in the contact index.
+  allContacts.push({
+    ...otherOwnerContact,
+    jnid: "jn-fixture-blank-correlation",
+    email: " \t ",
+    "Claim #": "\n",
+    mobile_phone: "2145551298"
+  });
+  const whitespaceReview = await fetch(`${origin}/hcn/api/v1/file-review`, {
+    method: "POST",
+    headers: hcnReadHeaders,
+    body: JSON.stringify({ fileRef, recentLimit: 10 })
+  });
+  allContacts.pop();
+  assert.equal(whitespaceReview.status, 200);
+  const whitespaceFile = await whitespaceReview.json();
+  assert.equal(whitespaceFile.sources.gmail.status, "fresh");
+  assert.equal(whitespaceFile.recent.gmail.length, 2);
+
+  const originalEmail = activeContact.email;
+  const originalClaim = activeContact["Claim #"];
+  Object.assign(activeContact, {
+    email: " ",
+    primary_email: originalEmail,
+    "Claim #": " ",
+    claimNumber: originalClaim
+  });
+  allContacts.push({
+    ...otherOwnerContact,
+    jnid: "jn-fixture-shared-claim-only",
+    "Claim #": originalClaim,
+    mobile_phone: "2145551298"
+  });
+  const aliasReview = await fetch(`${origin}/hcn/api/v1/file-review`, {
+    method: "POST",
+    headers: hcnReadHeaders,
+    body: JSON.stringify({ fileRef, recentLimit: 10 })
+  });
+  allContacts.pop();
+  activeContact.email = originalEmail;
+  activeContact["Claim #"] = originalClaim;
+  delete activeContact.primary_email;
+  delete activeContact.claimNumber;
+  assert.equal(aliasReview.status, 200);
+  const aliasFile = await aliasReview.json();
+  assert.equal(aliasFile.sources.gmail.status, "fresh");
+  // Only email is unique: do not let claim matching mask email-alias bugs.
+  assert.equal(aliasFile.recent.gmail.length, 1);
+  assert.equal(aliasFile.recent.gmail[0].direction, "inbound");
+
+  for (const failureMode of ["list", "detail", "malformed"]) {
+    hcnGmailFailureMode = failureMode;
+    const failedRead = await fetch(`${origin}/hcn/api/v1/file-review`, {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    });
+    hcnGmailFailureMode = "";
+    assert.equal(failedRead.status, 200);
+    const failedFile = await failedRead.json();
+    assert.equal(failedFile.sources.gmail.status, "incomplete");
+    assert.equal(failedFile.sources.gmail.completeness, "none");
+    assert.equal(failedFile.sources.gmail.failureCode, "provider_check_failed");
+    assert.deepEqual(failedFile.recent.gmail, []);
+    assert.doesNotMatch(JSON.stringify(failedFile), /PRIVATE-GMAIL-FAILURE/);
+  }
+
   allContacts.push({
     ...activeContact,
     jnid: "jn-fixture-duplicate-correlation",
@@ -5344,7 +5428,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         failureCode:
           source === "quo"
             ? "phone_match_unverified"
-            : "source_unavailable"
+            : "scope_check_failed"
       }
     );
     assert.deepEqual(ambiguousCorrelationFile.recent[source], []);
