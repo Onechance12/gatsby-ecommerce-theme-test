@@ -17,7 +17,7 @@ Principal owns code, tests, approval questions and integration.
 Observed live before this change: exact-file read reached HCN and returned
 Gmail `source_unavailable`; Connections showed a stored Google link. Reconnect
 reached Google's unverified test-app warning and was paused for user approval.
-No new Google grant has been accepted. Test-mode refresh expiry is a possible
+At that checkpoint no new Google grant had been accepted. Test-mode refresh expiry is a possible
 cause, not a proven diagnosis. Render Shell access was denied; no bypass or
 permission change was attempted. This candidate is not deployed.
 
@@ -53,19 +53,35 @@ permission change was attempted. This candidate is not deployed.
   caused an additional correction separating store outages from unlinked grants,
   and strengthened the email-only regression test.
 
-## Still required
+## Approved live reconnect: recovered on September 9
 
-The live trigger is not established; local reproduction does not prove the
-customer index contains the same defect. No new live model test was run, and
-Gmail has not been verified recovered. The same-account reconnect is paused
-pending approval of Google's test-app warning. OAuth test-mode expiry remains
-a plausible additional issue; see
+Chance explicitly approved Continue at Google's test-app warning for the existing
+Wave employee's Gmail and read-only Calendar permissions. The paused attempt did
+not complete; one fresh same-account flow then returned successfully at 13:39
+America/Chicago. Google requested exactly the existing Gmail modify and Calendar
+read-only scopes. No different account, additional scope, Render access change,
+or source code deployment was used.
+
+One actual-model, read-only Jobrolo turn then invoked `review_thresher_file` once
+in the same saved exact-file Internal chat, limiting recent communications to3.
+The UI showed a one-operation receipt and the answer reported Gmail available
+with3 returned items at2026-09-09T18:40:20Z. Their dated subjects were shown;
+the result remained bounded/partial (`source_partial`), not a complete mailbox
+audit. JobNimbus was fresh. Quo still returned `phone_match_unverified` with
+zero accepted items, not a verified empty history. No retries, sends, calls,
+drafts, tasks, notes, imports, or customer/source-record changes occurred.
+
+Thus Gmail recovery is observed after renewed authorization on unchanged source.
+The original provider error was not exposed, so token expiry specifically is
+still not proven. The synthetic whitespace defect is valid but was not required
+to recover this live read. OAuth test-mode expiry remains a recurrence risk; see
 [Google's refresh-token documentation](https://developers.google.com/identity/protocols/oauth2#expiration).
 
-Resume by completing the approved existing-scope Google reconnect and rechecking
-the exact file through Jobrolo. If it still fails, publish the reviewed source
-diagnostic candidate only after the required release approval and authorized
-HCN deployment access are available, then repeat the exact-file read. Do not
-weaken matching, use another employee grant, change Render permissions, bypass
-denied Shell access, or claim the candidate fixes the live account before that
-read succeeds. Jobrolo production remains c3e8bfe and HCN remains aad89a51.
+## Still required
+
+Candidate bcf4d01 remains local, tested and undeployed. Publish the reviewed
+hardening only after the required release approval and authorized HCN deployment
+access are available. Quo exact-phone matching is a separate unresolved issue.
+Do not weaken matching, borrow another employee grant, change Render permissions,
+or bypass the denied Shell. No production build was changed during reconnect:
+last verified Jobrolo source c3e8bfe and HCN aad89a51.
