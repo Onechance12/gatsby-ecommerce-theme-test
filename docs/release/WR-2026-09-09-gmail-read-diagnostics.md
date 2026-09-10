@@ -79,7 +79,12 @@ to recover this live read. OAuth test-mode expiry remains a recurrence risk; see
 
 ## Still required
 
-Candidate bcf4d01 remains local, tested and undeployed. Publish the reviewed
+Candidate bcf4d01 is published for review in
+[PR33](https://github.com/Onechance12/gatsby-ecommerce-theme-test/pull/33),
+targeting the deployed `codex/hcn-platform-foundation` branch, not the unrelated
+default `main`. A fresh local check again passed 201 prechecks and 789 main tests;
+receipt: `/tmp/hcn-gmail-evidence-final-check.log`. No release check is configured
+on this PR. It remains undeployed. Publish the reviewed
 hardening only after the required release approval and authorized HCN deployment
 access are available. Quo exact-phone matching is a separate unresolved issue.
 Do not weaken matching, borrow another employee grant, change Render permissions,
