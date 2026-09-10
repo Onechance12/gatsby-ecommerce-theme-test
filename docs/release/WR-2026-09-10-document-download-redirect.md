@@ -47,4 +47,21 @@ prechecks and795 main tests; syntax and whitespace checks passed. Log:
 P1/P2 blocker; it explicitly retains the initial `/files` versus observed browser
 `/api1/files` compatibility as an unknown until the live retest.
 
-Release pending. Do not claim deployed repair or successful document reading yet.
+[PR34](https://github.com/Onechance12/gatsby-ecommerce-theme-test/pull/34) merged
+as83c45d6302c2270b3e6d94a848f0d5a6dd404a04, with zero changed files relative to
+tested94eaf08. Renderdep-dah14pjl550s73d4qek0 became live at2026-09-10T02:14:39Z.
+Public provider-attested metadata reports the exact commit; release-critical
+configuration drift is aligned and health returns200. No Shell/SSH, environment
+change or duplicate deploy.
+
+Bounded live acceptance passed at02:15:34–40Z in the same saved private Rolo chat:
+the actual27-page policyPDF returned complete embedded text for requestedpage1;
+the one-page scanned contractor form returned OCR for its requested page. Both
+HCN byte requests returned200 with no failed extraction pages. This confirms the
+configured production API route works with the scoped CDN repair. Rolo exposed
+conflicting source facts and kept preparation pending, distinguishing OCR from
+signature validity and renewal offer from active coverage. Remaining PDF pages
+were intentionally unread. No import/copy, approval, send, call, or source-record
+change was performed; this is not live copied-file persistence certification.
+Reload retained the successful read summary, exact limits, pending preparation,
+tool receipt and document action card.
