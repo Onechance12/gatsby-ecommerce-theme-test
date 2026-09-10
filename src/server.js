@@ -269,7 +269,7 @@ import {
   loadThresherRuntimeConfiguration,
   projectThresherRuntimeConfiguration
 } from "./hcn-ops/thresher/runtime-config.js";
-import { fetchBoundedBinary } from "./http/bounded-binary.js";
+import { fetchJobNimbusBinary } from "./http/bounded-binary.js";
 import { fetchBoundedJson } from "./http/bounded-json.js";
 import {
   createJobroloHcnAuthenticator,
@@ -481,7 +481,8 @@ const HCN_JOBROLO_IMPORT_ROUTE_BOUNDS = Object.freeze({
   [HCN_JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE]: Object.freeze({
     deadlineMs:
       HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentRouteDurationMs,
-    maximumProviderRequests: 7
+    // Existing seven reads plus at most one verified JobNimbus file-CDN hop.
+    maximumProviderRequests: 8
   })
 });
 const HCN_ASSISTANT_HISTORY_KEY =
@@ -21265,7 +21266,6 @@ async function handleJobroloImportDocumentContent({
     requestBudget: providerReadBudget,
     requestedAt
   });
-  consumeJobroloImportProviderReadBudget(providerReadBudget);
   const remaining = assertJobroloImportRouteDeadline(providerReadBudget);
   if (remaining < 100) {
     const error = new Error("Jobrolo import source is unavailable.");
@@ -21274,7 +21274,7 @@ async function handleJobroloImportDocumentContent({
   }
   let downloaded;
   try {
-    downloaded = await fetchBoundedBinary(
+    downloaded = await fetchJobNimbusBinary(
       fetch,
       `${JOBNIMBUS_FILE_BASE_URL}/${encodeURIComponent(
         proof.providerRecordId
@@ -21284,10 +21284,33 @@ async function handleJobroloImportDocumentContent({
         timeoutMs: Math.min(60_000, remaining),
         maxBytes:
           HCN_JOBROLO_IMPORT_TRANSPORT_LIMITS.maximumDocumentContentBytes,
-        errorCode: "HCN_JOBROLO_IMPORT_DOCUMENT_DOWNLOAD_FAILED"
+        errorCode: "HCN_JOBROLO_IMPORT_DOCUMENT_DOWNLOAD_FAILED",
+        consumeRequest: () => {
+          assertJobroloImportRouteDeadline(providerReadBudget);
+          consumeJobroloImportProviderReadBudget(providerReadBudget);
+        },
+        ...(process.env.NODE_ENV === "test" ? {
+          testInitialOrigin: new URL(JOBNIMBUS_FILE_BASE_URL).origin
+        } : {})
       }
     );
-  } catch {
+  } catch (downloadError) {
+    const safeReasons = new Set([
+      "initial_target_rejected", "redirect_target_rejected", "redirect_limit",
+      "request_budget_exceeded", "invalid_response", "upstream_http",
+      "encoding_rejected", "length_invalid", "byte_limit",
+      "deadline_exceeded", "network_failed"
+    ]);
+    // Coarse transport diagnosis only: never log the file, URL, signed query,
+    // authorization headers, source bytes or provider error payload.
+    console.error(JSON.stringify({
+      event: "jobrolo_document_download_failed",
+      reason: safeReasons.has(downloadError?.failureReason)
+        ? downloadError.failureReason : "unclassified",
+      status: Number.isInteger(downloadError?.statusCode)
+        && downloadError.statusCode >= 100 && downloadError.statusCode <= 599
+        ? downloadError.statusCode : null
+    }));
     const error = new Error("Jobrolo import source is unavailable.");
     error.statusCode = 503;
     throw error;

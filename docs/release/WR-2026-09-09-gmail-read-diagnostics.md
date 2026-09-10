@@ -77,14 +77,29 @@ still not proven. The synthetic whitespace defect is valid but was not required
 to recover this live read. OAuth test-mode expiry remains a recurrence risk; see
 [Google's refresh-token documentation](https://developers.google.com/identity/protocols/oauth2#expiration).
 
-## Still required
+## Release completed September 10 UTC
+
+PR33 merged as2e93e0c6d2f2f2f5c613d2bd089d8f8ce74759f4 and Render deployment
+dep-dah08k61egvs73c0igp0 became live at2026-09-10T01:14:38Z. Public provider-attested
+metadata and health200 verified. Normal authorized Render CLI deployment was
+used; no Shell/SSH or permission change. Local201 prechecks and789 tests passed.
+
+One exact-file Rolo check at01:16:58Z returned scope_check_failed: neither a
+unique email nor claim number was recorded. The source correctly remains
+unread, not empty-success; this is not proof of a disconnected Google grant.
+Quo's separate model-input repair is deployed in Jobrolo PR361 and a02:00:19Z
+exact-phone check returned9 matched events with explicitly incomplete coverage.
+Actual document-content reads still failed503; see the September10 download
+redirect follow-up. No external sends, calls, imports or source-record writes.
+
+## Historical pre-release checkpoint
 
 Candidate bcf4d01 is published for review in
 [PR33](https://github.com/Onechance12/gatsby-ecommerce-theme-test/pull/33),
 targeting the deployed `codex/hcn-platform-foundation` branch, not the unrelated
 default `main`. A fresh local check again passed 201 prechecks and 789 main tests;
 receipt: `/tmp/hcn-gmail-evidence-final-check.log`. No release check is configured
-on this PR. It remains undeployed. Publish the reviewed
+on this PR. At that checkpoint it remained undeployed. Publish the reviewed
 hardening only after the required release approval and authorized HCN deployment
 access are available. Quo exact-phone matching is a separate unresolved issue.
 Do not weaken matching, borrow another employee grant, change Render permissions,

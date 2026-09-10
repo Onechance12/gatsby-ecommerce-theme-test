@@ -375,6 +375,15 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     "jobrolo_import_unavailable"
   );
   assert.doesNotMatch(redirectedDocument.text, /private\.invalid|secret/);
+  const downloadDiagnostic = output.split("\n").filter((line) => {
+    try { return JSON.parse(line).event === "jobrolo_document_download_failed"; }
+    catch { return false; }
+  }).map((line) => JSON.parse(line)).at(-1);
+  assert.deepEqual(downloadDiagnostic, {
+    event: "jobrolo_document_download_failed",
+    reason: "redirect_target_rejected",
+    status: 502
+  }, "download diagnostics retain only a coarse reason/status, never private URL or headers");
   state.mode = "normal";
 
   state.dateOfLoss = 1777291200;
