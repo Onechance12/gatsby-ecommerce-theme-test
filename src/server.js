@@ -17368,10 +17368,21 @@ async function loadHcnGmailFile({
   assignedOwnerId
 } = {}) {
   if (!(await hcnGoogleConnectorLinkedForCurrentRequest())) {
-    throw new Error("Gmail evidence is unavailable.");
+    throw hcnOptionalSourceFailure(
+      "google_not_linked",
+      "Link the signed-in employee's Google account to review Gmail."
+    );
   }
   const id = hcnProviderFileId(providerFileId);
-  const scope = await hcnExactCommunicationScope(id, assignedOwnerId);
+  let scope;
+  try {
+    scope = await hcnExactCommunicationScope(id, assignedOwnerId);
+  } catch {
+    throw hcnOptionalSourceFailure(
+      "scope_check_failed",
+      "The exact-file Gmail scope could not be checked."
+    );
+  }
   const file = scope.file;
   const query = buildFileGmailQuery(file, 365);
   const maximumMessages = Math.min(
@@ -17382,88 +17393,104 @@ async function loadHcnGmailFile({
     scope.file[GMAIL_FILE_EMAIL_UNIQUE] !== true
     && scope.file[GMAIL_FILE_CLAIM_UNIQUE] !== true
   ) {
-    throw new Error("Gmail evidence is unavailable.");
-  }
-  const result = await hcnGmailApi(
-    `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages`
-      + `?q=${encodeURIComponent(query)}&maxResults=${maximumMessages}`
-  );
-  if (
-    !result
-    || typeof result !== "object"
-    || Array.isArray(result)
-  ) {
-    throw new Error("Gmail evidence is unavailable.");
-  }
-  const rows = Array.isArray(result.messages)
-    ? result.messages
-    : result.messages === undefined
-      && Number(result.resultSizeEstimate) === 0
-      ? []
-      : null;
-  if (
-    !rows
-    || rows.length > maximumMessages
-    || rows.some(
-      (row) => {
-        const messageId = String(row?.id || "");
-        return !row
-          || typeof row !== "object"
-          || Array.isArray(row)
-          || !messageId
-          || messageId.length > 512
-          || /[\s\x00-\x1f\x7f]/.test(messageId);
-      }
-    )
-  ) {
-    throw new Error("Gmail evidence is unavailable.");
-  }
-  if (
-    new Set(rows.map((row) => String(row.id))).size !== rows.length
-  ) {
-    throw new Error("Gmail evidence is unavailable.");
-  }
-  const nextPageToken = result.nextPageToken;
-  if (
-    nextPageToken !== undefined
-    && nextPageToken !== null
-    && (
-      typeof nextPageToken !== "string"
-      || !nextPageToken.trim()
-      || nextPageToken.length > 2048
-    )
-  ) {
-    throw new Error("Gmail evidence is unavailable.");
-  }
-  const items = [];
-  for (const row of rows) {
-    const message = compactGmailFullMessage(
-      await hcnGmailApi(
-        `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/`
-          + `${encodeURIComponent(row.id)}?format=full`
-      )
+    throw hcnOptionalSourceFailure(
+      "scope_check_failed",
+      "The file's email or claim number could not be matched uniquely for Gmail."
     );
-    if (!gmailMessageMatchesFile(message, file)) continue;
-    const direction = hcnGmailDirection(message);
-    items.push({
-      ...message,
-      providerFileId: id,
-      direction,
-      actionState: hcnGmailActionState(message, direction)
-    });
   }
-  return mapScopedGmailEnvelope({
-    providerFileId: id,
-    items,
-    scope: {
+  try {
+    const result = await hcnGmailApi(
+      `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages`
+        + `?q=${encodeURIComponent(query)}&maxResults=${maximumMessages}`
+    );
+    if (
+      !result
+      || typeof result !== "object"
+      || Array.isArray(result)
+    ) {
+      throw new Error("Gmail evidence is unavailable.");
+    }
+    const rows = Array.isArray(result.messages)
+      ? result.messages
+      : result.messages === undefined
+        && Number(result.resultSizeEstimate) === 0
+        ? []
+        : null;
+    if (
+      !rows
+      || rows.length > maximumMessages
+      || rows.some(
+        (row) => {
+          const messageId = String(row?.id || "");
+          return !row
+            || typeof row !== "object"
+            || Array.isArray(row)
+            || !messageId
+            || messageId.length > 512
+            || /[\s\x00-\x1f\x7f]/.test(messageId);
+        }
+      )
+    ) {
+      throw new Error("Gmail evidence is unavailable.");
+    }
+    if (
+      new Set(rows.map((row) => String(row.id))).size !== rows.length
+    ) {
+      throw new Error("Gmail evidence is unavailable.");
+    }
+    const nextPageToken = result.nextPageToken;
+    if (
+      nextPageToken !== undefined
+      && nextPageToken !== null
+      && (
+        typeof nextPageToken !== "string"
+        || !nextPageToken.trim()
+        || nextPageToken.length > 2048
+      )
+    ) {
+      throw new Error("Gmail evidence is unavailable.");
+    }
+    const items = [];
+    for (const row of rows) {
+      const message = compactGmailFullMessage(
+        await hcnGmailApi(
+          `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/`
+            + `${encodeURIComponent(row.id)}?format=full`
+        )
+      );
+      if (!gmailMessageMatchesFile(message, file)) continue;
+      const direction = hcnGmailDirection(message);
+      items.push({
+        ...message,
+        providerFileId: id,
+        direction,
+        actionState: hcnGmailActionState(message, direction)
+      });
+    }
+    return mapScopedGmailEnvelope({
       providerFileId: id,
-      exactFileMatch: true
-    },
-    itemsComplete: !String(nextPageToken || ""),
-    ...hcnFreshnessWindow(requestedAt)
-  }, {
-    expectedProviderFileId: id
-  });
+      items,
+      scope: {
+        providerFileId: id,
+        exactFileMatch: true
+      },
+      itemsComplete: !String(nextPageToken || ""),
+      ...hcnFreshnessWindow(requestedAt)
+    }, {
+      expectedProviderFileId: id
+    });
+  } catch (error) {
+    if (error?.hcnSourceFailureCode === "google_not_linked") {
+      throw hcnOptionalSourceFailure(
+        "google_not_linked",
+        "Reconnect the signed-in employee's Google account to review Gmail."
+      );
+    }
+    throw hcnOptionalSourceFailure(
+      "provider_check_failed",
+      "Gmail could not check this file's email evidence."
+    );
+  }
 }
 
 async function loadHcnQuoFile({
@@ -17601,7 +17628,7 @@ async function buildHcnExactCommunicationScope(
   const file = compactContact(contact);
 
   const email = hcnNormalizeCorrelationEmail(
-    fieldValue(contact, [
+    hcnCommunicationFieldValue(contact, [
       "email",
       "primary_email",
       "primaryEmail"
@@ -17627,7 +17654,7 @@ async function buildHcnExactCommunicationScope(
     enumerable: false
   });
 
-  const rawClaimNumber = fieldValue(contact, [
+  const rawClaimNumber = hcnCommunicationFieldValue(contact, [
     "Claim #",
     "Claim Number",
     "claim_number",
@@ -19402,7 +19429,8 @@ async function getHcnGoogleAccessToken() {
 async function getHcnGoogleAccessTokenLocked(principalRef) {
   const grant = await hcnGoogleGrantStore().get({ principalRef });
   if (!grant?.refreshToken) {
-    const error = new Error(
+    const error = hcnOptionalSourceFailure(
+      "google_not_linked",
       "Link Gmail and Google Calendar before reviewing email evidence."
     );
     error.statusCode = 409;
@@ -19435,10 +19463,16 @@ async function getHcnGoogleAccessTokenLocked(principalRef) {
   const response = result.response;
   const payload = result.payload;
   if (!response.ok || !String(payload?.access_token || "").trim()) {
-    const error = new Error(
-      "The employee Google connection needs to be linked again."
+    const reconnectRequired =
+      [400, 401].includes(response.status)
+      && payload?.error === "invalid_grant";
+    const error = hcnOptionalSourceFailure(
+      reconnectRequired ? "google_not_linked" : "provider_check_failed",
+      reconnectRequired
+        ? "The employee Google connection needs to be linked again."
+        : "The employee Google token refresh is temporarily unavailable."
     );
-    error.statusCode = 401;
+    error.statusCode = reconnectRequired ? 401 : 502;
     throw error;
   }
   const accessToken = String(payload.access_token);
@@ -20112,7 +20146,11 @@ function hcnContactScalarInventory(
   for (const [key, rawValue] of Object.entries(contact)) {
     const normalizedKey = hcnCorrelationKey(key);
     if (!acceptedKeys.has(normalizedKey)) continue;
-    if (rawValue === undefined || rawValue === null || rawValue === "") {
+    if (
+      rawValue === undefined
+      || rawValue === null
+      || (typeof rawValue === "string" && !rawValue.trim())
+    ) {
       continue;
     }
     if (
@@ -20128,6 +20166,17 @@ function hcnContactScalarInventory(
     values.add(value);
   }
   return { complete: true, values };
+}
+
+function hcnCommunicationFieldValue(contact, names) {
+  // Whitespace is an absent field, not an identifier or a usable primary alias.
+  // Keep malformed nonblank values: the correlation inventory must deny them.
+  const populated = Object.fromEntries(
+    Object.entries(contact).filter(([, value]) =>
+      typeof value !== "string" || Boolean(value.trim())
+    )
+  );
+  return fieldValue(populated, names);
 }
 
 function hcnNormalizeCorrelationEmail(value) {
@@ -23282,7 +23331,12 @@ function redirectHcnOAuthFailure(
 }
 
 async function hcnGoogleConnectorLinkedForCurrentRequest() {
-  if (!hcnGoogleGrantStoreConfigured()) return false;
+  if (!hcnGoogleGrantStoreConfigured()) {
+    throw hcnOptionalSourceFailure(
+      "provider_check_failed",
+      "The employee Google connector is unavailable."
+    );
+  }
   try {
     const principalRef = currentHcnGooglePrincipalRef();
     const status = await HCN_GOOGLE_GRANT_OPERATIONS.run(
@@ -23291,7 +23345,10 @@ async function hcnGoogleConnectorLinkedForCurrentRequest() {
     );
     return status.state === "linked" && status.hasRefreshGrant === true;
   } catch {
-    return false;
+    throw hcnOptionalSourceFailure(
+      "provider_check_failed",
+      "The employee Google connection status could not be checked."
+    );
   }
 }
 

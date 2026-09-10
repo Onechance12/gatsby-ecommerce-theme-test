@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 import {
   HCN_FILE_SCHEMA,
@@ -845,6 +846,19 @@ test("Gmail and Quo failures become coded incomplete empty sources", async () =>
 });
 
 test("optional source failures expose only allowlisted employee-safe reason codes", async () => {
+  for (const code of [
+    "google_not_linked", "scope_check_failed", "provider_check_failed"
+  ]) {
+    const failure = new Error("PRIVATE-GMAIL-DIAGNOSTIC");
+    failure.hcnSourceFailureCode = code;
+    const file = await createService({
+      dependencies: { loadGmailFile: async () => { throw failure; } }
+    }).readFile({ fileRef: fileRef(), recentLimit: 10 });
+    assert.equal(file.sources.gmail.failureCode, code);
+    assert.equal(file.sources.gmail.completeness, "none");
+    assert.deepEqual(file.recent.gmail, []);
+    assert.doesNotMatch(JSON.stringify(file), /PRIVATE-GMAIL-DIAGNOSTIC/);
+  }
   const providerError = new Error("PRIVATE provider response");
   providerError.hcnSourceFailureCode = "provider_check_failed";
   const phoneMatchError = new Error("PRIVATE phone correlation response");
@@ -878,6 +892,124 @@ test("optional source failures expose only allowlisted employee-safe reason code
   assert.doesNotMatch(
     JSON.stringify([result, phoneResult]),
     /private_provider_secret|forged response|provider response|correlation response/
+  );
+});
+
+test("employee Google refresh distinguishes invalid grants from provider/config failures", async () => {
+  // Evaluate the actual functions without importing the server or starting any
+  // provider, store or listener. All credentials and responses are synthetic.
+  const source = await readFile(new URL("../server.js", import.meta.url), "utf8");
+  function extract(name) {
+    const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
+    assert.notEqual(start, -1);
+    const next = source.slice(start + 1).search(/\n(?:async )?function /);
+    assert.notEqual(next, -1);
+    return source.slice(start, start + 1 + next);
+  }
+  for (const scenario of [
+    { status: 400, error: "invalid_grant", code: "google_not_linked", http: 401 },
+    { status: 401, error: "invalid_grant", code: "google_not_linked", http: 401 },
+    { status: 401, error: "invalid_client", code: "provider_check_failed", http: 502 },
+    { status: 429, error: "rate_limit", code: "provider_check_failed", http: 502 },
+    { status: 503, error: "invalid_grant", code: "provider_check_failed", http: 502 },
+    { status: 200, error: "malformed", code: "provider_check_failed", http: 502 },
+    { missing: true, code: "google_not_linked", http: 409 }
+  ]) {
+    let writes = 0;
+    let requests = 0;
+    const context = {
+      URLSearchParams,
+      fetch: () => { throw new Error("No real network allowed"); },
+      GOOGLE_TOKEN_URL: "https://google.fixture/token",
+      HCN_GOOGLE_CLIENT_ID: "fixture-employee-client",
+      HCN_GOOGLE_CLIENT_SECRET: "fixture-employee-secret",
+      hcnGoogleGrantStore: () => ({
+        get: async () => scenario.missing ? null : {
+          refreshToken: "fixture-refresh",
+          scopes: []
+        },
+        upsert: async () => { writes++; }
+      }),
+      fetchBoundedProviderJson: async (_fetch, url, options) => {
+        requests++;
+        assert.equal(url, "https://google.fixture/token");
+        assert.equal(options.body.get("refresh_token"), "fixture-refresh");
+        assert.equal(options.body.get("client_id"), "fixture-employee-client");
+        return {
+          response: { ok: scenario.status === 200, status: scenario.status },
+          payload: { error: scenario.error, error_description: "PRIVATE-GOOGLE-ERROR" }
+        };
+      }
+    };
+    const tokenRead = runInNewContext(
+      extract("hcnOptionalSourceFailure") + "\n"
+        + extract("getHcnGoogleAccessTokenLocked")
+        + '\ngetHcnGoogleAccessTokenLocked("fixture-principal")',
+      context
+    );
+    await assert.rejects(tokenRead, (error) => {
+      assert.equal(error.hcnSourceFailureCode, scenario.code);
+      assert.equal(error.statusCode, scenario.http);
+      assert.doesNotMatch(error.message, /PRIVATE|fixture-employee|fixture-refresh/);
+      return true;
+    });
+    assert.equal(writes, 0);
+    assert.equal(requests, scenario.missing ? 0 : 1);
+  }
+  for (const scenario of ["linked", "absent", "unconfigured", "store_error"]) {
+    const context = {
+      hcnGoogleGrantStoreConfigured: () => scenario !== "unconfigured",
+      currentHcnGooglePrincipalRef: () => "fixture-principal",
+      HCN_GOOGLE_GRANT_OPERATIONS: { run: async (_id, read) => read() },
+      hcnGoogleGrantStore: () => ({
+        status: async () => {
+          if (scenario === "store_error") throw new Error("PRIVATE-STORE");
+          return { state: scenario, hasRefreshGrant: scenario === "linked" };
+        }
+      })
+    };
+    const result = runInNewContext(
+      extract("hcnOptionalSourceFailure") + "\n"
+        + extract("hcnGoogleConnectorLinkedForCurrentRequest")
+        + "\nhcnGoogleConnectorLinkedForCurrentRequest()",
+      context
+    );
+    if (["unconfigured", "store_error"].includes(scenario)) {
+      await assert.rejects(result, (error) => {
+        assert.equal(error.hcnSourceFailureCode, "provider_check_failed");
+        assert.doesNotMatch(error.message, /PRIVATE-STORE/);
+        return true;
+      });
+    } else {
+      assert.equal(await result, scenario === "linked");
+    }
+  }
+  const emailUnique = Symbol("fixture-email-unique");
+  const context = {
+    hcnGoogleConnectorLinkedForCurrentRequest: async () => true,
+    hcnProviderFileId: (id) => id,
+    hcnExactCommunicationScope: async () => ({ file: { [emailUnique]: true } }),
+    buildFileGmailQuery: () => "fixture-query",
+    GMAIL_FILE_EMAIL_UNIQUE: emailUnique,
+    GMAIL_FILE_CLAIM_UNIQUE: Symbol("fixture-claim-unique"),
+    GMAIL_USER: "me",
+    hcnGmailApi: async () => {
+      const error = new Error("PRIVATE-TOKEN-ERROR");
+      error.hcnSourceFailureCode = "google_not_linked";
+      throw error;
+    }
+  };
+  await assert.rejects(
+    runInNewContext(
+      extract("hcnOptionalSourceFailure") + "\n" + extract("loadHcnGmailFile")
+        + '\nloadHcnGmailFile({providerFileId:"fixture-file",recentLimit:3})',
+      context
+    ),
+    (error) => {
+      assert.equal(error.hcnSourceFailureCode, "google_not_linked");
+      assert.doesNotMatch(error.message, /PRIVATE-TOKEN-ERROR/);
+      return true;
+    }
   );
 });
 
