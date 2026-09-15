@@ -29,10 +29,38 @@ export function assessReadiness(packet, to, carrier) {
   if (!to && !carrier) blockers.push("no filing phone for this carrier");
 
   if (packet.goal === "file_new_claim") {
+    const coverageTermStatus = String(f.coverageTermStatus || "").trim();
+    const dateOfLoss = claimDateKey(f.dateOfLoss);
+    const coverageStart = claimDateKey(f.policyCoverageStart);
+    const coverageEnd = claimDateKey(f.policyCoverageEnd);
+
+    if (!dateOfLoss) blockers.push("date of loss is invalid");
+    if (coverageTermStatus === "blocked_conflict") {
+      blockers.push("policy or coverage evidence has an unresolved conflict");
+    } else if (coverageTermStatus === "verified_in_force") {
+      if (!coverageStart || !coverageEnd) {
+        blockers.push("verified coverage requires both policy term dates");
+      } else if (coverageStart > coverageEnd) {
+        blockers.push("policy coverage term start is after its end");
+      } else if (dateOfLoss && (dateOfLoss < coverageStart || dateOfLoss > coverageEnd)) {
+        blockers.push("date of loss is outside the verified policy term");
+      }
+    } else if (coverageTermStatus === "carrier_lookup_required") {
+      if (isMissing(f.priorPolicyLookupInstruction)) {
+        blockers.push("no prior-policy lookup instruction");
+      } else {
+        warnings.push("carrier must locate and confirm active coverage for the date of loss before filing");
+      }
+    } else {
+      blockers.push("no valid coverage term status");
+    }
+
     if (isMissing(f.causeOfLoss) || isGenericCause(f.causeOfLoss)) {
       blockers.push("no verified cause of loss");
     }
-    if (!practicalDamageCategories(packet.damageSummary).length) {
+    if (packet.damageEvidenceSource !== "approved_override") {
+      blockers.push("no explicitly approved damage facts");
+    } else if (!practicalDamageCategories(packet.damageSummary).length) {
       blockers.push("no verified practical damage categories");
     }
     if (isMissing(packet.damageOpening)) {
@@ -50,6 +78,19 @@ export function assessReadiness(packet, to, carrier) {
     warnings.push("no damage scope captured");
   }
   return { ready: blockers.length === 0, blockers, warnings };
+}
+
+function claimDateKey(value) {
+  const match = String(value || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return "";
+  const [, month, day, year] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    date.getUTCFullYear() !== Number(year)
+    || date.getUTCMonth() !== Number(month) - 1
+    || date.getUTCDate() !== Number(day)
+  ) return "";
+  return `${year}-${month}-${day}`;
 }
 
 // Duplicate-new-claim guard: a file that already carries a claim number should

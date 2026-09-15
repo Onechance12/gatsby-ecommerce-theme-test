@@ -27,9 +27,27 @@
 //       injuries, homeLivable, temporaryRepairs, contractorHired,
 //       occupancy, damageDiscovered, stormTime, damageOpening, damageDetails,
 //       propertyStories, roofAccessibility, damagedRooms, damagedRoomCount,
-//       contractorPhone
+//       contractorPhone,
+//       coverageTermStatus, policyCoverageStart, policyCoverageEnd
 //     }
 //   }
+export const COVERAGE_TERM_STATUSES = Object.freeze([
+  "verified_in_force",
+  "carrier_lookup_required",
+  "blocked_conflict"
+]);
+
+export function normalizeCoverageTermStatus(value, { defaultStatus = "" } = {}) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return defaultStatus;
+  if (!COVERAGE_TERM_STATUSES.includes(normalized)) {
+    throw new TypeError(
+      `coverageTermStatus must be one of: ${COVERAGE_TERM_STATUSES.join(", ")}.`
+    );
+  }
+  return normalized;
+}
+
 export function normalizeClaimFileInput(raw = {}) {
   const file = raw.file || {};
   const evidence = raw.evidence || {};
@@ -74,6 +92,11 @@ export function normalizeClaimFileInput(raw = {}) {
       damagedRoomCount: captured.damagedRoomCount || "",
       contractorPhone: captured.contractorPhone || ""
     },
-    overrides: { ...overrides }
+    overrides: {
+      ...overrides,
+      ...(overrides.coverageTermStatus === undefined
+        ? {}
+        : { coverageTermStatus: normalizeCoverageTermStatus(overrides.coverageTermStatus) })
+    }
   };
 }

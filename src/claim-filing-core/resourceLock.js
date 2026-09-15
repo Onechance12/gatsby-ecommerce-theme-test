@@ -10,7 +10,9 @@ export function evaluateClaimCallResource({
   attempts = [],
   unresolvedReservations = [],
   requestedGoal = "file_new_claim",
-  retryOfCallId = ""
+  retryOfCallId = "",
+  callbackTtlMs,
+  nowMs = Date.now()
 } = {}) {
   const retry = String(retryOfCallId || "").trim();
   const goal = String(requestedGoal || "").trim();
@@ -56,7 +58,11 @@ export function evaluateClaimCallResource({
     );
   }
 
-  const pendingCallback = rows.find((row) => row.callbackConfirmed === true && !row.callbackStatus);
+  const pendingCallback = rows.find((row) => (
+    row.callbackConfirmed === true
+    && !row.callbackStatus
+    && callbackWindowIsOpen(row, callbackTtlMs, nowMs)
+  ));
   if (pendingCallback) {
     return deny(
       "claim_callback_pending",
@@ -113,6 +119,21 @@ export function evaluateClaimCallResource({
   }
 
   return allow("retry_of_latest_ended_call", latest.callId);
+}
+
+function callbackWindowIsOpen(row, callbackTtlMs, nowMs) {
+  const createdAt = Number(row?.createdAt);
+  const ttl = Number(callbackTtlMs);
+  const now = Number(nowMs);
+  if (
+    !Number.isFinite(createdAt)
+    || createdAt <= 0
+    || !Number.isFinite(ttl)
+    || ttl <= 0
+    || !Number.isFinite(now)
+    || now < 0
+  ) return true;
+  return createdAt + ttl > now;
 }
 
 function safeGoalTransition(priorGoal, requestedGoal) {

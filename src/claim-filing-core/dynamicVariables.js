@@ -14,6 +14,10 @@ export const PROMPT_PLACEHOLDERS = [
   "policyNumberSpoken",
   "claimNumber",
   "dateOfLoss",
+  "coverageTermStatus",
+  "policyCoverageStart",
+  "policyCoverageEnd",
+  "priorPolicyLookupInstruction",
   "stormTime",
   "causeOfLoss",
   "adjuster",
@@ -96,7 +100,10 @@ export function spokenPolicyNumber(value) {
   // representative explicitly asks for another identifier.
   const master = raw.match(/\bmaster\s+policy\s*[:#]?\s+([a-z0-9-]+)/i);
   const policy = raw.match(/\bpolicy(?:\s+number|\s*#)?\s*[:#]?\s+([a-z0-9-]+)/i);
-  const selected = String(master?.[1] || policy?.[1] || raw.split(/\s*\/\s*/)[0]).trim();
+  const slashPrefix = raw.split(/\s*\/\s*/)[0].trim();
+  const standalone = /^[a-z0-9-]+$/i.test(slashPrefix) ? slashPrefix : "";
+  const identifier = raw.match(/\b(?=[a-z0-9-]*\d)[a-z0-9-]{5,}\b/i);
+  const selected = String(master?.[1] || policy?.[1] || standalone || identifier?.[0] || "").trim();
 
-  return selected || raw;
+  return selected || "Missing";
 }

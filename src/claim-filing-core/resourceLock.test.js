@@ -30,6 +30,66 @@ test("claim-call resource blocks provider windows, active calls, and confirmed c
   }).code, "claim_callback_active");
 });
 
+test("confirmed-callback lock expires only at the explicit TTL boundary", () => {
+  const pending = ended({ callbackConfirmed: true, createdAt: 1_000 });
+  assert.equal(evaluateClaimCallResource({
+    attempts: [pending],
+    retryOfCallId: "call-1",
+    callbackTtlMs: 500,
+    nowMs: 1_499
+  }).code, "claim_callback_pending");
+  assert.deepEqual(evaluateClaimCallResource({
+    attempts: [pending],
+    retryOfCallId: "call-1",
+    callbackTtlMs: 500,
+    nowMs: 1_500
+  }), {
+    allowed: true,
+    code: "retry_of_latest_ended_call",
+    latestPriorCallId: "call-1"
+  });
+});
+
+test("expired callback confirmation still requires exact latest-call retry lineage", () => {
+  const expired = ended({ callbackConfirmed: true, createdAt: 1_000 });
+  assert.equal(evaluateClaimCallResource({
+    attempts: [expired],
+    callbackTtlMs: 500,
+    nowMs: 2_000
+  }).code, "latest_call_id_required");
+  assert.equal(evaluateClaimCallResource({
+    attempts: [expired],
+    retryOfCallId: "call-other",
+    callbackTtlMs: 500,
+    nowMs: 2_000
+  }).code, "stale_retry_lineage");
+});
+
+test("invalid callback timing fails closed and an active continuation never expires", () => {
+  for (const options of [
+    { callbackTtlMs: 500, nowMs: 2_000, createdAt: 0 },
+    { callbackTtlMs: 0, nowMs: 2_000, createdAt: 1_000 },
+    { callbackTtlMs: 500, nowMs: Number.NaN, createdAt: 1_000 }
+  ]) {
+    assert.equal(evaluateClaimCallResource({
+      attempts: [ended({ callbackConfirmed: true, createdAt: options.createdAt })],
+      retryOfCallId: "call-1",
+      callbackTtlMs: options.callbackTtlMs,
+      nowMs: options.nowMs
+    }).code, "claim_callback_pending");
+  }
+  assert.equal(evaluateClaimCallResource({
+    attempts: [ended({
+      callbackConfirmed: true,
+      callbackStatus: "ongoing",
+      createdAt: 1_000
+    })],
+    retryOfCallId: "call-1",
+    callbackTtlMs: 500,
+    nowMs: 2_000
+  }).code, "claim_callback_active");
+});
+
 test("claim-call resource requires the latest ended call id across changed plan digests", () => {
   const attempts = [
     ended({ callId: "call-1", createdAt: 100 }),

@@ -2010,7 +2010,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
       await new Promise((resolve) => setTimeout(resolve, 40));
       const call = {
         call_id: `call-${retellCreateCount}`,
-        call_status: "ended",
+        call_status: "ongoing",
         direction: "outbound",
         agent_id: body.override_agent_id,
         agent_version: body.override_agent_version,
@@ -2019,7 +2019,12 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
         start_timestamp: Date.now(),
         duration_ms: 120000,
         disconnection_reason: "user_hangup",
-        transcript: "The claim is filed under SF-123. Send the representation documents to claims@example.test.",
+        transcript: "Agent: Can you confirm policy ACTIVE-POLICY-1 was active and covered the date of loss?\nUser: Yes, that is correct.\nUser: The claim is filed under SF-123. Send the representation documents to claims@example.test. You are all set. Have a good day.",
+        transcript_object: [
+          { role: "agent", content: "Can you confirm policy ACTIVE-POLICY-1 was active and covered the date of loss?" },
+          { role: "user", content: "Yes, that is correct." },
+          { role: "user", content: "The claim is filed under SF-123. Send the representation documents to claims@example.test. You are all set. Have a good day." }
+        ],
         metadata: body.metadata,
         retell_llm_dynamic_variables: body.retell_llm_dynamic_variables,
         call_analysis: {
@@ -2028,6 +2033,8 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
           custom_analysis_data: {
             filing_outcome: "claim_filed",
             claim_number: "SF-123",
+            active_policy_number: "ACTIVE-POLICY-1",
+            active_coverage_confirmed: true,
             document_submission: "claims@example.test",
             document_submission_requested: true,
             next_step: "Carrier will assign an adjuster.",
@@ -2047,6 +2054,9 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
       }
     } else if (req.method === "POST" && url.pathname.startsWith("/v2/stop-call/")) {
       retellStopCount += 1;
+      const callId = decodeURIComponent(url.pathname.slice("/v2/stop-call/".length));
+      const call = retellCalls.find((item) => item.call_id === callId);
+      if (call) call.call_status = "ended";
       payload = { stopped: true };
     } else {
       res.writeHead(404, { "content-type": "application/json" });
@@ -2077,6 +2087,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
       RETELL_FROM_NUMBER: "+12145550100",
       RETELL_GUARDED_END_CALL_TOKEN: guardedToken,
       RETELL_INBOUND_WEBHOOK_TOKEN: inboundToken,
+      RETELL_CALLBACK_TTL_HOURS: "1",
       ALLOW_RETELL_CALLS: "true",
       ALLOW_RETELL_CLAIM_CALLS: "true",
       ALLOW_CLIENT_COORDINATOR_CALLS: "false",
@@ -2152,7 +2163,11 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
     query: "2739",
     goal: "file_new_claim",
     includeCarrierBatch: false,
-    stormTime: "Approximately 4:30 PM CDT from the verified file evidence"
+    stormTime: "Approximately 4:30 PM CDT from the verified file evidence",
+    overrides: {
+      coverageTermStatus: "carrier_lookup_required",
+      damageDetails: ["Roof and exterior hail damage"]
+    }
   };
   const preparedResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
     method: "POST",
@@ -2234,6 +2249,36 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(success.mode, "executed");
   assert.equal(success.callId, "call-1");
 
+  const guardedEndResponse = await fetch(`${publicBaseUrl}/retell/guarded-end-call`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${guardedToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      call: { call_id: "call-1" },
+      args: {
+        goal: "file_new_claim",
+        reason: "objective_complete",
+        outcome: "claim_filed",
+        claim_number: "SF-123",
+        active_policy_number: "ACTIVE-POLICY-1",
+        active_coverage_confirmed: true,
+        callback_confirmed: false,
+        document_submission_requested: true,
+        next_step_requested: true,
+        additional_claims_completed: 0,
+        additional_claim_numbers: "",
+        batch_continuation_resolved: true
+      }
+    })
+  });
+  assert.equal(guardedEndResponse.status, 200);
+  const guardedEnd = await guardedEndResponse.json();
+  assert.equal(guardedEnd.allowed, true);
+  assert.equal(guardedEnd.stopped, true);
+  assert.equal(retellStopCount, 1);
+
   const replayResponse = await fetch(`${publicBaseUrl}/claim-filing/call`, {
     method: "POST",
     headers: macHeaders,
@@ -2251,6 +2296,9 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(resultResponse.status, 200);
   const result = await resultResponse.json();
   assert.equal(result.extracted.claimNumber, "SF-123");
+  assert.equal(result.extracted.activePolicyNumber, "ACTIVE-POLICY-1");
+  assert.equal(result.completionReview.guardedCompletionVerified, true);
+  assert.equal(result.completionReview.complete, true);
   assert.match(result.nextStep, /direct claim writeback is unavailable/i);
 
   const outbound = retellCalls.find((call) => call.call_id === "call-1");
@@ -2292,6 +2340,10 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(retellCreateCount, 1);
 
   outbound.transcript = "Your request for a callback has been confirmed. We will call you back.";
+  outbound.transcript_object = [{
+    role: "user",
+    content: "Your request for a callback has been confirmed. We will call you back."
+  }];
   outbound.call_analysis = {
     call_successful: false,
     call_summary: "Carrier callback confirmed.",
@@ -2301,6 +2353,11 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
       callback_requested: true
     }
   };
+  // The callback window starts when the carrier call ends. A long outbound
+  // call must not become retry-eligible merely because its start is older
+  // than the configured TTL.
+  outbound.start_timestamp = Date.now() - (2 * 60 * 60 * 1000);
+  outbound.end_timestamp = Date.now();
   const callbackRetryInput = {
     ...changedRedialInput,
     retryOfCallId: "call-1"
@@ -2368,6 +2425,10 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   const wrongNumberInbound = await signedInbound(inboundPayload({ to_number: "+12145550101" }));
   assert.equal(wrongNumberInbound.status, 200);
   assert.deepEqual((await wrongNumberInbound.json()).call_inbound, { reject: true });
+
+  const differentAniInbound = await signedInbound(inboundPayload({ from_number: "+18005550123" }));
+  assert.equal(differentAniInbound.status, 200);
+  assert.deepEqual((await differentAniInbound.json()).call_inbound, { reject: true });
 
   const admittedInbound = await signedInbound(inboundPayload());
   assert.equal(admittedInbound.status, 200);
@@ -2465,7 +2526,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   });
   assert.equal(dedicatedGuard.status, 200);
   assert.equal((await dedicatedGuard.json()).allowed, false);
-  assert.equal(retellStopCount, 0);
+  assert.equal(retellStopCount, 1);
 
   const corruptionPlanResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
     method: "POST",
@@ -6296,6 +6357,8 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
     } else if (req.method === "POST" && url.pathname === "/publish-agent-version/fixture-claim-config-agent") {
       publishedVersion = body.version;
       payload = {};
+    } else if (req.method === "POST" && url.pathname === "/v3/list-calls") {
+      payload = { items: [] };
     } else if (
       req.method === "PATCH"
       && url.pathname.startsWith("/update-phone-number/")
@@ -6789,7 +6852,13 @@ test("Mac claim prepare reads fresh evidence while the shared bridge principal i
   const preparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
     headers: macClaimHeaders,
-    body: JSON.stringify({ query: "2739" })
+    body: JSON.stringify({
+      query: "2739",
+      overrides: {
+        coverageTermStatus: "carrier_lookup_required",
+        damageDetails: ["Roof and exterior hail damage"]
+      }
+    })
   });
   const prepared = await preparedResponse.json();
   assert.equal(preparedResponse.status, 200, JSON.stringify(prepared));
@@ -6808,7 +6877,13 @@ test("Mac claim prepare reads fresh evidence while the shared bridge principal i
   const labeledPreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
     headers: macClaimHeaders,
-    body: JSON.stringify({ query: "JobNimbus #2739" })
+    body: JSON.stringify({
+      query: "JobNimbus #2739",
+      overrides: {
+        coverageTermStatus: "carrier_lookup_required",
+        damageDetails: ["Roof and exterior hail damage"]
+      }
+    })
   });
   assert.equal(labeledPreparedResponse.status, 200);
   assert.equal((await labeledPreparedResponse.json()).file.id, "contact-chance");

@@ -4,12 +4,20 @@
 // transcript parsing. Every field carries a per-field source so the writeback
 // can treat structured values as proposals and transcript guesses as unverified.
 
+import { verifyActiveCoverage } from "./coverageConfirmation.js";
+
 export function extractCallResults(call) {
   const cad = call?.raw?.call_analysis?.custom_analysis_data || call?.callAnalysis?.custom_analysis_data || {};
   const transcript = String(call?.transcript || "");
   const dv = call?.raw?.retell_llm_dynamic_variables || {};
 
   const claimNumber = firstNonEmpty(cad.claim_number, transcriptClaimNumber(transcript));
+  const proposedActivePolicyNumber = firstNonEmpty(cad.active_policy_number);
+  const proposedCoverageConfirmed = cad.active_coverage_confirmed === true
+    || /^true$/i.test(String(cad.active_coverage_confirmed || ""));
+  const activeCoverageEvidence = verifyActiveCoverage(call, proposedActivePolicyNumber);
+  const activeCoverageConfirmed = proposedCoverageConfirmed && activeCoverageEvidence.confirmed;
+  const activePolicyNumber = activeCoverageConfirmed ? proposedActivePolicyNumber : "";
   const adjusterName = carrierAdjusterName(cad.adjuster_name, dv);
   const adjusterPhone = carrierAdjusterPhone(
     firstNonEmpty(cad.adjuster_phone, transcriptNear(transcript, /adjuster|team/i, /(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|1[\s.-]?8\d{2}[\s.-]?\d{3}[\s.-]?\d{4})/)),
@@ -37,6 +45,8 @@ export function extractCallResults(call) {
   // (regex from transcript, UNVERIFIED), or "none".
   const source = {
     claimNumber: cad.claim_number ? "retell-analysis" : (claimNumber ? "transcript-guess" : "none"),
+    activePolicyNumber: activePolicyNumber ? "retell-analysis+transcript-proof" : "none",
+    activeCoverageConfirmed: activeCoverageConfirmed ? "retell-analysis+transcript-proof" : "none",
     adjusterName: adjusterName && cad.adjuster_name ? "retell-analysis" : "none",
     adjusterPhone: adjusterPhone && cad.adjuster_phone ? "retell-analysis" : (adjusterPhone ? "transcript-guess" : "none"),
     adjusterEmail: adjusterEmail && cad.adjuster_email ? "retell-analysis" : "none",
@@ -51,8 +61,14 @@ export function extractCallResults(call) {
     insuredName: firstNonEmpty(dv.insuredName),
     carrier: firstNonEmpty(dv.carrier),
     goal,
+    coverageTermStatus: firstNonEmpty(dv.coverageTermStatus),
+    policyCoverageStart: firstNonEmpty(dv.policyCoverageStart),
+    policyCoverageEnd: firstNonEmpty(dv.policyCoverageEnd),
     fromMetadata: call?.raw?.metadata || {},
     claimNumber,
+    activePolicyNumber,
+    activeCoverageConfirmed,
+    activeCoverageEvidence,
     adjusterName,
     adjusterPhone,
     adjusterEmail,

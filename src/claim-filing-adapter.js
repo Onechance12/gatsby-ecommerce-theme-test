@@ -7,21 +7,110 @@ import {
   existingClaimBlock,
   extractCallResults,
   flattenFactsForDynamicVariables,
+  isConfirmedCarrierCallback,
   lookupCarrier,
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-08-24.1";
+export const CLAIM_PLAN_VERSION = "2026-09-15.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
+export const CLAIM_FILING_COVERAGE_TERM_STATUSES = Object.freeze([
+  "verified_in_force",
+  "carrier_lookup_required",
+  "blocked_conflict"
+]);
+
+export const CLAIM_FILING_OVERRIDE_STRING_KEYS = Object.freeze([
+  "goal",
+  "carrierPhone",
+  "insuredName",
+  "customer",
+  "propertyAddress",
+  "address",
+  "carrier",
+  "policyNumber",
+  "claimNumber",
+  "dateOfLoss",
+  "causeOfLoss",
+  "typeOfLoss",
+  "mortgageCompany",
+  "stormTime",
+  "occupancy",
+  "damageDiscovered",
+  "propertyStories",
+  "roofAccessibility",
+  "damagedRooms",
+  "damagedRoomCount",
+  "contractorPhone",
+  "injuries",
+  "homeLivable",
+  "temporaryRepairs",
+  "contractorHired",
+  "damageOpening",
+  "policyCoverageStart",
+  "policyCoverageEnd"
+]);
+
+const CLAIM_FILING_OVERRIDE_KEYS = new Set([
+  ...CLAIM_FILING_OVERRIDE_STRING_KEYS,
+  "coverageTermStatus",
+  "damageDetails"
+]);
+
+export function normalizeClaimFilingOverrides(value = {}) {
+  if (value === undefined || value === null) return {};
+  if (
+    typeof value !== "object"
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw validationError("overrides must be an exact object when supplied.");
+  }
+  const unknown = Object.keys(value).filter((key) => !CLAIM_FILING_OVERRIDE_KEYS.has(key));
+  if (unknown.length) {
+    throw validationError(`Unsupported claim-filing override keys: ${unknown.sort().join(", ")}.`);
+  }
+  const normalized = {};
+  for (const key of CLAIM_FILING_OVERRIDE_STRING_KEYS) {
+    if (value[key] === undefined) continue;
+    if (typeof value[key] !== "string") {
+      throw validationError(`${key} must be a string when supplied.`);
+    }
+    normalized[key] = value[key];
+  }
+  if (value.coverageTermStatus !== undefined) {
+    if (!CLAIM_FILING_COVERAGE_TERM_STATUSES.includes(value.coverageTermStatus)) {
+      throw validationError(
+        `coverageTermStatus must be one of: ${CLAIM_FILING_COVERAGE_TERM_STATUSES.join(", ")}.`
+      );
+    }
+    normalized.coverageTermStatus = value.coverageTermStatus;
+  }
+  if (value.damageDetails !== undefined) {
+    if (typeof value.damageDetails === "string") {
+      if (!value.damageDetails.trim()) throw validationError("damageDetails cannot be empty when supplied.");
+      normalized.damageDetails = value.damageDetails;
+    } else if (
+      Array.isArray(value.damageDetails)
+      && value.damageDetails.length > 0
+      && value.damageDetails.every((item) => typeof item === "string" && item.trim())
+    ) {
+      normalized.damageDetails = [...value.damageDetails];
+    } else {
+      throw validationError("damageDetails must be a non-empty string or array of non-empty strings.");
+    }
+  }
+  return normalized;
+}
+
 export function buildClaimFilingPlan(input, options = {}) {
-  const verifiedInput = applyVerifiedFileOverrides(input, {
-    ...(input.overrides || {}),
-    ...(options.overrides || {})
-  });
-  const packetOptions = cleanObject({
-    ...(input.overrides || {}),
-    ...(options.overrides || {}),
+  const approvedOverrides = {
+    ...normalizeClaimFilingOverrides(input.overrides),
+    ...normalizeClaimFilingOverrides(options.overrides)
+  };
+  const verifiedInput = applyVerifiedFileOverrides(input, approvedOverrides);
+  const explicitOptions = cleanObject({
     goal: options.goal,
     carrierPhone: options.carrierPhone,
     stormTime: options.stormTime,
@@ -37,6 +126,10 @@ export function buildClaimFilingPlan(input, options = {}) {
     temporaryRepairs: options.temporaryRepairs,
     contractorHired: options.contractorHired
   });
+  const packetOptions = {
+    ...approvedOverrides,
+    ...explicitOptions
+  };
   const packet = buildClaimCallPacket(verifiedInput, packetOptions);
   const carrier = lookupCarrier(packet.verifiedFileFacts.carrier, packet.verifiedFileFacts.policyNumber);
   const to = normalizePhone(options.to || packetOptions.carrierPhone || carrier?.filingPhone || "");
@@ -179,7 +272,7 @@ export function callbackCandidateFromCall(call) {
     filingOutcome,
     callbackRequested: confirmedCallbackRequest(call),
     carrierPhone: normalizePhoneOrBlank(call.to_number),
-    createdAt: Number(call.start_timestamp || 0),
+    createdAt: callbackWindowStartedAt(call),
     ownerId: String(metadata.ownerId || ""),
     planDigest: String(metadata.planDigest || ""),
     sourcePlanDigest: String(metadata.sourcePlanDigest || ""),
@@ -190,6 +283,27 @@ export function callbackCandidateFromCall(call) {
     operatorPrincipalHash: String(metadata.operatorPrincipalHash || ""),
     dynamicVariables: stringifyDynamicVariables(variables)
   };
+}
+
+export function callbackCandidateRemainsPending(candidate, cutoffMs) {
+  const createdAt = Number(candidate?.createdAt);
+  const cutoff = Number(cutoffMs);
+  if (!Number.isFinite(cutoff) || cutoff < 0) return true;
+  // A confirmed callback with no trustworthy window start is malformed, not
+  // expired. Keep it pending until a human reconciles the carrier call.
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return true;
+  return createdAt >= cutoff;
+}
+
+function callbackWindowStartedAt(call) {
+  const explicitEnd = Number(call?.end_timestamp || 0);
+  if (Number.isFinite(explicitEnd) && explicitEnd > 0) return explicitEnd;
+  const start = Number(call?.start_timestamp || 0);
+  const duration = Number(call?.duration_ms || 0);
+  if (Number.isFinite(start) && start > 0 && Number.isFinite(duration) && duration > 0) {
+    return start + duration;
+  }
+  return start;
 }
 
 export function buildCallbackDynamicVariables(candidate, match = "matched") {
@@ -239,19 +353,31 @@ export function selectCallbackCandidate(candidates, fromNumber) {
   const rows = Array.isArray(candidates) ? candidates : [];
   const exact = rows.filter((candidate) => samePhone(candidate.carrierPhone, fromNumber));
   if (exact.length === 1) return { selected: exact[0], match: "matched" };
-  if (rows.length === 1) return { selected: rows[0], match: "single_pending_case_requires_carrier_confirmation" };
-  return { selected: null, match: rows.length ? "needs_identity_confirmation" : "no_pending_case" };
+  return {
+    selected: null,
+    match: rows.length
+      ? "different_number_requires_manual_recovery"
+      : "no_pending_case"
+  };
 }
 
 export function confirmedCallbackRequest(call) {
-  const transcript = String(call?.transcript || "");
-  return /(?:(?:request for (?:a )?callback|callback request) (?:has been|is|was) (?:confirmed|accepted|scheduled|received)|callback (?:is|was|has been) (?:confirmed|accepted|scheduled)|you(?:'ll| will) receive (?:a|the) callback|we(?:'ll| will) call you back|(?:your|the) (?:place|position) in (?:the )?line (?:has been|is) (?:saved|reserved))/i.test(transcript);
+  return isConfirmedCarrierCallback(call);
 }
 
 export function callbackPacketStatus(variables) {
   const goal = String(variables.goal || "file_new_claim");
   const goalRequired = goal === "file_new_claim"
-    ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss", "causeOfLoss", "damageOpening", "damageDetails"]
+    ? [
+        "insuredName",
+        "propertyAddress",
+        "carrier",
+        "dateOfLoss",
+        "causeOfLoss",
+        "damageOpening",
+        "damageDetails",
+        "coverageTermStatus"
+      ]
     : goal === "find_existing_claim"
       ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss"]
       : [];
@@ -273,6 +399,45 @@ export function callbackPacketStatus(variables) {
   // Existing-claim lookups are exactly hash-bound to the complete approved
   // packet by the server, but do not require new-claim damage/batch answers.
   if (goal === "find_existing_claim") return "READY";
+
+  const coverageTermStatus = String(variables.coverageTermStatus || "");
+  if (!CLAIM_FILING_COVERAGE_TERM_STATUSES.includes(coverageTermStatus)) {
+    return "INCOMPLETE: invalid coverageTermStatus";
+  }
+  if (coverageTermStatus === "blocked_conflict") {
+    return "INCOMPLETE: blocked coverage-term conflict";
+  }
+  if (
+    coverageTermStatus === "carrier_lookup_required"
+    && (!variables.priorPolicyLookupInstruction || /^missing/i.test(String(variables.priorPolicyLookupInstruction)))
+  ) {
+    return "INCOMPLETE: priorPolicyLookupInstruction";
+  }
+  if (
+    coverageTermStatus !== "carrier_lookup_required"
+    && (!variables.policyNumberSpoken || /^missing/i.test(String(variables.policyNumberSpoken)))
+  ) {
+    return "INCOMPLETE: policyNumberSpoken";
+  }
+  if (
+    coverageTermStatus === "verified_in_force"
+    && ["policyCoverageStart", "policyCoverageEnd"].some((key) => (
+      !variables[key] || /^missing/i.test(String(variables[key]))
+    ))
+  ) {
+    return "INCOMPLETE: verified coverage dates";
+  }
+  if (coverageTermStatus === "verified_in_force") {
+    const coverageStart = claimDateKey(variables.policyCoverageStart);
+    const coverageEnd = claimDateKey(variables.policyCoverageEnd);
+    const dateOfLoss = claimDateKey(variables.dateOfLoss);
+    if (!coverageStart || !coverageEnd || !dateOfLoss) {
+      return "INCOMPLETE: invalid verified coverage dates";
+    }
+    if (coverageStart > coverageEnd || dateOfLoss < coverageStart || dateOfLoss > coverageEnd) {
+      return "INCOMPLETE: date of loss outside verified coverage term";
+    }
+  }
 
   const batchCountText = String(variables.batchClaimCount || "").trim();
   if (!/^\d+$/.test(batchCountText)) return "INCOMPLETE: invalid batchClaimCount";
@@ -331,16 +496,49 @@ function samePhone(a, b) {
   return Boolean(left && right && left === right);
 }
 
-export function analyzeClaimCall(call, file) {
+function claimDateKey(value) {
+  const match = String(value || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return "";
+  const [, month, day, year] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    date.getUTCFullYear() !== Number(year)
+    || date.getUTCMonth() !== Number(month) - 1
+    || date.getUTCDate() !== Number(day)
+  ) return "";
+  return `${year}-${month}-${day}`;
+}
+
+export function analyzeClaimCall(call, file, options = {}) {
   const extracted = extractCallResults(call);
   const proposal = buildWritebackProposal(file, extracted);
   const writeback = proposalToProcessUpdate(proposal);
   const completedClaim = ["claim_filed", "existing_claim_confirmed"].includes(extracted.outcome);
   const completionGaps = [];
+  const guardedCompletionVerified = options.requireGuardedCompletion === true
+    ? validGuardedCompletionReceipt(call, extracted, options.guardedCompletion)
+    : null;
+  if (!completedClaim) {
+    completionGaps.push("The call did not produce a verified completed claim outcome.");
+  }
+  if (completedClaim && !extracted.claimNumber) {
+    completionGaps.push("The call outcome says the claim was completed, but no claim or reference number was captured.");
+  }
+  if (completedClaim && extracted.coverageTermStatus === "carrier_lookup_required") {
+    if (extracted.activeCoverageConfirmed !== true) {
+      completionGaps.push("The call did not verify that an active policy term covered the date of loss before filing.");
+    }
+    if (!extracted.activePolicyNumber) {
+      completionGaps.push("The call did not capture the active policy number used for the date of loss.");
+    }
+  }
   if (completedClaim && !extracted.documentSubmissionRequested) {
     completionGaps.push("The agent did not ask where to send the Letter of Representation and supporting documents.");
   } else if (completedClaim && !extracted.documentSubmission) {
     completionGaps.push("The agent asked about document submission, but no destination or carrier instruction was captured.");
+  }
+  if (options.requireGuardedCompletion === true && guardedCompletionVerified !== true) {
+    completionGaps.push("No matching guarded-completion receipt proves this call was safe to close.");
   }
   const completionReview = {
     claimNumberCaptured: Boolean(extracted.claimNumber),
@@ -348,6 +546,7 @@ export function analyzeClaimCall(call, file) {
     documentSubmissionRequested: extracted.documentSubmissionRequested,
     documentSubmissionCaptured: Boolean(extracted.documentSubmission),
     nextStepCaptured: Boolean(extracted.nextStep),
+    guardedCompletionVerified,
     complete: completionGaps.length === 0,
     gaps: completionGaps
   };
@@ -358,7 +557,9 @@ export function analyzeClaimCall(call, file) {
     fields: writeback.fields,
     status: writeback.status,
     note: writeback.note,
-    unverified: proposal.unverified
+    unverified: proposal.unverified,
+    completionReview,
+    guardedCompletionDigest: options.guardedCompletion ? digest(options.guardedCompletion) : ""
   });
   return { extracted, completionReview, proposal, writeback, writebackDigest };
 }
@@ -366,10 +567,21 @@ export function analyzeClaimCall(call, file) {
 export function buildPostClaimWorkflow(analysis = {}) {
   const extracted = analysis.extracted || {};
   const completedClaim = ["claim_filed", "existing_claim_confirmed"].includes(extracted.outcome);
-  if (!completedClaim || !extracted.claimNumber) {
+  if (analysis.completionReview && analysis.completionReview.complete !== true) {
     return {
       applicable: false,
-      primaryAction: "Resolve the incomplete carrier-call outcome before starting representation delivery.",
+      primaryAction: "Resolve the guarded call-completion gaps before starting representation delivery.",
+      steps: []
+    };
+  }
+  const lookupCoverageComplete = extracted.coverageTermStatus !== "carrier_lookup_required"
+    || (extracted.activeCoverageConfirmed === true && Boolean(extracted.activePolicyNumber));
+  if (!completedClaim || !extracted.claimNumber || !lookupCoverageComplete) {
+    return {
+      applicable: false,
+      primaryAction: lookupCoverageComplete
+        ? "Resolve the incomplete carrier-call outcome before starting representation delivery."
+        : "Confirm and capture the active policy covering the date of loss before starting representation delivery.",
       steps: []
     };
   }
@@ -424,6 +636,39 @@ export function buildPostClaimWorkflow(analysis = {}) {
       : "Obtain a verified representation-document destination, then prepare the LOR package for approval.",
     steps
   };
+}
+
+function validGuardedCompletionReceipt(call, extracted, receipt) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return false;
+  if (
+    receipt.writebackEligible !== true
+    || String(receipt.decisionCode || "") !== "objective_complete"
+    || !["claim_filed", "existing_claim_confirmed"].includes(String(receipt.outcome || ""))
+  ) return false;
+  const raw = call?.raw && typeof call.raw === "object" ? call.raw : call;
+  const callId = String(call?.callId || raw?.call_id || "");
+  const transcriptDigest = digest({
+    transcript: String(raw?.transcript || call?.transcript || ""),
+    transcriptObject: Array.isArray(raw?.transcript_object) ? raw.transcript_object : []
+  });
+  const same = (left, right) => normalizeReceiptIdentifier(left) === normalizeReceiptIdentifier(right);
+  if (
+    String(receipt.callId || "") !== callId
+    || String(receipt.goal || "") !== String(extracted.goal || "")
+    || String(receipt.outcome || "") !== String(extracted.outcome || "")
+    || !same(receipt.claimNumber, extracted.claimNumber)
+    || String(receipt.transcriptDigest || "") !== transcriptDigest
+  ) return false;
+  if (extracted.coverageTermStatus === "carrier_lookup_required") {
+    return receipt.activeCoverageConfirmed === true
+      && extracted.activeCoverageConfirmed === true
+      && same(receipt.activePolicyNumber, extracted.activePolicyNumber);
+  }
+  return true;
+}
+
+function normalizeReceiptIdentifier(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
 export function proposalToProcessUpdate(proposal) {

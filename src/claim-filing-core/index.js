@@ -26,3 +26,11 @@ export {
   transcriptNear
 } from "./resultExtraction.js";
 export { buildWritebackProposal } from "./writeback.js";
+export {
+  confirmedCallbackRequest,
+  isConfirmedCarrierCallback
+} from "./callbackConfirmation.js";
+export {
+  hasTranscriptBackedActiveCoverage,
+  verifyActiveCoverage
+} from "./coverageConfirmation.js";

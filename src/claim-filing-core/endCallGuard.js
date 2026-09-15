@@ -1,12 +1,21 @@
+import { isConfirmedCarrierCallback } from "./callbackConfirmation.js";
+import { hasTranscriptBackedActiveCoverage } from "./coverageConfirmation.js";
+
 const WAIT_STATE = /\b(?:one|1)\s+(?:sec(?:ond)?|moment)\b|\b(?:just\s+)?(?:give me|bear with me)\b|\bplease hold\b|\b(?:i(?:'m| am)|we(?:'re| are))\s+(?:documenting|typing|checking|looking|working|pulling|gathering)\b|\bi(?:'ll| will)\s+let you know if i have (?:a|any) questions?\b|\bi(?:'ll| will)\s+be right back\b/i;
 const WRAP_UP = /\b(?:goodbye|bye(?:-bye)?|have a (?:good|great|blessed|wonderful) (?:day|evening|weekend)|you(?:'re| are) all set|that (?:completes|finishes|wraps up)|thank you for calling)\b/i;
-const CALLBACK_CONFIRMED = /\b(?:callback|call back)\b.{0,80}\b(?:queued|scheduled|requested|confirmed|will call|should call|going to call)\b|\b(?:queued|scheduled|requested|confirmed)\b.{0,80}\b(?:callback|call back)\b/i;
 const NO_NUMBER_YET = /\b(?:no|not)\b.{0,50}\b(?:claim|reference)\s*(?:number|#)\b|\b(?:claim|reference)\s*(?:number|#)\b.{0,50}\b(?:not (?:available|assigned|generated)|will be (?:issued|assigned|generated))\b/i;
 const VOICEMAIL = /\b(?:leave (?:a|your) message|record your message|voicemail|mailbox is full|after the (?:tone|beep))\b/i;
 const WRONG_NUMBER = /\b(?:wrong number|not the right (?:number|department)|you have reached .{0,40}(?:instead|not))\b/i;
 const HUMAN_END_REQUEST = /\b(?:please )?(?:hang up|end the call|stop calling|do not call)\b/i;
 const BATCH_ATTEMPT = /\b(?:another|additional|second)\s+(?:claim|policyholder|client|insured)\b/i;
 const BATCH_REFUSAL = /\b(?:cannot|can't|unable|not able|won't)\b.{0,80}\b(?:another|additional|second)\s+(?:claim|policyholder|client|insured)\b|\b(?:another|additional|second)\s+(?:claim|policyholder|client|insured)\b.{0,80}\b(?:cannot|can't|unable|not able|separate call|different department)\b/i;
+const IDENTIFIER_AFFIRMATIVE = /^(?:yes|correct|that(?:'s| is) correct|confirmed|absolutely)\b/i;
+const CLAIM_IDENTIFIER_READBACK = /\b(?:claim|reference|confirmation)\s*(?:number|#)\b/i;
+const CLAIM_IDENTIFIER_DIRECT_CONTEXT = /\b(?:claim|reference|confirmation)\s*(?:number|#)\b|\b(?:the\s+)?claim\s+(?:is|was|has been)\s+(?:filed|opened|assigned|confirmed)\s+(?:under|as)\b/i;
+const CLAIM_IDENTIFIER_CONTRADICTION = /\b(?:no|not|isn't|wasn't|incorrect|wrong|invalid|correction|actually)\b.{0,120}\b(?:claim|reference|confirmation|number|correct)\b|\b(?:claim|reference|confirmation)\s*(?:number|#)\b.{0,120}\b(?:not|isn't|wasn't|incorrect|wrong|invalid)\b|\b(?:that|the)\s+(?:(?:claim|reference|confirmation)\s*)?number\b.{0,60}\b(?:not correct|wrong|incorrect|invalid)\b/i;
+const CLAIM_IDENTIFIER_REPLACEMENT = /\b(?:correct|actual|updated|new)\s+(?:claim|reference|confirmation)\s*(?:number|#)\b/i;
+const CLAIM_IDENTIFIER_UNCERTAINTY = /\b(?:cannot|can't|could not|couldn't|unable to|not able to|do not know|don't know|not sure|uncertain|neither confirm nor deny)\b.{0,160}\b(?:claim|reference|confirmation|number|filed|opened|assigned)\b|\b(?:claim|reference|confirmation)\s*(?:number|#)\b.{0,120}\b(?:cannot|can't|could not|couldn't|unable|not sure|uncertain)\b/i;
+const CLAIM_IDENTIFIER_HEDGE = /\b(?:may|might|could|possibly|probably|perhaps|maybe|think|believe|appears?|seems?|likely)\b/i;
 
 export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const turns = transcriptTurns(call);
@@ -47,9 +56,11 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const outcome = String(args.outcome || "").trim();
   const claimNumber = String(args.claim_number || args.claimNumber || "").trim();
   const normalizedClaim = normalizeIdentifier(claimNumber);
-  const transcriptBacksClaimNumber = identifierAppearsInTranscript(normalizedClaim, transcript);
+  const transcriptBacksClaimNumber = identifierAppearsInCarrierEvidence(normalizedClaim, turns);
   const noNumberWithTiming = NO_NUMBER_YET.test(transcript) && /\b(?:later|within|after|when|once|by|business (?:day|hours?)|hours?|days?|assigned|generated|issued)\b/i.test(transcript);
-  const callbackConfirmed = args.callback_confirmed === true && CALLBACK_CONFIRMED.test(transcript);
+  const callbackConfirmed = args.callback_confirmed === true && isConfirmedCarrierCallback(call);
+  const coverageTermStatus = String(call.retell_llm_dynamic_variables?.coverageTermStatus || "").trim();
+  const activePolicyNumber = String(args.active_policy_number || args.activePolicyNumber || "").trim();
 
   if (["file_new_claim", "find_existing_claim", "confirm_existing_claim"].includes(goal)) {
     if (!["claim_filed", "existing_claim_confirmed"].includes(outcome) && !callbackConfirmed && !noNumberWithTiming) {
@@ -57,6 +68,27 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
     }
     if (["claim_filed", "existing_claim_confirmed"].includes(outcome) && !transcriptBacksClaimNumber) {
       return deny("A transcript-backed claim or reference number has not been captured.", "missing_verified_claim_number");
+    }
+    if (goal === "file_new_claim" && ["claim_filed", "existing_claim_confirmed"].includes(outcome)) {
+      if (!["verified_in_force", "carrier_lookup_required"].includes(coverageTermStatus)) {
+        return deny(
+          "The approved packet does not contain a valid filing coverage disposition.",
+          "invalid_coverage_disposition"
+        );
+      }
+      if (
+        coverageTermStatus === "carrier_lookup_required"
+        && (
+          args.active_coverage_confirmed !== true
+          || !activePolicyNumber
+          || !hasTranscriptBackedActiveCoverage(call, activePolicyNumber)
+        )
+      ) {
+        return deny(
+          "The carrier has not explicitly confirmed the exact active policy covering the date of loss. Do not treat the filing as complete.",
+          "active_coverage_not_confirmed"
+        );
+      }
     }
     if (!transcriptBacksClaimNumber && !callbackConfirmed && !noNumberWithTiming) {
       return deny("No claim/reference number or explicit issuance instruction was verified.", "missing_claim_number");
@@ -83,7 +115,7 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
       const completed = Number(args.additional_claims_completed || 0);
       const completedAndVerified = completed >= additionalRequired
         && additionalNumbers.length >= additionalRequired
-        && additionalNumbers.slice(0, additionalRequired).every((value) => identifierAppearsInTranscript(value, transcript));
+        && additionalNumbers.slice(0, additionalRequired).every((value) => identifierAppearsInCarrierEvidence(value, turns));
       const refusalVerified = args.batch_continuation_resolved === true && BATCH_REFUSAL.test(transcript);
       if (!completedAndVerified && !refusalVerified) {
         return deny("The approved same-carrier batch is not complete and the representative did not refuse it. Continue with the additional claim.", "batch_claim_incomplete");
@@ -109,7 +141,11 @@ export function transcriptTurns(call = {}) {
     const match = line.match(/^\s*(agent|assistant|user|caller|callee|representative)\s*:\s*(.*)$/i);
     const label = String(match?.[1] || "").toLowerCase();
     return {
-      role: ["agent", "assistant"].includes(label) ? "agent" : "user",
+      role: ["agent", "assistant", "caller"].includes(label)
+        ? "agent"
+        : ["user", "callee", "representative"].includes(label)
+          ? "user"
+          : "unknown",
       content: String(match?.[2] || line).trim()
     };
   }).filter((turn) => turn.content);
@@ -123,6 +159,43 @@ function identifierAppearsInTranscript(normalizedIdentifier, transcript) {
   if (normalizedIdentifier.length < 5) return false;
   if (normalizeIdentifier(transcript).includes(normalizedIdentifier)) return true;
   return spokenIdentifierSequences(transcript).some((sequence) => sequence.includes(normalizedIdentifier));
+}
+
+function identifierAppearsInCarrierEvidence(normalizedIdentifier, turns) {
+  if (normalizedIdentifier.length < 5) return false;
+  let confirmed = false;
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    if (turn.role !== "user") continue;
+    const previous = turns[index - 1];
+    const exactIdentifierAppears = identifierAppearsInTranscript(normalizedIdentifier, turn.content);
+    if (
+      CLAIM_IDENTIFIER_CONTRADICTION.test(turn.content)
+      || CLAIM_IDENTIFIER_UNCERTAINTY.test(turn.content)
+      || CLAIM_IDENTIFIER_HEDGE.test(turn.content)
+      || (confirmed && CLAIM_IDENTIFIER_REPLACEMENT.test(turn.content) && !exactIdentifierAppears)
+    ) {
+      confirmed = false;
+      continue;
+    }
+    if (
+      exactIdentifierAppears
+      && (
+        CLAIM_IDENTIFIER_DIRECT_CONTEXT.test(turn.content)
+        || (previous?.role === "agent" && CLAIM_IDENTIFIER_READBACK.test(previous.content))
+      )
+    ) {
+      confirmed = true;
+      continue;
+    }
+    if (
+      IDENTIFIER_AFFIRMATIVE.test(turn.content)
+      && previous?.role === "agent"
+      && CLAIM_IDENTIFIER_READBACK.test(previous.content)
+      && identifierAppearsInTranscript(normalizedIdentifier, previous.content)
+    ) confirmed = true;
+  }
+  return confirmed;
 }
 
 function spokenIdentifierSequences(value) {

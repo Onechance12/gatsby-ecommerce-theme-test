@@ -34,14 +34,27 @@ contract (all fields optional; `normalizeClaimFileInput` fills safe defaults):
   overrides: {                   // approved per-call answers/goal
     goal, carrierPhone,
     injuries, homeLivable, temporaryRepairs, contractorHired,
-    occupancy, damageDiscovered, stormTime
+    occupancy, damageDiscovered, stormTime,
+    coverageTermStatus, policyCoverageStart, policyCoverageEnd,
+    damageOpening, damageDetails
   }
 }
 ```
 
 The `overrides` (and the same keys passed as the `options` arg to
 `buildClaimCallPacket`) let a specific file override the standard answers or the
-goal per call.
+goal per call. A new-claim call must bind one of these coverage dispositions:
+
+- `verified_in_force`: both term dates are valid and include the DOL.
+- `carrier_lookup_required`: the available policy identifier is a lookup
+  reference only; the carrier must confirm the exact active policy and DOL
+  coverage before filing can complete.
+- `blocked_conflict`: no call is ready until the conflict is resolved in a new
+  approved packet.
+
+Filename/note inference is review-only. New claims require explicit approved
+damage facts naming a practical damaged component; generic, old, unrelated, or
+no-damage statements do not make a call ready.
 
 ## Exports (from `src/claim-filing-core/index.js`)
 
@@ -59,6 +72,7 @@ goal per call.
 | `buildRetellLlmFromPacket(packet, options)`, `renderRetellPrompt(packet)`, `postCallAnalysisSchema()` | Retell prompt, tools (`request_guarded_end_call` + `press_digit`), and the post-call analysis schema. |
 | `extractCallResults(call)`, `inferOutcome(...)`, `transcript*` | Post-call extraction with **per-field source** (`retell-analysis` / `transcript-guess` / `none`). |
 | `buildWritebackProposal(file, ex)` | DRY-RUN JobNimbus proposal: `proposedFields`, `fieldConfidence`, `proposedNote`, `unverified`, `outcome`. |
+| `verifyActiveCoverage(call, policyNumber)` | Speaker-attributed transcript proof that one exact policy covered the DOL. Model analysis alone is never proof. |
 
 ## Carrier callback continuation contract
 
@@ -67,12 +81,16 @@ call, not a new generic inbound call.
 
 - The outbound Retell call keeps the complete approved packet in string dynamic
   variables and immutable ownership metadata.
-- Only calls whose transcript or structured analysis confirms that a callback
-  was actually requested are eligible callback candidates.
+- Only calls whose carrier-attributed transcript unequivocally confirms a
+  queued/scheduled callback are eligible. Receipt/submission, offers,
+  conditions, and model analysis alone are insufficient.
 - Callback candidates expire after the configured TTL and are removed once an
   inbound continuation exists.
 - The inbound webhook restores every approved claim fact, including DOL, cause,
-  damage, standard answers, batch data, goal, and contact facts.
+  damage, standard answers, goal, and contact facts.
+- The callback TTL begins when the outbound call ends. A callback from a
+  different ANI fails closed for manual recovery; it never receives a client
+  packet based only on being the sole pending case.
 - The callback metadata carries the original contact, owner, plan digest, and
   call id so result review and approval-gated writeback work on either call leg.
 - A callback packet must report `callbackPacketStatus=READY`. An incomplete
@@ -81,6 +99,8 @@ call, not a new generic inbound call.
   callbacks. It never places a call or writes JobNimbus.
 - Intentional retries require the ended prior call id and are rejected while a
   continuation is active or after a claim number was captured.
+- Same-carrier batching is disabled. Every Retell call is one fresh-read,
+  separately approved JobNimbus file.
 
 ## Company rules preserved
 
@@ -99,7 +119,11 @@ call, not a new generic inbound call.
 
 ## Writeback safety
 
-`buildWritebackProposal` proposes; it never writes. The local wrapper
+`buildWritebackProposal` proposes; it never writes. The bridge also requires a
+durable guarded-completion receipt bound to the call id, outcome, claim number,
+coverage disposition, exact active policy, and transcript digest. An ended call
+without that receipt remains review-only and cannot enter the post-claim
+workflow or JobNimbus writeback route. The local wrapper
 (`src/assistant/postCallWriteback.js`) adds the gated, dry-run-first CLI commands.
 A bridge adapter should keep the same gates (approval + explicit execute) and its
 own JobNimbus write path.

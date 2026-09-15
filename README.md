@@ -456,14 +456,18 @@ POST /claim-filing/writeback
 The workflow is intentionally split:
 
 1. `prepare` pulls fresh JobNimbus fields, activity, tasks, and document metadata,
-   builds the call packet, and returns a `planDigest` without placing a call.
+   builds one file's call packet, and returns a `planDigest` without placing a
+   call. Same-carrier batching is disabled.
 2. `call` repeats the live read. It rejects a stale digest and only calls when
    `execute:true` and `ALLOW_RETELL_CALLS=true` are both present.
 3. `result` reads the Retell transcript and post-call analysis. Structured facts
    are proposed for JobNimbus; transcript guesses remain visibly unverified.
+   When active coverage had to be located, the exact active policy and DOL
+   coverage must be proven by carrier-attributed transcript evidence.
 4. `writeback` repeats the live checks and requires the exact approved
-   `writebackDigest`. It writes only with `execute:true` and
-   `BRIDGE_ALLOW_WRITES=true`.
+   `writebackDigest`. It also requires the durable guarded-completion receipt
+   created at the verified end-call boundary. It writes only with `execute:true`
+   and `BRIDGE_ALLOW_WRITES=true`.
 
 Both calls and writebacks have a small idempotency ledger to prevent accidental
 duplicates. Point `CLAIM_CALL_STORE_PATH` at persistent storage if the ledger

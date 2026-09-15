@@ -15,7 +15,9 @@ import {
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
   callbackDynamicVariablesDigest,
+  callbackCandidateRemainsPending,
   digest,
+  normalizeClaimFilingOverrides,
   retellCallBody,
   callbackCandidateFromCall,
   selectCallbackCandidate,
@@ -4009,7 +4011,8 @@ async function placeClaimFilingCall(input) {
     const decision = evaluateClaimCallResource({
       ...resource,
       requestedGoal: plan.packet.goal,
-      retryOfCallId
+      retryOfCallId,
+      callbackTtlMs: RETELL_CALLBACK_TTL_HOURS * 60 * 60 * 1000
     });
     if (!decision.allowed) conflictError(decision.reason);
 
@@ -4955,14 +4958,17 @@ function claimResourceAttempt(outbound, row, inventory) {
     transcript: String(effective.transcript || ""),
     raw: effective
   });
+  const callbackCandidate = callbackCandidateFromCall(outbound);
   return {
     callId: String(outbound.call_id || row.callId || ""),
     callStatus: String(outbound.call_status || row.callStatus || ""),
-    createdAt: Number(outbound.start_timestamp || Date.parse(row.createdAt || "") || 0),
+    createdAt: callbackCandidate?.callbackRequested
+      ? Number(callbackCandidate.createdAt || 0)
+      : Number(outbound.start_timestamp || Date.parse(row.createdAt || "") || 0),
     goal: String(outbound.metadata?.goal || row.goal || ""),
     outcome: String(extracted.outcome || ""),
     claimNumber: String(extracted.claimNumber || ""),
-    callbackConfirmed: Boolean(callbackCandidateFromCall(outbound)?.callbackRequested),
+    callbackConfirmed: Boolean(callbackCandidate?.callbackRequested),
     callbackStatus: continuation ? String(continuation.call_status || "") : ""
   };
 }
@@ -5031,67 +5037,9 @@ function claimResourceCallbackMatchesOutbound(call, outbound) {
 }
 
 async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
-  if (input.includeCarrierBatch === false || primaryPlan.packet.goal !== "file_new_claim") return primaryPlan;
-  const carrierKey = normalizeCompare(primaryContext.file.carrier);
-  if (!carrierKey) return primaryPlan;
-
-  const contacts = await listContacts({ maxPages: Number(input.maxPages || 25) });
-  const candidates = contacts
-    .filter((contact) => isInsuranceFile(contact) && assignedTo(contact, CHANCE_OWNER_ID) && isOpenActive(contact))
-    .map((contact) => ({ contact, file: compactContact(contact) }))
-    .filter(({ file }) => file.id !== primaryContext.file.id)
-    .filter(({ file }) => normalizeCompare(file.carrier) === carrierKey)
-    .filter(({ file }) => /(?:ready|waiting) for pa review/i.test(file.status))
-    .filter(({ file }) => !String(file.claimNumber || "").trim())
-    .sort((a, b) => Number(a.file.number || 0) - Number(b.file.number || 0))
-    .slice(0, 6);
-
-  const batchClaims = [];
-  for (const { contact, file } of candidates) {
-    const candidateInput = {
-      file: {
-        id: file.id,
-        customer: file.name,
-        address: file.address,
-        carrier: file.carrier,
-        policyNumber: file.policyNumber,
-        claimNumber: file.claimNumber,
-        dateOfLoss: file.dateOfLoss,
-        typeOfLoss: file.typeOfLoss,
-        status: file.status,
-        mortgageCompany: fieldValue(contact, ["Mortgage Company", "mortgage_company", "cf_string_6"]),
-        contact,
-        adjuster: {}
-      },
-      evidence: { documents: [], notes: [], tasks: [] },
-      captured: {},
-      overrides: {}
-    };
-    const candidatePlan = await buildClaimPlanWithStormTime(input, candidateInput, file);
-    if (!candidatePlan.readiness.ready) continue;
-    batchClaims.push({
-      fileNumber: file.number,
-      contactId: file.id,
-      insuredName: candidatePlan.packet.verifiedFileFacts.insuredName,
-      propertyAddress: candidatePlan.packet.verifiedFileFacts.propertyAddress,
-      homeownerPhone: candidatePlan.packet.verifiedFileFacts.homeownerPhone,
-      homeownerEmail: candidatePlan.packet.verifiedFileFacts.homeownerEmail,
-      policyNumber: candidatePlan.callPlan.dynamicVariables.policyNumberSpoken,
-      dateOfLoss: candidatePlan.packet.verifiedFileFacts.dateOfLoss,
-      causeOfLoss: candidatePlan.packet.verifiedFileFacts.causeOfLoss,
-      injuries: candidatePlan.packet.verifiedFileFacts.injuries,
-      homeLivable: candidatePlan.packet.verifiedFileFacts.homeLivable,
-      temporaryRepairs: candidatePlan.packet.verifiedFileFacts.temporaryRepairs,
-      contractorHired: candidatePlan.packet.verifiedFileFacts.contractorHired
-    });
+  if (input.includeCarrierBatch === true) {
+    badRequest("Same-carrier batch claim calls are disabled. Prepare and approve exactly one JobNimbus file per Retell call.");
   }
-
-  primaryPlan.callPlan.dynamicVariables.batchClaimCount = String(batchClaims.length);
-  primaryPlan.callPlan.dynamicVariables.batchClaims = batchClaims.length ? JSON.stringify(batchClaims) : "None";
-  primaryPlan.callPlan.metadata.batchContactIds = batchClaims.map((claim) => claim.contactId).join(",");
-  primaryPlan.batchClaims = batchClaims;
-  primaryPlan.planDigest = digest({ primaryPlanDigest: primaryPlan.planDigest, batchClaims });
-  primaryPlan.callPlan.metadata.planDigest = primaryPlan.planDigest;
   return primaryPlan;
 }
 
@@ -5138,6 +5086,8 @@ async function claimFilingResult(input) {
       ? "Review the transcript and extraction. Any JobNimbus field, stage, note, task, or calendar change must be freshly prepared through its separate approved Operator action path; direct claim writeback is unavailable."
       : proposedCalendarEvent?.ready
         ? "Review the result and exact appointment. JobNimbus writeback and calendar creation remain separate approval-gated actions."
+        : analysis.completionReview?.complete !== true
+          ? "This call is review-only because guarded completion was not fully verified. Resolve the listed gaps before any JobNimbus writeback or representation workflow."
         : workflow.applicable
           ? workflow.primaryAction
           : "Review the result and proposed update. Use processApprovedClaimFilingWriteback with this writebackDigest; execute=true writes only after approval."
@@ -5198,6 +5148,9 @@ function explicitOffsetDateTime(value) {
 async function claimFilingWriteback(input) {
   const analysis = await loadClaimCallAnalysis(required(input.callId, "callId"));
   if (analysis.call.callStatus !== "ended") badRequest("The carrier call is not complete. Review it again after the call ends.");
+  if (analysis.completionReview?.complete !== true) {
+    badRequest(`Claim-call writeback is blocked: ${(analysis.completionReview?.gaps || ["guarded completion was not verified"]).join("; ")}`);
+  }
   assertApprovalDigest(input.writebackDigest, analysis.writebackDigest, "writebackDigest");
   const plan = await buildContactUpdatePlan(analysis.contact, analysis.writeback);
 
@@ -5335,6 +5288,13 @@ async function configureRetellAgent(input = {}) {
   }
   assertApprovalDigest(input.configDigest, configDigest, "configDigest");
 
+  const pendingCallbacks = await recentCallbackCandidates("");
+  if (pendingCallbacks.length) {
+    conflictError(
+      `Retell claim-agent publication is blocked while ${pendingCallbacks.length} confirmed carrier callback${pendingCallbacks.length === 1 ? " is" : "s are"} still pending (${pendingCallbacks.map((candidate) => candidate.callId).join(", ")}). Resolve or let the callback window expire before publishing a new version.`
+    );
+  }
+
   const draftAgent = await ensureRetellDraftAgentVersion(RETELL_AGENT_ID, agent);
   const draftLlmId = String(draftAgent?.response_engine?.llm_id || "").trim();
   const draftLlmVersion = Number(draftAgent?.response_engine?.version);
@@ -5423,12 +5383,56 @@ async function guardedRetellEndCall(input = {}) {
   }
 
   await retellApi("POST", `/v2/stop-call/${encodeURIComponent(callId)}`);
+  await recordGuardedClaimCompletion(liveCall, args, decision);
   return {
     ...decision,
     callId,
     stopped: true,
     message: "The bridge verified completion and ended the call. Do not speak again."
   };
+}
+
+async function recordGuardedClaimCompletion(liveCall, args, decision) {
+  const metadata = liveCall.metadata || {};
+  const callLeg = String(metadata.callLeg || "outbound");
+  const ledgerCallId = callLeg === "carrier_callback"
+    ? String(metadata.originalCallId || "")
+    : String(liveCall.call_id || "");
+  await withClaimCallMutation(async () => {
+    const ledger = await readClaimCallLedger();
+    const row = ledger.find((item) => (
+      String(item.callId || "") === ledgerCallId
+      && String(item.contactId || "") === String(metadata.contactId || "")
+      && String(item.fileNumber || "").replace(/^#/, "") === String(metadata.fileNumber || "").replace(/^#/, "")
+      && String(item.planDigest || "") === String(metadata.planDigest || "")
+      && String(item.principalHash || "") === String(metadata.operatorPrincipalHash || "")
+    ));
+    if (!row) throw new Error("The approved claim-call ledger record is missing after guarded completion.");
+    const outcome = String(args.outcome || "");
+    const decisionCode = String(decision?.code || "");
+    row.guardedCompletion = {
+      callId: String(liveCall.call_id || ""),
+      goal: String(args.goal || metadata.goal || ""),
+      outcome,
+      decisionCode,
+      writebackEligible: decisionCode === "objective_complete"
+        && ["claim_filed", "existing_claim_confirmed"].includes(outcome),
+      claimNumber: String(args.claim_number || args.claimNumber || ""),
+      coverageDisposition: String(liveCall.retell_llm_dynamic_variables?.coverageTermStatus || ""),
+      activePolicyNumber: String(args.active_policy_number || args.activePolicyNumber || ""),
+      activeCoverageConfirmed: args.active_coverage_confirmed === true,
+      transcriptDigest: claimCallTranscriptDigest(liveCall),
+      guardedAt: new Date().toISOString()
+    };
+    await writeClaimCallLedger(ledger.slice(-500));
+  });
+}
+
+function claimCallTranscriptDigest(call) {
+  return digest({
+    transcript: String(call?.transcript || ""),
+    transcriptObject: Array.isArray(call?.transcript_object) ? call.transcript_object : []
+  });
 }
 
 async function assertGuardedRetellCallOwnership(liveCall = {}) {
@@ -5758,7 +5762,10 @@ async function retellInbound(input) {
     retellConfiguration
   );
   const { selected, match } = selectCallbackCandidate(candidates, inbound.from_number);
-  if (!selected || match !== "matched") return rejectedRetellInbound();
+  if (
+    !selected
+    || !["matched", "single_pending_case_requires_carrier_confirmation"].includes(match)
+  ) return rejectedRetellInbound();
   const dynamicVariables = buildCallbackDynamicVariables(selected, match);
   if (dynamicVariables.callbackPacketStatus !== "READY") return rejectedRetellInbound();
 
@@ -5874,7 +5881,9 @@ async function recentCallbackCandidates(fromNumber) {
     .filter(Boolean)
     .filter((candidate) => candidate.callbackRequested)
     .filter((candidate) => !continuedCallIds.has(candidate.callId))
-    .filter((candidate) => !candidate.createdAt || candidate.createdAt >= cutoff)
+    // A malformed confirmed callback remains visible so configuration
+    // publication is blocked; durable inbound routing rejects invalid timing.
+    .filter((candidate) => callbackCandidateRemainsPending(candidate, cutoff))
     .sort((a, b) => {
       const aExact = samePhone(a.carrierPhone, fromNumber) ? 1 : 0;
       const bExact = samePhone(b.carrierPhone, fromNumber) ? 1 : 0;
@@ -6259,11 +6268,20 @@ async function loadClaimCallAnalysis(callId) {
   }
   const { contact } = await findChanceContact(metadata.contactId);
   const file = compactContact(contact);
+  const completionLedger = await readClaimCallLedger();
+  const completionRecord = completionLedger.find((item) => (
+    String(item.callId || "") === String(requestedRaw.call_id || "")
+    && String(item.contactId || "") === String(metadata.contactId || "")
+    && String(item.planDigest || "") === String(requestedRaw.metadata?.planDigest || "")
+  ));
   const result = analyzeClaimCall(call, {
     id: file.id,
     customer: file.name,
     status: file.status,
     carrier: file.carrier
+  }, {
+    requireGuardedCompletion: true,
+    guardedCompletion: completionRecord?.guardedCompletion || null
   });
   const callChain = [requestedRaw, ...(continuation ? [continuation] : [])].map((item) => ({
     callId: item.call_id,
@@ -15661,6 +15679,7 @@ function assertIdentityRequestScope(
       error.statusCode = 400;
       throw error;
     }
+    if (body.overrides !== undefined) normalizeClaimFilingOverrides(body.overrides);
   }
   if (body.includeBrainAdvisory === true) {
     const error = new Error("The Codex operator cannot send client evidence to an operational advisory model.");
@@ -17234,6 +17253,51 @@ const OPENAPI = {
         },
         required: ["batchId"]
       },
+      ClaimFilingOverrides: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          goal: { type: "string" },
+          carrierPhone: { type: "string" },
+          insuredName: { type: "string" },
+          customer: { type: "string" },
+          propertyAddress: { type: "string" },
+          address: { type: "string" },
+          carrier: { type: "string" },
+          policyNumber: { type: "string" },
+          claimNumber: { type: "string" },
+          dateOfLoss: { type: "string" },
+          causeOfLoss: { type: "string" },
+          typeOfLoss: { type: "string" },
+          mortgageCompany: { type: "string" },
+          stormTime: { type: "string" },
+          occupancy: { type: "string" },
+          damageDiscovered: { type: "string" },
+          propertyStories: { type: "string" },
+          roofAccessibility: { type: "string" },
+          damagedRooms: { type: "string" },
+          damagedRoomCount: { type: "string" },
+          contractorPhone: { type: "string" },
+          injuries: { type: "string" },
+          homeLivable: { type: "string" },
+          temporaryRepairs: { type: "string" },
+          contractorHired: { type: "string" },
+          damageOpening: { type: "string" },
+          damageDetails: {
+            oneOf: [
+              { type: "string", minLength: 1 },
+              { type: "array", minItems: 1, items: { type: "string", minLength: 1 } }
+            ]
+          },
+          coverageTermStatus: {
+            type: "string",
+            enum: ["verified_in_force", "carrier_lookup_required", "blocked_conflict"],
+            description: "Coverage-term disposition for the date of loss. A prior or unverified policy reference must use carrier_lookup_required."
+          },
+          policyCoverageStart: { type: "string", description: "Verified policy-term start date when known." },
+          policyCoverageEnd: { type: "string", description: "Verified policy-term end date when known." }
+        }
+      },
       ClaimFilingPrepareRequest: {
         type: "object",
         additionalProperties: false,
@@ -17256,7 +17320,7 @@ const OPENAPI = {
           contractorHired: { type: "string", description: "Per-file override; otherwise the approved company default is used." },
           includeCarrierBatch: { type: "boolean", default: false, description: "Must be false for the dedicated Mac operator. Claim-call approvals are always one JobNimbus file at a time." },
           retryOfCallId: { type: "string", description: "Optional prior ended call id for a separately prepared and approved retry of this same file." },
-          overrides: { type: "object", additionalProperties: true, description: "Approved per-call overrides. If DOL must also be saved to JobNimbus, execute and verify that update first, then prepare the call from the refreshed file. A later DOL change intentionally invalidates an earlier plan digest." }
+          overrides: { $ref: "#/components/schemas/ClaimFilingOverrides", description: "Strict approved per-call facts. Coverage disposition and explicit damage details are digest-bound; unknown keys are rejected." }
         },
         required: ["query"]
       },
@@ -17282,7 +17346,7 @@ const OPENAPI = {
           temporaryRepairs: { type: "string" },
           contractorHired: { type: "string" },
           includeCarrierBatch: { type: "boolean", default: false, description: "Must be false for the dedicated Mac operator. The bridge also forces one-file mode server-side." },
-          overrides: { type: "object", additionalProperties: true },
+          overrides: { $ref: "#/components/schemas/ClaimFilingOverrides" },
           retryOfCallId: { type: "string", description: "For an intentional retry only: the prior ended Retell call id for this same file. The bridge rejects retries while a callback is active or after a claim number was captured." },
           approvalChallenge: { type: "string", description: "Hidden short-lived single-use challenge returned by the immediately preceding exact dry run. The local Operator retains it; do not copy it into chat." },
           execute: { type: "boolean", default: false, description: "True only after Chance approves the exact prepared plan. Also requires both Retell claim-call gates." }

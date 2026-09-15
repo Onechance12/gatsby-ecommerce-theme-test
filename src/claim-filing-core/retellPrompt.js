@@ -33,6 +33,8 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
           reason: { type: "string", enum: ["objective_complete", "callback_confirmed", "no_number_yet", "voicemail", "automated_system", "wrong_number", "human_requested_end", "safety_stop"] },
           outcome: { type: "string", enum: ["claim_filed", "existing_claim_confirmed", "callback_requested", "blocked_missing_information", "carrier_unreachable", "no_result"] },
           claim_number: { type: "string", description: "Exact claim/reference number spoken by the carrier, or empty if none." },
+          active_policy_number: { type: "string", description: "Exact policy number the carrier confirmed was active for the date of loss, or empty when not required or not confirmed." },
+          active_coverage_confirmed: { type: "boolean", description: "True only after the carrier explicitly confirmed active coverage for the date of loss." },
           callback_confirmed: { type: "boolean" },
           document_submission_requested: { type: "boolean", description: "True only after asking where to send the LOR and supporting documents." },
           next_step_requested: { type: "boolean", description: "True only after asking for the carrier next step or timeframe." },
@@ -40,7 +42,7 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
           additional_claim_numbers: { type: "string", description: "Comma-separated claim/reference numbers for completed additional claims." },
           batch_continuation_resolved: { type: "boolean", description: "True only when every approved additional claim was completed or the representative explicitly refused/could not continue." }
         },
-        required: ["goal", "reason", "outcome", "claim_number", "callback_confirmed", "document_submission_requested", "next_step_requested", "additional_claims_completed", "additional_claim_numbers", "batch_continuation_resolved"]
+        required: ["goal", "reason", "outcome", "claim_number", "active_policy_number", "active_coverage_confirmed", "callback_confirmed", "document_submission_requested", "next_step_requested", "additional_claims_completed", "additional_claim_numbers", "batch_continuation_resolved"]
       }
     },
     {
@@ -72,6 +74,8 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
 export function postCallAnalysisSchema() {
   return [
     { type: "string", name: "claim_number", description: "The claim or reference number the carrier gave for this filing, digits/letters only. Empty if none was issued on the call." },
+    { type: "string", name: "active_policy_number", description: "The exact policy number the carrier explicitly confirmed was active on the date of loss. Empty unless the carrier confirmed it applies to that date." },
+    { type: "boolean", name: "active_coverage_confirmed", description: "True only when the carrier explicitly confirmed active coverage for the date of loss. False when unconfirmed, unavailable, inferred, or conflicting." },
     { type: "string", name: "adjuster_name", description: "Full name of the CARRIER-ASSIGNED adjuster or handling team only. Never put Chance Pearson, Wave Public Adjusting, the insured, or the carrier intake representative here. Empty if no carrier adjuster was assigned." },
     { type: "string", name: "adjuster_phone", description: "Direct phone number for the CARRIER-ASSIGNED adjuster or carrier claims team only. Never use Chance's, Wave's, the homeowner's, or the intake representative's number. Empty if not provided." },
     { type: "string", name: "adjuster_email", description: "Email address for the CARRIER-ASSIGNED adjuster only. Never use cpearson@wavepa.com, the homeowner email, or the general document-submission email. Empty if not provided." },
@@ -147,7 +151,7 @@ export function renderRetellPrompt(packet) {
       "call, transfer, or callback).",
     "If a claim, policy, or client detail is unknown, always treat it as unknown and attempt to obtain it — NEVER guess.",
     "Critical packet integrity: for a new filing, insured name, property address, carrier, date of loss, cause of loss, " +
-      "and damage facts must be loaded before speaking with a representative. If the system packet marks one of those " +
+      "explicitly approved damage facts, and a valid coverage-term status must be loaded before speaking with a representative. If the system packet marks one of those " +
       "facts missing after the call already passed preflight, treat that as a technical failure. Do not tell the carrier " +
       "the client file lacks the fact; collect the representative's name and callback number and end for a system review.",
     "Sensitive-information boundary: never provide, request, confirm, or invent a Social Security number, driver's " +
@@ -206,10 +210,19 @@ export function renderRetellPrompt(packet) {
     "- Homeowner phone: {{homeownerPhone}}",
     "- Homeowner email: {{homeownerEmail}}",
     "- Carrier: {{carrier}}",
-    "- Policy number: {{policyNumber}}",
-    "- Policy number to SAY aloud: {{policyNumberSpoken}}",
+    "- Available policy identifier/reference: {{policyNumber}}",
+    "- Available policy identifier/reference to SAY aloud: {{policyNumberSpoken}}",
     "- Claim number: {{claimNumber}}",
     "- Date of loss: {{dateOfLoss}}",
+    "- Coverage term status: {{coverageTermStatus}}",
+    "- Available policy term start: {{policyCoverageStart}}",
+    "- Available policy term end: {{policyCoverageEnd}}",
+    "- Required prior-policy lookup instruction: {{priorPolicyLookupInstruction}}",
+    "NEW-CLAIM COVERAGE GATE: Apply this only when {{goal}} is exactly 'file_new_claim'. " +
+      "If coverage term status is 'verified_in_force', rely only on the loaded verified term and date of loss; do not make an independent coverage determination. " +
+      "If it is 'carrier_lookup_required', follow the required prior-policy lookup instruction before attempting to open the claim. Ask the carrier to locate the policy term and exact policy number active on the date of loss and explicitly confirm that active coverage. " +
+      "Never claim that the currently displayed policy, an expired policy, a prior policy, or a later renewal covers the loss unless the carrier confirms it. If the carrier cannot explicitly confirm active coverage for the date of loss, do not file a new claim; capture the exact blocker and use outcome 'blocked_missing_information'. " +
+      "If coverage term status is 'blocked_conflict', Missing, or invalid, do not attempt to open a new claim. Capture active_policy_number only when the carrier confirms that exact number applies on the date of loss, and set active_coverage_confirmed true only after that explicit confirmation.",
     "- Approximate time of the storm/loss: {{stormTime}}",
     "STORM-TIME RULE: Treat {{stormTime}} exactly as labeled. If it says 'Approximately' or references a nearby " +
       "reported hail event, state it as an approximate public-report time, never as an eyewitness or exact property " +
@@ -410,7 +423,10 @@ export function renderRetellPrompt(packet) {
       "just because the rep thanked you if you still don't have the claim/reference number.",
     "",
     "Number & spelling handling (very important — this is where calls go wrong):",
-    "- When asked for the policy number, say ONLY {{policyNumberSpoken}}. Never volunteer labels such as 'master " +
+    "- When coverage term status is 'verified_in_force' and the representative asks for the policy number, say ONLY " +
+      "{{policyNumberSpoken}}. When coverage term status is 'carrier_lookup_required', first say: 'I have an available " +
+      "policy reference that may help locate the policy active on the date of loss,' then give ONLY " +
+      "{{policyNumberSpoken}}. Never call that reference active or current. Never volunteer labels such as 'master " +
       "policy', a control number, loan number, mortgage reference, or any identifier after a slash. Give another " +
       "identifier only if the representative specifically asks for it by name.",
     "- Read {{policyNumberSpoken}} one character at a time at a slow, steady pace. A hyphen is only visual punctuation; " +

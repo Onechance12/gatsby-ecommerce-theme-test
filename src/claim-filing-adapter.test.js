@@ -3,11 +3,14 @@ import test from "node:test";
 
 import {
   callbackCandidateFromCall,
+  callbackCandidateRemainsPending,
   callbackDynamicVariablesDigest,
   buildCallbackDynamicVariables,
   buildCallbackMetadata,
   buildPostClaimWorkflow,
+  callbackPacketStatus,
   confirmedCallbackRequest,
+  digest,
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
@@ -132,7 +135,7 @@ test("confirmed callbacks restore the complete approved claim packet", () => {
     call_id: "call-alice-outbound",
     to_number: "+18002557828",
     start_timestamp: 1770000000000,
-    transcript: "Your request for a callback has been confirmed.",
+    transcript_object: [{ role: "user", content: "Your request for a callback has been confirmed." }],
     metadata: outbound.callPlan.metadata,
     retell_llm_dynamic_variables: outbound.callPlan.dynamicVariables
   };
@@ -188,6 +191,41 @@ test("callback packet fails closed when a critical fact is missing", () => {
   assert.match(callback.callbackPacketStatus, /dateOfLoss/);
 });
 
+test("callback packet verifies an in-force term actually covers the date of loss", () => {
+  const variables = {
+    goal: "file_new_claim",
+    insuredName: "Alice Gonzales",
+    propertyAddress: "2904 Hillside Dr",
+    carrier: "Allstate",
+    policyNumberSpoken: "844118424",
+    dateOfLoss: "06/02/2026",
+    causeOfLoss: "Hail and wind",
+    damageOpening: "Roof hail damage.",
+    damageDetails: "Roof hail damage",
+    coverageTermStatus: "verified_in_force",
+    policyCoverageStart: "08/09/2024",
+    policyCoverageEnd: "08/09/2025",
+    injuries: "No injuries reported",
+    homeLivable: "Yes",
+    temporaryRepairs: "No",
+    contractorHired: "No",
+    batchClaimCount: "0",
+    batchClaims: "None"
+  };
+  assert.equal(
+    callbackPacketStatus(variables),
+    "INCOMPLETE: date of loss outside verified coverage term"
+  );
+  assert.equal(
+    callbackPacketStatus({ ...variables, policyCoverageEnd: "02/31/2027" }),
+    "INCOMPLETE: invalid verified coverage dates"
+  );
+  assert.equal(
+    callbackPacketStatus({ ...variables, policyCoverageEnd: "08/09/2026" }),
+    "READY"
+  );
+});
+
 test("find-existing-claim callbacks require the exact lookup packet", () => {
   const incomplete = buildCallbackDynamicVariables({
     dynamicVariables: {
@@ -228,6 +266,8 @@ test("callback readiness and digest bind the complete approved dynamic-variable 
     carrier: "State Farm",
     policyNumberSpoken: "POLICY-1",
     dateOfLoss: "04/25/2026",
+    coverageTermStatus: "carrier_lookup_required",
+    priorPolicyLookupInstruction: "Ask the carrier to locate and confirm active coverage for the date of loss before filing.",
     causeOfLoss: "Hail",
     damageOpening: "The documented damage is roof hail damage.",
     damageDetails: "Roof hail damage",
@@ -268,18 +308,85 @@ test("callback matching requires a unique safe association", () => {
   const vega = { contactId: "vega", carrierPhone: "+18003251088" };
   assert.deepEqual(selectCallbackCandidate([alice, vega], "+18002557828"), { selected: alice, match: "matched" });
   assert.deepEqual(selectCallbackCandidate([alice], "anonymous"), {
-    selected: alice,
-    match: "single_pending_case_requires_carrier_confirmation"
+    selected: null,
+    match: "different_number_requires_manual_recovery"
   });
   assert.deepEqual(selectCallbackCandidate([alice, vega], "anonymous"), {
     selected: null,
-    match: "needs_identity_confirmation"
+    match: "different_number_requires_manual_recovery"
   });
+});
+
+test("callback TTL starts when the outbound call ends, not when it starts", () => {
+  const candidate = callbackCandidateFromCall({
+    call_id: "call-timing",
+    to_number: "+18002557828",
+    start_timestamp: 1000,
+    end_timestamp: 9000,
+    duration_ms: 7000,
+    metadata: { source: "hcn-wave-jobnimbus-bridge", contactId: "contact-1" },
+    retell_llm_dynamic_variables: {}
+  });
+  assert.equal(candidate.createdAt, 9000);
+
+  const fallback = callbackCandidateFromCall({
+    call_id: "call-timing-fallback",
+    to_number: "+18002557828",
+    start_timestamp: 1000,
+    duration_ms: 7000,
+    metadata: { source: "hcn-wave-jobnimbus-bridge", contactId: "contact-1" },
+    retell_llm_dynamic_variables: {}
+  });
+  assert.equal(fallback.createdAt, 8000);
+
+  const malformed = callbackCandidateFromCall({
+    call_id: "call-timing-missing",
+    to_number: "+18002557828",
+    transcript_object: [{
+      role: "user",
+      content: "Your callback request is confirmed. We will call you back."
+    }],
+    metadata: {
+      source: "hcn-wave-jobnimbus-bridge",
+      contactId: "contact-1",
+      goal: "file_new_claim"
+    },
+    retell_llm_dynamic_variables: {}
+  });
+  assert.equal(malformed.callbackRequested, true);
+  assert.equal(malformed.createdAt, 0);
+  assert.equal(callbackCandidateRemainsPending(malformed, 10_000), true);
+  assert.equal(callbackCandidateRemainsPending({ createdAt: 1_000 }, 10_000), false);
+});
+
+test("carrier-lookup callback remains ready when no prior policy number is available", () => {
+  const variables = {
+    goal: "file_new_claim",
+    insuredName: "Fixture Homeowner",
+    propertyAddress: "100 Test St, Dallas, TX 75201",
+    carrier: "State Farm",
+    policyNumberSpoken: "Missing",
+    dateOfLoss: "04/25/2026",
+    coverageTermStatus: "carrier_lookup_required",
+    priorPolicyLookupInstruction: "Locate active coverage by insured name, address, and phone before filing.",
+    causeOfLoss: "Hail",
+    damageOpening: "Roof shingle hail damage.",
+    damageDetails: "Roof shingle hail damage",
+    injuries: "No injuries reported",
+    homeLivable: "Yes",
+    temporaryRepairs: "No",
+    contractorHired: "No",
+    batchClaimCount: "0",
+    batchClaims: "None"
+  };
+  assert.equal(callbackPacketStatus(variables), "READY");
 });
 
 test("callback eligibility requires carrier confirmation, not merely an offer", () => {
   assert.equal(confirmedCallbackRequest({ transcript: "Press one if you would like a callback." }), false);
-  assert.equal(confirmedCallbackRequest({ transcript: "Your request for a callback has been confirmed." }), true);
+  assert.equal(confirmedCallbackRequest({
+    transcript_object: [{ role: "user", content: "Your request for a callback has been confirmed." }]
+  }), true);
   assert.equal(confirmedCallbackRequest({
     call_analysis: { custom_analysis_data: { filing_outcome: "callback_requested" } }
   }), false);
@@ -287,7 +394,9 @@ test("callback eligibility requires carrier confirmation, not merely an offer", 
     transcript: "Press one to receive a callback.",
     call_analysis: { custom_analysis_data: { callback_requested: true, filing_outcome: "callback_requested" } }
   }), false);
-  assert.equal(confirmedCallbackRequest({ transcript: "We will call you back when an agent is available." }), true);
+  assert.equal(confirmedCallbackRequest({
+    transcript_object: [{ role: "user", content: "We will call you back when an agent is available." }]
+  }), true);
 });
 
 test("voice prompt uses the loaded homeowner phone for IVR account lookup", () => {
@@ -427,6 +536,16 @@ test("claim packet separates the short damage opening from detailed follow-up sc
       documents: [{ name: "Final Draft Estimate.pdf" }],
       notes: [{ body: "Roof hail damage. Front window screens. Gutters and fascia. Garage door. Wood fence. Bathroom ceiling and adjoining wall water damage." }],
       tasks: []
+    },
+    overrides: {
+      damageDetails: [
+        "Roof hail damage",
+        "Front window screens/windows",
+        "Gutters and fascia",
+        "Garage door",
+        "Wood fence",
+        "Bathroom ceiling and adjoining walls"
+      ]
     }
   });
   const plan = buildClaimFilingPlan(input, {
@@ -434,13 +553,11 @@ test("claim packet separates the short damage opening from detailed follow-up sc
     from: "+12145550100",
     agentId: "agent-1"
   });
-  assert.match(plan.callPlan.dynamicVariables.damageOpening, /^The documented damage includes /);
-  assert.match(plan.callPlan.dynamicVariables.damageOpening, /roof damage/);
-  assert.match(plan.callPlan.dynamicVariables.damageOpening, /bathroom ceiling and adjoining walls/);
+  assert.equal(plan.callPlan.dynamicVariables.damageOpening, "Roof hail damage.");
   assert.doesNotMatch(plan.callPlan.dynamicVariables.damageOpening, /I also believe|mostly paint/i);
   assert.match(plan.callPlan.dynamicVariables.damageDetails, /window screens\/windows/);
-  assert.match(plan.callPlan.dynamicVariables.damageDetails, /garage door/);
-  assert.match(plan.callPlan.dynamicVariables.damageDetails, /bathroom ceiling and adjoining walls/);
+  assert.match(plan.callPlan.dynamicVariables.damageDetails, /garage door/i);
+  assert.match(plan.callPlan.dynamicVariables.damageDetails, /bathroom ceiling and adjoining walls/i);
   assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /detached structures/);
   assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /personal property/);
   assert.match(renderRetellPrompt({}), /When a human representative first asks broadly what was damaged/);
@@ -490,6 +607,25 @@ test("approved per-call overrides replace stale verified carrier and DOL facts",
   assert.equal(plan.packet.verifiedFileFacts.causeOfLoss, "Hail and wind");
 });
 
+test("nested approved overrides survive absent top-level option fields", () => {
+  const plan = buildClaimFilingPlan(fixture({
+    overrides: {
+      goal: "file_new_claim",
+      carrierPhone: "+18002557828",
+      stormTime: "4:30 PM CDT",
+      coverageTermStatus: "carrier_lookup_required",
+      damageDetails: ["Roof shingle hail damage"]
+    }
+  }), {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.packet.goal, "file_new_claim");
+  assert.equal(plan.callPlan.to, "+18002557828");
+  assert.equal(plan.packet.verifiedFileFacts.stormTime, "4:30 PM CDT");
+});
+
 test("verified damage details replace broader inferred damage categories", () => {
   const input = fixture({
     evidence: {
@@ -514,7 +650,8 @@ test("new-claim filing hard-blocks without a verified cause and practical damage
       ...fixture().file,
       typeOfLoss: ""
     },
-    evidence: { documents: [], notes: [], tasks: [] }
+    evidence: { documents: [], notes: [], tasks: [] },
+    overrides: {}
   });
   const plan = buildClaimFilingPlan(input, {
     ownerId: OWNER_ID,
@@ -523,7 +660,7 @@ test("new-claim filing hard-blocks without a verified cause and practical damage
   });
   assert.equal(plan.readiness.ready, false);
   assert.match(plan.readiness.blockers.join("; "), /no verified cause of loss/);
-  assert.match(plan.readiness.blockers.join("; "), /no verified practical damage categories/);
+  assert.match(plan.readiness.blockers.join("; "), /no explicitly approved damage facts/);
   assert.equal(plan.callPlan.dynamicVariables.damageOpening, "Missing");
   assert.doesNotMatch(plan.packet.humanRepresentativeScript, /roof damage|window screens|interior damage/i);
 });
@@ -534,7 +671,8 @@ test("existing-claim lookup remains ready without cause or damage scope", () => 
       ...fixture().file,
       typeOfLoss: ""
     },
-    evidence: { documents: [], notes: [], tasks: [] }
+    evidence: { documents: [], notes: [], tasks: [] },
+    overrides: {}
   });
   const plan = buildClaimFilingPlan(input, {
     ownerId: OWNER_ID,
@@ -566,6 +704,9 @@ function fixture(overrides = {}) {
       documents: [{ name: "Roof and exterior estimate.pdf" }],
       notes: [],
       tasks: []
+    },
+    overrides: {
+      damageDetails: ["Roof and exterior hail damage"]
     },
     ...overrides
   };
@@ -758,6 +899,74 @@ test("call completion review confirms the representation destination was capture
   assert.equal(workflow.steps.find((step) => step.id === "lor_package").emailSubjectRule, "Claim number only");
   assert.equal(workflow.steps.find((step) => step.id === "lor_package").emailTemplate, "payment_redirection");
   assert.match(workflow.steps.find((step) => step.id === "lor_package").emailBodyRule, /included as a payee/i);
+});
+
+test("a safety or callback termination receipt can never certify claim writeback", () => {
+  const transcriptObject = [
+    { role: "agent", content: "We will wait for the carrier callback." },
+    { role: "user", content: "Please end the call." }
+  ];
+  const call = {
+    callId: "call-safety-exit",
+    callStatus: "ended",
+    raw: {
+      call_id: "call-safety-exit",
+      transcript: "",
+      transcript_object: transcriptObject,
+      metadata: { goal: "file_new_claim" },
+      retell_llm_dynamic_variables: { goal: "file_new_claim" },
+      call_analysis: {
+        custom_analysis_data: {
+          claim_number: "UNVERIFIED-123",
+          filing_outcome: "callback_requested",
+          document_submission_requested: true,
+          document_submission: "claims@example.com"
+        }
+      }
+    }
+  };
+  const receipt = {
+    callId: "call-safety-exit",
+    goal: "file_new_claim",
+    outcome: "callback_requested",
+    claimNumber: "UNVERIFIED-123",
+    decisionCode: "human_requested_end",
+    writebackEligible: false,
+    transcriptDigest: digest({ transcript: "", transcriptObject })
+  };
+  const result = analyzeClaimCall(
+    call,
+    { id: "contact-safety-exit", customer: "Fixture Homeowner", status: "Ready for PA Review", carrier: "State Farm" },
+    { requireGuardedCompletion: true, guardedCompletion: receipt }
+  );
+  assert.equal(result.completionReview.guardedCompletionVerified, false);
+  assert.equal(result.completionReview.complete, false);
+  assert.match(result.completionReview.gaps.join(" "), /did not produce a verified completed claim outcome/i);
+});
+
+test("lookup-mode result cannot start post-claim work without active policy evidence", () => {
+  const base = {
+    outcome: "claim_filed",
+    claimNumber: "43-TEST-790",
+    coverageTermStatus: "carrier_lookup_required",
+    documentSubmissionRequested: true,
+    documentSubmission: "claims@example.com"
+  };
+  const missingPolicy = buildPostClaimWorkflow({
+    extracted: { ...base, activeCoverageConfirmed: true, activePolicyNumber: "" }
+  });
+  assert.equal(missingPolicy.applicable, false);
+  assert.match(missingPolicy.primaryAction, /active policy covering the date of loss/i);
+
+  const missingConfirmation = buildPostClaimWorkflow({
+    extracted: { ...base, activeCoverageConfirmed: false, activePolicyNumber: "ACTIVE-123" }
+  });
+  assert.equal(missingConfirmation.applicable, false);
+
+  const complete = buildPostClaimWorkflow({
+    extracted: { ...base, activeCoverageConfirmed: true, activePolicyNumber: "ACTIVE-123" }
+  });
+  assert.equal(complete.applicable, true);
 });
 
 test("post-claim workflow blocks the LOR send until a destination is captured", () => {

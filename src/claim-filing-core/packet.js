@@ -3,7 +3,10 @@
 // produces the goal-specific call packet: objective, verified facts (including
 // the four resolved standard answers), damage summary, IVR/human scripts,
 // capture list, stop rules, and result format. No JobNimbus, no CLI, no env.
-import { normalizeClaimFileInput } from "./inputContract.js";
+import {
+  normalizeClaimFileInput,
+  normalizeCoverageTermStatus
+} from "./inputContract.js";
 import { resolveStandardAnswers, inferCause, inferDamageCategories } from "./standardAnswers.js";
 
 export const DEFAULT_GOAL = "file_new_claim";
@@ -33,6 +36,19 @@ export function buildClaimCallPacket(input, options = {}) {
   const goal = normalizeGoal(options.goal || overrides.goal || DEFAULT_GOAL, file);
   const causeOfLoss = file.typeOfLoss || inferCause(file, normalized.evidence);
   const standard = resolveStandardAnswers(overrides);
+  const coverageTermStatus = normalizeCoverageTermStatus(overrides.coverageTermStatus, {
+    defaultStatus: goal === "file_new_claim" ? "carrier_lookup_required" : ""
+  });
+  const policyCoverageStart = normalizePolicyCoverageDate(overrides.policyCoverageStart);
+  const policyCoverageEnd = normalizePolicyCoverageDate(overrides.policyCoverageEnd);
+  const dateOfLoss = normalizeDateOfLoss(file.dateOfLoss);
+  const priorPolicyLookupInstruction = buildPriorPolicyLookupInstruction({
+    goal,
+    coverageTermStatus,
+    policyCoverageStart,
+    policyCoverageEnd,
+    dateOfLoss
+  });
 
   const facts = {
     insuredName: file.customer || "Missing",
@@ -42,7 +58,11 @@ export function buildClaimCallPacket(input, options = {}) {
     carrier: file.carrier || "Missing",
     policyNumber: file.policyNumber || "Missing",
     claimNumber: cleanClaimNumber(file.claimNumber) || "Missing / not filed",
-    dateOfLoss: normalizeDateOfLoss(file.dateOfLoss),
+    dateOfLoss,
+    coverageTermStatus: coverageTermStatus || "not_applicable",
+    policyCoverageStart,
+    policyCoverageEnd,
+    priorPolicyLookupInstruction,
     stormTime: overrides.stormTime || captured.stormTime || "Missing",
     causeOfLoss,
     currentStatus: file.status || "Missing",
@@ -63,13 +83,28 @@ export function buildClaimCallPacket(input, options = {}) {
     carrierPhone: overrides.carrierPhone || "User will provide / caller should find claims phone if needed"
   };
 
+  // Filename/note keyword matches are useful review hints, but they are not
+  // approved claim facts. A new filing may speak and pass readiness only from
+  // damage details/opening explicitly supplied in the approved call input.
   const inferredDamageCategories = inferDamageCategories(file, normalized.evidence);
-  const damageDetails = normalizeDamageDetails(overrides.damageDetails, inferredDamageCategories);
-  const damageCategories = overrides.damageDetails ? [...damageDetails] : inferredDamageCategories;
-  const damageOpening = String(
-    overrides.damageOpening
-    || (goal === "file_new_claim" ? evidenceBackedDamageOpening(damageCategories) : "Not applicable for an existing-claim lookup.")
-  ).trim();
+  const approvedDamageDetails = normalizeApprovedDamageDetails(overrides.damageDetails);
+  const approvedDamageOpening = normalizeApprovedDamageOpening(overrides.damageOpening);
+  const newClaimDamageDetails = approvedDamageDetails.length
+    ? approvedDamageDetails
+    : approvedDamageOpening
+      ? [approvedDamageOpening]
+      : [];
+  const damageDetails = goal === "file_new_claim"
+    ? newClaimDamageDetails
+    : normalizeDamageDetails(overrides.damageDetails, inferredDamageCategories);
+  const damageCategories = goal === "file_new_claim"
+    ? [...newClaimDamageDetails]
+    : overrides.damageDetails
+      ? [...damageDetails]
+      : inferredDamageCategories;
+  const damageOpening = goal === "file_new_claim"
+    ? approvedDamageOpening || safeApprovedDamageOpening(approvedDamageDetails)
+    : String(overrides.damageOpening || "Not applicable for an existing-claim lookup.").trim();
   const missingFields = missingCallFields(facts, goal, damageCategories);
 
   return {
@@ -77,6 +112,10 @@ export function buildClaimCallPacket(input, options = {}) {
     goal,
     verifiedFileFacts: facts,
     damageSummary: damageCategories,
+    inferredDamageSummary: inferredDamageCategories,
+    damageEvidenceSource: goal === "file_new_claim"
+      ? (approvedDamageOpening || approvedDamageDetails.length ? "approved_override" : "missing_approved_damage")
+      : (approvedDamageDetails.length ? "approved_override" : "synced_evidence_review"),
     damageOpening,
     damageDetails,
     missingFields,
@@ -102,13 +141,114 @@ function normalizeDamageDetails(value, fallback) {
   return [...fallback];
 }
 
-function evidenceBackedDamageOpening(categories) {
-  const verified = (Array.isArray(categories) ? categories : [])
-    .map((item) => String(item || "").trim())
-    .filter((item) => item && !/^(?:missing|unknown|no specific damage categories)/i.test(item));
-  if (!verified.length) return "Missing";
-  if (verified.length === 1) return `The documented damage is ${verified[0]}.`;
-  return `The documented damage includes ${verified.slice(0, -1).join(", ")}, and ${verified.at(-1)}.`;
+function normalizeApprovedDamageDetails(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(isUsableApprovedDamage);
+  }
+  const detail = String(value || "").trim();
+  // Preserve an approved sentence intact. Splitting on commas or semicolons can
+  // detach a limiting clause such as "storm causation not established."
+  return isUsableApprovedDamage(detail) ? [detail] : [];
+}
+
+function normalizeApprovedDamageOpening(value) {
+  const opening = String(value || "").trim();
+  return isUsableApprovedDamage(opening) ? opening : "";
+}
+
+function isUsableApprovedDamage(value) {
+  const detail = String(value || "").trim();
+  const concreteComponent = /\b(?:roof|shingle|tile|metal|soft metal|flashing|fascia|soffit|gutter|downspout|vent|chimney|skylight|siding|window|screen|door|garage|fence|decking|sheathing|ceiling|wall|drywall|floor|flooring|paint|interior|room|hvac|air conditioner|a\/c|duct|coil|compressor|personal property|contents?)\b/i;
+  if (
+    !detail
+    || /^(?:missing|unknown|undetermined|not applicable|n\/?a|none|no specific damage categories)\b/i.test(detail)
+    || /^(?:damage occurred|property damage|storm damage|hail damage|wind damage)[.!]?$/i.test(detail)
+  ) return false;
+  if (
+    (
+      /\bno\s+damage\b/i.test(detail)
+      || /\bdamage\s+(?:was|is|has)\s+not\s+(?:observed|reported|documented|found|confirmed|verified)\b/i.test(detail)
+      || /^(?:no|none)\b.*\bdamage\b/i.test(detail)
+    )
+    && !/\b(?:but|however|except)\b/i.test(detail)
+  ) return false;
+  if (
+    /\b(?:wear and tear|old damage|pre[- ]existing damage|unrelated to (?:this|the) loss)\b/i.test(detail)
+    && !/\b(?:but|however|except)\b/i.test(detail)
+  ) return false;
+  if (!concreteComponent.test(detail)) return false;
+  return true;
+}
+
+function safeApprovedDamageOpening(details) {
+  const first = String(details?.[0] || "").trim();
+  if (!first) return "Missing";
+  // Do not paraphrase, broaden, or relabel an approved detail as documented
+  // damage. Preserve its qualifiers and use only the first detail as the short
+  // opening; the remaining approved details stay available for follow-up.
+  return /[.!?]$/.test(first) ? first : `${first}.`;
+}
+
+function normalizePolicyCoverageDate(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return "Missing";
+  const normalized = normalizeDateOfLoss(value);
+  return claimDateKey(normalized) ? normalized : "Invalid";
+}
+
+function buildPriorPolicyLookupInstruction({
+  goal,
+  coverageTermStatus,
+  policyCoverageStart,
+  policyCoverageEnd,
+  dateOfLoss
+}) {
+  if (goal !== "file_new_claim") return "Not applicable for an existing-claim lookup.";
+
+  const dol = isMissingDate(dateOfLoss) ? "the approved date of loss" : `the ${dateOfLoss} date of loss`;
+  const start = claimDateKey(policyCoverageStart);
+  const end = claimDateKey(policyCoverageEnd);
+  const loss = claimDateKey(dateOfLoss);
+
+  if (coverageTermStatus === "blocked_conflict") {
+    return `Policy or coverage evidence conflicts for ${dol}. Do not open a new claim until a newly approved packet resolves that conflict.`;
+  }
+  if (coverageTermStatus === "verified_in_force") {
+    if (!start || !end || !loss || start > end || loss < start || loss > end) {
+      return `Coverage is marked verified_in_force, but a complete valid policy term covering ${dol} is not loaded. Do not open a new claim until the packet is corrected.`;
+    }
+    return `The policy term from ${policyCoverageStart} through ${policyCoverageEnd} is verified in force for ${dol}; no prior-policy lookup is required.`;
+  }
+
+  let termContext = "No complete verified policy term is loaded.";
+  if (start && end && loss && start <= end) {
+    if (loss < start) {
+      termContext = `The available policy term from ${policyCoverageStart} through ${policyCoverageEnd} starts after ${dol}.`;
+    } else if (loss > end) {
+      termContext = `The available policy term from ${policyCoverageStart} through ${policyCoverageEnd} ended before ${dol}.`;
+    } else {
+      termContext = `The available policy term from ${policyCoverageStart} through ${policyCoverageEnd} includes ${dol}, but active coverage is not verified.`;
+    }
+  } else if (start || end) {
+    termContext = `Only part of the available policy term is loaded (${policyCoverageStart} through ${policyCoverageEnd}).`;
+  }
+  return `${termContext} Before filing, ask the carrier to locate the active policy term and policy number covering ${dol} and explicitly confirm active coverage for that date. Do not represent an unverified, expired, prior, or later renewal term as covering the loss. If the carrier cannot confirm active coverage, do not file the claim; capture the exact blocker.`;
+}
+
+function claimDateKey(value) {
+  const match = String(value || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return "";
+  const [, month, day, year] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    date.getUTCFullYear() !== Number(year)
+    || date.getUTCMonth() !== Number(month) - 1
+    || date.getUTCDate() !== Number(day)
+  ) return "";
+  return `${year}-${month}-${day}`;
+}
+
+function isMissingDate(value) {
+  return !value || /^(?:missing|invalid)$/i.test(String(value));
 }
 
 export function normalizeGoal(value, file) {
@@ -224,7 +364,10 @@ function captureFieldsFor(goal) {
     "follow-up timeframe"
   ];
   if (goal === "inspection_scheduling") fields.push("inspection date/time and access requirements");
-  if (goal === "file_new_claim") fields.push("whether carrier will contact homeowner or PA first");
+  if (goal === "file_new_claim") {
+    fields.push("active policy number and explicit confirmation that its term covers the date of loss");
+    fields.push("whether carrier will contact homeowner or PA first");
+  }
   return fields;
 }
 
@@ -266,6 +409,8 @@ function buildResultFormat(goal) {
     callCompleted: "yes/no",
     objectiveCompleted: "yes/no/partial",
     claimNumber: "",
+    activePolicyNumber: "",
+    activeCoverageConfirmed: "yes/no",
     representativeName: "",
     adjusterName: "",
     adjusterPhone: "",
