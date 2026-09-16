@@ -6701,7 +6701,9 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       assert.equal(body.webhook_url, null);
       assert.deepEqual(body.webhook_events, []);
       assert.equal(body.custom_stt_config, null);
-      assert.equal(body.user_dtmf_options, null);
+      assert.equal(body.allow_user_dtmf, false);
+      assert.equal(body.allow_dtmf_interruption, false);
+      assert.deepEqual(body.user_dtmf_options, {});
       assert.deepEqual(body.guardrail_config, { output_topics: [], input_topics: [] });
       assert.equal(body.handbook_config.natural_filler_words, false);
       assert.equal(body.data_storage_setting, "everything");

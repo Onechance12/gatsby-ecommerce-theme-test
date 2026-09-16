@@ -50,7 +50,9 @@ test("claim runtime is tuned for carrier holds, accurate entities, and no native
   assert.equal(settings.webhook_url, null);
   assert.deepEqual(settings.webhook_events, []);
   assert.equal(settings.custom_stt_config, null);
-  assert.equal(settings.user_dtmf_options, null);
+  assert.equal(settings.allow_user_dtmf, false);
+  assert.equal(settings.allow_dtmf_interruption, false);
+  assert.deepEqual(settings.user_dtmf_options, {});
   assert.deepEqual(settings.guardrail_config, { output_topics: [], input_topics: [] });
   assert.equal(settings.handbook_config.natural_filler_words, false);
   assert.ok(settings.boosted_keywords.includes("{{policyNumberSpoken}}"));

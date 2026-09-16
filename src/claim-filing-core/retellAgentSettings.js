@@ -96,7 +96,9 @@ export const RETELL_CLAIM_AGENT_SETTINGS = Object.freeze({
   call_screening_option: null,
   allow_user_dtmf: false,
   allow_dtmf_interruption: false,
-  user_dtmf_options: null,
+  // Retell materializes an empty object here even when DTMF is disabled. Pin
+  // the inert readback shape so exact publication attestation stays stable.
+  user_dtmf_options: Object.freeze({}),
 
   guardrail_config: Object.freeze({
     output_topics: Object.freeze([]),
