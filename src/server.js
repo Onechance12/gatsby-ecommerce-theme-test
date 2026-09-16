@@ -48,6 +48,7 @@ import {
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import { extractCallResults } from "./claim-filing-core/resultExtraction.js";
+import { isCarrierUsableStormTime } from "./claim-filing-core/stormTime.js";
 import { evaluateClaimCallResource } from "./claim-filing-core/resourceLock.js";
 import {
   buildClientCoordinatorAgentSettings,
@@ -6112,16 +6113,36 @@ async function buildClaimPlanWithStormTime(input, canonicalInput, file) {
 
 async function resolveClaimStormTime(input, canonicalInput, file) {
   const supplied = String(input.stormTime || input.overrides?.stormTime || "").trim();
-  if (hasClockTime(supplied)) {
+  if (isCarrierUsableStormTime(supplied)) {
     return {
       stormTime: supplied,
       evidence: { source: "chance_approved_or_file_specific_time", value: supplied, verifiedWeatherMatch: false }
     };
   }
 
-  const dol = isoDateFromClaimValue(file.dateOfLoss || canonicalInput.file?.dateOfLoss);
-  const cause = String(file.typeOfLoss || canonicalInput.file?.typeOfLoss || "");
-  const address = String(file.address || canonicalInput.file?.address || "").trim();
+  // The carrier answer is one DOL fact: the approved date and its usable time.
+  // Prefer the exact per-call override so weather research cannot silently run
+  // against a stale or blank JobNimbus date while the packet uses another date.
+  const dol = isoDateFromClaimValue(
+    input.overrides?.dateOfLoss
+    || input.dateOfLoss
+    || file.dateOfLoss
+    || canonicalInput.file?.dateOfLoss
+  );
+  const cause = String(
+    input.overrides?.causeOfLoss
+    || input.overrides?.typeOfLoss
+    || file.typeOfLoss
+    || canonicalInput.file?.typeOfLoss
+    || ""
+  );
+  const address = String(
+    input.overrides?.propertyAddress
+    || input.overrides?.address
+    || file.address
+    || canonicalInput.file?.address
+    || ""
+  ).trim();
   if (dol && address && /hail/i.test(cause)) {
     try {
       const research = await researchPropertyHailDates({
@@ -6144,7 +6165,8 @@ async function resolveClaimStormTime(input, canonicalInput, file) {
           stormTime: value,
           evidence: {
             source: "NWS Local Storm Report via Iowa Environmental Mesonet",
-            dateMatchedToJobNimbusDol: dol,
+            dateMatchedToApprovedDol: dol,
+            dateMatchedToJobNimbusDol: dol === isoDateFromClaimValue(file.dateOfLoss) ? dol : null,
             value,
             confidence: candidate.confidence,
             hailInches: report.hailInches,
@@ -6160,7 +6182,7 @@ async function resolveClaimStormTime(input, canonicalInput, file) {
     } catch (error) {
       return {
         stormTime: supplied,
-        evidence: supplied
+        evidence: isCarrierUsableStormTime(supplied)
           ? { source: "chance_approved_approximation", value: supplied, verifiedWeatherMatch: false }
           : { source: "weather_research_unavailable", verifiedWeatherMatch: false },
         warning: `Storm-time weather research was unavailable: ${String(error.message || error).slice(0, 180)}`
@@ -6168,7 +6190,7 @@ async function resolveClaimStormTime(input, canonicalInput, file) {
     }
   }
 
-  if (supplied) {
+  if (isCarrierUsableStormTime(supplied)) {
     return {
       stormTime: supplied,
       evidence: { source: "chance_approved_approximation", value: supplied, verifiedWeatherMatch: false },
@@ -6178,12 +6200,8 @@ async function resolveClaimStormTime(input, canonicalInput, file) {
   return {
     stormTime: "",
     evidence: { source: "not_found", verifiedWeatherMatch: false },
-    warning: "No verified or nearby reported storm time was found; Retell must say the exact time is unknown if asked."
+    warning: "No verified, approved, or nearby reported storm time was found; a new-claim call cannot proceed until Chance approves a truthful carrier-usable approximation."
   };
-}
-
-function hasClockTime(value) {
-  return /\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|0?[1-9])\s*(?:a\.?m\.?|p\.?m\.?)\b/i.test(String(value || ""));
 }
 
 function isoDateFromClaimValue(value) {
@@ -6935,12 +6953,31 @@ async function dateOfLossResearch(input) {
     throw error;
   }
 
+  const carrierIntakeCandidates = research.candidates.map((candidate) => ({
+    dateOfLoss: candidate.date,
+    stormTime: candidate.nearestReport?.localTime
+      ? `Approximately ${candidate.nearestReport.localTime} based on a nearby reported hail event`
+      : null,
+    confidence: candidate.confidence,
+    source: candidate.nearestReport?.localTime
+      ? "NWS Local Storm Report via Iowa Environmental Mesonet"
+      : null,
+    caution: candidate.nearestReport?.localTime
+      ? "This is the time of a nearby reported hail observation, not a property-specific eyewitness time."
+      : "No carrier-usable time was found for this candidate; obtain a truthful approved time-of-day before filing."
+  }));
+  const recommendedCarrierIntake = research.recommendedCandidate
+    ? carrierIntakeCandidates.find((candidate) => candidate.dateOfLoss === research.recommendedCandidate.date) || null
+    : null;
+
   return {
     file,
     readScope,
     currentJobNimbusDateOfLoss: file.dateOfLoss || null,
     ...research,
-    instruction: "These dates are research candidates only. Compare them with the policy/dec coverage period, current JobNimbus documents, prior claim history, and carrier evidence. Never file a claim or update JobNimbus from weather research alone; show Chance the evidence and obtain approval first."
+    carrierIntakeCandidates,
+    recommendedCarrierIntake,
+    instruction: "Each DOL candidate is a date-and-time pair for carrier intake. Compare it with the policy/dec coverage period, current JobNimbus documents, prior claim history, and carrier evidence. Carry both the approved date and its carrier-usable time into the claim packet. Never file a claim or update JobNimbus from weather research alone; show Chance the evidence and obtain approval first."
   };
 }
 
@@ -17274,7 +17311,7 @@ const OPENAPI = {
           causeOfLoss: { type: "string" },
           typeOfLoss: { type: "string" },
           mortgageCompany: { type: "string" },
-          stormTime: { type: "string" },
+          stormTime: { type: "string", description: "Carrier-usable time paired with dateOfLoss. Accepts a sourced clock time or a truthful Chance-approved daypart such as morning, afternoon, evening, or overnight." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
           propertyStories: { type: "string" },
@@ -17310,7 +17347,7 @@ const OPENAPI = {
           goal: { type: "string", enum: ["file_new_claim", "find_existing_claim", "status_follow_up", "lor_destination", "inspection_scheduling", "adjuster_assignment"], default: "file_new_claim" },
           to: { type: "string", description: "Optional carrier destination override in E.164 or US format." },
           carrierPhone: { type: "string", description: "Alias for an approved carrier filing phone override." },
-          stormTime: { type: "string", description: "Optional Chance-approved or document-verified time. Omit vague guesses: the bridge automatically matches the confirmed JobNimbus DOL to nearby public NWS hail reports and adds a sourced approximate time when available." },
+          stormTime: { type: "string", description: "Carrier-usable time paired with the selected DOL. The bridge automatically matches the approved DOL, including an explicit date override, to nearby public NWS hail reports. If no report is available, a new-claim call requires a truthful Chance-approved approximation such as morning, afternoon, or evening." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
           propertyStories: { type: "string", description: "Verified number of stories, for example 'One story'. Never guess." },
@@ -17337,7 +17374,7 @@ const OPENAPI = {
           goal: { type: "string" },
           to: { type: "string" },
           carrierPhone: { type: "string" },
-          stormTime: { type: "string", description: "Use the same explicit time override supplied during preparation, if any. Otherwise omit so the bridge repeats automatic sourced weather-time enrichment before digest validation." },
+          stormTime: { type: "string", description: "Use the same carrier-usable time supplied during preparation, if any. Otherwise omit so the bridge repeats sourced weather-time enrichment against the same approved DOL before digest validation." },
           occupancy: { type: "string" },
           damageDiscovered: { type: "string" },
           propertyStories: { type: "string" },

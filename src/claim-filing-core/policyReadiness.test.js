@@ -29,6 +29,7 @@ function input(overrides = {}, file = {}, evidence = {}) {
     evidence,
     overrides: {
       damageDetails: ["Hail impact marks were observed on the roof shingles"],
+      stormTime: "Evening",
       ...overrides
     }
   };
@@ -177,6 +178,44 @@ test("carrier lookup still blocks an impossible date of loss", () => {
   const packet = buildClaimCallPacket(input({}, { dateOfLoss: "02/31/2026" }));
   assert.equal(readiness(packet).ready, false);
   assert.match(readiness(packet).blockers.join(" "), /date of loss is invalid/i);
+});
+
+test("a new claim cannot proceed with a date of loss but no carrier-usable time", () => {
+  for (const stormTime of [
+    "",
+    "Missing",
+    "Unknown",
+    "TBD",
+    "N/A",
+    "Not found",
+    "Approximately",
+    "not 4 PM",
+    "unknown, maybe 4 PM",
+    "Missing 4:30 PM",
+    "I do not know; 16:30?"
+  ]) {
+    const result = readiness(buildClaimCallPacket(input({ stormTime })));
+    assert.equal(result.ready, false, stormTime);
+    assert.match(result.blockers.join(" "), /no storm time/i, stormTime);
+    assert.doesNotMatch(result.warnings.join(" "), /no storm time/i, stormTime);
+  }
+});
+
+test("a new claim accepts an approved daypart or carrier-usable clock time", () => {
+  for (const stormTime of [
+    "Morning",
+    "Late afternoon",
+    "Evening",
+    "Overnight",
+    "4 PM",
+    "4:30 PM CDT",
+    "16:30",
+    "Approximately 5:38 PM CDT based on a nearby reported hail event",
+    "Approximately 4:30 PM CDT from the verified file evidence"
+  ]) {
+    const result = readiness(buildClaimCallPacket(input({ stormTime })));
+    assert.equal(result.ready, true, stormTime);
+  }
 });
 
 test("find-existing behavior remains independent of the new-claim coverage gate", () => {

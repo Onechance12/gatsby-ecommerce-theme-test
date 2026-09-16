@@ -8,11 +8,12 @@ import {
   extractCallResults,
   flattenFactsForDynamicVariables,
   isConfirmedCarrierCallback,
+  isCarrierUsableStormTime,
   lookupCarrier,
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-09-16.1";
+export const CLAIM_PLAN_VERSION = "2026-09-16.2";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export const CLAIM_FILING_COVERAGE_TERM_STATUSES = Object.freeze([
@@ -373,6 +374,7 @@ export function callbackPacketStatus(variables) {
         "propertyAddress",
         "carrier",
         "dateOfLoss",
+        "stormTime",
         "causeOfLoss",
         "damageOpening",
         "damageDetails",
@@ -393,7 +395,11 @@ export function callbackPacketStatus(variables) {
         "batchClaims"
       ]
     : goalRequired;
-  const missing = required.filter((key) => !variables[key] || /^missing/i.test(String(variables[key])));
+  const missing = required.filter((key) => (
+    key === "stormTime"
+      ? !isCarrierUsableStormTime(variables[key])
+      : !variables[key] || /^missing/i.test(String(variables[key]))
+  ));
   if (missing.length) return `INCOMPLETE: ${missing.join(", ")}`;
 
   // Existing-claim lookups are exactly hash-bound to the complete approved

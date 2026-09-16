@@ -8,6 +8,7 @@ import {
   normalizeCoverageTermStatus
 } from "./inputContract.js";
 import { resolveStandardAnswers, inferCause, inferDamageCategories } from "./standardAnswers.js";
+import { isCarrierUsableStormTime } from "./stormTime.js";
 
 export const DEFAULT_GOAL = "file_new_claim";
 const ALLOWED_GOALS = new Set([
@@ -415,11 +416,15 @@ function buildResultFormat(goal) {
 
 function missingCallFields(facts, goal, damageCategories) {
   const requiredKeys = ["insuredName", "propertyAddress", "homeownerPhone", "carrier"];
-  if (goal === "file_new_claim") requiredKeys.push("policyNumber", "dateOfLoss");
+  if (goal === "file_new_claim") requiredKeys.push("policyNumber", "dateOfLoss", "stormTime");
   if (goal !== "file_new_claim") requiredKeys.push("claimNumber");
 
   const missing = requiredKeys
-    .filter((key) => !facts[key] || /^missing/i.test(facts[key]))
+    .filter((key) => (
+      key === "stormTime"
+        ? !isCarrierUsableStormTime(facts[key])
+        : !facts[key] || /^missing/i.test(facts[key])
+    ))
     .map((key) => key.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`));
 
   if (!damageCategories.length || damageCategories[0].startsWith("No specific")) {

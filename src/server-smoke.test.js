@@ -2382,7 +2382,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
 
   const changedRedialInput = {
     ...exactInput,
-    stormTime: "Approximately 4:45 PM CDT from revised verified file evidence"
+    stormTime: "4:45 PM CDT"
   };
   const changedRedialPlanResponse = await fetch(`${publicBaseUrl}/claim-filing/prepare`, {
     method: "POST",
@@ -6585,7 +6585,8 @@ test("Mac claim prepare reads fresh evidence while the shared bridge principal i
       res.writeHead(200, { "content-type": "text/csv" });
       res.end([
         "VALID,VALID2,LAT,LON,MAG,WFO,TYPECODE,TYPETEXT,CITY,COUNTY,STATE,SOURCE,REMARK,UGC,UGCNAME,QUALIFIER",
-        '202604252130,2026/04/25 21:30,32.779,-96.795,1.75,FWD,H,HAIL,Dallas,Dallas,TX,Public,"Golf ball hail, photographed.",TXC113,Dallas,M'
+        '202604252130,2026/04/25 21:30,32.779,-96.795,1.75,FWD,H,HAIL,Dallas,Dallas,TX,Public,"Golf ball hail, photographed.",TXC113,Dallas,M',
+        '202604261930,2026/04/26 19:30,32.780,-96.796,1.50,FWD,H,HAIL,Dallas,Dallas,TX,Public,"Ping pong ball hail, photographed.",TXC113,Dallas,M'
       ].join("\n"));
       return;
     }
@@ -6940,6 +6941,46 @@ test("Mac claim prepare reads fresh evidence while the shared bridge principal i
   assert.match(prepared.packet.scriptInstruction, /Do not invent damage/);
   assert.match(prepared.planDigest, /^[a-f0-9]{64}$/);
 
+  const overrideDolPreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macClaimHeaders,
+    body: JSON.stringify({
+      query: "2739",
+      overrides: {
+        dateOfLoss: "04/26/2026",
+        coverageTermStatus: "carrier_lookup_required",
+        damageDetails: ["Roof and exterior hail damage"]
+      }
+    })
+  });
+  const overrideDolPrepared = await overrideDolPreparedResponse.json();
+  assert.equal(overrideDolPreparedResponse.status, 200, JSON.stringify(overrideDolPrepared));
+  assert.equal(overrideDolPrepared.packet.verifiedFileFacts.dateOfLoss, "04/26/2026");
+  assert.equal(overrideDolPrepared.packet.verifiedFileFacts.stormTime, "Approximately 2:30 PM CDT based on a nearby reported hail event");
+  assert.equal(overrideDolPrepared.stormTimeEvidence.dateMatchedToApprovedDol, "2026-04-26");
+  assert.equal(overrideDolPrepared.stormTimeEvidence.dateMatchedToJobNimbusDol, null);
+  assert.equal(overrideDolPrepared.readiness.ready, true);
+
+  const noTimePreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
+    method: "POST",
+    headers: macClaimHeaders,
+    body: JSON.stringify({
+      query: "2739",
+      overrides: {
+        dateOfLoss: "04/27/2026",
+        coverageTermStatus: "carrier_lookup_required",
+        damageDetails: ["Roof and exterior hail damage"]
+      }
+    })
+  });
+  const noTimePrepared = await noTimePreparedResponse.json();
+  assert.equal(noTimePreparedResponse.status, 200, JSON.stringify(noTimePrepared));
+  assert.equal(noTimePrepared.packet.verifiedFileFacts.dateOfLoss, "04/27/2026");
+  assert.equal(noTimePrepared.packet.verifiedFileFacts.stormTime, "Missing");
+  assert.equal(noTimePrepared.readiness.ready, false);
+  assert.match(noTimePrepared.readiness.blockers.join(" "), /no storm time/i);
+  assert.equal(noTimePrepared.approvalChallenge, "");
+
   const labeledPreparedResponse = await fetch(`http://127.0.0.1:${bridgePort}/claim-filing/prepare`, {
     method: "POST",
     headers: macClaimHeaders,
@@ -7152,6 +7193,10 @@ test("Mac claim prepare reads fresh evidence while the shared bridge principal i
   assert.equal(dolResearch.currentJobNimbusDateOfLoss, "2026-04-25");
   assert.equal(dolResearch.mode, "read_only_weather_research");
   assert.equal(dolResearch.recommendedCandidate.date, "2026-04-25");
+  assert.ok(dolResearch.carrierIntakeCandidates.length >= 2);
+  assert.ok(dolResearch.carrierIntakeCandidates.every((candidate) => candidate.dateOfLoss && candidate.stormTime));
+  assert.equal(dolResearch.recommendedCarrierIntake.dateOfLoss, "2026-04-25");
+  assert.equal(dolResearch.recommendedCarrierIntake.stormTime, "Approximately 4:30 PM CDT based on a nearby reported hail event");
   assert.match(dolResearch.instruction, /Never file a claim or update JobNimbus/i);
 
   const broadCompanyDocumentResponse = await fetch(`http://127.0.0.1:${bridgePort}/jobnimbus/document-file`, {

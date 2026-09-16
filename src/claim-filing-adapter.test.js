@@ -199,6 +199,7 @@ test("callback packet verifies an in-force term actually covers the date of loss
     carrier: "Allstate",
     policyNumberSpoken: "844118424",
     dateOfLoss: "06/02/2026",
+    stormTime: "Evening",
     causeOfLoss: "Hail and wind",
     damageOpening: "Roof hail damage.",
     damageDetails: "Roof hail damage",
@@ -266,6 +267,7 @@ test("callback readiness and digest bind the complete approved dynamic-variable 
     carrier: "State Farm",
     policyNumberSpoken: "POLICY-1",
     dateOfLoss: "04/25/2026",
+    stormTime: "4:30 PM CDT",
     coverageTermStatus: "carrier_lookup_required",
     priorPolicyLookupInstruction: "Give the policy number only when asked, then provide the insured name and property address if the carrier cannot locate it.",
     causeOfLoss: "Hail",
@@ -279,6 +281,10 @@ test("callback readiness and digest bind the complete approved dynamic-variable 
     batchClaims: "None"
   };
   assert.equal(buildCallbackDynamicVariables({ dynamicVariables: variables }).callbackPacketStatus, "READY");
+  assert.match(
+    buildCallbackDynamicVariables({ dynamicVariables: { ...variables, stormTime: "Unknown" } }).callbackPacketStatus,
+    /stormTime/
+  );
   const incomplete = { ...variables };
   delete incomplete.contractorHired;
   assert.match(buildCallbackDynamicVariables({ dynamicVariables: incomplete }).callbackPacketStatus, /contractorHired/);
@@ -367,6 +373,7 @@ test("carrier-lookup callback remains ready when no prior policy number is avail
     carrier: "State Farm",
     policyNumberSpoken: "Missing",
     dateOfLoss: "04/25/2026",
+    stormTime: "Evening",
     coverageTermStatus: "carrier_lookup_required",
     priorPolicyLookupInstruction: "Ask whether the carrier can search by insured name and property address.",
     causeOfLoss: "Hail",
@@ -476,6 +483,11 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /documentation delay.*never satisfies this rule/i);
   assert.match(prompt, /The phrases 'I can follow up'.*are forbidden during claim intake/i);
   assert.match(prompt, /NEVER answer 'No'.*additional claim has been attempted/i);
+  assert.match(prompt, /TOP-PRIORITY NAME ROUTER/i);
+  assert.match(prompt, /Chance Pearson's AI assistant with Wave Public Adjusting/i);
+  assert.match(prompt, /Never answer that caller-identity question with the insured's name/i);
+  assert.match(prompt, /Never ask the carrier 'How can I help you\?'/i);
+  assert.match(prompt, /After a machine or representative says only 'got it'.*say nothing/i);
 });
 
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
@@ -485,6 +497,8 @@ test("carrier prompt stays silent for IVR openings and accepts transfers", () =>
   assert.match(prompt, /Never substitute a made-up noon, morning, afternoon, or evening/i);
   assert.match(prompt, /A transfer is not a completed objective/i);
   assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
+  assert.match(prompt, /answer exactly: 'File a new homeowners property claim\.'/i);
+  assert.match(prompt, /NEVER add filler such as 'um'/i);
 });
 
 test("claim packet exposes only the fixed Retell-owned human opening", () => {
@@ -620,6 +634,7 @@ test("Danielle #2791 dry run carries approved living-room and kitchen damage int
       coverageTermStatus: "carrier_lookup_required",
       policyCoverageStart: "08/09/2024",
       policyCoverageEnd: "08/09/2025",
+      stormTime: "Evening",
       damageOpening: "Hail and wind damage to the roof and exterior, with interior damage in the living room and kitchen.",
       damageDetails,
       damagedRooms: "Living room and kitchen",
@@ -650,7 +665,8 @@ test("approved per-call overrides replace stale verified carrier and DOL facts",
     overrides: {
       carrier: "Allstate Insurance Company",
       dateOfLoss: "04/27/2026",
-      causeOfLoss: "Hail and wind"
+      causeOfLoss: "Hail and wind",
+      stormTime: "Evening"
     }
   });
   assert.equal(plan.readiness.ready, true);
@@ -758,7 +774,8 @@ function fixture(overrides = {}) {
       tasks: []
     },
     overrides: {
-      damageDetails: ["Roof and exterior hail damage"]
+      damageDetails: ["Roof and exterior hail damage"],
+      stormTime: "Evening"
     },
     ...overrides
   };

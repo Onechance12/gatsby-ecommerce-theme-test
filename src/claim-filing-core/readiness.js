@@ -6,6 +6,7 @@
 // requiresPolicyNumber. Also exposes the duplicate-new-claim guard so the bridge
 // adapter gets the same protection the local CLI has.
 import { cleanClaimNumber } from "./packet.js";
+import { isCarrierUsableStormTime } from "./stormTime.js";
 
 const isMissing = (v) => !v || /^missing/i.test(String(v));
 const isGenericCause = (v) => /^(?:property damage|other|unknown|undetermined|n\/a|not applicable)$/i.test(String(v || "").trim());
@@ -73,7 +74,13 @@ export function assessReadiness(packet, to, carrier) {
     else warnings.push("no policy number — carrier will be asked to locate coverage by insured name/address/phone");
   }
 
-  if (isMissing(f.stormTime)) warnings.push("no storm time (run DOL report / inspection capture)");
+  if (!isCarrierUsableStormTime(f.stormTime)) {
+    if (packet.goal === "file_new_claim") {
+      blockers.push("no storm time (select the DOL date and its carrier-usable time before filing)");
+    } else {
+      warnings.push("no storm time (run DOL report / inspection capture)");
+    }
+  }
   if (packet.goal !== "file_new_claim" && !practicalDamageCategories(packet.damageSummary).length) {
     warnings.push("no damage scope captured");
   }
