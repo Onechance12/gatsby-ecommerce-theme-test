@@ -16,7 +16,8 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
       description:
         "Request permission to end the call. This is the only tool that may end a carrier claim call. The bridge " +
         "independently verifies the live transcript, claim/reference number, required closing questions, wait state, " +
-        "and representative wrap-up. If denied, remain connected and follow the returned instruction.",
+        "the agent's natural final closing, and a later representative goodbye or acknowledgement. If denied, " +
+        "remain connected and follow the returned instruction.",
       url: options.guardedEndCallUrl || "https://jobnimbus-chatgpt-bridge.onrender.com/retell/guarded-end-call",
       method: "POST",
       headers: options.guardedEndCallAuthorization ? { authorization: options.guardedEndCallAuthorization } : undefined,
@@ -407,8 +408,8 @@ export function renderRetellPrompt(packet) {
     "- If the rep says 'thank you', 'you're all set', or seems to wrap up but you do NOT yet have a claim or " +
       "reference number, DO NOT hang up and do NOT say your closing line — say: 'Before we wrap up, could I grab " +
       "the claim or reference number for this filing?' Once you have that number (or the rep clearly states no " +
-      "number exists yet and explains when one will be issued), say your closing line 'Thank you for all of your " +
-      "help. Have a blessed day.' — then WAIT for the rep to say goodbye or acknowledge back before you use " +
+      "number exists yet and explains when one will be issued), say your closing line 'I really appreciate all your " +
+      "help. I hope you have a blessed day. Goodbye.' — then WAIT for the rep to say goodbye or acknowledge back before you use " +
       "request_guarded_end_call. Do NOT hang up the instant you finish talking; give them a moment to respond, like a human would. " +
       "Only call request_guarded_end_call after the rep has said goodbye / wrapped up. Never trigger the closing line or request_guarded_end_call " +
       "just because the rep thanked you if you still don't have the claim/reference number.",

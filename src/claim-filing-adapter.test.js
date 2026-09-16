@@ -471,6 +471,8 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /I'll let you know if I have a question.*ALWAYS mean the representative is still working/i);
   assert.match(prompt, /During a wait state, never say the closing blessing and never invoke request_guarded_end_call/i);
   assert.match(prompt, /request_guarded_end_call is forbidden while claim_number is empty/i);
+  assert.match(prompt, /I really appreciate all your help\. I hope you have a blessed day\. Goodbye\./i);
+  assert.match(prompt, /WAIT for the rep to say goodbye or acknowledge back/i);
   assert.match(prompt, /documentation delay.*never satisfies this rule/i);
   assert.match(prompt, /The phrases 'I can follow up'.*are forbidden during claim intake/i);
   assert.match(prompt, /NEVER answer 'No'.*additional claim has been attempted/i);

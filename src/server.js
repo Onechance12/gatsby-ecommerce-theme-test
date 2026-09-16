@@ -5378,7 +5378,11 @@ async function guardedRetellEndCall(input = {}) {
     return {
       ...decision,
       callId,
-      instruction: "Do not say a closing line. Remain connected and continue the call according to this reason."
+      instruction: decision.code === "representative_not_wrapped_after_closing"
+        ? "Do not repeat the closing line. Remain silent and wait for the representative to respond."
+        : decision.code === "agent_closing_not_spoken"
+          ? "Say the approved natural closing exactly once, then remain silent and wait for the representative to respond."
+          : "Do not say a closing line. Remain connected and continue the call according to this reason."
     };
   }
 

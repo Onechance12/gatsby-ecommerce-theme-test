@@ -2,6 +2,8 @@ import { isConfirmedCarrierCallback } from "./callbackConfirmation.js";
 
 const WAIT_STATE = /\b(?:one|1)\s+(?:sec(?:ond)?|moment)\b|\b(?:just\s+)?(?:give me|bear with me)\b|\bplease hold\b|\b(?:i(?:'m| am)|we(?:'re| are))\s+(?:documenting|typing|checking|looking|working|pulling|gathering)\b|\bi(?:'ll| will)\s+let you know if i have (?:a|any) questions?\b|\bi(?:'ll| will)\s+be right back\b/i;
 const WRAP_UP = /\b(?:goodbye|bye(?:-bye)?|have a (?:good|great|blessed|wonderful) (?:day|evening|weekend)|you(?:'re| are) all set|that (?:completes|finishes|wraps up)|thank you for calling)\b/i;
+const AGENT_FINAL_CLOSING = /\b(?:thank you for (?:all of )?your help|i (?:really )?appreciate (?:all(?: of)? )?(?:your help|everything))\b.{0,120}\b(?:have|hope you have) a blessed day\b/i;
+const POST_CLOSING_ACKNOWLEDGEMENT = /^(?:(?:okay|all right|alright)[\s,.!'-]+)?(?:(?:thank you(?: very much| so much)?|thanks(?: very much| so much)?|you too|same to you|goodbye|bye(?:-bye)?|take care|(?:you )?have a (?:good|great|blessed|wonderful) (?:day|evening|weekend)(?: as well)?)(?:[\s,.!'-]+|$))+$/i;
 const NO_NUMBER_YET = /\b(?:no|not)\b.{0,50}\b(?:claim|reference)\s*(?:number|#)\b|\b(?:claim|reference)\s*(?:number|#)\b.{0,50}\b(?:not (?:available|assigned|generated)|will be (?:issued|assigned|generated))\b/i;
 const VOICEMAIL = /\b(?:leave (?:a|your) message|record your message|voicemail|mailbox is full|after the (?:tone|beep))\b/i;
 const WRONG_NUMBER = /\b(?:wrong number|not the right (?:number|department)|you have reached .{0,40}(?:instead|not))\b/i;
@@ -108,10 +110,38 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
     }
   }
 
-  if (!WRAP_UP.test(latestCallee)) {
-    return deny("The carrier representative has not said goodbye or clearly wrapped up.", "representative_not_wrapped");
+  const latestAgentIndex = lastTurnIndex(turns, (turn) => turn.role === "agent");
+  const closingIndex = latestAgentIndex >= 0 && AGENT_FINAL_CLOSING.test(turns[latestAgentIndex].content)
+    ? latestAgentIndex
+    : -1;
+  if (closingIndex < 0) {
+    if (!WRAP_UP.test(latestCallee)) {
+      return deny("The carrier representative has not said goodbye or clearly wrapped up.", "representative_not_wrapped");
+    }
+    return deny(
+      "Give the natural final closing, then remain connected and wait for the representative to respond.",
+      "agent_closing_not_spoken"
+    );
+  }
+  const acknowledgementIndex = lastTurnIndex(turns, (turn) => turn.role === "user");
+  if (
+    acknowledgementIndex <= closingIndex
+    || acknowledgementIndex !== turns.length - 1
+    || !POST_CLOSING_ACKNOWLEDGEMENT.test(turns[acknowledgementIndex].content)
+  ) {
+    return deny(
+      "The representative has not responded after the final closing. Remain silent and wait for their goodbye or acknowledgement.",
+      "representative_not_wrapped_after_closing"
+    );
   }
   return allow("The objective, required closing questions, and carrier wrap-up were verified.", "objective_complete");
+}
+
+function lastTurnIndex(turns, predicate) {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (predicate(turns[index], index)) return index;
+  }
+  return -1;
 }
 
 export function transcriptTurns(call = {}) {

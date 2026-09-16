@@ -2274,7 +2274,73 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
     })
   });
   assert.equal(guardedEndResponse.status, 200);
-  const guardedEnd = await guardedEndResponse.json();
+  const missingClosing = await guardedEndResponse.json();
+  assert.equal(missingClosing.allowed, false);
+  assert.equal(missingClosing.code, "agent_closing_not_spoken");
+  assert.match(missingClosing.instruction, /say the approved natural closing exactly once/i);
+  assert.equal(retellStopCount, 0);
+
+  const liveRetellCall = retellCalls.find((call) => call.call_id === "call-1");
+  liveRetellCall.transcript_object.push({
+    role: "agent",
+    content: "I really appreciate all your help. I hope you have a blessed day. Goodbye."
+  });
+  liveRetellCall.transcript += "\nAgent: I really appreciate all your help. I hope you have a blessed day. Goodbye.";
+  const waitingForGoodbyeResponse = await fetch(`${publicBaseUrl}/retell/guarded-end-call`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${guardedToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      call: { call_id: "call-1" },
+      args: {
+        goal: "file_new_claim",
+        reason: "objective_complete",
+        outcome: "claim_filed",
+        claim_number: "SF-123",
+        callback_confirmed: false,
+        document_submission_requested: true,
+        next_step_requested: true,
+        additional_claims_completed: 0,
+        additional_claim_numbers: "",
+        batch_continuation_resolved: true
+      }
+    })
+  });
+  assert.equal(waitingForGoodbyeResponse.status, 200);
+  const waitingForGoodbye = await waitingForGoodbyeResponse.json();
+  assert.equal(waitingForGoodbye.allowed, false);
+  assert.equal(waitingForGoodbye.code, "representative_not_wrapped_after_closing");
+  assert.match(waitingForGoodbye.instruction, /remain silent and wait/i);
+  assert.equal(retellStopCount, 0);
+
+  liveRetellCall.transcript_object.push({ role: "user", content: "You too. Goodbye." });
+  liveRetellCall.transcript += "\nUser: You too. Goodbye.";
+  const completedGuardedEndResponse = await fetch(`${publicBaseUrl}/retell/guarded-end-call`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${guardedToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      call: { call_id: "call-1" },
+      args: {
+        goal: "file_new_claim",
+        reason: "objective_complete",
+        outcome: "claim_filed",
+        claim_number: "SF-123",
+        callback_confirmed: false,
+        document_submission_requested: true,
+        next_step_requested: true,
+        additional_claims_completed: 0,
+        additional_claim_numbers: "",
+        batch_continuation_resolved: true
+      }
+    })
+  });
+  assert.equal(completedGuardedEndResponse.status, 200);
+  const guardedEnd = await completedGuardedEndResponse.json();
   assert.equal(guardedEnd.allowed, true);
   assert.equal(guardedEnd.stopped, true);
   assert.equal(retellStopCount, 1);
