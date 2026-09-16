@@ -3,17 +3,20 @@ import { createHash } from "node:crypto";
 import {
   assessReadiness,
   buildClaimCallPacket,
+  buildRetellLlmFromPacket,
   buildWritebackProposal,
+  estimateRetellInitialContext,
   existingClaimBlock,
   extractCallResults,
   flattenFactsForDynamicVariables,
   isConfirmedCarrierCallback,
   isCarrierUsableStormTime,
   lookupCarrier,
-  PROMPT_PLACEHOLDERS
+  PROMPT_PLACEHOLDERS,
+  RETELL_INITIAL_CONTEXT_CHARACTER_LIMIT
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-09-16.2";
+export const CLAIM_PLAN_VERSION = "2026-09-16.3";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export const CLAIM_FILING_COVERAGE_TERM_STATUSES = Object.freeze([
@@ -137,8 +140,20 @@ export function buildClaimFilingPlan(input, options = {}) {
   const from = normalizePhone(options.from || "");
   const readiness = assessReadiness(packet, to, carrier);
   const duplicateBlock = existingClaimBlock(verifiedInput.file?.claimNumber, packet.goal);
-  const blockers = [...readiness.blockers, ...(duplicateBlock ? [duplicateBlock] : [])];
   const dynamicVariables = flattenFactsForDynamicVariables(packet);
+  const initialContext = estimateRetellInitialContext(
+    buildRetellLlmFromPacket(packet),
+    dynamicVariables
+  );
+  const contextBlock = initialContext.withinLimit
+    ? ""
+    : `Retell initial context is ${initialContext.characters} characters, above the ` +
+      `${RETELL_INITIAL_CONTEXT_CHARACTER_LIMIT}-character cost guard; shorten the approved call facts`;
+  const blockers = [
+    ...readiness.blockers,
+    ...(duplicateBlock ? [duplicateBlock] : []),
+    ...(contextBlock ? [contextBlock] : [])
+  ];
   const ownerId = String(options.ownerId || "").trim();
   const contactId = String(input.file?.id || "").trim();
   const agentId = String(options.agentId || "").trim();
@@ -182,6 +197,7 @@ export function buildClaimFilingPlan(input, options = {}) {
       to,
       from,
       agentId,
+      initialContext,
       dynamicVariables,
       metadata: {
         source: CLAIM_BRIDGE_SOURCE,
@@ -322,6 +338,13 @@ export function buildCallbackDynamicVariables(candidate, match = "matched") {
   for (const key of PROMPT_PLACEHOLDERS) {
     if (!out[key]) out[key] = "Missing";
   }
+  const initialContext = estimateRetellInitialContext(
+    buildRetellLlmFromPacket({}),
+    out
+  );
+  if (!initialContext.withinLimit) {
+    out.callbackPacketStatus = "INCOMPLETE: Retell initial context cost guard";
+  }
   return out;
 }
 
@@ -381,7 +404,7 @@ export function callbackPacketStatus(variables) {
         "coverageTermStatus"
       ]
     : goal === "find_existing_claim"
-      ? ["insuredName", "propertyAddress", "carrier", "policyNumberSpoken", "dateOfLoss"]
+      ? ["insuredName", "propertyAddress", "carrier", "dateOfLoss"]
       : [];
   if (!goalRequired.length) return "INCOMPLETE: unsupported goal";
   const required = goal === "file_new_claim"
@@ -404,7 +427,15 @@ export function callbackPacketStatus(variables) {
 
   // Existing-claim lookups are exactly hash-bound to the complete approved
   // packet by the server, but do not require new-claim damage/batch answers.
-  if (goal === "find_existing_claim") return "READY";
+  // The carrier can locate one by a known claim number even when the policy
+  // number was never available.
+  if (goal === "find_existing_claim") {
+    const hasClaimNumber = Boolean(variables.claimNumber) && !/^missing/i.test(String(variables.claimNumber));
+    const hasPolicyNumber = Boolean(variables.policyNumberSpoken) && !/^missing/i.test(String(variables.policyNumberSpoken));
+    return hasClaimNumber || hasPolicyNumber
+      ? "READY"
+      : "INCOMPLETE: claimNumber or policyNumberSpoken";
+  }
 
   const coverageTermStatus = String(variables.coverageTermStatus || "");
   if (!CLAIM_FILING_COVERAGE_TERM_STATUSES.includes(coverageTermStatus)) {

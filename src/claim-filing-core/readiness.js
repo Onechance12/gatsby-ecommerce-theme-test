@@ -101,12 +101,14 @@ function claimDateKey(value) {
 }
 
 // Duplicate-new-claim guard: a file that already carries a claim number should
-// never open a NEW claim (that's a status follow-up, not a filing). Returns a
-// blocker string when the guard trips, otherwise "".
+// never open a NEW claim. Route an exact-file confirmation/lookup through the
+// only other goal this claim lane supports; later status work belongs to the
+// dedicated Carrier Follow-Up lane. Returns a blocker string when the guard
+// trips, otherwise "".
 export function existingClaimBlock(claimNumber, goal) {
   const existing = cleanClaimNumber(String(claimNumber || "").replace(/^missing.*/i, ""));
   if (goal === "file_new_claim" && existing) {
-    return `file already has claim # ${existing} — use goal:"status_follow_up", not a new filing`;
+    return `file already has claim # ${existing} — use goal:"find_existing_claim" to confirm or locate it; use the Carrier Follow-Up lane for later status work`;
   }
   return "";
 }

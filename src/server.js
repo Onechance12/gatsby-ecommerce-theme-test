@@ -46,6 +46,14 @@ import {
   sendQuoText
 } from "./quo/client.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
+import {
+  buildRetellClaimAgentSettings,
+  buildRetellClaimLlmSettings,
+  buildRetellClaimVoiceSettings,
+  normalizeRetellClaimAgentSettings,
+  normalizeRetellClaimLlmSettings,
+  normalizeRetellClaimVoiceSettings
+} from "./claim-filing-core/retellAgentSettings.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import { extractCallResults } from "./claim-filing-core/resultExtraction.js";
 import { isCarrierUsableStormTime } from "./claim-filing-core/stormTime.js";
@@ -242,6 +250,8 @@ const STANDARD_W9_SHA256 = String(process.env.STANDARD_W9_SHA256 || "").trim().t
 const ALLOW_GMAIL_SEND = RELEASE_GATES.ALLOW_GMAIL_SEND;
 const PERSISTENT_DATA_ROOT = process.env.MEMORY_ROOT || tmpdir();
 const BRIDGE_DATA_DIR = path.join(PERSISTENT_DATA_ROOT, "bridge");
+const RETELL_CLAIM_PUBLICATION_RECEIPT_PATH = process.env.RETELL_CLAIM_PUBLICATION_RECEIPT_PATH
+  || path.join(BRIDGE_DATA_DIR, "retell-claim-publication-receipt.json");
 const HANDOFF_STORE_PATH = process.env.HANDOFF_STORE_PATH || path.join(BRIDGE_DATA_DIR, "handoffs.json");
 const HANDOFF_UPLOAD_DIR = process.env.HANDOFF_UPLOAD_DIR || path.join(BRIDGE_DATA_DIR, "handoff-uploads");
 const ARTIFACT_STORE_PATH = process.env.ARTIFACT_STORE_PATH || path.join(BRIDGE_DATA_DIR, "artifacts.json");
@@ -513,6 +523,7 @@ let actionBatchLedgerWriteCount = 0;
 let actionApprovalMutationQueue = Promise.resolve();
 let claimCallMutationQueue = Promise.resolve();
 let outboundSendMutationQueue = Promise.resolve();
+let retellClaimConfigurationMutationQueue = Promise.resolve();
 const ACTION_RECEIPT_RECOVERY_STATE = {
   status: "pending",
   lastStartupRecoveryAt: "",
@@ -3665,40 +3676,93 @@ function bindClaimCallApproval(plan, input = {}, attestation = null) {
 }
 
 function claimFilingToolAttestation(tools) {
-  return (Array.isArray(tools) ? tools : []).map((tool) => cleanObject({
-    type: String(tool?.type || ""),
-    name: String(tool?.name || ""),
-    description: String(tool?.description || ""),
-    url: String(tool?.url || ""),
-    method: String(tool?.method || ""),
-    timeout_ms: Number.isFinite(Number(tool?.timeout_ms)) ? Number(tool.timeout_ms) : undefined,
-    delay_ms: Number.isFinite(Number(tool?.delay_ms)) ? Number(tool.delay_ms) : undefined,
-    speak_during_execution: typeof tool?.speak_during_execution === "boolean"
-      ? tool.speak_during_execution
-      : undefined,
-    speak_after_execution: typeof tool?.speak_after_execution === "boolean"
-      ? tool.speak_after_execution
-      : undefined,
-    parameters: tool?.parameters && typeof tool.parameters === "object"
-      ? tool.parameters
-      : undefined,
-    headerNames: tool?.headers && typeof tool.headers === "object"
-      ? Object.keys(tool.headers).sort()
-      : undefined,
-    authorizationHeaderSha256: tool?.headers && typeof tool.headers === "object"
-      && String(tool.headers.Authorization || tool.headers.authorization || "")
-      ? digest(String(tool.headers.Authorization || tool.headers.authorization))
-      : undefined
-  }));
+  return (Array.isArray(tools) ? tools : []).map((tool) => {
+    const snapshot = JSON.parse(JSON.stringify(tool && typeof tool === "object" ? tool : {}));
+    const headers = snapshot.headers && typeof snapshot.headers === "object" && !Array.isArray(snapshot.headers)
+      ? Object.entries(snapshot.headers)
+        .map(([name, value]) => ({
+          name: String(name).toLowerCase(),
+          valueSha256: digest(String(value || ""))
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name))
+      : [];
+    const authorizationHeader = headers.find((header) => header.name === "authorization");
+    delete snapshot.headers;
+    return {
+      ...snapshot,
+      headers,
+      headerNames: headers.map((header) => header.name),
+      authorizationHeaderSha256: authorizationHeader?.valueSha256 || ""
+    };
+  });
 }
 
 function claimFilingAnalysisAttestation(fields) {
-  return (Array.isArray(fields) ? fields : []).map((field) => cleanObject({
-    type: String(field?.type || ""),
-    name: String(field?.name || ""),
-    description: String(field?.description || ""),
-    choices: Array.isArray(field?.choices) ? field.choices.map(String) : undefined
-  }));
+  const normalizedFields = new Set([
+    "type",
+    "name",
+    "description",
+    "choices",
+    "examples",
+    "required",
+    "conditional_prompt"
+  ]);
+  return (Array.isArray(fields) ? fields : []).map((field) => {
+    const source = field && typeof field === "object" ? field : {};
+    const extraConfiguration = Object.fromEntries(
+      Object.entries(source)
+        .filter(([name]) => !normalizedFields.has(name))
+        .map(([name, value]) => [name, JSON.parse(JSON.stringify(value))])
+    );
+    return {
+      type: String(source.type || ""),
+      name: String(source.name || ""),
+      description: String(source.description || ""),
+      choices: Array.isArray(source.choices) ? source.choices.map(String) : [],
+      examples: Array.isArray(source.examples) ? source.examples.map(String) : [],
+      required: source.required === true,
+      conditional_prompt: String(source.conditional_prompt || ""),
+      extraConfiguration
+    };
+  });
+}
+
+function claimFilingLlmSettingsAttestation(llm = {}) {
+  return normalizeRetellClaimLlmSettings(llm);
+}
+
+function claimFilingAgentSettingsAttestation(agent = {}) {
+  return normalizeRetellClaimAgentSettings(agent);
+}
+
+function claimFilingVoiceAttestation(agent = {}) {
+  return normalizeRetellClaimVoiceSettings(agent);
+}
+
+function claimFilingTransferLlmAttestation(llm = {}) {
+  return llm?.is_transfer_llm ?? false;
+}
+
+const EXPECTED_RETELL_CLAIM_RETAINED_AGENT_CONFIGURATION = Object.freeze({
+  assigned_tags: Object.freeze([]),
+  channel: "voice"
+});
+
+const EXPECTED_RETELL_CLAIM_RETAINED_LLM_CONFIGURATION = Object.freeze({});
+
+function claimFilingLiveConfigurationProjection(agent = {}, llm = {}) {
+  return {
+    generalPrompt: String(llm?.general_prompt || ""),
+    generalTools: claimFilingToolAttestation(llm?.general_tools),
+    llmSettings: claimFilingLlmSettingsAttestation(llm),
+    isTransferLlm: claimFilingTransferLlmAttestation(llm),
+    agentSettings: claimFilingAgentSettingsAttestation(agent),
+    voiceConfiguration: claimFilingVoiceAttestation(agent),
+    postCallAnalysisData: claimFilingAnalysisAttestation(agent?.post_call_analysis_data),
+    timeZone: String(agent?.timezone || ""),
+    retainedAgentConfiguration: retellClaimRetainedAgentConfiguration(agent),
+    retainedLlmConfiguration: retellClaimRetainedLlmConfiguration(llm)
+  };
 }
 
 function expectedRetellClaimPhoneConfiguration() {
@@ -3734,7 +3798,7 @@ async function claimFilingConfiguration() {
     badRequest("Retell claim filing is not fully configured.");
   }
   const [agent, phone] = await Promise.all([
-    retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`),
+    retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}?version=latest_published`),
     retellApi("GET", `/get-phone-number/${encodeURIComponent(RETELL_FROM_NUMBER)}`)
   ]);
   const agentVersion = Number(agent?.version);
@@ -3759,8 +3823,10 @@ async function claimFilingConfiguration() {
   const expectedLlm = buildRetellLlmFromPacket(retellConfigurationPacket(), {
     guardedEndCallUrl: `${PUBLIC_BASE_URL}/retell/guarded-end-call`,
     guardedEndCallAuthorization: `Bearer ${RETELL_GUARDED_END_CALL_TOKEN}`
-  }).toLlmRequestBody();
+  }).toLlmRequestBody(buildRetellClaimLlmSettings());
   const expectedAnalysis = postCallAnalysisSchema();
+  const expectedAgentSettings = buildRetellClaimAgentSettings();
+  const expectedVoice = buildRetellClaimVoiceSettings();
   const liveTools = Array.isArray(llm?.general_tools) ? llm.general_tools : [];
   const liveAnalysis = Array.isArray(agent?.post_call_analysis_data)
     ? agent.post_call_analysis_data
@@ -3772,18 +3838,27 @@ async function claimFilingConfiguration() {
   const expectedPhone = expectedRetellClaimPhoneConfiguration();
   const expectedInboundAgents = claimFilingPhoneAgentAttestation(expectedPhone.inboundAgents);
   const liveInboundAgents = claimFilingPhoneAgentAttestation(phone?.inbound_agents);
+  const expectedRetainedAgentConfiguration = structuredClone(
+    EXPECTED_RETELL_CLAIM_RETAINED_AGENT_CONFIGURATION
+  );
+  const expectedRetainedLlmConfiguration = structuredClone(
+    EXPECTED_RETELL_CLAIM_RETAINED_LLM_CONFIGURATION
+  );
+  const liveRetainedAgentConfiguration = retellClaimRetainedAgentConfiguration(agent);
+  const liveRetainedLlmConfiguration = retellClaimRetainedLlmConfiguration(llm);
   const expectedConfiguration = {
     generalPrompt: expectedLlm.general_prompt,
     generalTools: expectedTools,
+    llmSettings: claimFilingLlmSettingsAttestation(expectedLlm),
+    isTransferLlm: false,
+    agentSettings: claimFilingAgentSettingsAttestation(expectedAgentSettings),
+    voiceConfiguration: claimFilingVoiceAttestation(expectedVoice),
     postCallAnalysisData: expectedAnalysisFields,
-    timeZone: OPERATIONS_TIME_ZONE
+    timeZone: OPERATIONS_TIME_ZONE,
+    retainedAgentConfiguration: expectedRetainedAgentConfiguration,
+    retainedLlmConfiguration: expectedRetainedLlmConfiguration
   };
-  const liveConfiguration = {
-    generalPrompt: String(llm?.general_prompt || ""),
-    generalTools: attestedLiveTools,
-    postCallAnalysisData: attestedLiveAnalysis,
-    timeZone: String(agent?.timezone || "")
-  };
+  const liveConfiguration = claimFilingLiveConfigurationProjection(agent, llm);
   const expectedConfigDigest = digest(expectedConfiguration);
   const liveConfigDigest = digest(liveConfiguration);
   const expectedToolNames = expectedLlm.general_tools.map((tool) => String(tool.name || "")).sort();
@@ -3797,8 +3872,16 @@ async function claimFilingConfiguration() {
   const promptMatches = liveConfiguration.generalPrompt === expectedConfiguration.generalPrompt;
   const toolsMatch = digest(attestedLiveTools) === digest(expectedTools);
   const analysisSchemaMatches = digest(attestedLiveAnalysis) === digest(expectedAnalysisFields);
+  const llmSettingsMatch = digest(liveConfiguration.llmSettings) === digest(expectedConfiguration.llmSettings);
+  const isTransferLlmMatch = liveConfiguration.isTransferLlm === false;
+  const agentSettingsMatch = digest(liveConfiguration.agentSettings) === digest(expectedConfiguration.agentSettings);
+  const voiceConfigurationMatches = digest(liveConfiguration.voiceConfiguration) === digest(expectedConfiguration.voiceConfiguration);
+  const retainedAgentConfigurationMatches = digest(liveRetainedAgentConfiguration) === digest(expectedRetainedAgentConfiguration);
+  const retainedLlmConfigurationMatches = digest(liveRetainedLlmConfiguration) === digest(expectedRetainedLlmConfiguration);
   const timezoneMatches = liveConfiguration.timeZone === OPERATIONS_TIME_ZONE;
   const published = agent?.is_published === true && llm?.is_published === true;
+  const agentIdentityMatches = String(agent?.agent_id || "") === RETELL_AGENT_ID;
+  const llmIdentityMatches = String(llm?.llm_id || "") === llmId && Number(llm?.version) === llmVersion;
   const phoneNumberMatches = String(phone?.phone_number || "") === expectedPhone.phoneNumber;
   const inboundWebhookUrlMatches = String(phone?.inbound_webhook_url || "") === expectedPhone.inboundWebhookUrl;
   const inboundAgentRoutingMatches = digest(liveInboundAgents) === digest(expectedInboundAgents);
@@ -3820,6 +3903,17 @@ async function claimFilingConfiguration() {
     configurationDigest: liveConfigDigest,
     phoneConfigurationDigest: livePhoneConfigDigest
   });
+  const publicationReceipt = await readRetellClaimPublicationReceipt();
+  const publicationReceiptMatches = publicationReceipt.status === "verified"
+    && publicationReceipt.payload.agentId === RETELL_AGENT_ID
+    && publicationReceipt.payload.agentVersion === agentVersion
+    && publicationReceipt.payload.llmId === llmId
+    && publicationReceipt.payload.llmVersion === llmVersion
+    && publicationReceipt.payload.configurationDigest === liveConfigDigest
+    && publicationReceipt.payload.retainedAgentDigest === digest(liveRetainedAgentConfiguration)
+    && publicationReceipt.payload.retainedLlmDigest === digest(liveRetainedLlmConfiguration)
+    && publicationReceipt.payload.phoneConfigurationDigest === livePhoneConfigDigest
+    && publicationReceipt.payload.agentConfigDigest === agentConfigDigest;
   const callbackWebhookAvailable = phoneNumberMatches
     && inboundWebhookUrlMatches
     && inboundAgentRoutingMatches;
@@ -3828,8 +3922,17 @@ async function claimFilingConfiguration() {
     && toolsMatch
     && guardedEndAuthorizationMatches
     && analysisSchemaMatches
+    && llmSettingsMatch
+    && isTransferLlmMatch
+    && agentSettingsMatch
+    && voiceConfigurationMatches
+    && retainedAgentConfigurationMatches
+    && retainedLlmConfigurationMatches
     && timezoneMatches
     && callbackWebhookAvailable
+    && agentIdentityMatches
+    && llmIdentityMatches
+    && publicationReceiptMatches
     && expectedConfigDigest === liveConfigDigest;
 
   return {
@@ -3854,6 +3957,8 @@ async function claimFilingConfiguration() {
     agentPublished: agent?.is_published === true,
     llmPublished: llm?.is_published === true,
     agentVersion,
+    agentId: RETELL_AGENT_ID,
+    llmId,
     llmVersion,
     agentConfigDigest,
     promptMatches,
@@ -3863,6 +3968,42 @@ async function claimFilingConfiguration() {
     dtmfPressDigitAvailable: liveToolNames.includes("press_digit"),
     guardedEndCallAvailable: liveToolNames.includes("request_guarded_end_call"),
     analysisSchemaMatches,
+    llmSettingsMatch,
+    isTransferLlmMatch,
+    agentSettingsMatch,
+    voiceConfigurationMatches,
+    voiceConfiguration: liveConfiguration.voiceConfiguration,
+    retainedAgentConfigurationMatches,
+    retainedLlmConfigurationMatches,
+    retainedAgentConfiguration: retellApprovalSafeConfiguration(liveRetainedAgentConfiguration),
+    retainedLlmConfiguration: retellApprovalSafeConfiguration(liveRetainedLlmConfiguration),
+    agentIdentityMatches,
+    llmIdentityMatches,
+    publicationReceiptStatus: publicationReceipt.status,
+    publicationReceiptMatches,
+    publicationReceiptPublishedAt: publicationReceiptMatches
+      ? publicationReceipt.payload.publishedAt
+      : "",
+    configurationMismatches: [
+      !promptMatches ? "general_prompt" : "",
+      !toolsMatch ? "general_tools" : "",
+      !guardedEndAuthorizationMatches ? "guarded_end_authorization" : "",
+      !analysisSchemaMatches ? "post_call_analysis_data" : "",
+      !llmSettingsMatch ? "llm_settings" : "",
+      !isTransferLlmMatch ? "is_transfer_llm" : "",
+      !agentSettingsMatch ? "agent_settings" : "",
+      !voiceConfigurationMatches ? "voice_configuration" : "",
+      !retainedAgentConfigurationMatches ? `retained_agent_configuration:${Object.keys(liveRetainedAgentConfiguration).sort().join(",") || "missing"}` : "",
+      !retainedLlmConfigurationMatches ? `retained_llm_configuration:${Object.keys(liveRetainedLlmConfiguration).sort().join(",") || "missing"}` : "",
+      !timezoneMatches ? "timezone" : "",
+      !agentIdentityMatches ? "agent_identity" : "",
+      !llmIdentityMatches ? "llm_identity" : "",
+      !publicationReceiptMatches ? `publication_receipt:${publicationReceipt.status}` : "",
+      !phoneNumberMatches ? "phone_number" : "",
+      !inboundWebhookUrlMatches ? "inbound_webhook_url" : "",
+      !inboundAgentRoutingMatches ? "inbound_agent_routing" : "",
+      !published ? "published_versions" : ""
+    ].filter(Boolean),
     analysisFields: liveAnalysis.map((field) => String(field?.name || "")).filter(Boolean),
     timezoneMatches,
     expectedConfigDigest,
@@ -3881,6 +4022,7 @@ async function prepareClaimFiling(input) {
   const claimInput = isMacCodexOperatorRequest()
     ? { ...input, includeCarrierBatch: false }
     : input;
+  assertDedicatedClaimAgentGoal(claimInput);
   const context = await buildLiveClaimContext(required(input.query, "query"));
   let plan = await buildClaimPlanWithStormTime(claimInput, context.canonicalInput, context.file);
   plan = await attachSameCarrierBatch(plan, context, claimInput);
@@ -3927,6 +4069,7 @@ async function placeClaimFilingCall(input) {
   const claimInput = isMacCodexOperatorRequest()
     ? { ...input, includeCarrierBatch: false }
     : input;
+  assertDedicatedClaimAgentGoal(claimInput);
   const context = await buildLiveClaimContext(required(input.query, "query"));
   let plan = await buildClaimPlanWithStormTime(claimInput, context.canonicalInput, context.file);
   plan = await attachSameCarrierBatch(plan, context, claimInput);
@@ -3941,7 +4084,7 @@ async function placeClaimFilingCall(input) {
 
   const retellConfiguration = await claimFilingConfiguration();
   if (retellConfiguration.ready !== true) {
-    badRequest("The live Retell claim agent is not attested to the deployed bridge configuration.");
+    conflictError("The live Retell claim agent is not attested to the deployed bridge configuration.");
   }
   plan = bindClaimCallApproval(plan, claimInput, retellConfiguration);
   assertApprovalDigest(input.planDigest, plan.planDigest);
@@ -5044,6 +5187,15 @@ async function attachSameCarrierBatch(primaryPlan, primaryContext, input) {
   return primaryPlan;
 }
 
+function assertDedicatedClaimAgentGoal(input = {}) {
+  const goal = String(input.goal || input.overrides?.goal || "file_new_claim").trim();
+  if (!["file_new_claim", "find_existing_claim"].includes(goal)) {
+    badRequest(
+      "The Retell claim agent supports only file_new_claim or find_existing_claim. Use the dedicated Carrier Follow-Up or Client Coordinator lane for other work."
+    );
+  }
+}
+
 async function claimFilingResult(input) {
   const analysis = await loadClaimCallAnalysis(required(input.callId, "callId"));
   if (analysis.call.callStatus === "ongoing" || analysis.call.callStatus === "registered") {
@@ -5226,7 +5378,301 @@ function versionedRetellEndpoint(endpoint, version) {
   return `${endpoint}?version=${encodeURIComponent(String(parsed))}`;
 }
 
+function retellConfigurationWithoutFields(value, fields) {
+  const snapshot = structuredClone(value && typeof value === "object" ? value : {});
+  for (const field of fields) delete snapshot[field];
+  return snapshot;
+}
+
+function retellApprovalSafeConfiguration(value, fieldName = "") {
+  if (Array.isArray(value)) {
+    return value.map((item) => retellApprovalSafeConfiguration(item, fieldName));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([name, item]) => [
+      name,
+      retellApprovalSafeConfiguration(item, name)
+    ]));
+  }
+  if (typeof value !== "string") return value;
+  if (/authorization|token|secret|password|api.?key|credential|headers?/i.test(fieldName)) {
+    return { valueSha256: digest(value), redacted: true };
+  }
+  if (/url|uri|endpoint/i.test(fieldName)) {
+    let originAndPath = "";
+    try {
+      const parsed = new URL(value);
+      originAndPath = `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      originAndPath = "non_url_value";
+    }
+    return { originAndPath, valueSha256: digest(value), redacted: true };
+  }
+  if (value.length > 200) {
+    return { length: value.length, valueSha256: digest(value), redacted: true };
+  }
+  return value;
+}
+
+function retellClaimRetainedAgentConfiguration(agent) {
+  const retained = retellConfigurationWithoutFields(agent, new Set([
+    "agent_id",
+    "version",
+    "base_version",
+    "is_published",
+    "version_title",
+    "version_description",
+    "last_modification_timestamp",
+    "response_engine",
+    "post_call_analysis_data",
+    ...Object.keys(buildRetellClaimAgentSettings()),
+    ...Object.keys(buildRetellClaimVoiceSettings())
+  ]));
+  retained.assigned_tags = Array.isArray(agent?.assigned_tags)
+    ? [...agent.assigned_tags].map(String).sort()
+    : [];
+  retained.channel = agent?.channel == null ? "voice" : String(agent.channel);
+  return retained;
+}
+
+function retellClaimRetainedLlmConfiguration(llm) {
+  return retellConfigurationWithoutFields(llm, new Set([
+    "llm_id",
+    "version",
+    "is_published",
+    "last_modification_timestamp",
+    "is_transfer_llm",
+    "general_prompt",
+    "general_tools",
+    ...Object.keys(buildRetellClaimLlmSettings())
+  ]));
+}
+
+function retellClaimPublicationReceiptSignature(payload) {
+  const key = createHash("sha256")
+    .update("wave-retell-claim-publication-receipt:v1", "utf8")
+    .update("\0", "utf8")
+    .update(RETELL_GUARDED_END_CALL_TOKEN, "utf8")
+    .update("\0", "utf8")
+    .update(RETELL_INBOUND_WEBHOOK_TOKEN, "utf8")
+    .digest();
+  return createHmac("sha256", key).update(digest(payload), "utf8").digest("hex");
+}
+
+async function readRetellClaimPublicationReceipt() {
+  let raw;
+  try {
+    raw = await readFile(RETELL_CLAIM_PUBLICATION_RECEIPT_PATH, "utf8");
+  } catch (error) {
+    return error?.code === "ENOENT"
+      ? { status: "missing", payload: null }
+      : { status: "unavailable", payload: null };
+  }
+  let row;
+  try {
+    row = JSON.parse(raw);
+  } catch {
+    return { status: "corrupt", payload: null };
+  }
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return { status: "invalid", payload: null };
+  }
+  const { signature, ...payload } = row;
+  if (
+    payload.schemaVersion !== 1
+    || !/^[a-f0-9]{64}$/i.test(String(signature || ""))
+    || !secureEqual(signature, retellClaimPublicationReceiptSignature(payload))
+  ) {
+    return { status: "invalid", payload: null };
+  }
+  return { status: "verified", payload };
+}
+
+async function writeRetellClaimPublicationReceipt(payload) {
+  const normalized = {
+    schemaVersion: 1,
+    agentId: String(payload.agentId || ""),
+    agentVersion: Number(payload.agentVersion),
+    llmId: String(payload.llmId || ""),
+    llmVersion: Number(payload.llmVersion),
+    configurationDigest: String(payload.configurationDigest || ""),
+    retainedAgentDigest: String(payload.retainedAgentDigest || ""),
+    retainedLlmDigest: String(payload.retainedLlmDigest || ""),
+    phoneConfigurationDigest: String(payload.phoneConfigurationDigest || ""),
+    agentConfigDigest: String(payload.agentConfigDigest || ""),
+    approvedPublisherConfigDigest: String(payload.approvedPublisherConfigDigest || ""),
+    publishedAt: String(payload.publishedAt || new Date().toISOString())
+  };
+  for (const field of [
+    "configurationDigest",
+    "retainedAgentDigest",
+    "retainedLlmDigest",
+    "phoneConfigurationDigest",
+    "agentConfigDigest",
+    "approvedPublisherConfigDigest"
+  ]) {
+    if (!/^[a-f0-9]{64}$/i.test(normalized[field])) {
+      throw new TypeError(`Retell publication receipt ${field} must be a SHA-256 digest.`);
+    }
+  }
+  if (
+    !normalized.agentId
+    || !Number.isInteger(normalized.agentVersion)
+    || normalized.agentVersion < 0
+    || !normalized.llmId
+    || !Number.isInteger(normalized.llmVersion)
+    || normalized.llmVersion < 0
+  ) {
+    throw new TypeError("Retell publication receipt requires exact agent and LLM identities and versions.");
+  }
+  await writePrivateJsonFile(RETELL_CLAIM_PUBLICATION_RECEIPT_PATH, {
+    ...normalized,
+    signature: retellClaimPublicationReceiptSignature(normalized)
+  });
+  return normalized;
+}
+
+function assertRetellClaimPublishProjection({
+  agent,
+  llm,
+  expectedAgentVersion,
+  expectedBaseVersion,
+  expectedLlmId,
+  expectedLlmVersion,
+  expectedLlm,
+  expectedAgentSettings,
+  expectedVoice,
+  expectedAnalysis,
+  expectedPublished,
+  expectedRetainedAgentConfiguration,
+  expectedRetainedLlmConfiguration
+}) {
+  const actualProjection = {
+    agentId: String(agent?.agent_id || ""),
+    agentVersion: Number(agent?.version),
+    baseVersion: agent?.base_version === null ? null : Number(agent?.base_version),
+    published: agent?.is_published === true,
+    responseEngine: {
+      type: String(agent?.response_engine?.type || ""),
+      llmId: String(agent?.response_engine?.llm_id || ""),
+      llmVersion: Number(agent?.response_engine?.version)
+    },
+    llmId: String(llm?.llm_id || ""),
+    llmVersion: Number(llm?.version),
+    llmPublished: llm?.is_published === true,
+    ...claimFilingLiveConfigurationProjection(agent, llm)
+  };
+  const expectedProjection = {
+    agentId: RETELL_AGENT_ID,
+    agentVersion: Number(expectedAgentVersion),
+    baseVersion: Number(expectedBaseVersion),
+    published: expectedPublished === true,
+    responseEngine: {
+      type: "retell-llm",
+      llmId: String(expectedLlmId),
+      llmVersion: Number(expectedLlmVersion)
+    },
+    llmId: String(expectedLlmId),
+    llmVersion: Number(expectedLlmVersion),
+    llmPublished: expectedPublished === true,
+    generalPrompt: expectedLlm.general_prompt,
+    generalTools: claimFilingToolAttestation(expectedLlm.general_tools),
+    llmSettings: claimFilingLlmSettingsAttestation(expectedLlm),
+    isTransferLlm: false,
+    agentSettings: claimFilingAgentSettingsAttestation(expectedAgentSettings),
+    voiceConfiguration: claimFilingVoiceAttestation(expectedVoice),
+    postCallAnalysisData: claimFilingAnalysisAttestation(expectedAnalysis),
+    timeZone: OPERATIONS_TIME_ZONE,
+    retainedAgentConfiguration: structuredClone(expectedRetainedAgentConfiguration),
+    retainedLlmConfiguration: structuredClone(expectedRetainedLlmConfiguration)
+  };
+  if (digest(actualProjection) !== digest(expectedProjection)) {
+    conflictError("Retell claim-agent publication projection did not match the exact reviewed configuration. Nothing was published.");
+  }
+}
+
+async function runSerializedRetellClaimConfiguration(task) {
+  const previous = retellClaimConfigurationMutationQueue;
+  let release;
+  retellClaimConfigurationMutationQueue = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous.catch(() => {});
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+async function readExactPublishedRetellClaimBase() {
+  const agent = await retellApi(
+    "GET",
+    `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}?version=latest_published`
+  );
+  const agentVersion = Number(agent?.version);
+  const llmId = String(agent?.response_engine?.llm_id || "").trim();
+  const llmVersion = Number(agent?.response_engine?.version);
+  if (
+    String(agent?.agent_id || "") !== RETELL_AGENT_ID
+    ||
+    !Number.isInteger(agentVersion)
+    || agentVersion < 0
+    || agent?.is_published !== true
+    || agent?.response_engine?.type !== "retell-llm"
+    || !llmId
+    || !Number.isInteger(llmVersion)
+    || llmVersion < 0
+  ) {
+    conflictError("Retell no longer has a usable exact published claim-agent base. Nothing was published.");
+  }
+  const llm = await retellApi(
+    "GET",
+    versionedRetellEndpoint(`/get-retell-llm/${encodeURIComponent(llmId)}`, llmVersion)
+  );
+  if (
+    String(llm?.llm_id || "") !== llmId
+    || Number(llm?.version) !== llmVersion
+    || llm?.is_published !== true
+    || claimFilingTransferLlmAttestation(llm) !== false
+  ) {
+    conflictError("Retell no longer has the published LLM bound to the exact claim-agent base. Nothing was published.");
+  }
+  return { agent, agentVersion, llm, llmId, llmVersion };
+}
+
+function assertRetellClaimBaseUnchanged(current, expected) {
+  if (
+    current.agentVersion !== expected.agentVersion
+    || current.llmId !== expected.llmId
+    || current.llmVersion !== expected.llmVersion
+    || digest(current.agent) !== expected.agentSnapshotDigest
+    || digest(current.llm) !== expected.llmSnapshotDigest
+  ) {
+    conflictError("The live Retell claim-agent base changed after approval. Nothing was published; prepare and approve the current configuration again.");
+  }
+}
+
+function assertRetellClaimPhoneProjection(phone, expectedPhone) {
+  const expectedInboundAgents = claimFilingPhoneAgentAttestation(expectedPhone.inboundAgents);
+  const actualInboundAgents = claimFilingPhoneAgentAttestation(phone?.inbound_agents);
+  if (
+    String(phone?.phone_number || "") !== expectedPhone.phoneNumber
+    || String(phone?.inbound_webhook_url || "") !== expectedPhone.inboundWebhookUrl
+    || digest(actualInboundAgents) !== digest(expectedInboundAgents)
+  ) {
+    conflictError("Retell phone routing did not match the exact reviewed fail-closed callback configuration after update.");
+  }
+}
+
 async function configureRetellAgent(input = {}) {
+  if (input.execute === true) {
+    return runSerializedRetellClaimConfiguration(() => configureRetellAgentUnlocked(input));
+  }
+  return configureRetellAgentUnlocked(input);
+}
+
+async function configureRetellAgentUnlocked(input = {}) {
   if (
     !RETELL_API_KEY
     || !RETELL_AGENT_ID
@@ -5236,26 +5682,91 @@ async function configureRetellAgent(input = {}) {
   ) {
     badRequest("Retell claim-agent configuration requires the API key, agent, from number, guarded-end credential, and inbound-webhook credential.");
   }
-  const agent = await retellApi("GET", `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`);
+  const agent = await retellApi(
+    "GET",
+    `/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}?version=latest_published`
+  );
+  const baseAgentVersion = Number(agent?.version);
+  if (
+    String(agent?.agent_id || "") !== RETELL_AGENT_ID
+    || !Number.isInteger(baseAgentVersion)
+    || baseAgentVersion < 0
+    || agent?.is_published !== true
+  ) {
+    badRequest("Retell did not return an exact published base agent version.");
+  }
   const llmId = String(agent?.response_engine?.llm_id || "").trim();
+  const baseLlmVersion = Number(agent?.response_engine?.version);
   if (agent?.response_engine?.type !== "retell-llm" || !llmId) {
     badRequest("The configured Retell agent does not use a Retell LLM response engine.");
   }
+  if (!Number.isInteger(baseLlmVersion) || baseLlmVersion < 0) {
+    badRequest("The exact published Retell agent does not reference a versioned Retell LLM.");
+  }
+  const baseLlm = await retellApi(
+    "GET",
+    versionedRetellEndpoint(`/get-retell-llm/${encodeURIComponent(llmId)}`, baseLlmVersion)
+  );
+  if (
+    String(baseLlm?.llm_id || "") !== llmId
+    || Number(baseLlm?.version) !== baseLlmVersion
+    || baseLlm?.is_published !== true
+  ) {
+    badRequest("Retell did not return the published LLM bound to the exact base agent version.");
+  }
+  const baseAgentSnapshotDigest = digest(agent);
+  const baseLlmSnapshotDigest = digest(baseLlm);
 
   const llmConfig = buildRetellLlmFromPacket(retellConfigurationPacket(), {
     guardedEndCallUrl: `${PUBLIC_BASE_URL}/retell/guarded-end-call`,
     guardedEndCallAuthorization: RETELL_GUARDED_END_CALL_TOKEN
       ? `Bearer ${RETELL_GUARDED_END_CALL_TOKEN}`
       : ""
-  }).toLlmRequestBody();
+  }).toLlmRequestBody(buildRetellClaimLlmSettings());
+  const agentSettings = buildRetellClaimAgentSettings();
+  const voiceSettings = buildRetellClaimVoiceSettings();
   const analysisSchema = postCallAnalysisSchema();
+  const analysisAttestation = claimFilingAnalysisAttestation(analysisSchema);
   const phoneConfig = expectedRetellClaimPhoneConfiguration();
+  const baseRetainedAgentConfiguration = retellClaimRetainedAgentConfiguration(agent);
+  const baseRetainedLlmConfiguration = retellClaimRetainedLlmConfiguration(baseLlm);
+  const targetRetainedAgentConfiguration = structuredClone(
+    EXPECTED_RETELL_CLAIM_RETAINED_AGENT_CONFIGURATION
+  );
+  const targetRetainedLlmConfiguration = structuredClone(
+    EXPECTED_RETELL_CLAIM_RETAINED_LLM_CONFIGURATION
+  );
+  const baseRetainedAgentDigest = digest(baseRetainedAgentConfiguration);
+  const baseRetainedLlmDigest = digest(baseRetainedLlmConfiguration);
+  const retainedConfigurationEligible = (
+    baseRetainedAgentDigest === digest(targetRetainedAgentConfiguration)
+    && baseRetainedLlmDigest === digest(targetRetainedLlmConfiguration)
+  );
+  const transferLlmEligible = claimFilingTransferLlmAttestation(baseLlm) === false;
+  const initialContextCharacters = JSON.stringify({
+    general_prompt: llmConfig.general_prompt,
+    general_tools: llmConfig.general_tools
+  }).length;
   const configDigest = digest({
     agentId: RETELL_AGENT_ID,
     llmId,
+    baseAgentVersion,
+    baseLlmVersion,
+    baseAgentSnapshotDigest,
+    baseLlmSnapshotDigest,
+    baseRetainedAgentConfiguration,
+    baseRetainedLlmConfiguration,
+    baseRetainedAgentDigest,
+    baseRetainedLlmDigest,
+    targetRetainedAgentConfiguration,
+    targetRetainedLlmConfiguration,
     generalPrompt: llmConfig.general_prompt,
     generalTools: llmConfig.general_tools,
-    postCallAnalysisData: analysisSchema,
+    llmSettings: claimFilingLlmSettingsAttestation(llmConfig),
+    isTransferLlm: false,
+    agentSettings: claimFilingAgentSettingsAttestation(agentSettings),
+    voiceConfiguration: claimFilingVoiceAttestation(voiceSettings),
+    postCallAnalysisData: analysisAttestation,
     timeZone: OPERATIONS_TIME_ZONE,
     phoneNumber: phoneConfig.phoneNumber,
     inboundAgents: phoneConfig.inboundAgents,
@@ -5264,15 +5775,50 @@ async function configureRetellAgent(input = {}) {
   const preview = {
     agentId: RETELL_AGENT_ID,
     llmId,
-    currentAgentVersion: agent.version,
-    currentPublished: Boolean(agent.is_published),
+    baseAgentVersion,
+    baseLlmVersion,
+    baseAgentSnapshotDigest,
+    baseLlmSnapshotDigest,
+    baseRetainedAgentConfiguration: retellApprovalSafeConfiguration(baseRetainedAgentConfiguration),
+    baseRetainedLlmConfiguration: retellApprovalSafeConfiguration(baseRetainedLlmConfiguration),
+    baseRetainedAgentDigest,
+    baseRetainedLlmDigest,
+    retainedConfigurationEligible,
+    transferLlmEligible,
+    currentAgentVersion: baseAgentVersion,
+    currentPublished: true,
     configDigest,
     promptCharacters: llmConfig.general_prompt.length,
+    promptEstimatedTokens: Math.ceil(llmConfig.general_prompt.length / 4),
+    initialContextCharacters,
+    initialContextEstimatedTokens: Math.ceil(initialContextCharacters / 4),
     toolNames: llmConfig.general_tools.map((tool) => tool.name),
     analysisFields: analysisSchema.map((field) => field.name),
     phoneConfigurationDigest: digest(phoneConfig),
     inboundAgentRouting: "unset_fail_closed_webhook_override_only",
-    inboundWebhookAuthentication: "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp"
+    inboundWebhookAuthentication: "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp",
+    exactConfiguration: {
+      baseAgentVersion,
+      baseLlmVersion,
+      baseAgentSnapshotDigest,
+      baseLlmSnapshotDigest,
+      baseRetainedAgentConfiguration: retellApprovalSafeConfiguration(baseRetainedAgentConfiguration),
+      baseRetainedLlmConfiguration: retellApprovalSafeConfiguration(baseRetainedLlmConfiguration),
+      baseRetainedAgentDigest,
+      baseRetainedLlmDigest,
+      targetRetainedAgentConfiguration,
+      targetRetainedLlmConfiguration,
+      generalPrompt: llmConfig.general_prompt,
+      generalTools: claimFilingToolAttestation(llmConfig.general_tools),
+      llmSettings: claimFilingLlmSettingsAttestation(llmConfig),
+      isTransferLlm: false,
+      agentSettings: claimFilingAgentSettingsAttestation(agentSettings),
+      voiceConfiguration: claimFilingVoiceAttestation(voiceSettings),
+      postCallAnalysisData: analysisAttestation,
+      timeZone: OPERATIONS_TIME_ZONE,
+      phoneConfigurationDigest: digest(phoneConfig),
+      inboundAgentRouting: "unset_fail_closed_webhook_override_only"
+    }
   };
 
   if (input.execute !== true) {
@@ -5281,13 +5827,16 @@ async function configureRetellAgent(input = {}) {
       approvalRequired: true,
       publishRequired: true,
       ...preview,
-      nextStep: "Review this exact configuration. execute=true updates the latest draft; publish=true also publishes that returned draft version."
+      nextStep: "Review this exact configuration and immutable published base. execute=true creates a fresh draft from that exact base, attests the complete publish projection, and publish=true publishes only that new draft."
     };
   }
   if (input.publish !== true) {
     badRequest("publish=true is required with execute=true so the bridge and live Retell agent cannot be left on different prompt versions.");
   }
   assertApprovalDigest(input.configDigest, configDigest, "configDigest");
+  if (!retainedConfigurationEligible || !transferLlmEligible) {
+    conflictError("The published Retell base contains an unreviewed retained setting or is a transfer LLM. Nothing was published; review the current base before trying again.");
+  }
 
   const pendingCallbacks = await recentCallbackCandidates("");
   if (pendingCallbacks.length) {
@@ -5296,36 +5845,193 @@ async function configureRetellAgent(input = {}) {
     );
   }
 
-  const draftAgent = await ensureRetellDraftAgentVersion(RETELL_AGENT_ID, agent);
+  const createdDraft = await retellApi("POST", `/create-agent-version/${encodeURIComponent(RETELL_AGENT_ID)}`, {
+    base_version: baseAgentVersion
+  });
+  const draftAgentVersion = Number(createdDraft?.version);
+  if (
+    String(createdDraft?.agent_id || "") !== RETELL_AGENT_ID
+    || !Number.isInteger(draftAgentVersion)
+    || draftAgentVersion < 0
+    || createdDraft?.is_published === true
+    || Number(createdDraft?.base_version) !== baseAgentVersion
+  ) {
+    badRequest("Retell did not create a fresh draft from the exact reviewed published version.");
+  }
+  const draftAgent = await retellApi(
+    "GET",
+    versionedRetellEndpoint(`/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, draftAgentVersion)
+  );
   const draftLlmId = String(draftAgent?.response_engine?.llm_id || "").trim();
   const draftLlmVersion = Number(draftAgent?.response_engine?.version);
-  if (draftAgent?.response_engine?.type !== "retell-llm" || !draftLlmId || !Number.isInteger(draftLlmVersion)) {
+  if (
+    String(draftAgent?.agent_id || "") !== RETELL_AGENT_ID
+    || Number(draftAgent?.version) !== draftAgentVersion
+    || draftAgent?.is_published === true
+    || Number(draftAgent?.base_version) !== baseAgentVersion
+    || draftAgent?.response_engine?.type !== "retell-llm"
+    || !draftLlmId
+    || !Number.isInteger(draftLlmVersion)
+  ) {
     badRequest("Retell created a carrier-agent draft without a usable Retell LLM draft.");
+  }
+  const draftLlm = await retellApi(
+    "GET",
+    versionedRetellEndpoint(`/get-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion)
+  );
+  if (
+    String(draftLlm?.llm_id || "") !== draftLlmId
+    || Number(draftLlm?.version) !== draftLlmVersion
+    || draftLlm?.is_published === true
+    || claimFilingTransferLlmAttestation(draftLlm) !== false
+  ) {
+    badRequest("Retell did not create an editable LLM draft for the fresh agent draft.");
+  }
+  if (
+    digest(retellClaimRetainedAgentConfiguration(draftAgent)) !== baseRetainedAgentDigest
+    || digest(retellClaimRetainedLlmConfiguration(draftLlm)) !== baseRetainedLlmDigest
+  ) {
+    conflictError("Retell added or changed an unreviewed retained setting while cloning the approved base. Nothing was published.");
   }
   const llm = await retellApi("PATCH", versionedRetellEndpoint(`/update-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion), {
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
-    begin_message: ""
+    ...buildRetellClaimLlmSettings()
   });
   const llmVersion = Number(llm.version);
-  if (!Number.isInteger(llmVersion) || llmVersion < 0) badRequest("Retell updated the LLM but did not return a usable version.");
+  if (
+    String(llm?.llm_id || "") !== draftLlmId
+    || !Number.isInteger(llmVersion)
+    || llmVersion !== draftLlmVersion
+    || llm?.is_published === true
+    || claimFilingTransferLlmAttestation(llm) !== false
+  ) {
+    conflictError("Retell updated a different or published LLM version than the exact fresh draft. Nothing was published.");
+  }
   const updatedAgent = await retellApi("PATCH", versionedRetellEndpoint(`/update-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, draftAgent.version), {
     response_engine: { type: "retell-llm", llm_id: draftLlmId, version: llmVersion },
+    ...agentSettings,
+    ...voiceSettings,
     post_call_analysis_data: analysisSchema,
-    post_call_analysis_model: "gpt-4.1-mini",
-    timezone: OPERATIONS_TIME_ZONE
+    post_call_analysis_model: agentSettings.post_call_analysis_model,
+    timezone: agentSettings.timezone
   });
   const version = Number(updatedAgent.version);
-  if (!Number.isInteger(version) || version < 0) badRequest("Retell updated the draft but did not return a publishable agent version.");
+  if (
+    String(updatedAgent?.agent_id || "") !== RETELL_AGENT_ID
+    || !Number.isInteger(version)
+    || version !== draftAgentVersion
+    || Number(updatedAgent?.base_version) !== baseAgentVersion
+    || updatedAgent?.is_published === true
+  ) {
+    conflictError("Retell updated a different agent version than the fresh reviewed draft. Nothing was published.");
+  }
+  const [attestedDraftAgent, attestedDraftLlm] = await Promise.all([
+    retellApi("GET", versionedRetellEndpoint(`/get-agent/${encodeURIComponent(RETELL_AGENT_ID)}`, version)),
+    retellApi("GET", versionedRetellEndpoint(`/get-retell-llm/${encodeURIComponent(draftLlmId)}`, llmVersion))
+  ]);
+  assertRetellClaimPublishProjection({
+    agent: attestedDraftAgent,
+    llm: attestedDraftLlm,
+    expectedAgentVersion: version,
+    expectedBaseVersion: baseAgentVersion,
+    expectedLlmId: draftLlmId,
+    expectedLlmVersion: llmVersion,
+    expectedLlm: llmConfig,
+    expectedAgentSettings: agentSettings,
+    expectedVoice: voiceSettings,
+    expectedAnalysis: analysisSchema,
+    expectedPublished: false,
+    expectedRetainedAgentConfiguration: targetRetainedAgentConfiguration,
+    expectedRetainedLlmConfiguration: targetRetainedLlmConfiguration
+  });
+
+  // Dashboard or parallel publishers are outside this request's draft. Refuse
+  // to publish if the immutable base approved by Chance is no longer exactly
+  // the live published base.
+  const currentBase = await readExactPublishedRetellClaimBase();
+  assertRetellClaimBaseUnchanged(currentBase, {
+    agentVersion: baseAgentVersion,
+    llmId,
+    llmVersion: baseLlmVersion,
+    agentSnapshotDigest: baseAgentSnapshotDigest,
+    llmSnapshotDigest: baseLlmSnapshotDigest
+  });
+
   await retellApi("POST", `/publish-agent-version/${encodeURIComponent(RETELL_AGENT_ID)}`, {
     version,
-    version_title: "Carrier filing safeguards and verified property facts",
-    version_description: "Chance-scoped JobNimbus and Google Calendar scheduling authority with approval-gated calendar writeback."
+    version_title: "Carrier claim filing runtime",
+    version_description: "Compact claim-only prompt, pinned conversation controls, exact callback restoration, guarded ending, and approval-gated writeback."
+  });
+  const publishedCurrent = await readExactPublishedRetellClaimBase();
+  if (
+    publishedCurrent.agentVersion !== version
+    || publishedCurrent.llmId !== draftLlmId
+    || publishedCurrent.llmVersion !== llmVersion
+  ) {
+    conflictError("The newly published Retell claim agent is not the current live version. Phone routing was not changed; reconcile Retell before continuing.");
+  }
+  assertRetellClaimPublishProjection({
+    agent: publishedCurrent.agent,
+    llm: publishedCurrent.llm,
+    expectedAgentVersion: version,
+    expectedBaseVersion: baseAgentVersion,
+    expectedLlmId: draftLlmId,
+    expectedLlmVersion: llmVersion,
+    expectedLlm: llmConfig,
+    expectedAgentSettings: agentSettings,
+    expectedVoice: voiceSettings,
+    expectedAnalysis: analysisSchema,
+    expectedPublished: true,
+    expectedRetainedAgentConfiguration: targetRetainedAgentConfiguration,
+    expectedRetainedLlmConfiguration: targetRetainedLlmConfiguration
   });
   await retellApi("PATCH", `/update-phone-number/${encodeURIComponent(RETELL_FROM_NUMBER)}`, {
     inbound_agents: phoneConfig.inboundAgents,
     inbound_webhook_url: phoneConfig.inboundWebhookUrl
   });
+  const updatedPhone = await retellApi(
+    "GET",
+    `/get-phone-number/${encodeURIComponent(RETELL_FROM_NUMBER)}`
+  );
+  assertRetellClaimPhoneProjection(updatedPhone, phoneConfig);
+  const publishedConfiguration = claimFilingLiveConfigurationProjection(
+    publishedCurrent.agent,
+    publishedCurrent.llm
+  );
+  const publishedConfigurationDigest = digest(publishedConfiguration);
+  const publishedPhoneConfigurationDigest = digest({
+    phoneNumber: String(updatedPhone?.phone_number || ""),
+    inboundAgents: claimFilingPhoneAgentAttestation(updatedPhone?.inbound_agents),
+    inboundWebhookUrl: String(updatedPhone?.inbound_webhook_url || "")
+  });
+  const publishedAgentConfigDigest = digest({
+    agentId: RETELL_AGENT_ID,
+    agentVersion: version,
+    llmId: draftLlmId,
+    llmVersion,
+    configurationDigest: publishedConfigurationDigest,
+    phoneConfigurationDigest: publishedPhoneConfigurationDigest
+  });
+  const writtenReceipt = await writeRetellClaimPublicationReceipt({
+    agentId: RETELL_AGENT_ID,
+    agentVersion: version,
+    llmId: draftLlmId,
+    llmVersion,
+    configurationDigest: publishedConfigurationDigest,
+    retainedAgentDigest: digest(publishedConfiguration.retainedAgentConfiguration),
+    retainedLlmDigest: digest(publishedConfiguration.retainedLlmConfiguration),
+    phoneConfigurationDigest: publishedPhoneConfigurationDigest,
+    agentConfigDigest: publishedAgentConfigDigest,
+    approvedPublisherConfigDigest: configDigest
+  });
+  const verifiedReceipt = await readRetellClaimPublicationReceipt();
+  if (
+    verifiedReceipt.status !== "verified"
+    || digest(verifiedReceipt.payload) !== digest(writtenReceipt)
+  ) {
+    conflictError("The Retell claim-agent publication receipt could not be durably verified. The live agent remains blocked until it is reconciled.");
+  }
 
   return {
     mode: "executed",
@@ -5333,9 +6039,10 @@ async function configureRetellAgent(input = {}) {
     phoneNumberConfigured: true,
     inboundWebhookConfigured: true,
     ...preview,
-    draftAgentVersion: Number(draftAgent.version),
+    draftAgentVersion,
     publishedAgentVersion: version,
     retellLlmVersion: llmVersion,
+    publicationReceiptVerified: true,
     nextStep: "Verify the live claim-agent, phone routing, and callback webhook attestation. Do not place a call without Chance's separate approval of one fresh exact-file plan."
   };
 }
@@ -5728,12 +6435,10 @@ function retellConfigurationPacket() {
       "claim or reference number",
       "representative and adjuster contact information",
       "document-submission destination and subject rule",
-      "confirmed inspection date, arrival window, timezone, and access requirements",
       "carrier next step and expected timeframe"
     ],
     stopRules: [
-      "Never guess a client, claim, policy, date, damage fact, or appointment time.",
-      "Never schedule outside the merged availability supplied for the call.",
+      "Never guess a client, claim, policy, date, or damage fact.",
       "Never provide sensitive identity, banking, card, PIN, or password information.",
       "Never update JobNimbus or send a carrier email from the phone call."
     ],
@@ -5741,7 +6446,6 @@ function retellConfigurationPacket() {
       objectiveCompleted: "yes/no/partial",
       claimNumber: "",
       adjuster: {},
-      inspection: { scheduled: false, start: "", end: "", timezone: "", accessRequirements: "" },
       documentSubmission: "",
       nextStep: "",
       blocker: ""
@@ -15681,7 +16385,8 @@ function assertIdentityRequestScope(
     "/claim-filing/prepare",
     "/claim-filing/call",
     "/claim-filing/result",
-    "/claim-filing/callbacks"
+    "/claim-filing/callbacks",
+    "/retell/configure-agent"
   ].includes(pathname);
   if (
     claimFilingRoute
@@ -17344,7 +18049,7 @@ const OPENAPI = {
         additionalProperties: false,
         properties: {
           query: { type: "string", description: "Chance Pearson JobNimbus file identifier. Prefer JobNimbus number, claim number, or exact address." },
-          goal: { type: "string", enum: ["file_new_claim", "find_existing_claim", "status_follow_up", "lor_destination", "inspection_scheduling", "adjuster_assignment"], default: "file_new_claim" },
+          goal: { type: "string", enum: ["file_new_claim", "find_existing_claim"], default: "file_new_claim", description: "The dedicated claim agent only files or locates a claim. Use Carrier Follow-Up for status, document-destination, adjuster, or inspection work." },
           to: { type: "string", description: "Optional carrier destination override in E.164 or US format." },
           carrierPhone: { type: "string", description: "Alias for an approved carrier filing phone override." },
           stormTime: { type: "string", description: "Carrier-usable time paired with the selected DOL. The bridge automatically matches the approved DOL, including an explicit date override, to nearby public NWS hail reports. If no report is available, a new-claim call requires a truthful Chance-approved approximation such as morning, afternoon, or evening." },

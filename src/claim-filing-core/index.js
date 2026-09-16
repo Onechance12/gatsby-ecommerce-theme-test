@@ -18,7 +18,13 @@ export { lookupCarrier, knownCarriers } from "./carrierDirectory.js";
 export { assessReadiness, existingClaimBlock } from "./readiness.js";
 export { isCarrierUsableStormTime } from "./stormTime.js";
 export { flattenFactsForDynamicVariables, PROMPT_PLACEHOLDERS } from "./dynamicVariables.js";
-export { buildRetellLlmFromPacket, renderRetellPrompt, postCallAnalysisSchema } from "./retellPrompt.js";
+export {
+  buildRetellLlmFromPacket,
+  estimateRetellInitialContext,
+  RETELL_INITIAL_CONTEXT_CHARACTER_LIMIT,
+  renderRetellPrompt,
+  postCallAnalysisSchema
+} from "./retellPrompt.js";
 export {
   extractCallResults,
   inferOutcome,

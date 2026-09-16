@@ -256,14 +256,28 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     "POST /claim-filing/prepare",
     "POST /claim-filing/call",
     "POST /claim-filing/result",
-    "POST /claim-filing/callbacks"
+    "POST /claim-filing/callbacks",
+    "POST /retell/configure-agent"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
     assert.equal(routeAllowed(operator, method, pathname), false, route);
     assert.equal(routeAllowed(macOperator, method, pathname), true, route);
   }
-  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 25);
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 26);
+
+  for (const identity of [
+    { type: "google_oauth", role: "chance" },
+    { type: "google_oauth", role: "administrator" },
+    { type: "google_oauth", role: "employee" },
+    { type: "bridge_token", role: "chance" },
+    { type: "hcn_browser_session", role: "chance" },
+    operator,
+    { type: "codex_operator_token", role: "chance", subject: "codex-mac-operator" }
+  ]) {
+    assert.equal(routeAllowed(identity, "POST", "/retell/configure-agent"), false);
+  }
+  assert.equal(routeAllowed(macOperator, "POST", "/retell/configure-agent"), true);
 
   for (const route of [
     "POST /auth/quo-line",

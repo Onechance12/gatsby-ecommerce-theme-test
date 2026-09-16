@@ -44,6 +44,7 @@ test("Codex operator descriptor names exactly the existing least-privilege route
   assert.equal(macCapabilities.includes("operations.run_policy.read"), true);
   assert.equal(macCapabilities.includes("operations.action_batch_receipts.read"), true);
   assert.equal(macCapabilities.includes("operations.action_batch_receipts.reconcile"), true);
+  assert.equal(macCapabilities.includes("retell.agent.configure"), true);
 
   const descriptor = buildCapabilityDescriptor({
     identity: { type: "codex_operator_token", role: "codex_operator" }
@@ -77,9 +78,10 @@ test("Google roles are normalized to named capabilities without wildcard authori
       .filter(({ route }) => !route.includes(" /hcn/"))
       .map(({ name }) => name)
   ).size;
-  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 5);
+  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 6);
   assert.equal(chance.authorizedCapabilities.includes("gmail.drafts.send"), true);
   assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), false);
+  assert.equal(chance.authorizedCapabilities.includes("retell.agent.configure"), false);
   assert.equal(chance.authorizedCapabilities.includes("hcn.work_center.read"), false);
   assert.equal(chance.authorizedCapabilities.includes("hcn.file.review"), false);
   assert.equal(JSON.stringify(chance).includes("allRoutes"), false);

@@ -254,7 +254,7 @@ test("coverage controls stay server-side and are not exposed to the live model",
   assert.match(prompt, /NEW-CLAIM POLICY HANDLING/);
   assert.match(prompt, /give only \{\{policyNumberSpoken\}\} with no preface or disclaimer/i);
   assert.match(prompt, /Do not proactively ask the carrier to identify an active policy, confirm coverage, or discuss term dates/i);
-  assert.match(prompt, /Policy number: \{\{policyNumberSpoken\}\}/i);
+  assert.match(prompt, /Policy number to speak: \{\{policyNumberSpoken\}\}/i);
   assert.doesNotMatch(prompt, /Available policy identifier\/reference/i);
   assert.doesNotMatch(prompt, /I have an available policy reference that may help locate/i);
 });

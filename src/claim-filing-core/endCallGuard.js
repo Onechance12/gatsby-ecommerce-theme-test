@@ -62,6 +62,22 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const callbackConfirmed = args.callback_confirmed === true && isConfirmedCarrierCallback(call);
   const coverageTermStatus = String(call.retell_llm_dynamic_variables?.coverageTermStatus || "").trim();
 
+  // An IVR-confirmed queue callback is its own terminal outcome. There is no
+  // human representative from whom to collect an LOR destination, next step,
+  // or post-closing goodbye, so never force the model to fabricate those facts.
+  if (callbackConfirmed) {
+    if (reason !== "callback_confirmed" || outcome !== "callback_requested") {
+      return deny(
+        "Use reason callback_confirmed and outcome callback_requested for the transcript-verified queue callback.",
+        "invalid_callback_termination"
+      );
+    }
+    return allow(
+      "The carrier IVR explicitly confirmed that the callback was queued.",
+      "callback_confirmed"
+    );
+  }
+
   if (["file_new_claim", "find_existing_claim", "confirm_existing_claim"].includes(goal)) {
     if (!["claim_filed", "existing_claim_confirmed"].includes(outcome) && !callbackConfirmed && !noNumberWithTiming) {
       return deny("The filing outcome is incomplete. Keep the call connected.", "incomplete_outcome");

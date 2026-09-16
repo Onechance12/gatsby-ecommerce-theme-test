@@ -43,11 +43,89 @@ test("normalizeDateOfLoss converts JobNimbus epoch seconds before the voice call
   assert.equal(normalizeDateOfLoss("4/25/2026"), "04/25/2026");
 });
 
-test("Retell prompt has a dedicated homeowner appointment mode", () => {
+test("Retell claim prompt excludes retired lanes and stays within budget", () => {
+  const plan = buildClaimFilingPlan(fixture(), {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  const prompt = renderRetellPrompt(plan.packet);
+  const llm = buildRetellLlmFromPacket(plan.packet);
+  const initialContextCharacters = JSON.stringify({
+    general_prompt: llm.generalPrompt,
+    general_tools: llm.generalTools
+  }).length;
+  assert.ok(prompt.length < 12000, `claim prompt is ${prompt.length} characters`);
+  assert.ok(
+    initialContextCharacters < 14000,
+    `claim prompt plus tools is ${initialContextCharacters} characters`
+  );
+  assert.match(prompt, /CARRIER CLAIM INTAKE — EXACT FILE ONLY/);
+  assert.match(prompt, /INBOUND CARRIER CALLBACK/);
+  assert.match(prompt, /Apply this entire section only when direction is carrier_callback/i);
+  assert.match(prompt, /When direction is outbound_claim_call, ignore callbackMatch and callbackPacketStatus/i);
+  assert.match(prompt, /Only for direction carrier_callback, if packet status is not READY/i);
+  assert.match(prompt, /NEW-CLAIM POLICY HANDLING/);
+  assert.match(prompt, /file_new_claim when policyNumberSpoken is not Missing/i);
+  assert.match(prompt, /NO_RESPONSE_NEEDED/);
+  assert.doesNotMatch(prompt, /homeowner_appointment_confirmation|homeownerOutreachOpening/i);
+  assert.doesNotMatch(prompt, /inspection_scheduling|availableAppointmentWindows/i);
+  assert.doesNotMatch(prompt, /batchClaimCount|batchClaims|BATCH FILING/i);
+});
+
+test("claim prompt gives new filing and existing-claim lookup distinct openings", () => {
   const prompt = renderRetellPrompt({});
-  assert.match(prompt, /HIGHEST-PRIORITY HOMEOWNER APPOINTMENT MODE/);
-  assert.match(prompt, /homeowner_appointment_confirmation/);
-  assert.match(prompt, /do not leave a message/);
+  assert.match(prompt, /For file_new_claim say: .*calling to file a property claim/i);
+  assert.match(prompt, /For find_existing_claim say: .*calling to locate or confirm an existing property claim/i);
+  assert.match(prompt, /Never use the new-claim opening for an existing-claim lookup/i);
+  assert.match(prompt, /For file_new_claim, prefer Report\/File\/New\/Homeowners Property Claim/i);
+  assert.match(prompt, /For find_existing_claim, prefer Existing Claim\/Claim Status/i);
+  assert.match(prompt, /Never choose a new-claim route for an existing-claim lookup/i);
+});
+
+test("an otherwise-ready no-policy filing asks for insured-and-address lookup instead of speaking Missing", () => {
+  const input = fixture();
+  input.file.policyNumber = "";
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  const prompt = renderRetellPrompt(plan.packet);
+  assert.equal(plan.readiness.ready, true);
+  assert.equal(plan.callPlan.dynamicVariables.policyNumberSpoken, "Missing");
+  assert.match(prompt, /If policyNumberSpoken is exactly Missing, never speak the word Missing as a policy number/i);
+  assert.match(prompt, /Can you search by the insured name and property address\?/i);
+});
+
+test("claim planning blocks oversized expanded Retell context before a paid call", () => {
+  const input = fixture();
+  input.overrides.damageOpening = `Roof damage ${"with verified damage ".repeat(90)}`;
+  input.overrides.damageDetails = [input.overrides.damageOpening];
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  assert.equal(plan.readiness.ready, false);
+  assert.ok(plan.callPlan.initialContext.characters > 14000);
+  assert.match(plan.readiness.blockers.join("\n"), /Retell initial context .* above .* cost guard/i);
+});
+
+test("callback restoration also fails closed when expanded Retell context exceeds the cost guard", () => {
+  const plan = buildClaimFilingPlan(fixture(), {
+    ownerId: OWNER_ID,
+    from: "+12145550100",
+    agentId: "agent-1"
+  });
+  const variables = buildCallbackDynamicVariables({
+    dynamicVariables: {
+      ...plan.callPlan.dynamicVariables,
+      damageOpening: `Roof damage ${"with verified damage ".repeat(90)}`,
+      damageDetails: `Roof damage ${"with verified damage ".repeat(90)}`
+    }
+  });
+  assert.equal(variables.callbackPacketStatus, "INCOMPLETE: Retell initial context cost guard");
 });
 
 test("callbackCandidateFromCall reconstructs a pending case from Retell metadata", () => {
@@ -227,7 +305,7 @@ test("callback packet verifies an in-force term actually covers the date of loss
   );
 });
 
-test("find-existing-claim callbacks require the exact lookup packet", () => {
+test("find-existing-claim callbacks require one usable claim or policy identifier", () => {
   const incomplete = buildCallbackDynamicVariables({
     dynamicVariables: {
       goal: "find_existing_claim",
@@ -239,7 +317,19 @@ test("find-existing-claim callbacks require the exact lookup packet", () => {
     }
   }, "matched");
   assert.match(incomplete.callbackPacketStatus, /^INCOMPLETE:/);
-  assert.match(incomplete.callbackPacketStatus, /policyNumberSpoken/);
+  assert.match(incomplete.callbackPacketStatus, /claimNumber or policyNumberSpoken/);
+  const claimOnlyReady = buildCallbackDynamicVariables({
+    dynamicVariables: {
+      goal: "find_existing_claim",
+      insuredName: "Fixture Homeowner",
+      propertyAddress: "100 Test St, Dallas, TX 75201",
+      carrier: "State Farm",
+      policyNumberSpoken: "Missing",
+      claimNumber: "43-TEST-123",
+      dateOfLoss: "04/25/2026"
+    }
+  }, "matched");
+  assert.equal(claimOnlyReady.callbackPacketStatus, "READY");
   const ready = buildCallbackDynamicVariables({
     dynamicVariables: {
       goal: "find_existing_claim",
@@ -409,9 +499,9 @@ test("callback eligibility requires carrier confirmation, not merely an offer", 
 test("voice prompt uses the loaded homeowner phone for IVR account lookup", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /ACCOUNT PHONE LOOKUP/);
-  assert.match(prompt, /use \{\{homeownerPhone\}\}/);
+  assert.match(prompt, /\{\{homeownerPhone\}\} is loaded/);
   assert.match(prompt, /Do not answer 'I don't know it' when homeownerPhone is present/);
-  assert.match(prompt, /remain connected until the IVR explicitly confirms/);
+  assert.match(prompt, /confirmed only after the IVR explicitly says it was accepted, scheduled, or placed in queue/);
 });
 
 test("completed filings are not offered as callback candidates", () => {
@@ -447,8 +537,10 @@ test("IVR controls listen to the full menu without waiting for a repeat", () => 
   assert.match(guardedEnd.url, /\/retell\/guarded-end-call$/);
   assert.equal(guardedEnd.speak_after_execution, true);
   assert.equal(config.generalTools.some((tool) => tool.type === "end_call"), false);
-  assert.equal(pressDigit.delay_ms, 250);
-  assert.equal(pressDigit.speak_after_execution, false);
+  assert.equal(pressDigit.delay_ms, 1000);
+  assert.equal(Object.hasOwn(pressDigit, "speak_after_execution"), false);
+  assert.deepEqual(Object.keys(pressDigit).sort(), ["delay_ms", "description", "name", "type"]);
+  assert.equal(config.toLlmRequestBody().start_speaker, "user");
   assert.match(config.generalPrompt, /wait about 0\.75 to 1 second/i);
   assert.doesNotMatch(config.generalPrompt, /wait a full 3 seconds after the system/i);
 });
@@ -457,37 +549,35 @@ test("carrier calls refuse sensitive identity and banking information", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /never provide, request, confirm, or invent a Social Security number/i);
   assert.match(prompt, /driver's license number, bank account, routing number/i);
-  assert.match(prompt, /Just making sure we are still connected\./);
-  assert.match(prompt, /first configured silence reminder triggers at 30 seconds/i);
-  assert.match(prompt, /second reminder triggers at 60 seconds total/i);
+  assert.match(prompt, /return exactly NO_RESPONSE_NEEDED/i);
+  assert.doesNotMatch(prompt, /Just making sure we are still connected/i);
+  assert.match(prompt, /TERMINAL INTAKE BLOCKER/);
+  assert.match(prompt, /requires homeowner participation/);
+  assert.match(prompt, /reason safety_stop and outcome blocked_missing_information/);
 });
 
 test("carrier prompt forbids repetitive hold and intake filler", () => {
   const prompt = renderRetellPrompt({});
-  assert.match(prompt, /AFTER ANSWERING A HUMAN'S QUESTION, STOP SPEAKING IMMEDIATELY/i);
-  assert.match(prompt, /Never append phrases such as 'let me know if you need anything else'/i);
-  assert.match(prompt, /reply only 'Ok\.' once/i);
-  assert.match(prompt, /Do not ask 'What else do you need\?'/i);
-  assert.match(prompt, /only once at final wrap-up/i);
+  assert.match(prompt, /Answer only what was asked, then stop/i);
+  assert.match(prompt, /Do not say .*let me know if you need anything else/i);
+  assert.match(prompt, /brief 'Ok' is socially necessary once/i);
+  assert.match(prompt, /Never append a follow-up question after each answer/i);
   assert.match(prompt, /That's all I have verified/i);
   assert.match(prompt, /TOP-PRIORITY TURN RULE: one question gets one short answer/i);
-  assert.match(prompt, /Do not manufacture filler words or conversational padding/i);
   assert.match(prompt, /FINAL WRAP-UP IS A HARD STATE GATE/i);
   assert.match(prompt, /where should I send our Letter of Representation and supporting documents/i);
-  assert.match(prompt, /NEVER answer 'No', 'That's all'/i);
-  assert.match(prompt, /I'll let you know if I have a question.*ALWAYS mean the representative is still working/i);
+  assert.match(prompt, /Never answer 'No' or 'That's all'/i);
+  assert.match(prompt, /Wait-state language is never a wrap-up/i);
   assert.match(prompt, /During a wait state, never say the closing blessing and never invoke request_guarded_end_call/i);
   assert.match(prompt, /request_guarded_end_call is forbidden while claim_number is empty/i);
   assert.match(prompt, /I really appreciate all your help\. I hope you have a blessed day\. Goodbye\./i);
   assert.match(prompt, /WAIT for the rep to say goodbye or acknowledge back/i);
   assert.match(prompt, /documentation delay.*never satisfies this rule/i);
-  assert.match(prompt, /The phrases 'I can follow up'.*are forbidden during claim intake/i);
-  assert.match(prompt, /NEVER answer 'No'.*additional claim has been attempted/i);
-  assert.match(prompt, /TOP-PRIORITY NAME ROUTER/i);
+  assert.match(prompt, /phrases 'I can follow up'.*are forbidden during claim intake/i);
   assert.match(prompt, /Chance Pearson's AI assistant with Wave Public Adjusting/i);
   assert.match(prompt, /Never answer that caller-identity question with the insured's name/i);
   assert.match(prompt, /Never ask the carrier 'How can I help you\?'/i);
-  assert.match(prompt, /After a machine or representative says only 'got it'.*say nothing/i);
+  assert.match(prompt, /machine acknowledges.*return exactly NO_RESPONSE_NEEDED/i);
 });
 
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
@@ -496,8 +586,8 @@ test("carrier prompt stays silent for IVR openings and accepts transfers", () =>
   assert.match(prompt, /We're the homeowner's public adjuster, and I'm calling to file a property claim/);
   assert.match(prompt, /Never substitute a made-up noon, morning, afternoon, or evening/i);
   assert.match(prompt, /A transfer is not a completed objective/i);
-  assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
-  assert.match(prompt, /answer exactly: 'File a new homeowners property claim\.'/i);
+  assert.match(prompt, /return NO_RESPONSE_NEEDED during the transfer/i);
+  assert.match(prompt, /exactly 'File a new homeowners property claim\.'/i);
   assert.match(prompt, /NEVER add filler such as 'um'/i);
 });
 
@@ -513,15 +603,11 @@ test("claim packet exposes only the fixed Retell-owned human opening", () => {
   assert.match(plan.packet.scriptInstruction, /Do not invent damage/);
 });
 
-test("inspection scheduling prompt uses only merged live calendar authority", () => {
+test("claim prompt does not own inspection scheduling", () => {
   const prompt = renderRetellPrompt({});
-  assert.match(prompt, /LIVE INSPECTION SCHEDULING AUTHORITY/);
-  assert.match(prompt, /Availability status: \{\{availabilityStatus\}\}/);
-  assert.match(prompt, /ONLY appointment windows you are authorized to accept/);
-  assert.match(prompt, /If availability status is not exactly 'READY', do not schedule/);
-  assert.match(prompt, /full arrival window fits entirely inside one authorized window/);
-  assert.match(prompt, /merged JobNimbus and Google Calendar availability above is the check/);
-  assert.match(prompt, /JobNimbus calendar creation remains a separate approval-gated action/);
+  assert.doesNotMatch(prompt, /LIVE INSPECTION SCHEDULING AUTHORITY/);
+  assert.doesNotMatch(prompt, /availabilityStatus|availableAppointmentWindows/);
+  assert.doesNotMatch(prompt, /inspection_scheduling/);
 });
 
 test("structured inspection result preserves exact confirmed calendar details", () => {
@@ -709,7 +795,8 @@ test("verified damage details replace broader inferred damage categories", () =>
     overrides: { damageDetails: ["Roof hail damage", "Fence damage"] }
   });
   assert.deepEqual(plan.packet.damageSummary, ["Roof hail damage", "Fence damage"]);
-  assert.doesNotMatch(plan.callPlan.dynamicVariables.damageSummary, /detached/i);
+  assert.doesNotMatch(plan.callPlan.dynamicVariables.damageDetails, /detached/i);
+  assert.equal(Object.hasOwn(plan.callPlan.dynamicVariables, "damageSummary"), false);
 });
 
 test("new-claim filing hard-blocks without a verified cause and practical damage category", () => {

@@ -1,7 +1,10 @@
 // Retell dynamic-variable assembly. Pure + dependency-free. Every {{placeholder}}
 // referenced in the Retell prompt (retellPrompt.js) must get a value here, or it
 // would be spoken literally ("curly brace insured name"), so we default them all.
-// Keep PROMPT_PLACEHOLDERS in sync with renderRetellPrompt.
+// Keep PROMPT_PLACEHOLDERS limited to the placeholders actually rendered by
+// renderRetellPrompt. Other bridge-only variables (for example the callback
+// guard's batch counters) may still ride in the packet without becoming model
+// instructions.
 export const PROMPT_PLACEHOLDERS = [
   "goal",
   "objective",
@@ -10,7 +13,6 @@ export const PROMPT_PLACEHOLDERS = [
   "homeownerPhone",
   "homeownerEmail",
   "carrier",
-  "policyNumber",
   "policyNumberSpoken",
   "claimNumber",
   "dateOfLoss",
@@ -18,7 +20,6 @@ export const PROMPT_PLACEHOLDERS = [
   "causeOfLoss",
   "adjuster",
   "mortgageCompany",
-  "damageSummary",
   "damageOpening",
   "damageDetails",
   "injuries",
@@ -40,14 +41,7 @@ export const PROMPT_PLACEHOLDERS = [
   "callbackPolicyNumber",
   "callbackClaimNumber",
   "callbackPacketStatus",
-  "pendingCallbackCases",
-  "batchClaimCount",
-  "batchClaims",
-  "availabilityStatus",
-  "availableAppointmentWindows",
-  "availabilityTimeZone",
-  "appointmentDurationMinutes",
-  "availabilitySources"
+  "pendingCallbackCases"
 ];
 
 export function flattenFactsForDynamicVariables(packet) {
@@ -56,9 +50,6 @@ export function flattenFactsForDynamicVariables(packet) {
     out[key] = String(value ?? "");
   }
   out.objective = String(packet.objective ?? "");
-  // damageSummary is a separate packet field (array); the prompt references
-  // {{damageSummary}}, so join it to a string per call.
-  out.damageSummary = (packet.damageSummary || []).join(", ");
   out.damageOpening = String(packet.damageOpening || "");
   out.damageDetails = (packet.damageDetails || packet.damageSummary || []).join(", ");
   out.policyNumberSpoken = spokenPolicyNumber(out.policyNumber);

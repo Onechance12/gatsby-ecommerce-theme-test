@@ -82,7 +82,8 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /claim-filing/prepare",
   "POST /claim-filing/call",
   "POST /claim-filing/result",
-  "POST /claim-filing/callbacks"
+  "POST /claim-filing/callbacks",
+  "POST /retell/configure-agent"
 ]);
 
 const CODEX_MAC_OPERATOR_ONLY_ROUTES = new Set([
@@ -93,7 +94,8 @@ const CODEX_MAC_OPERATOR_ONLY_ROUTES = new Set([
   "POST /claim-filing/prepare",
   "POST /claim-filing/call",
   "POST /claim-filing/result",
-  "POST /claim-filing/callbacks"
+  "POST /claim-filing/callbacks",
+  "POST /retell/configure-agent"
 ]);
 
 const CODEX_MAC_CLAIM_FILING_ROUTES = new Set([
@@ -101,7 +103,8 @@ const CODEX_MAC_CLAIM_FILING_ROUTES = new Set([
   "POST /claim-filing/prepare",
   "POST /claim-filing/call",
   "POST /claim-filing/result",
-  "POST /claim-filing/callbacks"
+  "POST /claim-filing/callbacks",
+  "POST /retell/configure-agent"
 ]);
 
 export const HCN_BROWSER_ALLOWED_ROUTES = new Set([

@@ -391,40 +391,42 @@ test("allows wrap-up after the approved additional claim is completed", () => {
   assert.equal(decision.allowed, true);
 });
 
-test("allows a verified callback only after an explicit queue and carrier goodbye", () => {
+test("allows a transcript-verified IVR callback without inventing human wrap-up facts", () => {
   const decision = evaluateGuardedEndCall({
     call: call([
-      ["user", "I queued the callback and the claims team will call you within one business day. Have a good day."],
-      ["agent", NATURAL_FINAL_CLOSING],
-      ["user", REPRESENTATIVE_GOODBYE]
+      ["user", "Your callback request has been confirmed. The claims team will call you within one business day."]
     ]),
     args: {
       ...completedArgs,
       reason: "callback_confirmed",
       outcome: "callback_requested",
       claim_number: "",
-      callback_confirmed: true
+      callback_confirmed: true,
+      document_submission_requested: false,
+      next_step_requested: false
     }
   });
   assert.equal(decision.allowed, true);
+  assert.equal(decision.code, "callback_confirmed");
 });
 
-test("a verified callback still waits for a post-closing response", () => {
+test("a verified callback rejects the wrong terminal reason instead of entering human wrap-up", () => {
   const decision = evaluateGuardedEndCall({
     call: call([
-      ["user", "I queued the callback and the claims team will call you within one business day. Have a good day."],
-      ["agent", NATURAL_FINAL_CLOSING]
+      ["user", "Your callback has been queued. A claims representative will call you back."]
     ]),
     args: {
       ...completedArgs,
-      reason: "callback_confirmed",
+      reason: "objective_complete",
       outcome: "callback_requested",
       claim_number: "",
-      callback_confirmed: true
+      callback_confirmed: true,
+      document_submission_requested: false,
+      next_step_requested: false
     }
   });
   assert.equal(decision.allowed, false);
-  assert.equal(decision.code, "representative_not_wrapped_after_closing");
+  assert.equal(decision.code, "invalid_callback_termination");
 });
 
 test("blocks an agent-requested callback that the carrier did not confirm", () => {
@@ -438,7 +440,9 @@ test("blocks an agent-requested callback that the carrier did not confirm", () =
       reason: "callback_confirmed",
       outcome: "callback_requested",
       claim_number: "",
-      callback_confirmed: true
+      callback_confirmed: true,
+      document_submission_requested: false,
+      next_step_requested: false
     }
   });
   assert.equal(decision.allowed, false);
