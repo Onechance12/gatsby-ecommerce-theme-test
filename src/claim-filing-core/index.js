@@ -17,7 +17,13 @@ export {
 export { lookupCarrier, knownCarriers } from "./carrierDirectory.js";
 export { assessReadiness, existingClaimBlock } from "./readiness.js";
 export { isCarrierUsableStormTime } from "./stormTime.js";
-export { flattenFactsForDynamicVariables, PROMPT_PLACEHOLDERS } from "./dynamicVariables.js";
+export {
+  flattenFactsForDynamicVariables,
+  PROMPT_PLACEHOLDERS,
+  spokenDate,
+  spokenIdentifierForAudio,
+  spokenPhoneNumber
+} from "./dynamicVariables.js";
 export {
   buildRetellLlmFromPacket,
   estimateRetellInitialContext,

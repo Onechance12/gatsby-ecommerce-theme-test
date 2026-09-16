@@ -40,7 +40,7 @@ test("static Retell contract rejects a live tool URL and absent per-case catch-a
 test("offline Retell suite rejects real-client data and missing variables", () => {
   const contract = structuredClone(buildOfflineRetellSimulationContract());
   contract.cases[0].dynamicVariables.insuredName = "Danielle Stellrecht";
-  delete contract.cases[0].dynamicVariables.policyNumberSpoken;
+  delete contract.cases[0].dynamicVariables.policyNumberForSpeech;
   const result = validateOfflineRetellSimulationContract(contract);
   assert.equal(result.valid, false);
   assert.match(result.errors.join(" "), /missing variables/i);

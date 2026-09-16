@@ -20,9 +20,18 @@ import {
   validateRetellCallChainOwnership,
   validateRetellCallOwnership
 } from "./claim-filing-adapter.js";
-import { spokenPolicyNumber } from "./claim-filing-core/dynamicVariables.js";
+import {
+  spokenDate,
+  spokenIdentifierForAudio,
+  spokenPhoneNumber,
+  spokenPolicyNumber
+} from "./claim-filing-core/dynamicVariables.js";
 import { normalizeDateOfLoss } from "./claim-filing-core/packet.js";
-import { buildRetellLlmFromPacket, renderRetellPrompt } from "./claim-filing-core/retellPrompt.js";
+import {
+  buildRetellLlmFromPacket,
+  estimateRetellInitialContext,
+  renderRetellPrompt
+} from "./claim-filing-core/retellPrompt.js";
 import { extractCallResults } from "./claim-filing-core/resultExtraction.js";
 
 const OWNER_ID = "chance-owner";
@@ -34,6 +43,20 @@ test("spokenPolicyNumber strips mortgage control and loan references", () => {
   );
   assert.equal(spokenPolicyNumber("Policy # 93-E4-B591-7"), "93-E4-B591-7");
   assert.equal(spokenPolicyNumber("POLICY-1"), "POLICY-1");
+});
+
+test("Retell speech values spell identifiers and group phone digits deterministically", () => {
+  assert.equal(spokenIdentifierForAudio("41790830"), "four one seven nine - zero eight three zero");
+  assert.equal(
+    spokenIdentifierForAudio("93-E4-B591-7"),
+    "nine three - E four - B five nine one - seven"
+  );
+  assert.equal(
+    spokenPhoneNumber("(214) 490-9402"),
+    "two one four - four nine zero - nine four zero two"
+  );
+  assert.equal(spokenDate("06/02/2026"), "June second, twenty twenty six");
+  assert.equal(spokenIdentifierForAudio("Missing"), "Missing");
 });
 
 test("normalizeDateOfLoss converts JobNimbus epoch seconds before the voice call", () => {
@@ -66,7 +89,7 @@ test("Retell claim prompt excludes retired lanes and stays within budget", () =>
   assert.match(prompt, /When direction is outbound_claim_call, ignore callbackMatch and callbackPacketStatus/i);
   assert.match(prompt, /Only for direction carrier_callback, if packet status is not READY/i);
   assert.match(prompt, /NEW-CLAIM POLICY HANDLING/);
-  assert.match(prompt, /file_new_claim when policyNumberSpoken is not Missing/i);
+  assert.match(prompt, /file_new_claim when policyNumberForSpeech is not Missing/i);
   assert.match(prompt, /NO_RESPONSE_NEEDED/);
   assert.doesNotMatch(prompt, /homeowner_appointment_confirmation|homeownerOutreachOpening/i);
   assert.doesNotMatch(prompt, /inspection_scheduling|availableAppointmentWindows/i);
@@ -78,9 +101,8 @@ test("claim prompt gives new filing and existing-claim lookup distinct openings"
   assert.match(prompt, /For file_new_claim say: .*calling to file a property claim/i);
   assert.match(prompt, /For find_existing_claim say: .*calling to locate or confirm an existing property claim/i);
   assert.match(prompt, /Never use the new-claim opening for an existing-claim lookup/i);
-  assert.match(prompt, /For file_new_claim, prefer Report\/File\/New\/Homeowners Property Claim/i);
-  assert.match(prompt, /For find_existing_claim, prefer Existing Claim\/Claim Status/i);
-  assert.match(prompt, /Never choose a new-claim route for an existing-claim lookup/i);
+  assert.match(prompt, /For file_new_claim choose Report\/File\/New\/Homeowners Property Claim/i);
+  assert.match(prompt, /For find_existing_claim choose Existing Claim\/Claim Status/i);
 });
 
 test("an otherwise-ready no-policy filing asks for insured-and-address lookup instead of speaking Missing", () => {
@@ -94,7 +116,8 @@ test("an otherwise-ready no-policy filing asks for insured-and-address lookup in
   const prompt = renderRetellPrompt(plan.packet);
   assert.equal(plan.readiness.ready, true);
   assert.equal(plan.callPlan.dynamicVariables.policyNumberSpoken, "Missing");
-  assert.match(prompt, /If policyNumberSpoken is exactly Missing, never speak the word Missing as a policy number/i);
+  assert.equal(plan.callPlan.dynamicVariables.policyNumberForSpeech, "Missing");
+  assert.match(prompt, /If policyNumberForSpeech is Missing, never speak it as a number/i);
   assert.match(prompt, /Can you search by the insured name and property address\?/i);
 });
 
@@ -229,6 +252,8 @@ test("confirmed callbacks restore the complete approved claim packet", () => {
   assert.equal(callback.propertyAddress, "100 Test St, Dallas, TX 75201");
   assert.equal(callback.carrier, "Allstate Insurance Company");
   assert.equal(callback.policyNumberSpoken, "POLICY-1");
+  assert.equal(callback.policyNumberForSpeech, "P O L I C Y - one");
+  assert.equal(callback.callbackPolicyNumberForSpeech, "P O L I C Y - one");
   assert.equal(callback.dateOfLoss, "04/27/2026");
   assert.equal(callback.causeOfLoss, "Hail and wind");
   assert.match(callback.damageDetails, /Interior water damage/);
@@ -499,9 +524,9 @@ test("callback eligibility requires carrier confirmation, not merely an offer", 
 test("voice prompt uses the loaded homeowner phone for IVR account lookup", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /ACCOUNT PHONE LOOKUP/);
-  assert.match(prompt, /\{\{homeownerPhone\}\} is loaded/);
-  assert.match(prompt, /Do not answer 'I don't know it' when homeownerPhone is present/);
-  assert.match(prompt, /confirmed only after the IVR explicitly says it was accepted, scheduled, or placed in queue/);
+  assert.match(prompt, /\{\{homeownerPhoneForSpeech\}\} is not Missing/);
+  assert.match(prompt, /never claim it is unknown/);
+  assert.match(prompt, /confirmed only after the IVR says accepted, scheduled, or queued/);
 });
 
 test("completed filings are not offered as callback candidates", () => {
@@ -515,12 +540,12 @@ test("completed filings are not offered as callback candidates", () => {
 
 test("inbound callback prompt recovers from a clipped carrier introduction", () => {
   const prompt = renderRetellPrompt({});
-  assert.match(prompt, /stay silent for about two seconds/i);
+  assert.match(prompt, /two silent seconds/i);
   assert.match(prompt, /AI assistant\. Give me a second while I pull up that information\./);
   assert.match(prompt, /If they already clearly named the carrier, do not ask for it again\./);
   assert.match(prompt, /Callback packet status/);
-  assert.match(prompt, /complete claim file did not load on my side/i);
-  assert.match(prompt, /Do not ask the representative to confirm the insured name/i);
+  assert.match(prompt, /packet status is not READY/i);
+  assert.match(prompt, /Confirm insured only if asked or lookup fails/i);
 });
 
 test("voice prompt contains no speakable pacing label", () => {
@@ -695,12 +720,13 @@ test("Danielle #2791 dry run carries approved living-room and kitchen damage int
     file: {
       ...fixture().file,
       id: "contact-2791",
-      customer: "Danielle Stellrecht",
+      customer: "William Moseley and Danielle Stellrecht",
       address: "3736 Hackberry Ln, Bedford, TX 76021",
       carrier: "Homesite Insurance via GEICO",
       policyNumber: "41790830",
       dateOfLoss: "06/02/2026",
-      typeOfLoss: "Hail and wind"
+      typeOfLoss: "Hail and wind",
+      contact: { mobile_phone: "2144909402", email: "daniellenick308@gmail.com" }
     },
     overrides: {}
   });
@@ -737,6 +763,35 @@ test("Danielle #2791 dry run carries approved living-room and kitchen damage int
   assert.equal(plan.callPlan.dynamicVariables.damageDetails, damageDetails.join(", "));
   assert.equal(plan.callPlan.dynamicVariables.damagedRooms, "Living room and kitchen");
   assert.equal(plan.callPlan.dynamicVariables.damagedRoomCount, "Two rooms");
+  assert.equal(
+    plan.callPlan.dynamicVariables.policyNumberForSpeech,
+    "four one seven nine - zero eight three zero"
+  );
+  assert.equal(
+    plan.callPlan.dynamicVariables.homeownerPhoneForSpeech,
+    "two one four - four nine zero - nine four zero two"
+  );
+  assert.equal(plan.callPlan.dynamicVariables.dateOfLossForSpeech, "June second, twenty twenty six");
+  assert.equal(plan.callPlan.initialContext.withinLimit, true);
+  assert.ok(plan.callPlan.initialContext.characters < 14_000);
+
+  const call = {
+    call_id: "call-danielle-outbound",
+    to_number: "+18666214823",
+    start_timestamp: 1770000000000,
+    transcript_object: [{ role: "user", content: "Your request for a callback has been confirmed." }],
+    metadata: plan.callPlan.metadata,
+    retell_llm_dynamic_variables: plan.callPlan.dynamicVariables
+  };
+  const callback = buildCallbackDynamicVariables(callbackCandidateFromCall(call), "matched");
+  const callbackContext = estimateRetellInitialContext(buildRetellLlmFromPacket({}), callback);
+  assert.equal(callback.callbackPacketStatus, "READY");
+  assert.equal(callback.callbackPolicyNumberForSpeech, "four one seven nine - zero eight three zero");
+  assert.equal(callback.homeownerPhoneForSpeech, "two one four - four nine zero - nine four zero two");
+  assert.equal(callback.dateOfLossForSpeech, "June second, twenty twenty six");
+  assert.match(callback.damageDetails, /living room and kitchen/i);
+  assert.equal(callbackContext.withinLimit, true);
+  assert.ok(callbackContext.characters < 14_000);
 });
 
 test("approved per-call overrides replace stale verified carrier and DOL facts", () => {

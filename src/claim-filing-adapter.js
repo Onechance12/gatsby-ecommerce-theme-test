@@ -13,10 +13,13 @@ import {
   isCarrierUsableStormTime,
   lookupCarrier,
   PROMPT_PLACEHOLDERS,
-  RETELL_INITIAL_CONTEXT_CHARACTER_LIMIT
+  RETELL_INITIAL_CONTEXT_CHARACTER_LIMIT,
+  spokenDate,
+  spokenIdentifierForAudio,
+  spokenPhoneNumber
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-09-16.3";
+export const CLAIM_PLAN_VERSION = "2026-09-16.4";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export const CLAIM_FILING_COVERAGE_TERM_STATUSES = Object.freeze([
@@ -325,13 +328,20 @@ function callbackWindowStartedAt(call) {
 
 export function buildCallbackDynamicVariables(candidate, match = "matched") {
   const out = stringifyDynamicVariables(candidate?.dynamicVariables || {});
+  out.homeownerPhoneForSpeech = spokenPhoneNumber(out.homeownerPhone);
+  out.policyNumberForSpeech = spokenIdentifierForAudio(out.policyNumberSpoken);
+  out.claimNumberForSpeech = spokenIdentifierForAudio(out.claimNumber);
+  out.dateOfLossForSpeech = spokenDate(out.dateOfLoss);
+  out.contractorPhoneForSpeech = spokenPhoneNumber(out.contractorPhone);
   out.directionMode = "carrier_callback";
   out.callbackMatch = String(match || "matched");
   out.callbackCarrier = String(candidate?.carrier || out.carrier || "Unknown");
   out.callbackInsuredName = String(candidate?.insuredName || out.insuredName || "Unknown");
   out.callbackPropertyAddress = String(candidate?.propertyAddress || out.propertyAddress || "Unknown");
   out.callbackPolicyNumber = String(candidate?.policyNumberSpoken || out.policyNumberSpoken || "Unknown");
+  out.callbackPolicyNumberForSpeech = spokenIdentifierForAudio(out.callbackPolicyNumber);
   out.callbackClaimNumber = String(candidate?.claimNumber || out.claimNumber || "Missing / not filed");
+  out.callbackClaimNumberForSpeech = spokenIdentifierForAudio(out.callbackClaimNumber);
   out.pendingCallbackCases = "";
   out.callbackPacketStatus = callbackPacketStatus(out);
 
