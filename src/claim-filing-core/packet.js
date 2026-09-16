@@ -120,7 +120,7 @@ export function buildClaimCallPacket(input, options = {}) {
     damageDetails,
     missingFields,
     scriptAuthority: "retell_fixed_carrier_workflow",
-    scriptInstruction: "Do not invent damage. Retell handles the IVR with short answers and uses only the evidence-backed damage opening after a live person asks what was damaged.",
+    scriptInstruction: "Do not invent damage. Retell handles the IVR with short answers, gives one direct answer per question, and uses only the evidence-backed damage opening after a live person asks what was damaged.",
     quoLearnedCallPattern: buildQuoLearnedPattern(goal),
     callScript: buildCallScript(goal, facts, damageCategories, damageOpening, damageDetails),
     shortIvrAnswers: buildIvrAnswers(goal, facts),
@@ -219,19 +219,7 @@ function buildPriorPolicyLookupInstruction({
     return `The policy term from ${policyCoverageStart} through ${policyCoverageEnd} is verified in force for ${dol}; no prior-policy lookup is required.`;
   }
 
-  let termContext = "No complete verified policy term is loaded.";
-  if (start && end && loss && start <= end) {
-    if (loss < start) {
-      termContext = `The available policy term from ${policyCoverageStart} through ${policyCoverageEnd} starts after ${dol}.`;
-    } else if (loss > end) {
-      termContext = `The available policy term from ${policyCoverageStart} through ${policyCoverageEnd} ended before ${dol}.`;
-    } else {
-      termContext = `The available policy term from ${policyCoverageStart} through ${policyCoverageEnd} includes ${dol}, but active coverage is not verified.`;
-    }
-  } else if (start || end) {
-    termContext = `Only part of the available policy term is loaded (${policyCoverageStart} through ${policyCoverageEnd}).`;
-  }
-  return `${termContext} Before filing, ask the carrier to locate the active policy term and policy number covering ${dol} and explicitly confirm active coverage for that date. Do not represent an unverified, expired, prior, or later renewal term as covering the loss. If the carrier cannot confirm active coverage, do not file the claim; capture the exact blocker.`;
+  return "Give the available policy number only when the carrier asks for it. Do not volunteer policy-term dates, describe the number as prior or expired, or ask the carrier to confirm active coverage. If the carrier cannot locate the policy, say only that this is the policy number you have, then provide the insured name and property address as requested so the carrier can search. Capture any corrected policy number the carrier volunteers. If the carrier still cannot locate the insured or accept the filing, capture the exact blocker.";
 }
 
 function claimDateKey(value) {
@@ -327,7 +315,7 @@ function buildIvrAnswers(goal, facts) {
 }
 
 function buildHumanScript(goal, facts, damageCategories, damageOpening = "Missing", damageDetails = damageCategories) {
-  const filingIntro = "Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting. We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf.";
+  const filingIntro = "Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting. We're the homeowner's public adjuster, and I'm calling to file a property claim.";
   const intro = `Hi, this is Chance Pearson's AI assistant with Wave Public Adjusting calling regarding the property claim for ${facts.insuredName}.`;
   if (goal === "file_new_claim") {
     return [
@@ -365,7 +353,7 @@ function captureFieldsFor(goal) {
   ];
   if (goal === "inspection_scheduling") fields.push("inspection date/time and access requirements");
   if (goal === "file_new_claim") {
-    fields.push("active policy number and explicit confirmation that its term covers the date of loss");
+    fields.push("any corrected policy number the carrier volunteers during intake");
     fields.push("whether carrier will contact homeowner or PA first");
   }
   return fields;
@@ -409,8 +397,6 @@ function buildResultFormat(goal) {
     callCompleted: "yes/no",
     objectiveCompleted: "yes/no/partial",
     claimNumber: "",
-    activePolicyNumber: "",
-    activeCoverageConfirmed: "yes/no",
     representativeName: "",
     adjusterName: "",
     adjusterPhone: "",

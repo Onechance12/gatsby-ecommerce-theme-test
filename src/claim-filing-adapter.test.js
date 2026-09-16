@@ -267,7 +267,7 @@ test("callback readiness and digest bind the complete approved dynamic-variable 
     policyNumberSpoken: "POLICY-1",
     dateOfLoss: "04/25/2026",
     coverageTermStatus: "carrier_lookup_required",
-    priorPolicyLookupInstruction: "Ask the carrier to locate and confirm active coverage for the date of loss before filing.",
+    priorPolicyLookupInstruction: "Give the policy number only when asked, then provide the insured name and property address if the carrier cannot locate it.",
     causeOfLoss: "Hail",
     damageOpening: "The documented damage is roof hail damage.",
     damageDetails: "Roof hail damage",
@@ -368,7 +368,7 @@ test("carrier-lookup callback remains ready when no prior policy number is avail
     policyNumberSpoken: "Missing",
     dateOfLoss: "04/25/2026",
     coverageTermStatus: "carrier_lookup_required",
-    priorPolicyLookupInstruction: "Locate active coverage by insured name, address, and phone before filing.",
+    priorPolicyLookupInstruction: "Ask whether the carrier can search by insured name and property address.",
     causeOfLoss: "Hail",
     damageOpening: "Roof shingle hail damage.",
     damageDetails: "Roof shingle hail damage",
@@ -462,7 +462,9 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
   assert.match(prompt, /reply only 'Ok\.' once/i);
   assert.match(prompt, /Do not ask 'What else do you need\?'/i);
   assert.match(prompt, /only once at final wrap-up/i);
-  assert.match(prompt, /I don't have any additional verified details beyond what I already provided/i);
+  assert.match(prompt, /That's all I have verified/i);
+  assert.match(prompt, /TOP-PRIORITY TURN RULE: one question gets one short answer/i);
+  assert.match(prompt, /Do not manufacture filler words or conversational padding/i);
   assert.match(prompt, /FINAL WRAP-UP IS A HARD STATE GATE/i);
   assert.match(prompt, /where should I send our Letter of Representation and supporting documents/i);
   assert.match(prompt, /NEVER answer 'No', 'That's all'/i);
@@ -477,7 +479,7 @@ test("carrier prompt forbids repetitive hold and intake filler", () => {
 test("carrier prompt stays silent for IVR openings and accepts transfers", () => {
   const prompt = renderRetellPrompt({});
   assert.match(prompt, /first response to that audio must contain NO spoken words/i);
-  assert.match(prompt, /We are the public adjuster for the homeowner, and I'm calling to file a new property insurance claim on their behalf/);
+  assert.match(prompt, /We're the homeowner's public adjuster, and I'm calling to file a property claim/);
   assert.match(prompt, /Never substitute a made-up noon, morning, afternoon, or evening/i);
   assert.match(prompt, /A transfer is not a completed objective/i);
   assert.match(prompt, /silence-reminder event that occurs before that period expires must produce no spoken check-in/i);
@@ -490,7 +492,7 @@ test("claim packet exposes only the fixed Retell-owned human opening", () => {
     agentId: "agent-1"
   });
   assert.equal(plan.packet.scriptAuthority, "retell_fixed_carrier_workflow");
-  assert.match(plan.packet.humanRepresentativeScript, /We are the public adjuster for the homeowner/);
+  assert.match(plan.packet.humanRepresentativeScript, /We're the homeowner's public adjuster/);
   assert.doesNotMatch(plan.packet.humanRepresentativeScript.split("\n")[0], /Fixture Homeowner|100 Test St|POLICY-1|04\/25\/2026/);
   assert.match(plan.packet.scriptInstruction, /Do not invent damage/);
 });
@@ -584,6 +586,54 @@ test("verified property intake facts travel into Retell without global assumptio
   assert.match(prompt, /How many stories is the home\?/);
   assert.match(prompt, /I don't have that verified in front of me/);
   assert.doesNotMatch(prompt, /defer naturally and offer to follow up/);
+});
+
+test("Danielle #2791 dry run carries approved living-room and kitchen damage into Retell", () => {
+  const input = fixture({
+    file: {
+      ...fixture().file,
+      id: "contact-2791",
+      customer: "Danielle Stellrecht",
+      address: "3736 Hackberry Ln, Bedford, TX 76021",
+      carrier: "Homesite Insurance via GEICO",
+      policyNumber: "41790830",
+      dateOfLoss: "06/02/2026",
+      typeOfLoss: "Hail and wind"
+    },
+    overrides: {}
+  });
+  const damageDetails = [
+    "Hail and wind damage to the roof",
+    "Damage to fascia and flashing",
+    "Reported decking damage",
+    "Interior damage in the living room and kitchen"
+  ];
+  const plan = buildClaimFilingPlan(input, {
+    ownerId: OWNER_ID,
+    fileNumber: "2791",
+    from: "+12145550100",
+    to: "+18666214823",
+    agentId: "agent-1",
+    overrides: {
+      coverageTermStatus: "carrier_lookup_required",
+      policyCoverageStart: "08/09/2024",
+      policyCoverageEnd: "08/09/2025",
+      damageOpening: "Hail and wind damage to the roof and exterior, with interior damage in the living room and kitchen.",
+      damageDetails,
+      damagedRooms: "Living room and kitchen",
+      damagedRoomCount: "Two rooms"
+    }
+  });
+
+  assert.equal(plan.readiness.ready, true);
+  assert.equal(plan.file.number, "2791");
+  assert.equal(
+    plan.callPlan.dynamicVariables.damageOpening,
+    "Hail and wind damage to the roof and exterior, with interior damage in the living room and kitchen."
+  );
+  assert.equal(plan.callPlan.dynamicVariables.damageDetails, damageDetails.join(", "));
+  assert.equal(plan.callPlan.dynamicVariables.damagedRooms, "Living room and kitchen");
+  assert.equal(plan.callPlan.dynamicVariables.damagedRoomCount, "Two rooms");
 });
 
 test("approved per-call overrides replace stale verified carrier and DOL facts", () => {
@@ -944,7 +994,7 @@ test("a safety or callback termination receipt can never certify claim writeback
   assert.match(result.completionReview.gaps.join(" "), /did not produce a verified completed claim outcome/i);
 });
 
-test("lookup-mode result cannot start post-claim work without active policy evidence", () => {
+test("lookup-mode result can start post-claim work from a carrier-issued claim number", () => {
   const base = {
     outcome: "claim_filed",
     claimNumber: "43-TEST-790",
@@ -952,21 +1002,13 @@ test("lookup-mode result cannot start post-claim work without active policy evid
     documentSubmissionRequested: true,
     documentSubmission: "claims@example.com"
   };
-  const missingPolicy = buildPostClaimWorkflow({
-    extracted: { ...base, activeCoverageConfirmed: true, activePolicyNumber: "" }
-  });
-  assert.equal(missingPolicy.applicable, false);
-  assert.match(missingPolicy.primaryAction, /active policy covering the date of loss/i);
+  const completed = buildPostClaimWorkflow({ extracted: base });
+  assert.equal(completed.applicable, true);
 
-  const missingConfirmation = buildPostClaimWorkflow({
-    extracted: { ...base, activeCoverageConfirmed: false, activePolicyNumber: "ACTIVE-123" }
+  const incomplete = buildPostClaimWorkflow({
+    extracted: { ...base, claimNumber: "" }
   });
-  assert.equal(missingConfirmation.applicable, false);
-
-  const complete = buildPostClaimWorkflow({
-    extracted: { ...base, activeCoverageConfirmed: true, activePolicyNumber: "ACTIVE-123" }
-  });
-  assert.equal(complete.applicable, true);
+  assert.equal(incomplete.applicable, false);
 });
 
 test("post-claim workflow blocks the LOR send until a destination is captured", () => {

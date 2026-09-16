@@ -49,7 +49,7 @@ export function assessReadiness(packet, to, carrier) {
       if (isMissing(f.priorPolicyLookupInstruction)) {
         blockers.push("no prior-policy lookup instruction");
       } else {
-        warnings.push("carrier must locate and confirm active coverage for the date of loss before filing");
+        warnings.push("available policy number is a lookup value; give it when asked and use insured name/address only if the carrier cannot locate it");
       }
     } else {
       blockers.push("no valid coverage term status");

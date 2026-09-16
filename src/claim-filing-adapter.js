@@ -12,7 +12,7 @@ import {
   PROMPT_PLACEHOLDERS
 } from "./claim-filing-core/index.js";
 
-export const CLAIM_PLAN_VERSION = "2026-09-15.1";
+export const CLAIM_PLAN_VERSION = "2026-09-16.1";
 export const CLAIM_BRIDGE_SOURCE = "hcn-wave-jobnimbus-bridge";
 
 export const CLAIM_FILING_COVERAGE_TERM_STATUSES = Object.freeze([
@@ -524,14 +524,6 @@ export function analyzeClaimCall(call, file, options = {}) {
   if (completedClaim && !extracted.claimNumber) {
     completionGaps.push("The call outcome says the claim was completed, but no claim or reference number was captured.");
   }
-  if (completedClaim && extracted.coverageTermStatus === "carrier_lookup_required") {
-    if (extracted.activeCoverageConfirmed !== true) {
-      completionGaps.push("The call did not verify that an active policy term covered the date of loss before filing.");
-    }
-    if (!extracted.activePolicyNumber) {
-      completionGaps.push("The call did not capture the active policy number used for the date of loss.");
-    }
-  }
   if (completedClaim && !extracted.documentSubmissionRequested) {
     completionGaps.push("The agent did not ask where to send the Letter of Representation and supporting documents.");
   } else if (completedClaim && !extracted.documentSubmission) {
@@ -574,14 +566,10 @@ export function buildPostClaimWorkflow(analysis = {}) {
       steps: []
     };
   }
-  const lookupCoverageComplete = extracted.coverageTermStatus !== "carrier_lookup_required"
-    || (extracted.activeCoverageConfirmed === true && Boolean(extracted.activePolicyNumber));
-  if (!completedClaim || !extracted.claimNumber || !lookupCoverageComplete) {
+  if (!completedClaim || !extracted.claimNumber) {
     return {
       applicable: false,
-      primaryAction: lookupCoverageComplete
-        ? "Resolve the incomplete carrier-call outcome before starting representation delivery."
-        : "Confirm and capture the active policy covering the date of loss before starting representation delivery.",
+      primaryAction: "Resolve the incomplete carrier-call outcome before starting representation delivery.",
       steps: []
     };
   }
@@ -659,11 +647,6 @@ function validGuardedCompletionReceipt(call, extracted, receipt) {
     || !same(receipt.claimNumber, extracted.claimNumber)
     || String(receipt.transcriptDigest || "") !== transcriptDigest
   ) return false;
-  if (extracted.coverageTermStatus === "carrier_lookup_required") {
-    return receipt.activeCoverageConfirmed === true
-      && extracted.activeCoverageConfirmed === true
-      && same(receipt.activePolicyNumber, extracted.activePolicyNumber);
-  }
   return true;
 }
 

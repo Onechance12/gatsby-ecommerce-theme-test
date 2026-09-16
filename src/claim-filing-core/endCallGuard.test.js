@@ -22,8 +22,6 @@ const completedArgs = {
   reason: "objective_complete",
   outcome: "claim_filed",
   claim_number: "430J1Z808",
-  active_policy_number: "",
-  active_coverage_confirmed: false,
   callback_confirmed: false,
   document_submission_requested: true,
   next_step_requested: true
@@ -167,73 +165,32 @@ test("carrier denial or correction cancels claim-number proof", () => {
   assert.equal(laterCorrection.code, "missing_verified_claim_number");
 });
 
-test("lookup-mode filing requires transcript-backed active coverage confirmation", () => {
-  const pending = call([
+test("lookup-mode filing completes from a carrier-issued claim number without a coverage interrogation", () => {
+  const completed = call([
     ["user", "The claim number is four three zero J one Z eight zero eight. Have a good day."],
     ["agent", "Thank you."]
   ]);
-  pending.retell_llm_dynamic_variables = {
+  completed.retell_llm_dynamic_variables = {
     goal: "file_new_claim",
     coverageTermStatus: "carrier_lookup_required"
   };
-  const denied = evaluateGuardedEndCall({
-    call: pending,
-    args: { ...completedArgs, active_policy_number: "ACTIVE-2026", active_coverage_confirmed: true }
-  });
-  assert.equal(denied.allowed, false);
-  assert.equal(denied.code, "active_coverage_not_confirmed");
-
-  const confirmed = call([
-    ["agent", "Can you confirm policy ACTIVE-2026 is active and in force for the date of loss?"],
-    ["user", "Yes, it is active for that loss date."],
-    ["user", "The claim number is four three zero J one Z eight zero eight. Have a good day."],
-    ["agent", "Thank you."]
-  ]);
-  confirmed.retell_llm_dynamic_variables = pending.retell_llm_dynamic_variables;
   const allowed = evaluateGuardedEndCall({
-    call: confirmed,
-    args: { ...completedArgs, active_policy_number: "ACTIVE-2026", active_coverage_confirmed: true }
+    call: completed,
+    args: completedArgs
   });
   assert.equal(allowed.allowed, true);
-});
+  assert.equal(allowed.code, "objective_complete");
 
-test("lookup-mode coverage proof rejects contradictions and unlabelled assertions", () => {
-  const contradictions = [
-    "Policy ACTIVE-2026 was active last year, not on the date of loss.",
-    "Policy ACTIVE-2026 was active but does not cover the date of loss.",
-    "Policy ACTIVE-2026 is active after the loss date."
-  ];
-  for (const statement of contradictions) {
-    const candidate = call([
-      ["user", statement],
-      ["user", "The claim number is four three zero J one Z eight zero eight. Have a good day."]
-    ]);
-    candidate.retell_llm_dynamic_variables = {
-      goal: "file_new_claim",
-      coverageTermStatus: "carrier_lookup_required"
-    };
-    const decision = evaluateGuardedEndCall({
-      call: candidate,
-      args: { ...completedArgs, active_policy_number: "ACTIVE-2026", active_coverage_confirmed: true }
-    });
-    assert.equal(decision.allowed, false, statement);
-    assert.equal(decision.code, "active_coverage_not_confirmed", statement);
-  }
-
-  const unlabelled = {
-    metadata: { goal: "file_new_claim" },
-    retell_llm_dynamic_variables: {
-      goal: "file_new_claim",
-      coverageTermStatus: "carrier_lookup_required"
-    },
-    transcript: "Policy ACTIVE-2026 is active on the date of loss.\nUser: The claim number is 430J1Z808. Have a good day."
-  };
-  const decision = evaluateGuardedEndCall({
-    call: unlabelled,
-    args: { ...completedArgs, active_policy_number: "ACTIVE-2026", active_coverage_confirmed: true }
+  const noNumber = call([
+    ["user", "I found the insured, but I do not have a claim number for you. Goodbye."]
+  ]);
+  noNumber.retell_llm_dynamic_variables = completed.retell_llm_dynamic_variables;
+  const denied = evaluateGuardedEndCall({
+    call: noNumber,
+    args: { ...completedArgs, claim_number: "" }
   });
-  assert.equal(decision.allowed, false);
-  assert.equal(decision.code, "active_coverage_not_confirmed");
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.code, "missing_verified_claim_number");
 });
 
 test("new-claim completion fails closed on an invalid coverage disposition", () => {

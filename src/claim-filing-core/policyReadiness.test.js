@@ -7,8 +7,7 @@ import {
   flattenFactsForDynamicVariables,
   PROMPT_PLACEHOLDERS
 } from "./dynamicVariables.js";
-import { postCallAnalysisSchema, renderRetellPrompt } from "./retellPrompt.js";
-import { extractCallResults } from "./resultExtraction.js";
+import { buildRetellLlmFromPacket, postCallAnalysisSchema, renderRetellPrompt } from "./retellPrompt.js";
 
 const carrier = { display: "Test Carrier", requiresPolicyNumber: false };
 
@@ -47,21 +46,23 @@ test("new claims default to carrier lookup and receive a deterministic lookup in
   assert.equal(packet.verifiedFileFacts.coverageTermStatus, "carrier_lookup_required");
   assert.equal(packet.verifiedFileFacts.policyCoverageStart, "Missing");
   assert.equal(packet.verifiedFileFacts.policyCoverageEnd, "Missing");
-  assert.match(packet.verifiedFileFacts.priorPolicyLookupInstruction, /locate the active policy term and policy number/i);
+  assert.match(packet.verifiedFileFacts.priorPolicyLookupInstruction, /Give the available policy number only when the carrier asks/i);
+  assert.match(packet.verifiedFileFacts.priorPolicyLookupInstruction, /insured name and property address/i);
+  assert.doesNotMatch(packet.verifiedFileFacts.priorPolicyLookupInstruction, /explicitly confirm active coverage|before filing/i);
   assert.doesNotMatch(packet.verifiedFileFacts.priorPolicyLookupInstruction, /ignore the date/i);
   assert.equal(readiness(packet).ready, true);
-  assert.match(readiness(packet).warnings.join(" "), /confirm active coverage/i);
+  assert.match(readiness(packet).warnings.join(" "), /give it when asked/i);
 });
 
-test("carrier lookup instruction explains a later available renewal without treating it as coverage", () => {
+test("carrier lookup does not volunteer a later term or trigger a coverage interrogation", () => {
   const packet = buildClaimCallPacket(input({
     coverageTermStatus: "carrier_lookup_required",
     policyCoverageStart: "2026-06-01",
     policyCoverageEnd: "2027-06-01"
   }));
 
-  assert.match(packet.verifiedFileFacts.priorPolicyLookupInstruction, /starts after/i);
-  assert.match(packet.verifiedFileFacts.priorPolicyLookupInstruction, /do not file/i);
+  assert.doesNotMatch(packet.verifiedFileFacts.priorPolicyLookupInstruction, /starts after|06\/01\/2026|active policy/i);
+  assert.match(packet.verifiedFileFacts.priorPolicyLookupInstruction, /Do not volunteer policy-term dates/i);
   assert.equal(readiness(packet).ready, true);
 });
 
@@ -196,7 +197,7 @@ test("find-existing behavior remains independent of the new-claim coverage gate"
   assert.doesNotMatch(result.blockers.join(" "), /coverage|policy term/i);
 });
 
-test("coverage facts are bound into dynamic variables and the fixed prompt", () => {
+test("coverage controls stay server-side and are not exposed to the live model", () => {
   const packet = buildClaimCallPacket(input({ coverageTermStatus: "carrier_lookup_required" }));
   const variables = flattenFactsForDynamicVariables(packet);
   const prompt = renderRetellPrompt(packet);
@@ -207,76 +208,31 @@ test("coverage facts are bound into dynamic variables and the fixed prompt", () 
     "policyCoverageEnd",
     "priorPolicyLookupInstruction"
   ]) {
-    assert.ok(PROMPT_PLACEHOLDERS.includes(key));
     assert.ok(variables[key]);
-    assert.match(prompt, new RegExp(`\\{\\{${key}\\}\\}`));
+    assert.ok(!PROMPT_PLACEHOLDERS.includes(key));
+    assert.doesNotMatch(prompt, new RegExp(`\\{\\{${key}\\}\\}`));
   }
-  assert.match(prompt, /NEW-CLAIM COVERAGE GATE/);
-  assert.match(prompt, /active_policy_number/);
-  assert.match(prompt, /active_coverage_confirmed/);
+  assert.match(prompt, /NEW-CLAIM POLICY HANDLING/);
+  assert.match(prompt, /give only \{\{policyNumberSpoken\}\} with no preface or disclaimer/i);
+  assert.match(prompt, /Do not proactively ask the carrier to identify an active policy, confirm coverage, or discuss term dates/i);
+  assert.match(prompt, /Policy number: \{\{policyNumberSpoken\}\}/i);
+  assert.doesNotMatch(prompt, /Available policy identifier\/reference/i);
+  assert.doesNotMatch(prompt, /I have an available policy reference that may help locate/i);
 });
 
-test("post-call analysis and extraction retain active-policy confirmation", () => {
+test("live tool, result shape, and post-call schema do not request active-policy proof", () => {
+  const packet = buildClaimCallPacket(input({ coverageTermStatus: "carrier_lookup_required" }));
+  const llm = buildRetellLlmFromPacket(packet);
+  const guardedEnd = llm.generalTools.find((tool) => tool.name === "request_guarded_end_call");
+  const properties = guardedEnd.parameters.properties;
   const schema = postCallAnalysisSchema();
-  assert.equal(schema.find((field) => field.name === "active_policy_number")?.type, "string");
-  assert.equal(schema.find((field) => field.name === "active_coverage_confirmed")?.type, "boolean");
-
-  const result = extractCallResults({
-    raw: {
-      transcript_object: [
-        { role: "agent", content: "Can you confirm policy ACTIVE-2026 was active and covered the date of loss?" },
-        { role: "user", content: "Yes, that is correct." }
-      ],
-      call_analysis: {
-        custom_analysis_data: {
-          active_policy_number: "ACTIVE-2026",
-          active_coverage_confirmed: true,
-          filing_outcome: "claim_filed"
-        }
-      },
-      retell_llm_dynamic_variables: { goal: "file_new_claim" }
-    }
-  });
-
-  assert.equal(result.activePolicyNumber, "ACTIVE-2026");
-  assert.equal(result.activeCoverageConfirmed, true);
-  assert.equal(result.source.activePolicyNumber, "retell-analysis+transcript-proof");
-  assert.equal(result.source.activeCoverageConfirmed, "retell-analysis+transcript-proof");
-
-  const hallucinated = extractCallResults({
-    transcript: "Carrier hung up.",
-    raw: {
-      transcript: "Carrier hung up.",
-      call_analysis: {
-        custom_analysis_data: {
-          active_policy_number: "ACTIVE-2026",
-          active_coverage_confirmed: true,
-          filing_outcome: "claim_filed"
-        }
-      },
-      retell_llm_dynamic_variables: { goal: "file_new_claim" }
-    }
-  });
-  assert.equal(hallucinated.activePolicyNumber, "");
-  assert.equal(hallucinated.activeCoverageConfirmed, false);
-
-  const correctedByCarrier = extractCallResults({
-    raw: {
-      transcript_object: [
-        { role: "agent", content: "Can you confirm policy ACTIVE-2026 was active and covered the date of loss?" },
-        { role: "user", content: "Yes, that is correct." },
-        { role: "user", content: "Correction: policy ACTIVE-2026 was not active on the date of loss." }
-      ],
-      call_analysis: {
-        custom_analysis_data: {
-          active_policy_number: "ACTIVE-2026",
-          active_coverage_confirmed: true,
-          filing_outcome: "claim_filed"
-        }
-      },
-      retell_llm_dynamic_variables: { goal: "file_new_claim" }
-    }
-  });
-  assert.equal(correctedByCarrier.activePolicyNumber, "");
-  assert.equal(correctedByCarrier.activeCoverageConfirmed, false);
+  assert.equal(properties.active_policy_number, undefined);
+  assert.equal(properties.active_coverage_confirmed, undefined);
+  assert.ok(!guardedEnd.parameters.required.includes("active_policy_number"));
+  assert.ok(!guardedEnd.parameters.required.includes("active_coverage_confirmed"));
+  assert.equal(schema.find((field) => field.name === "active_policy_number"), undefined);
+  assert.equal(schema.find((field) => field.name === "active_coverage_confirmed"), undefined);
+  assert.equal(packet.resultFormat.activePolicyNumber, undefined);
+  assert.equal(packet.resultFormat.activeCoverageConfirmed, undefined);
+  assert.doesNotMatch(llm.generalPrompt, /activePolicyNumber|activeCoverageConfirmed|active_policy_number|active_coverage_confirmed/);
 });

@@ -47,8 +47,10 @@ goal per call. A new-claim call must bind one of these coverage dispositions:
 
 - `verified_in_force`: both term dates are valid and include the DOL.
 - `carrier_lookup_required`: the available policy identifier is a lookup
-  reference only; the carrier must confirm the exact active policy and DOL
-  coverage before filing can complete.
+  value. Retell gives it plainly when asked and uses insured name/address only
+  if the carrier cannot locate it. Retell does not volunteer term dates or ask
+  the representative to confirm active coverage. A carrier-issued claim or
+  reference number proves the completed filing.
 - `blocked_conflict`: no call is ready until the conflict is resolved in a new
   approved packet.
 
@@ -121,7 +123,8 @@ call, not a new generic inbound call.
 
 `buildWritebackProposal` proposes; it never writes. The bridge also requires a
 durable guarded-completion receipt bound to the call id, outcome, claim number,
-coverage disposition, exact active policy, and transcript digest. An ended call
+coverage disposition, and transcript digest. Any corrected policy number the
+carrier volunteers remains captured as call evidence. An ended call
 without that receipt remains review-only and cannot enter the post-claim
 workflow or JobNimbus writeback route. The local wrapper
 (`src/assistant/postCallWriteback.js`) adds the gated, dry-run-first CLI commands.

@@ -1,5 +1,4 @@
 import { isConfirmedCarrierCallback } from "./callbackConfirmation.js";
-import { hasTranscriptBackedActiveCoverage } from "./coverageConfirmation.js";
 
 const WAIT_STATE = /\b(?:one|1)\s+(?:sec(?:ond)?|moment)\b|\b(?:just\s+)?(?:give me|bear with me)\b|\bplease hold\b|\b(?:i(?:'m| am)|we(?:'re| are))\s+(?:documenting|typing|checking|looking|working|pulling|gathering)\b|\bi(?:'ll| will)\s+let you know if i have (?:a|any) questions?\b|\bi(?:'ll| will)\s+be right back\b/i;
 const WRAP_UP = /\b(?:goodbye|bye(?:-bye)?|have a (?:good|great|blessed|wonderful) (?:day|evening|weekend)|you(?:'re| are) all set|that (?:completes|finishes|wraps up)|thank you for calling)\b/i;
@@ -60,7 +59,6 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
   const noNumberWithTiming = NO_NUMBER_YET.test(transcript) && /\b(?:later|within|after|when|once|by|business (?:day|hours?)|hours?|days?|assigned|generated|issued)\b/i.test(transcript);
   const callbackConfirmed = args.callback_confirmed === true && isConfirmedCarrierCallback(call);
   const coverageTermStatus = String(call.retell_llm_dynamic_variables?.coverageTermStatus || "").trim();
-  const activePolicyNumber = String(args.active_policy_number || args.activePolicyNumber || "").trim();
 
   if (["file_new_claim", "find_existing_claim", "confirm_existing_claim"].includes(goal)) {
     if (!["claim_filed", "existing_claim_confirmed"].includes(outcome) && !callbackConfirmed && !noNumberWithTiming) {
@@ -74,19 +72,6 @@ export function evaluateGuardedEndCall({ call = {}, args = {} } = {}) {
         return deny(
           "The approved packet does not contain a valid filing coverage disposition.",
           "invalid_coverage_disposition"
-        );
-      }
-      if (
-        coverageTermStatus === "carrier_lookup_required"
-        && (
-          args.active_coverage_confirmed !== true
-          || !activePolicyNumber
-          || !hasTranscriptBackedActiveCoverage(call, activePolicyNumber)
-        )
-      ) {
-        return deny(
-          "The carrier has not explicitly confirmed the exact active policy covering the date of loss. Do not treat the filing as complete.",
-          "active_coverage_not_confirmed"
         );
       }
     }

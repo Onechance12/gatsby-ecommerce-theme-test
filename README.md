@@ -462,8 +462,10 @@ The workflow is intentionally split:
    `execute:true` and `ALLOW_RETELL_CALLS=true` are both present.
 3. `result` reads the Retell transcript and post-call analysis. Structured facts
    are proposed for JobNimbus; transcript guesses remain visibly unverified.
-   When active coverage had to be located, the exact active policy and DOL
-   coverage must be proven by carrier-attributed transcript evidence.
+   A carrier-attributed claim/reference number proves the filing result. When
+   the available policy number is only a lookup value, Retell gives it when
+   asked and falls back to insured name/address only if the carrier cannot find
+   it; it does not proactively discuss policy terms or interrogate coverage.
 4. `writeback` repeats the live checks and requires the exact approved
    `writebackDigest`. It also requires the durable guarded-completion receipt
    created at the verified end-call boundary. It writes only with `execute:true`
