@@ -538,8 +538,8 @@ test("IVR controls listen to the full menu without waiting for a repeat", () => 
   assert.equal(guardedEnd.speak_after_execution, true);
   assert.equal(config.generalTools.some((tool) => tool.type === "end_call"), false);
   assert.equal(pressDigit.delay_ms, 1000);
-  assert.equal(Object.hasOwn(pressDigit, "speak_after_execution"), false);
-  assert.deepEqual(Object.keys(pressDigit).sort(), ["delay_ms", "description", "name", "type"]);
+  assert.equal(pressDigit.speak_after_execution, false);
+  assert.deepEqual(Object.keys(pressDigit).sort(), ["delay_ms", "description", "name", "speak_after_execution", "type"]);
   assert.equal(config.toLlmRequestBody().start_speaker, "user");
   assert.match(config.generalPrompt, /wait about 0\.75 to 1 second/i);
   assert.doesNotMatch(config.generalPrompt, /wait a full 3 seconds after the system/i);

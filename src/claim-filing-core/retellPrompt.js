@@ -47,6 +47,10 @@ export function buildRetellLlmFromPacket(packet, options = {}) {
       name: "press_digit",
       description:
         "Press one DTMF digit only when the completed IVR menu requires that exact keypad input.",
+      // Retell otherwise materializes true and immediately runs another model
+      // turn after the digit. Keep this false so the carrier IVR can respond
+      // before the agent reasons or speaks again.
+      speak_after_execution: false,
       // Retell's pause-detection delay. One second matches the spoken IVR
       // contract and avoids treating a slow menu pause as the end of the menu.
       delay_ms: options.pressDigitDelayMs ?? 1000

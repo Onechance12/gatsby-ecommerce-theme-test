@@ -6673,7 +6673,8 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       assert.deepEqual(body.knowledge_base_ids, []);
       assert.deepEqual(body.kb_config, { top_k: 3, filter_score: 0.6 });
       assert.deepEqual(body.default_dynamic_variables, {});
-      assert.equal(body.general_tools.some((tool) => tool.name === "press_digit"), true);
+      const pressDigitTool = body.general_tools.find((tool) => tool.name === "press_digit");
+      assert.equal(pressDigitTool.speak_after_execution, false);
       const guardedTool = body.general_tools.find((tool) => tool.name === "request_guarded_end_call");
       assert.equal(guardedTool.url, `${publicBaseUrl}/retell/guarded-end-call`);
       assert.equal(guardedTool.headers.authorization, `Bearer ${guardedToken}`);
