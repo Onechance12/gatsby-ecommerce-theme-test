@@ -6578,6 +6578,9 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   let publishedVersion = null;
   let livePublishedVersion = 7;
   let draftCreateCount = 0;
+  let llmUpdateCount = 0;
+  let agentUpdateCount = 0;
+  let publishCount = 0;
   let phoneState = {
     phone_number: "+12145550100",
     inbound_agents: [{ agent_id: "legacy-agent", agent_version: 1, weight: 1 }],
@@ -6595,7 +6598,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
     starting_state: "legacy-router",
     mcps: [{ name: "legacy-mcp", url: "https://legacy.invalid/mcp" }],
     knowledge_base_ids: ["legacy-kb"],
-    kb_config: { top_k: 20, filter_score: 0 },
+    kb_config: null,
     default_dynamic_variables: { insuredName: "Legacy Wrong Insured" }
   };
   let draftAgentState = {
@@ -6655,6 +6658,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       draftCreateCount += 1;
       payload = structuredClone(draftAgentState);
     } else if (req.method === "PATCH" && url.pathname === "/update-retell-llm/fixture-claim-config-llm") {
+      llmUpdateCount += 1;
       assert.equal(url.searchParams.get("version"), "5");
       assert.equal(body.begin_message, "");
       assert.equal(body.start_speaker, "user");
@@ -6667,7 +6671,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       assert.equal(body.starting_state, null);
       assert.deepEqual(body.mcps, []);
       assert.deepEqual(body.knowledge_base_ids, []);
-      assert.equal(body.kb_config, null);
+      assert.equal(Object.hasOwn(body, "kb_config"), false);
       assert.deepEqual(body.default_dynamic_variables, {});
       assert.equal(body.general_tools.some((tool) => tool.name === "press_digit"), true);
       const guardedTool = body.general_tools.find((tool) => tool.name === "request_guarded_end_call");
@@ -6682,6 +6686,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       };
       payload = structuredClone(draftLlmState);
     } else if (req.method === "PATCH" && url.pathname === "/update-agent/fixture-claim-config-agent") {
+      agentUpdateCount += 1;
       assert.equal(url.searchParams.get("version"), "8");
       assert.equal(body.response_engine.version, 5);
       assert.equal(body.timezone, "America/Chicago");
@@ -6719,6 +6724,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       };
       payload = structuredClone(draftAgentState);
     } else if (req.method === "POST" && url.pathname === "/publish-agent-version/fixture-claim-config-agent") {
+      publishCount += 1;
       publishedVersion = body.version;
       draftAgentState = { ...draftAgentState, is_published: true };
       draftLlmState = { ...draftLlmState, is_published: true };
@@ -6862,6 +6868,27 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   assert.equal(JSON.stringify(dryRun).includes(guardedToken), false);
   assert.equal(JSON.stringify(dryRun).includes(inboundToken), false);
 
+  draftLlmState.kb_config = { top_k: 20, filter_score: 0 };
+  const inheritedKbResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      execute: true,
+      publish: true,
+      configDigest: dryRun.configDigest
+    })
+  });
+  const inheritedKb = await inheritedKbResponse.json();
+  assert.equal(inheritedKbResponse.status, 409);
+  assert.match(inheritedKb.error, /unexpected knowledge-base configuration/i);
+  assert.equal(draftCreateCount, 1);
+  assert.equal(llmUpdateCount, 0);
+  assert.equal(agentUpdateCount, 0);
+  assert.equal(publishCount, 0);
+  assert.equal(phoneUpdateCount, 0);
+  assert.equal(phoneReadCount, 0);
+  draftLlmState.kb_config = null;
+
   const executeResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
     method: "POST",
     headers,
@@ -6879,7 +6906,10 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   assert.equal(executed.inboundWebhookConfigured, true);
   assert.equal(executed.publicationReceiptVerified, true);
   assert.equal(publishedVersion, 8);
-  assert.equal(draftCreateCount, 1);
+  assert.equal(draftCreateCount, 2);
+  assert.equal(llmUpdateCount, 1);
+  assert.equal(agentUpdateCount, 1);
+  assert.equal(publishCount, 1);
   assert.equal(phoneUpdateCount, 1);
   assert.equal(phoneReadCount, 1);
   const persistedPublicationReceipt = JSON.parse(await readFile(
@@ -6946,7 +6976,7 @@ test("claim-agent publication fails closed when the published base changes befor
     starting_state: "legacy",
     mcps: [{ name: "legacy", url: "https://legacy.invalid/mcp" }],
     knowledge_base_ids: ["legacy-kb"],
-    kb_config: { top_k: 10 },
+    kb_config: null,
     default_dynamic_variables: { carrier: "Wrong carrier" }
   };
 

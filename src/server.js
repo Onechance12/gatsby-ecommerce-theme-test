@@ -49,6 +49,7 @@ import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing
 import {
   buildRetellClaimAgentSettings,
   buildRetellClaimLlmSettings,
+  buildRetellClaimLlmUpdateSettings,
   buildRetellClaimVoiceSettings,
   normalizeRetellClaimAgentSettings,
   normalizeRetellClaimLlmSettings,
@@ -5918,10 +5919,13 @@ async function configureRetellAgentUnlocked(input = {}) {
   ) {
     conflictError("Retell added or changed an unreviewed retained setting while cloning the approved base. Nothing was published.");
   }
+  if ((draftLlm?.kb_config ?? null) !== null) {
+    conflictError("Retell cloned an unexpected knowledge-base configuration into the fresh draft. Nothing was published.");
+  }
   const llm = await retellApi("PATCH", versionedRetellEndpoint(`/update-retell-llm/${encodeURIComponent(draftLlmId)}`, draftLlmVersion), {
     general_prompt: llmConfig.general_prompt,
     general_tools: llmConfig.general_tools,
-    ...buildRetellClaimLlmSettings()
+    ...buildRetellClaimLlmUpdateSettings()
   });
   const llmVersion = Number(llm.version);
   if (
