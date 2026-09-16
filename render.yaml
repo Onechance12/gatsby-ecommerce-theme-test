@@ -134,6 +134,8 @@ services:
         sync: false
       - key: RETELL_FROM_NUMBER
         sync: false
+      - key: RETELL_AGENT_PUBLISHER_TOKEN
+        sync: false
       - key: RETELL_GUARDED_END_CALL_TOKEN
         sync: false
       - key: RETELL_INBOUND_WEBHOOK_TOKEN

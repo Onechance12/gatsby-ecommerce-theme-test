@@ -3716,6 +3716,107 @@ test("Codex operator device tokens must be distinct", async () => {
   assert.match(stderr, /CODEX_MAC_OPERATOR_TOKEN must be different from CODEX_OPERATOR_TOKEN/i);
 });
 
+test("Retell agent publisher token is strong and isolated from operational credentials", async () => {
+  const cases = [
+    {
+      port: "18897",
+      token: "too-short",
+      macToken: "fixture-publisher-isolation-mac-token-1234567890",
+      expected: /RETELL_AGENT_PUBLISHER_TOKEN must contain 32 to 512 printable non-space ASCII/i
+    },
+    {
+      port: "18898",
+      token: "fixture-publisher-duplicate-token-1234567890",
+      macToken: "fixture-publisher-duplicate-token-1234567890",
+      expected: /CODEX_MAC_OPERATOR_TOKEN and RETELL_AGENT_PUBLISHER_TOKEN must use distinct credentials/i
+    },
+    {
+      port: "18899",
+      token: "fixture-publisher-retell-api-duplicate-1234567890",
+      macToken: "fixture-publisher-isolation-mac-token-1234567890",
+      retellApiKey: "fixture-publisher-retell-api-duplicate-1234567890",
+      expected: /RETELL_AGENT_PUBLISHER_TOKEN and RETELL_API_KEY must use distinct credentials/i
+    },
+    {
+      port: "18900",
+      token: "fixture-publisher-voice-duplicate-1234567890",
+      macToken: "fixture-publisher-isolation-mac-token-1234567890",
+      voiceStreamToken: "fixture-publisher-voice-duplicate-1234567890",
+      expected: /RETELL_AGENT_PUBLISHER_TOKEN and VOICE_STREAM_TOKEN must use distinct credentials/i
+    },
+    {
+      port: "18901",
+      token: "fixture-publisher-jobnimbus-api-duplicate-1234567890",
+      macToken: "fixture-publisher-isolation-mac-token-1234567890",
+      jobNimbusApiKey: "fixture-publisher-jobnimbus-api-duplicate-1234567890",
+      expected: /RETELL_AGENT_PUBLISHER_TOKEN and JOBNIMBUS_API_KEY must use distinct credentials/i
+    }
+  ];
+  for (const fixture of cases) {
+    const child = spawn(process.execPath, ["src/server.js"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: fixture.port,
+        JOBNIMBUS_BRIDGE_TOKEN: "fixture-publisher-isolation-bridge-token-1234567890",
+        CODEX_MAC_OPERATOR_TOKEN: fixture.macToken,
+        RETELL_AGENT_PUBLISHER_TOKEN: fixture.token,
+        RETELL_API_KEY: fixture.retellApiKey || "",
+        VOICE_STREAM_TOKEN: fixture.voiceStreamToken || "",
+        JOBNIMBUS_API_KEY: fixture.jobNimbusApiKey || "",
+        ALLOW_GOOGLE_USER_AUTH: "false"
+      },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    const exitCode = await new Promise((resolve) => child.on("exit", resolve));
+    assert.notEqual(exitCode, 0);
+    assert.match(stderr, fixture.expected);
+  }
+});
+
+test("Retell claim agent identity is isolated from broader publication lanes", async () => {
+  const cases = [
+    {
+      port: "18902",
+      variable: "RETELL_CLIENT_COORDINATOR_AGENT_ID"
+    },
+    {
+      port: "18903",
+      variable: "RETELL_CARRIER_FOLLOWUP_AGENT_ID"
+    }
+  ];
+  for (const fixture of cases) {
+    const sharedAgentId = `fixture-shared-agent-${fixture.port}`;
+    const child = spawn(process.execPath, ["src/server.js"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: fixture.port,
+        JOBNIMBUS_BRIDGE_TOKEN: "fixture-agent-isolation-bridge-token-1234567890",
+        RETELL_AGENT_ID: sharedAgentId,
+        [fixture.variable]: sharedAgentId,
+        JOBNIMBUS_API_KEY: "",
+        ALLOW_GOOGLE_USER_AUTH: "false"
+      },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    const exitCode = await new Promise((resolve) => child.on("exit", resolve));
+    assert.notEqual(exitCode, 0);
+    assert.match(
+      stderr,
+      new RegExp(`RETELL_AGENT_ID and ${fixture.variable} must identify different Retell agents`, "i")
+    );
+  }
+});
+
 test("Chance file resolution fails closed on tied exact names", async (t) => {
   const bridgePort = 18891;
   const fakeApiPort = 18892;
@@ -6669,6 +6770,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       PUBLIC_BASE_URL: publicBaseUrl,
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-claim-config-bridge-token-1234567890",
       CODEX_MAC_OPERATOR_TOKEN: "fixture-claim-config-mac-token-1234567890",
+      RETELL_AGENT_PUBLISHER_TOKEN: "fixture-claim-config-publisher-token-1234567890",
       RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
       RETELL_API_KEY: "fixture-claim-config-api-key",
       RETELL_AGENT_ID: "fixture-claim-config-agent",
@@ -6687,21 +6789,33 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
   const headers = {
-    authorization: "Bearer fixture-claim-config-mac-token-1234567890",
+    authorization: "Bearer fixture-claim-config-publisher-token-1234567890",
     "content-type": "application/json"
   };
   const broadHeaders = {
     authorization: "Bearer fixture-claim-config-bridge-token-1234567890",
     "content-type": "application/json"
   };
+  const macHeaders = {
+    authorization: "Bearer fixture-claim-config-mac-token-1234567890",
+    "content-type": "application/json"
+  };
   for (const body of [{ execute: false }, { execute: true, publish: true, configDigest: "0".repeat(64) }]) {
-    const denied = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
-      method: "POST",
-      headers: broadHeaders,
-      body: JSON.stringify(body)
-    });
-    assert.equal(denied.status, 403);
+    for (const deniedHeaders of [broadHeaders, macHeaders]) {
+      const denied = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
+        method: "POST",
+        headers: deniedHeaders,
+        body: JSON.stringify(body)
+      });
+      assert.equal(denied.status, 403);
+    }
   }
+  const publisherWrongRoute = await fetch(`${publicBaseUrl}/claim-filing/configuration`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({})
+  });
+  assert.equal(publisherWrongRoute.status, 403);
   const dryRunResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
     method: "POST",
     headers,
@@ -6911,6 +7025,7 @@ test("claim-agent publication fails closed when the published base changes befor
       PUBLIC_BASE_URL: publicBaseUrl,
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-claim-race-bridge-token-1234567890",
       CODEX_MAC_OPERATOR_TOKEN: "fixture-claim-race-mac-token-1234567890",
+      RETELL_AGENT_PUBLISHER_TOKEN: "fixture-claim-race-publisher-token-1234567890",
       RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
       RETELL_API_KEY: "fixture-claim-race-api-key",
       RETELL_AGENT_ID: "fixture-claim-race-agent",
@@ -6929,7 +7044,7 @@ test("claim-agent publication fails closed when the published base changes befor
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
   const headers = {
-    authorization: "Bearer fixture-claim-race-mac-token-1234567890",
+    authorization: "Bearer fixture-claim-race-publisher-token-1234567890",
     "content-type": "application/json"
   };
   const dryRunResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
@@ -6970,7 +7085,7 @@ async function exerciseRejectedClaimAgentPublisherResponse(t, options) {
   const agentId = `${fixtureName}-agent`;
   const llmId = `${fixtureName}-llm`;
   const apiKey = `${fixtureName}-api-key`;
-  const operatorToken = `${fixtureName}-mac-token-1234567890`;
+  const publisherToken = `${fixtureName}-publisher-token-1234567890`;
   let llmPatchCount = 0;
   let agentPatchCount = 0;
   let publishCount = 0;
@@ -7071,7 +7186,8 @@ async function exerciseRejectedClaimAgentPublisherResponse(t, options) {
       PORT: String(bridgePort),
       PUBLIC_BASE_URL: publicBaseUrl,
       JOBNIMBUS_BRIDGE_TOKEN: `${fixtureName}-bridge-token-1234567890`,
-      CODEX_MAC_OPERATOR_TOKEN: operatorToken,
+      CODEX_MAC_OPERATOR_TOKEN: `${fixtureName}-mac-token-1234567890`,
+      RETELL_AGENT_PUBLISHER_TOKEN: publisherToken,
       RETELL_API_BASE_URL: `http://127.0.0.1:${fakeRetellPort}`,
       RETELL_API_KEY: apiKey,
       RETELL_AGENT_ID: agentId,
@@ -7090,7 +7206,7 @@ async function exerciseRejectedClaimAgentPublisherResponse(t, options) {
   t.after(() => child.kill("SIGTERM"));
   await waitForServer(child, bridgePort);
   const headers = {
-    authorization: `Bearer ${operatorToken}`,
+    authorization: `Bearer ${publisherToken}`,
     "content-type": "application/json"
   };
   const dryRunResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {

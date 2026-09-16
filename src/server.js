@@ -181,6 +181,7 @@ const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
+const RETELL_AGENT_PUBLISHER_TOKEN = process.env.RETELL_AGENT_PUBLISHER_TOKEN || "";
 // Unconfigured by default; independent of every operational credential/gate.
 const DOCUMENT_RESEARCH_TOKEN = process.env.DOCUMENT_RESEARCH_TOKEN || "";
 const DOCUMENT_RESEARCH_API_KEY = process.env.DOCUMENT_RESEARCH_JOBNIMBUS_API_KEY || "";
@@ -288,6 +289,14 @@ const RETELL_AGENT_ID = process.env.RETELL_AGENT_ID || "";
 const RETELL_HOMEOWNER_AGENT_ID = process.env.RETELL_HOMEOWNER_AGENT_ID || "agent_83d18f8328f04e88ba2d5dcdd9";
 const RETELL_CLIENT_COORDINATOR_AGENT_ID = process.env.RETELL_CLIENT_COORDINATOR_AGENT_ID || RETELL_HOMEOWNER_AGENT_ID;
 const RETELL_CARRIER_FOLLOWUP_AGENT_ID = process.env.RETELL_CARRIER_FOLLOWUP_AGENT_ID || "agent_66fb8a49fc6ab5a777eb9f0474";
+for (const [name, agentId] of [
+  ["RETELL_CLIENT_COORDINATOR_AGENT_ID", RETELL_CLIENT_COORDINATOR_AGENT_ID],
+  ["RETELL_CARRIER_FOLLOWUP_AGENT_ID", RETELL_CARRIER_FOLLOWUP_AGENT_ID]
+]) {
+  if (RETELL_AGENT_ID && agentId && RETELL_AGENT_ID === agentId) {
+    throw new Error(`RETELL_AGENT_ID and ${name} must identify different Retell agents.`);
+  }
+}
 const RETELL_FROM_NUMBER = process.env.RETELL_FROM_NUMBER || TWILIO_FROM_NUMBER || "";
 const ALLOW_RETELL_CALLS = RELEASE_GATES.ALLOW_RETELL_CALLS;
 const ALLOW_RETELL_CLAIM_CALLS = RELEASE_GATES.ALLOW_RETELL_CLAIM_CALLS;
@@ -533,6 +542,7 @@ const ACTION_RECEIPT_RECOVERY_STATE = {
 for (const [name, token] of [
   ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
   ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+  ["RETELL_AGENT_PUBLISHER_TOKEN", RETELL_AGENT_PUBLISHER_TOKEN],
   ["DOCUMENT_RESEARCH_TOKEN", DOCUMENT_RESEARCH_TOKEN]
 ]) {
   if (token && !/^[\x21-\x7E]{32,512}$/.test(token)) {
@@ -569,6 +579,7 @@ const RETELL_BOUNDARY_TOKENS = [
   ["JOBNIMBUS_BRIDGE_TOKEN", BRIDGE_TOKEN],
   ["CODEX_OPERATOR_TOKEN", CODEX_OPERATOR_TOKEN],
   ["CODEX_MAC_OPERATOR_TOKEN", CODEX_MAC_OPERATOR_TOKEN],
+  ["RETELL_AGENT_PUBLISHER_TOKEN", RETELL_AGENT_PUBLISHER_TOKEN],
   ["DOCUMENT_RESEARCH_TOKEN", DOCUMENT_RESEARCH_TOKEN],
   ["RETELL_GUARDED_END_CALL_TOKEN", RETELL_GUARDED_END_CALL_TOKEN],
   ["RETELL_INBOUND_WEBHOOK_TOKEN", RETELL_INBOUND_WEBHOOK_TOKEN]
@@ -580,6 +591,20 @@ for (let left = 0; left < RETELL_BOUNDARY_TOKENS.length; left += 1) {
     if (secureEqual(leftToken, rightToken)) {
       throw new Error(`${leftName} and ${rightName} must use distinct credentials.`);
     }
+  }
+}
+for (const [name, token] of [
+  ["JOBNIMBUS_API_KEY", API_KEY],
+  ["RETELL_API_KEY", RETELL_API_KEY],
+  ["DOCUMENT_RESEARCH_JOBNIMBUS_API_KEY", DOCUMENT_RESEARCH_API_KEY],
+  ["VOICE_STREAM_TOKEN", VOICE_STREAM_TOKEN]
+]) {
+  if (
+    RETELL_AGENT_PUBLISHER_TOKEN
+    && token
+    && secureEqual(RETELL_AGENT_PUBLISHER_TOKEN, token)
+  ) {
+    throw new Error(`RETELL_AGENT_PUBLISHER_TOKEN and ${name} must use distinct credentials.`);
   }
 }
 if (DOCUMENT_RESEARCH_TOKEN && VOICE_STREAM_TOKEN && secureEqual(DOCUMENT_RESEARCH_TOKEN, VOICE_STREAM_TOKEN)) {
@@ -15822,7 +15847,7 @@ function requireApprovalDigest(provided, expected, label) {
 
 function redactSensitiveText(value) {
   let text = String(value || "");
-  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, DOCUMENT_RESEARCH_TOKEN, DOCUMENT_RESEARCH_API_KEY, RETELL_GUARDED_END_CALL_TOKEN, RETELL_INBOUND_WEBHOOK_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
+  for (const secret of [API_KEY, BRIDGE_TOKEN, CODEX_OPERATOR_TOKEN, CODEX_MAC_OPERATOR_TOKEN, RETELL_AGENT_PUBLISHER_TOKEN, DOCUMENT_RESEARCH_TOKEN, DOCUMENT_RESEARCH_API_KEY, RETELL_GUARDED_END_CALL_TOKEN, RETELL_INBOUND_WEBHOOK_TOKEN, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, OPENAI_API_KEY, ZAI_API_KEY, TWILIO_AUTH_TOKEN, RETELL_API_KEY, QUO_API_KEY].filter((item) => item && item.length >= 8)) {
     text = text.split(secret).join("[REDACTED]");
   }
   return text
@@ -15908,6 +15933,21 @@ async function authenticateBearerRequest(req) {
       role: "retell_guarded_end",
       hostedDomain: "",
       scopes: ["retell_claim_call:guarded_end_only"],
+      googleAccessToken: "",
+      jobNimbusOwnerId: "",
+      jobNimbusScope: "none",
+      quoLineId: ""
+    };
+  }
+  if (RETELL_AGENT_PUBLISHER_TOKEN && secureEqual(token, RETELL_AGENT_PUBLISHER_TOKEN)) {
+    return {
+      type: "retell_agent_publisher_token",
+      subject: "retell-agent-publisher",
+      email: "",
+      name: "Retell Agent Publisher",
+      role: "retell_agent_publisher",
+      hostedDomain: "",
+      scopes: ["retell_claim_agent:configure"],
       googleAccessToken: "",
       jobNimbusOwnerId: "",
       jobNimbusScope: "none",
@@ -16380,13 +16420,24 @@ function assertIdentityRequestScope(
     error.statusCode = 403;
     throw error;
   }
+  if (
+    pathname === "/retell/configure-agent"
+    && !(
+      identity?.type === "retell_agent_publisher_token"
+      && identity.subject === "retell-agent-publisher"
+      && identity.role === "retell_agent_publisher"
+    )
+  ) {
+    const error = new Error("Retell claim-agent publication accepts only its dedicated one-route credential.");
+    error.statusCode = 403;
+    throw error;
+  }
   const claimFilingRoute = [
     "/claim-filing/configuration",
     "/claim-filing/prepare",
     "/claim-filing/call",
     "/claim-filing/result",
-    "/claim-filing/callbacks",
-    "/retell/configure-agent"
+    "/claim-filing/callbacks"
   ].includes(pathname);
   if (
     claimFilingRoute

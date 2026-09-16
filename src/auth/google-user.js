@@ -82,8 +82,7 @@ export const CODEX_OPERATOR_ALLOWED_ROUTES = new Set([
   "POST /claim-filing/prepare",
   "POST /claim-filing/call",
   "POST /claim-filing/result",
-  "POST /claim-filing/callbacks",
-  "POST /retell/configure-agent"
+  "POST /claim-filing/callbacks"
 ]);
 
 const CODEX_MAC_OPERATOR_ONLY_ROUTES = new Set([
@@ -94,8 +93,7 @@ const CODEX_MAC_OPERATOR_ONLY_ROUTES = new Set([
   "POST /claim-filing/prepare",
   "POST /claim-filing/call",
   "POST /claim-filing/result",
-  "POST /claim-filing/callbacks",
-  "POST /retell/configure-agent"
+  "POST /claim-filing/callbacks"
 ]);
 
 const CODEX_MAC_CLAIM_FILING_ROUTES = new Set([
@@ -103,7 +101,10 @@ const CODEX_MAC_CLAIM_FILING_ROUTES = new Set([
   "POST /claim-filing/prepare",
   "POST /claim-filing/call",
   "POST /claim-filing/result",
-  "POST /claim-filing/callbacks",
+  "POST /claim-filing/callbacks"
+]);
+
+const RETELL_AGENT_PUBLISHER_ONLY_ROUTES = new Set([
   "POST /retell/configure-agent"
 ]);
 
@@ -287,6 +288,11 @@ export function routeAllowed(identity, method, pathname) {
     return identity.subject === "codex-document-research"
       && identity.role === "document_research"
       && DOCUMENT_RESEARCH_ROUTES.includes(route);
+  }
+  if (RETELL_AGENT_PUBLISHER_ONLY_ROUTES.has(route)) {
+    return identity.type === "retell_agent_publisher_token"
+      && identity.subject === "retell-agent-publisher"
+      && identity.role === "retell_agent_publisher";
   }
   // Even broad legacy/admin roles may not borrow the separate research grant.
   if (pathname.startsWith("/document-research/")) return false;

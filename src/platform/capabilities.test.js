@@ -44,7 +44,7 @@ test("Codex operator descriptor names exactly the existing least-privilege route
   assert.equal(macCapabilities.includes("operations.run_policy.read"), true);
   assert.equal(macCapabilities.includes("operations.action_batch_receipts.read"), true);
   assert.equal(macCapabilities.includes("operations.action_batch_receipts.reconcile"), true);
-  assert.equal(macCapabilities.includes("retell.agent.configure"), true);
+  assert.equal(macCapabilities.includes("retell.agent.configure"), false);
 
   const descriptor = buildCapabilityDescriptor({
     identity: { type: "codex_operator_token", role: "codex_operator" }

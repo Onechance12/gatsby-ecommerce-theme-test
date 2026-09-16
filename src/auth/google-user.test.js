@@ -223,6 +223,7 @@ test("coordinator routes are read-focused while Google roles cannot use HCN brow
 test("dedicated Codex operator is a fail-closed non-Google role", () => {
   const operator = { type: "codex_operator_token", role: "codex_operator", subject: "codex-hp-operator" };
   const macOperator = { type: "codex_operator_token", role: "codex_operator", subject: "codex-mac-operator" };
+  const retellPublisher = { type: "retell_agent_publisher_token", role: "retell_agent_publisher", subject: "retell-agent-publisher" };
   const spoofedGoogleOperator = { type: "google_oauth", role: "codex_operator" };
 
   for (const route of [
@@ -256,15 +257,14 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     "POST /claim-filing/prepare",
     "POST /claim-filing/call",
     "POST /claim-filing/result",
-    "POST /claim-filing/callbacks",
-    "POST /retell/configure-agent"
+    "POST /claim-filing/callbacks"
   ]) {
     const [method, pathname] = route.split(" ");
     assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.has(route), true);
     assert.equal(routeAllowed(operator, method, pathname), false, route);
     assert.equal(routeAllowed(macOperator, method, pathname), true, route);
   }
-  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 26);
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 25);
 
   for (const identity of [
     { type: "google_oauth", role: "chance" },
@@ -273,11 +273,14 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     { type: "bridge_token", role: "chance" },
     { type: "hcn_browser_session", role: "chance" },
     operator,
+    macOperator,
     { type: "codex_operator_token", role: "chance", subject: "codex-mac-operator" }
   ]) {
     assert.equal(routeAllowed(identity, "POST", "/retell/configure-agent"), false);
   }
-  assert.equal(routeAllowed(macOperator, "POST", "/retell/configure-agent"), true);
+  assert.equal(routeAllowed(retellPublisher, "POST", "/retell/configure-agent"), true);
+  assert.equal(routeAllowed(retellPublisher, "POST", "/claim-filing/configuration"), false);
+  assert.equal(routeAllowed(retellPublisher, "GET", "/auth/whoami"), false);
 
   for (const route of [
     "POST /auth/quo-line",
