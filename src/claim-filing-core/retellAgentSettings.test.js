@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   buildRetellClaimAgentSettings,
   buildRetellClaimLlmSettings,
-  buildRetellClaimLlmUpdateSettings,
   buildRetellClaimVoiceSettings,
   normalizeRetellClaimAgentSettings,
   normalizeRetellClaimLlmSettings,
@@ -27,19 +26,9 @@ test("claim LLM waits for the carrier and pins deterministic tool behavior", () 
     starting_state: null,
     mcps: [],
     knowledge_base_ids: [],
-    kb_config: null,
+    kb_config: { top_k: 3, filter_score: 0.6 },
     default_dynamic_variables: {}
   });
-});
-
-test("claim LLM update omits only Retell's object-only null KB field", () => {
-  const target = buildRetellClaimLlmSettings();
-  const update = buildRetellClaimLlmUpdateSettings();
-  assert.equal(target.kb_config, null);
-  assert.equal(Object.hasOwn(update, "kb_config"), false);
-  assert.deepEqual(update, Object.fromEntries(
-    Object.entries(target).filter(([field]) => field !== "kb_config")
-  ));
 });
 
 test("claim runtime is tuned for carrier holds, accurate entities, and no native IVR hangup", () => {

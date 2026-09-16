@@ -21,7 +21,10 @@ export const RETELL_CLAIM_LLM_SETTINGS = Object.freeze({
   starting_state: null,
   mcps: Object.freeze([]),
   knowledge_base_ids: Object.freeze([]),
-  kb_config: null,
+  // Retell materializes these retrieval defaults on every fresh draft even
+  // when no knowledge bases are attached. Pin the exact inert defaults so the
+  // publisher can PATCH the current object-only schema and attest the readback.
+  kb_config: Object.freeze({ top_k: 3, filter_score: 0.6 }),
   default_dynamic_variables: Object.freeze({})
 });
 
@@ -141,19 +144,6 @@ export const RETELL_CLAIM_AGENT_SETTINGS = Object.freeze({
 
 export function buildRetellClaimLlmSettings() {
   return structuredClone(RETELL_CLAIM_LLM_SETTINGS);
-}
-
-// Retell's update API accepts kb_config only as an object. The reviewed live
-// contract intentionally has no knowledge-base configuration, represented by
-// null in Retell readbacks and in our attestation. A fresh draft is cloned from
-// that exact attested base, so omit only this unsupported null field from the
-// partial PATCH; the post-update readback still has to attest to null.
-export function buildRetellClaimLlmUpdateSettings() {
-  const settings = buildRetellClaimLlmSettings();
-  if (settings.kb_config === null) {
-    delete settings.kb_config;
-  }
-  return settings;
 }
 
 export function buildRetellClaimAgentSettings() {

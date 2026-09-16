@@ -6598,7 +6598,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
     starting_state: "legacy-router",
     mcps: [{ name: "legacy-mcp", url: "https://legacy.invalid/mcp" }],
     knowledge_base_ids: ["legacy-kb"],
-    kb_config: null,
+    kb_config: { top_k: 3, filter_score: 0.6 },
     default_dynamic_variables: { insuredName: "Legacy Wrong Insured" }
   };
   let draftAgentState = {
@@ -6671,7 +6671,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       assert.equal(body.starting_state, null);
       assert.deepEqual(body.mcps, []);
       assert.deepEqual(body.knowledge_base_ids, []);
-      assert.equal(Object.hasOwn(body, "kb_config"), false);
+      assert.deepEqual(body.kb_config, { top_k: 3, filter_score: 0.6 });
       assert.deepEqual(body.default_dynamic_variables, {});
       assert.equal(body.general_tools.some((tool) => tool.name === "press_digit"), true);
       const guardedTool = body.general_tools.find((tool) => tool.name === "request_guarded_end_call");
@@ -6841,7 +6841,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   assert.equal(dryRun.exactConfiguration.llmSettings.starting_state, null);
   assert.deepEqual(dryRun.exactConfiguration.llmSettings.mcps, []);
   assert.deepEqual(dryRun.exactConfiguration.llmSettings.knowledge_base_ids, []);
-  assert.equal(dryRun.exactConfiguration.llmSettings.kb_config, null);
+  assert.deepEqual(dryRun.exactConfiguration.llmSettings.kb_config, { top_k: 3, filter_score: 0.6 });
   assert.deepEqual(dryRun.exactConfiguration.llmSettings.default_dynamic_variables, {});
   assert.equal(dryRun.exactConfiguration.llmSettings.model_high_priority, false);
   assert.equal(dryRun.exactConfiguration.isTransferLlm, false);
@@ -6887,7 +6887,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
   assert.equal(publishCount, 0);
   assert.equal(phoneUpdateCount, 0);
   assert.equal(phoneReadCount, 0);
-  draftLlmState.kb_config = null;
+  draftLlmState.kb_config = { top_k: 3, filter_score: 0.6 };
 
   const executeResponse = await fetch(`${publicBaseUrl}/retell/configure-agent`, {
     method: "POST",
@@ -6976,7 +6976,7 @@ test("claim-agent publication fails closed when the published base changes befor
     starting_state: "legacy",
     mcps: [{ name: "legacy", url: "https://legacy.invalid/mcp" }],
     knowledge_base_ids: ["legacy-kb"],
-    kb_config: null,
+    kb_config: { top_k: 3, filter_score: 0.6 },
     default_dynamic_variables: { carrier: "Wrong carrier" }
   };
 
@@ -7147,7 +7147,8 @@ async function exerciseRejectedClaimAgentPublisherResponse(t, options) {
     llm_id: llmId,
     version: 5,
     is_published: false,
-    knowledge_base_ids: []
+    knowledge_base_ids: [],
+    kb_config: { top_k: 3, filter_score: 0.6 }
   };
 
   const fakeRetell = createServer(async (req, res) => {
