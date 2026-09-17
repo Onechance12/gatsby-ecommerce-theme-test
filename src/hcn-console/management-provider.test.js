@@ -205,14 +205,14 @@ test("management provider counts JobNimbus Status Changed records as operational
   assert.equal(result.data.events[0].actorAdjusterId, "owner_a");
 });
 
-test("management provider never promotes drafts, task creation, file views, automation, or unknown records", () => {
+test("management provider recognizes human file work from the JobNimbus activity stream", () => {
   const result = mapManagementJobNimbusEnvelope(envelope({
     activities: [
       {
-        jnid: "event_email_draft",
+        jnid: "event_comment_created",
         related: { id: "file_a" },
-        record_type_name: "Email",
-        status_name: "Draft",
+        record_type_name: "Comment",
+        status_name: "Created",
         date_created: NOW
       },
       {
@@ -223,10 +223,124 @@ test("management provider never promotes drafts, task creation, file views, auto
         date_created: NOW
       },
       {
-        jnid: "event_note_automated",
+        jnid: "event_task_updated",
+        related: { id: "file_a" },
+        record_type_name: "Task",
+        status_name: "Updated",
+        date_created: NOW
+      },
+      {
+        jnid: "event_task_completed",
+        related: { id: "file_a" },
+        record_type_name: "Task",
+        status_name: "Completed",
+        date_created: NOW
+      },
+      {
+        jnid: "event_field_changed",
         related: { id: "file_b" },
+        record_type_name: "Field Changed",
+        date_created: NOW
+      },
+      {
+        jnid: "event_contact_modified",
+        related: { id: "file_b" },
+        record_type_name: "Contact Modified",
+        date_created: NOW
+      },
+      {
+        jnid: "event_assigned_contact",
+        related: { id: "file_b" },
+        record_type_name: "Assigned Contact",
+        date_created: NOW
+      },
+      {
+        jnid: "event_attachment_deleted",
+        related: { id: "file_b" },
+        record_type_name: "Attachment Deleted",
+        status_name: "Deleted",
+        date_created: NOW
+      },
+      {
+        jnid: "event_related_to_task",
+        related: { id: "file_b" },
+        record_type_name: "Related to Task",
+        date_created: NOW
+      },
+      {
+        jnid: "event_document_created",
+        related: { id: "file_b" },
+        record_type_name: "Document",
+        status_name: "Created",
+        date_created: NOW
+      },
+      {
+        jnid: "event_photo_uploaded",
+        related: { id: "file_b" },
+        record_type_name: "Photo",
+        status_name: "Uploaded",
+        date_created: NOW
+      },
+      {
+        jnid: "event_form_submitted",
+        related: { id: "file_c" },
+        record_type_name: "Form",
+        status_name: "Submitted",
+        date_created: NOW
+      },
+      {
+        jnid: "event_estimate_created",
+        related: { id: "file_c" },
+        record_type_name: "Estimate",
+        status_name: "Created",
+        date_created: NOW
+      },
+      {
+        jnid: "event_call_recorded",
+        related: { id: "file_c" },
+        record_type_name: "Phone Call",
+        status_name: "Recorded",
+        date_created: NOW
+      },
+      {
+        jnid: "event_note_created",
+        related: { id: "file_c" },
+        record_type_name: "Note",
+        status_name: "Created",
+        date_created: NOW
+      }
+    ]
+  }), { adjusters: ADJUSTERS });
+
+  assert.equal(result.data.events.length, 15);
+  assert.equal(
+    result.data.events.every((event) => event.classification === "operational"),
+    true
+  );
+});
+
+test("management provider excludes non-work activity from the gap clock", () => {
+  const result = mapManagementJobNimbusEnvelope(envelope({
+    activities: [
+      {
+        jnid: "event_email_draft",
+        related: { id: "file_a" },
+        record_type_name: "Email",
+        status_name: "Draft",
+        date_created: NOW
+      },
+      {
+        jnid: "event_note_automated",
+        related: { id: "file_a" },
         record_type_name: "Note",
         status_name: "Automated",
+        date_created: NOW
+      },
+      {
+        jnid: "event_note_system",
+        related: { id: "file_a" },
+        record_type_name: "Note",
+        status_name: "System",
         date_created: NOW
       },
       {
@@ -234,6 +348,20 @@ test("management provider never promotes drafts, task creation, file views, auto
         related: { id: "file_b" },
         record_type_name: "File",
         status_name: "Opened",
+        date_created: NOW
+      },
+      {
+        jnid: "event_document_viewed",
+        related: { id: "file_b" },
+        record_type_name: "Document",
+        status_name: "Viewed",
+        date_created: NOW
+      },
+      {
+        jnid: "event_imported",
+        related: { id: "file_c" },
+        record_type_name: "Imported Activity",
+        status_name: "Recorded",
         date_created: NOW
       },
       {
@@ -246,11 +374,11 @@ test("management provider never promotes drafts, task creation, file views, auto
 
   assert.deepEqual(
     result.data.events.map((event) => event.classification),
-    ["unsupported", "unsupported", "noise", "unsupported", "unsupported"]
+    ["unsupported", "noise", "noise", "unsupported", "unsupported", "noise", "unsupported"]
   );
 });
 
-test("task timestamps never count as activity while open tasks remain separate", () => {
+test("mutable task timestamps never count as activity while open tasks remain separate", () => {
   const result = mapManagementJobNimbusEnvelope(envelope({
     tasks: [
       {

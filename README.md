@@ -513,16 +513,21 @@ shortcuts: exceeding a bound fails the report instead of returning an
 apparently complete ranking. Review and test any limit change as a release
 change.
 
-The ranking is deliberately an **activity-gap report**, not a complete
+The ranking is deliberately a **JobNimbus work-activity gap report**, not a complete
 communication-gap report. It uses JobNimbus only. Gmail, Quo, and Google
 Calendar are returned as `not_evaluated` because the current connections do
-not prove company-wide, exact-file coverage. JobNimbus tasks, reminders,
-drafts, and system/automation records do not reset the gap. The sweep also does
-not inspect or infer the meaning of a note body; it ranks the latest eligible
-JobNimbus activity metadata it can verify.
+not prove company-wide, exact-file coverage. Counted JobNimbus activity-stream
+records for notes/comments, task lifecycle work, contact/status/field changes,
+uploads, documents/photos/forms/estimates, and supported communications reset
+the gap. Mutable task-object timestamps do not. Reminders, drafts, file views,
+queued/pending records, and system/automation/import/sync activity do not reset
+the gap. The sweep also does not inspect or infer the meaning of a note body; it
+ranks the latest eligible JobNimbus activity metadata it can verify. The source
+does not prove a human actor for every generic activity record, so the report
+must not be described as a human-attribution audit.
 
 Only reviewed activity kind/state combinations are allowlisted. Unknown,
-queued, draft, task-created, file-view, and other unsupported records never
+queued, draft, file-view, and other unsupported records never
 reset a gap. Their bounded aggregate counts remain visible, and any unsupported
 record makes the relevant file and the report explicitly partial even when all
 provider pages were fetched. Event counts describe the complete fetched

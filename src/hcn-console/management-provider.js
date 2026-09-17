@@ -56,6 +56,10 @@ const VERIFIED_COMMUNICATION_ATTEMPT_STATES = new Set([
   "undeliverable",
   "voicemail"
 ]);
+const VERIFIED_COMMUNICATION_RECORDED_STATES = new Set([
+  "logged",
+  "recorded"
+]);
 const VERIFIED_OPERATIONAL_KINDS = new Set([
   "appointment_completed",
   "appointment_rescheduled",
@@ -80,6 +84,73 @@ const VERIFIED_OPERATIONAL_KINDS = new Set([
   "supplement_submitted",
   "workflow_status_change"
 ]);
+const VERIFIED_HUMAN_TOUCH_KINDS = new Set([
+  ...VERIFIED_OPERATIONAL_KINDS,
+  "assigned_contact",
+  "attachment",
+  "attachment_added",
+  "attachment_deleted",
+  "attachment_updated",
+  "attachment_uploaded",
+  "comment",
+  "comment_added",
+  "contact_change",
+  "contact_changed",
+  "contact_created",
+  "contact_modified",
+  "contact_update",
+  "contact_updated",
+  "document",
+  "document_added",
+  "estimate",
+  "estimate_created",
+  "estimate_uploaded",
+  "field_change",
+  "field_changed",
+  "field_update",
+  "field_updated",
+  "file",
+  "file_added",
+  "file_uploaded",
+  "form",
+  "form_completed",
+  "form_submitted",
+  "form_updated",
+  "photo",
+  "photo_added",
+  "photo_deleted",
+  "photo_updated",
+  "photo_uploaded",
+  "related_to_task",
+  "task",
+  "task_completed",
+  "task_created",
+  "task_reassigned",
+  "task_update",
+  "task_updated",
+  "unassigned_contact"
+]);
+const VERIFIED_HUMAN_TOUCH_STATES = new Set([
+  "added",
+  "changed",
+  "completed",
+  "created",
+  "deleted",
+  "logged",
+  "recorded",
+  "received",
+  "reviewed",
+  "submitted",
+  "updated",
+  "uploaded"
+]);
+const VERIFIED_TASK_ACTIVITY_KINDS = new Set([
+  "task",
+  "task_completed",
+  "task_created",
+  "task_update",
+  "task_updated"
+]);
 const VERIFIED_OPERATIONAL_KIND_STATES = new Set([
   "appointment:completed",
   "appointment:rescheduled",
@@ -100,25 +171,42 @@ const EXPLICIT_NOISE_KINDS = new Set([
   "audit",
   "automation",
   "automated",
+  "automated_note",
   "import",
+  "imported",
+  "imported_activity",
   "integration",
+  "integration_event",
   "reminder",
+  "reminder_generated",
   "sync",
+  "synced",
   "system",
+  "system_generated",
+  "system_note",
   "system_sync"
 ]);
 const EXPLICIT_NOISE_STATES = new Set([
   "automated",
   "automation",
+  "import",
+  "imported",
+  "integration",
+  "reminder",
+  "sync",
+  "synced",
+  "system",
   "system_generated"
 ]);
 const UNSUPPORTED_ACTIVITY_STATES = new Set([
   "created",
   "draft",
+  "open",
   "opened",
   "pending",
   "queued",
   "scheduled",
+  "view",
   "viewed"
 ]);
 const ESTIMATING_STATUS_CODES = new Set(
@@ -398,8 +486,8 @@ function mapTask(task, providerFileId, adjusters) {
   const actorAdjusterId = exactActorAdjusterId(task, adjusters);
   return {
     evidenceId,
-    // JobNimbus task dates are not yet proven to be completion timestamps.
-    // A completed task therefore cannot reset a management activity gap.
+    // Mutable task records do not prove when a task lifecycle action happened.
+    // The gap uses immutable JobNimbus activity-stream Task records instead.
     event: null,
     openTask:
       completed || cancelled
@@ -435,9 +523,21 @@ function classifyActivity(kind, state) {
     if (VERIFIED_COMMUNICATION_ATTEMPT_STATES.has(state)) {
       return "contact_attempt";
     }
+    if (VERIFIED_COMMUNICATION_RECORDED_STATES.has(state)) {
+      return "operational";
+    }
     return "unsupported";
   }
   if (VERIFIED_OPERATIONAL_KIND_STATES.has(`${kind}:${state}`)) {
+    return "operational";
+  }
+  if (
+    VERIFIED_HUMAN_TOUCH_KINDS.has(kind)
+    && (
+      VERIFIED_HUMAN_TOUCH_STATES.has(state)
+      || (VERIFIED_TASK_ACTIVITY_KINDS.has(kind) && state === "open")
+    )
+  ) {
     return "operational";
   }
   if (UNSUPPORTED_ACTIVITY_STATES.has(state)) return "unsupported";
