@@ -5294,12 +5294,12 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
     stageCode: display.stageCode,
     lastTouch: lastAt
       ? {
-          summary: "Latest allowlisted JobNimbus activity record",
+          summary: "Latest counted JobNimbus work activity",
           at: lastAt,
           source: "jobnimbus"
         }
       : {
-          summary: "No verified JobNimbus activity was found",
+          summary: "No counted JobNimbus work activity was found; gap starts at file creation",
           at: "",
           source: "jobnimbus"
         },
@@ -5317,7 +5317,7 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
         hasEvidenceIssues
           ? "All JobNimbus activity pages were read, but "
             + `${evidenceIssues.join("; ")}; Gmail, Quo, and calendar were not evaluated.`
-          : "All JobNimbus activity pages were read; ranking uses only allowlisted activity types, and Gmail, Quo, and calendar were not evaluated."
+          : "All JobNimbus activity pages were read; ranking uses counted JobNimbus work-activity types, and Gmail, Quo, and calendar were not evaluated."
     },
     eventSummary: display.eventSummary
   };

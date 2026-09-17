@@ -220,12 +220,17 @@ Deliverables:
 - opaque HCN file and evidence references, ephemeral `no-store` responses, and
   no provider identifiers in the browser DTO.
 
-The ranking is activity-only. JobNimbus tasks, reminders, drafts, and
-system/automation activity are not touch evidence. The report does not inspect
-note-body meaning and must never be described as a verified successful-client-
-communication report. Only reviewed activity kind/state combinations reset a
-gap. Unsupported records are counted, excluded from ranking, and make the
-affected evidence and report visibly partial.
+The ranking is activity-only. Counted JobNimbus activity-stream records for
+notes/comments, task lifecycle work, contact/status/field changes,
+uploads, and supported communications are touch evidence. Mutable task-object
+timestamps are not. Reminders, drafts, file views, queued/pending records, and
+system/automation/import/sync activity are not touch evidence. The report does
+not inspect note-body meaning and must never be described as a verified
+successful-client-communication report. Only reviewed activity kind/state
+combinations reset a gap. Unsupported records are counted, excluded from
+ranking, and make the affected evidence and report visibly partial. Because
+generic provider records do not always prove the actor, this is a work-activity
+report rather than a human-attribution audit.
 
 Exit gate:
 

@@ -2369,7 +2369,7 @@ test("employee home stays simple while the 10 by 3 sweep remains capability-gate
   assert.match(html, /This first report uses JobNimbus activity only/);
   assert.match(
     html,
-    /longest verified\s+gap since a qualifying JobNimbus operational activity/
+    /longest verified\s+gap since the latest counted work activity in JobNimbus/
   );
   assert.match(html, /Company-wide Gmail,[\s\S]*Quo,[\s\S]*calendar communication evidence is not available/);
   assert.match(html, /delivery, export, delegation, and follow-up creation belong to[\s\S]*a later approval-gated phase/);
@@ -3156,16 +3156,16 @@ test("file evidence hides unavailable action controls", async () => {
   assert.match(script, /Actions are read only for this session/);
 });
 
-test("management sweep labels gaps as qualifying operational activity", async () => {
+test("management sweep labels gaps as counted JobNimbus work", async () => {
   const [htmlAsset, scriptAsset] = await Promise.all([
     readHcnConsoleAsset("/hcn/"),
     readHcnConsoleAsset("/hcn/app.js")
   ]);
   const html = htmlAsset.body.toString("utf8");
   const script = scriptAsset.body.toString("utf8");
-  assert.match(html, /gap since a qualifying JobNimbus operational activity/);
-  assert.match(html, /Longest qualifying operational-activity gaps/);
-  assert.match(script, /Last qualifying operational activity/);
+  assert.match(html, /gap since the latest counted work activity in JobNimbus/);
+  assert.match(html, /Longest JobNimbus work-activity gaps/);
+  assert.match(script, /Last counted JobNimbus work activity/);
   assert.doesNotMatch(script, /"Last JobNimbus touch"/);
 });
 

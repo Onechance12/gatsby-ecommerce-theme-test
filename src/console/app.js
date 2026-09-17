@@ -7328,14 +7328,14 @@
       ? explicitLastTouch
       : meaningfulTouch && meaningfulTouch.lastAt
         ? {
-            summary: "Meaningful JobNimbus activity",
+            summary: "Counted JobNimbus work activity",
             at: meaningfulTouch.lastAt,
             source: meaningfulTouch.source || "jobnimbus",
             actor: ""
           }
         : operationalTouch && operationalTouch.basis === "active_since"
           ? {
-              summary: "No verified JobNimbus operational event",
+              summary: "No counted JobNimbus work activity; gap starts at file creation",
               at: operationalTouch.sinceAt,
               source: "jobnimbus",
               actor: ""
@@ -7972,7 +7972,7 @@
 
     appendSweepDetail(
       details,
-      "Last qualifying operational activity",
+      "Last counted JobNimbus work activity",
       sweepNarrativeText(item.lastTouch)
     );
     appendSweepDetail(details, "Current blocker", item.blocker.summary);

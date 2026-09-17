@@ -4654,7 +4654,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   assert.equal(
     crossFileChanceItem.lastTouch.summary,
-    "No verified JobNimbus activity was found"
+    "No counted JobNimbus work activity was found; gap starts at file creation"
   );
   const crossFileCompanyItem = crossFileManagementSweep.companyWorst.find(
     (item) => item.fileRef === crossFileChanceItem.fileRef
@@ -4709,7 +4709,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(chanceManagementItem.gaps.operationalActivity.lastAt, null);
   assert.equal(
     chanceManagementItem.lastTouch.summary,
-    "No verified JobNimbus activity was found"
+    "No counted JobNimbus work activity was found; gap starts at file creation"
   );
   assert.equal(jobNimbusMutationRequests.length, 0);
 
