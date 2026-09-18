@@ -467,6 +467,13 @@ HP credential, shared bridge token, or broader operational Mac permission is
 used. An absent digest leaves this identity disabled. The regular Mac operator
 and all its existing restrictions remain unchanged.
 
+The sweep also reads the exact-file upload catalog because JobNimbus does not
+always emit an activity entry for an upload. A provider-created document/photo
+with a verified creator and creation time can reset the gap. Mutable update
+times and filename dates cannot. Draft, deleted, and explicitly automated
+uploads are excluded; missing provenance and cross-file uploads are flagged.
+The response carries per-file document counts and company-level limitations.
+
 `POST /hcn/api/v1/management-sweep` returns a fresh, ephemeral report containing
 up to ten active insurance files with the longest verified JobNimbus activity
 gap for each of exactly three configured adjusters, plus a company-wide
