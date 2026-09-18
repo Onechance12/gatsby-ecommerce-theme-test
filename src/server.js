@@ -136,6 +136,13 @@ import {
 import { assertStrongOAuthSessionSecret } from "./auth/oauth-secret.js";
 import { buildPlatformMeta, buildPlatformSession } from "./platform/metadata.js";
 import { readReleaseGates } from "./platform/release-gates.js";
+import { getBuildInfo } from "./platform/build-info.js";
+import {
+  createManagementReportAuthenticator,
+  isManagementReportIdentity,
+  MANAGEMENT_REPORT_ROUTES,
+  MANAGEMENT_REPORT_SESSION_ROUTE
+} from "./auth/hcn-management-report-auth.js";
 import {
   HCN_CONSOLE_SECURITY_HEADERS,
   isPublicHcnConsoleAsset,
@@ -338,6 +345,7 @@ const API_KEY = process.env.JOBNIMBUS_API_KEY || "";
 const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
+const authenticateManagementReport = createManagementReportAuthenticator(process.env);
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
 const HCN_ACTION_EXECUTION_ENABLED =
   RELEASE_GATES.HCN_ACTION_EXECUTION_ENABLED;
@@ -1280,6 +1288,7 @@ const routes = new Map([
   ["POST /hcn/api/v1/connectors/quo-line", hcnQuoLineLink],
   ["POST /hcn/api/v1/work-center", hcnReadWorkCenter],
   ["POST /hcn/api/v1/management-sweep", hcnReadManagementSweep],
+  [`GET ${MANAGEMENT_REPORT_SESSION_ROUTE}`, hcnManagementReportSession],
   ["POST /hcn/api/v1/closed-file-benchmark", hcnReadClosedFileBenchmark],
   ["POST /hcn/api/v1/file-review", hcnReadFile],
   ["POST /hcn/api/v1/assistant/conversations/list", hcnListAssistantConversations],
@@ -4778,6 +4787,26 @@ async function hcnReadManagementSweep(input = {}) {
   return withHcnReadAdmission(
     () => readHcnManagementSweep(input)
   );
+}
+
+function hcnManagementReportSession() {
+  const identity = currentRequestIdentity();
+  if (!isManagementReportIdentity(identity)) {
+    const error = new Error("The isolated management report identity is required.");
+    error.statusCode = 403;
+    throw error;
+  }
+  return {
+    schema: "hcn.management-report-session.v1",
+    ready: HCN_MANAGEMENT_ADJUSTERS.ready === true && hcnConsoleFreshReadConfigured(),
+    identity,
+    build: getBuildInfo(),
+    routes: [...MANAGEMENT_REPORT_ROUTES],
+    readOnly: true,
+    externalWrites: false,
+    configuredAdjusterCount: HCN_MANAGEMENT_ADJUSTERS.adjusters.length,
+    rankingMode: "jobnimbus_activity_only"
+  };
 }
 
 async function hcnReadClosedFileBenchmark(input = {}) {
@@ -11012,6 +11041,9 @@ function hcnPublicCompletedActions(result, operations, scope) {
 function assertHcnManagementSession() {
   const context = currentRequestAuthentication();
   const identity = currentRequestIdentity();
+  if (context?.authenticationMethod === "bearer" && isManagementReportIdentity(identity)) {
+    return { role: identity.role, subject: identity.subject, scope: identity.scopes[0] };
+  }
   if (
     context?.authenticationMethod === "bearer"
     && isCodexHpManagementSweepIdentity(identity)
@@ -11050,6 +11082,8 @@ async function withHcnReadAdmission(callback) {
           namespace: "hcn-console:fresh-read:session:v1",
           value: sessionId
         }
+      : context?.authenticationMethod === "bearer" && isManagementReportIdentity(identity)
+        ? { namespace: "hcn-console:fresh-read:management-report:v1", value: identity.subject }
       : (
           context?.authenticationMethod === "bearer"
           && isCodexHpManagementSweepIdentity(identity)
@@ -22229,6 +22263,8 @@ async function authenticateRequest(req) {
 async function authenticateBearerRequest(req) {
   const token = bearerToken(req);
   if (!token) return null;
+  const reportIdentity = authenticateManagementReport(token);
+  if (reportIdentity) return reportIdentity;
   if (BRIDGE_TOKEN && token === BRIDGE_TOKEN) {
     return {
       type: "bridge_token",

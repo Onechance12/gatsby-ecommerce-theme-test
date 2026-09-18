@@ -3152,6 +3152,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
       JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-bridge-token-for-ambiguity",
       CODEX_OPERATOR_TOKEN:
         "fixture-hcn-hp-operator-token-1234567890",
+      HCN_MANAGEMENT_REPORT_TOKEN_SHA256:
+        createHash("sha256").update("a".repeat(64)).digest("hex"),
       CODEX_MAC_OPERATOR_TOKEN:
         "fixture-hcn-mac-operator-token-1234567890",
       JOBNIMBUS_API_KEY: "hcn-jobnimbus-api-key",
@@ -4315,6 +4317,23 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
 
   const deniedManagementRequestsBefore =
     hcnProviderRequests.length;
+  const reportHeaders = { authorization: `Bearer ${"a".repeat(64)}`, "content-type": "application/json" };
+  const reportSessionResponse = await fetch(`${origin}/hcn/api/v1/management-report-session`, { headers: reportHeaders });
+  assert.equal(reportSessionResponse.status, 200);
+  const reportSession = await reportSessionResponse.json();
+  assert.equal(reportSession.ready, true);
+  assert.equal(reportSession.readOnly, true);
+  assert.equal(reportSession.externalWrites, false);
+  assert.equal(reportSession.identity.subject, "codex-mac-management-report");
+  assert.equal(reportSession.configuredAdjusterCount, 3);
+  assert.equal(hcnProviderRequests.length, deniedManagementRequestsBefore);
+  for (const route of ["/ops/action-batch", "/jobnimbus/create-note", "/gmail/send", "/claim-filing/call", "/hcn/api/v1/closed-file-benchmark"]) {
+    const denied = await fetch(`${origin}${route}`, { method: "POST", headers: reportHeaders, body: "{}" });
+    assert.equal(denied.status, 403, route);
+  }
+  const badReport = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: JSON.stringify({ limitPerAdjuster: 10, operatorScope: "company" }) });
+  assert.equal(badReport.status, 400);
+  assert.equal(hcnProviderRequests.length, deniedManagementRequestsBefore);
   for (const authorization of [
     "Bearer fixture-hcn-mac-operator-token-1234567890",
     "Bearer fixture-shared-bridge-token-for-ambiguity"
@@ -4340,6 +4359,16 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     jobNimbusMutationRequests.length,
     hpMutationRequestsBefore
   );
+
+  const macReportResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, {
+    method: "POST", headers: reportHeaders, body: JSON.stringify({ limitPerAdjuster: 10 })
+  });
+  assert.equal(macReportResponse.status, 200);
+  const macReport = await macReportResponse.json();
+  assert.equal(macReport.schema, "hcn.console.management-sweep.v1");
+  assert.equal(macReport.adjusters.length, 3);
+  assert.equal(macReport.summary.eligibleFileCount, hpManagementSweep.summary.eligibleFileCount);
+  assert.equal(jobNimbusMutationRequests.length, hpMutationRequestsBefore);
 
   const managementRequestsBefore = hcnProviderRequests.length;
   hcnManagementActivityFilters.length = 0;
