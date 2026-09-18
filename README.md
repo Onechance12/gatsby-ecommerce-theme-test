@@ -455,6 +455,18 @@ memory, model advisories, or any persistence layer.
 
 ### Three-adjuster JobNimbus activity-gap sweep
 
+The Mac plugin can also use the dedicated **report-only** identity
+`codex-mac-management-report`. Configure `HCN_MANAGEMENT_REPORT_TOKEN_SHA256`
+with the SHA-256 of a separate 32-byte lowercase-hex credential; keep its original
+only in macOS Keychain (`com.wavepa.hcn-management-report` / `codex-mac-management-report`).
+It admits exactly `GET /hcn/api/v1/management-report-session` and the existing
+`POST /hcn/api/v1/management-sweep`. The session attests readiness, build, exact
+identity and route set. It cannot read individual files, invoke models, send,
+call, upload, create notes/tasks, or execute approval batches. No Google login,
+HP credential, shared bridge token, or broader operational Mac permission is
+used. An absent digest leaves this identity disabled. The regular Mac operator
+and all its existing restrictions remain unchanged.
+
 `POST /hcn/api/v1/management-sweep` returns a fresh, ephemeral report containing
 up to ten active insurance files with the longest verified JobNimbus activity
 gap for each of exactly three configured adjusters, plus a company-wide
@@ -470,7 +482,7 @@ ranking. Its request body may contain only:
 `10`. Browser access requires an explicitly provisioned HCN management role
 (`chance`, `administrator`, or `manager`), the exact console origin, the
 session CSRF value, and the `hcn.management_sweep.read` capability. The
-dedicated HP Codex operator is the only bearer-token exception: its immutable
+dedicated HP Codex operator is the existing operational bearer-token exception: its immutable
 `codex-hp-operator` identity must carry the separate
 `management_sweep:read` scope. The Mac operator, shared bridge token, other
 Codex identities, and general employee sessions remain denied. This exception

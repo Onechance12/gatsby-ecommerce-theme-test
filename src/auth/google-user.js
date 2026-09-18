@@ -2,6 +2,7 @@ import {
   fetchBoundedProviderJson,
   resolveGoogleProviderEndpoint
 } from "./google-provider-http.js";
+import { isManagementReportIdentity, MANAGEMENT_REPORT_ROUTES, MANAGEMENT_REPORT_SESSION_ROUTE } from "./hcn-management-report-auth.js";
 
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
@@ -391,6 +392,10 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (identity.type === "hcn_management_report_token") {
+    return isManagementReportIdentity(identity) && MANAGEMENT_REPORT_ROUTES.includes(route);
+  }
+  if (pathname === MANAGEMENT_REPORT_SESSION_ROUTE) return false;
   const hcnRoles = HCN_BROWSER_ROUTE_ROLES.get(route);
   if (hcnRoles) {
     return (
