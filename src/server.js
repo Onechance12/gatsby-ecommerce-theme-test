@@ -137,6 +137,7 @@ import { assertStrongOAuthSessionSecret } from "./auth/oauth-secret.js";
 import { buildPlatformMeta, buildPlatformSession } from "./platform/metadata.js";
 import { readReleaseGates } from "./platform/release-gates.js";
 import { getBuildInfo } from "./platform/build-info.js";
+import { managementDocumentActivities } from "./hcn-console/management-documents.js";
 import {
   createManagementReportAuthenticator,
   isManagementReportIdentity,
@@ -5044,7 +5045,8 @@ async function readHcnManagementSweep(input = {}) {
       jobNumber: file.jobNumber,
       statusCode: file.statusCode,
       stageCode: file.stageCode,
-      eventSummary: file.eventSummary
+      eventSummary: file.eventSummary,
+      documentSummary: file.documentSummary
     });
     return {
       fileRef,
@@ -5101,10 +5103,15 @@ async function readHcnManagementSweep(input = {}) {
         ),
       0
     );
+  const uncertainDocumentCount = snapshot.data.files.reduce((n, file) => n + Number(file.documentSummary?.uncertain || 0), 0);
+  const ambiguousDocumentCount = snapshot.data.files.reduce((n, file) => n + Number(file.documentSummary?.ambiguous || 0), 0);
+  const countedDocumentCount = snapshot.data.files.reduce((n, file) => n + Number(file.documentSummary?.counted || 0), 0);
   const completenessStatus =
     ambiguousOwnerCount > 0
     || unsupportedActivityRecordCount > 0
     || ambiguousActivityReferenceCount > 0
+    || uncertainDocumentCount > 0
+    || ambiguousDocumentCount > 0
       ? "partial"
       : "complete";
   const completenessDetails = [];
@@ -5127,10 +5134,13 @@ async function readHcnManagementSweep(input = {}) {
       + " pointed to multiple eligible files and were conservatively excluded"
     );
   }
+  if (uncertainDocumentCount || ambiguousDocumentCount) {
+    completenessDetails.push(`${uncertainDocumentCount} uploads lacked a verified creator or creation time and ${ambiguousDocumentCount} uploads had ambiguous file links; these did not reset gaps`);
+  }
   const completenessSummary = completenessDetails.length
-    ? "Complete per-file JobNimbus histories were read, but "
+    ? "Complete per-file JobNimbus activity and upload histories were read, but "
       + `${completenessDetails.join("; ")}.`
-    : "Every eligible configured-owner file was checked with complete per-file JobNimbus activity reads.";
+    : "Every eligible configured-owner file was checked with complete per-file JobNimbus activity and upload reads.";
 
   const response = {
     schema: sweep.schemaVersion,
@@ -5153,7 +5163,10 @@ async function readHcnManagementSweep(input = {}) {
     summary: {
       ...sweep.summary,
       unsupportedActivityRecordCount,
-      ambiguousActivityReferenceCount
+      ambiguousActivityReferenceCount,
+      countedDocumentCount,
+      uncertainDocumentCount,
+      ambiguousDocumentCount
     },
     sourceHealth: [
       {
@@ -5305,6 +5318,10 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
       + " conservatively excluded"
     );
   }
+  const documentSummary = display.documentSummary || { fetched: 0, counted: 0, excluded: 0, uncertain: 0, ambiguous: 0 };
+  if (documentSummary.uncertain || documentSummary.ambiguous) {
+    evidenceIssues.push(`${documentSummary.uncertain} uncertain and ${documentSummary.ambiguous} cross-file uploads did not reset this gap`);
+  }
   const hasEvidenceIssues = evidenceIssues.length > 0;
   return {
     ...item,
@@ -5345,10 +5362,11 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
       summary:
         hasEvidenceIssues
           ? "All JobNimbus activity pages were read, but "
-            + `${evidenceIssues.join("; ")}; Gmail, Quo, and calendar were not evaluated.`
-          : "All JobNimbus activity pages were read; ranking uses counted JobNimbus work-activity types, and Gmail, Quo, and calendar were not evaluated."
+            + `${evidenceIssues.join("; ")}; upload metadata was also checked. Gmail, Quo, and calendar were not evaluated.`
+          : "All JobNimbus activity and upload pages were read; ranking uses verified work and upload creation times. Gmail, Quo, and calendar were not evaluated."
     },
-    eventSummary: display.eventSummary
+    eventSummary: display.eventSummary,
+    documentSummary
   };
 }
 
@@ -17139,20 +17157,21 @@ async function loadHcnManagementJobNimbusSnapshot({
     HCN_MANAGEMENT_READ_CONCURRENCY,
     async (file) => {
       let result;
+      let documents;
       try {
-        result = await listHcnExactFileActivitiesComplete(
-          file.providerFileId,
-          { requestBudget: providerReadBudget }
-        );
+        [result, documents] = await Promise.all([
+          listHcnExactFileActivitiesComplete(file.providerFileId, { requestBudget: providerReadBudget }),
+          listHcnResourceComplete("/files", { maxRecords: 5000, relatedContactId: file.providerFileId, requestBudget: providerReadBudget })
+        ]);
       } catch (error) {
         if (error?.code === "hcn_management_source_unavailable") throw error;
         throw hcnManagementSourceUnavailable(
           "One or more JobNimbus activity histories are unavailable."
         );
       }
-      if (!result.complete) {
+      if (!result.complete || !documents.complete) {
         throw hcnManagementSourceUnavailable(
-          "One or more JobNimbus activity histories are incomplete."
+          "One or more JobNimbus activity or document histories are incomplete."
         );
       }
       const unambiguousRows = [];
@@ -17183,6 +17202,11 @@ async function loadHcnManagementJobNimbusSnapshot({
         );
       }
       try {
+        const documentEvidence = managementDocumentActivities(documents.rows, {
+          fileId: file.providerFileId,
+          knownFileIds: new Set(contactsById.keys()),
+          asOf: freshness.asOf
+        });
         const mapped = mapManagementJobNimbusEnvelope({
           contacts: [contact],
           activities: unambiguousRows,
@@ -17200,7 +17224,7 @@ async function loadHcnManagementJobNimbusSnapshot({
             event.classification
           )
         );
-        const latestEvent = accepted.reduce((latest, event) => {
+        const latestEvent = [...accepted, ...documentEvidence.events].reduce((latest, event) => {
           if (!latest) return event;
           const occurred =
             Date.parse(event.occurredAt) - Date.parse(latest.occurredAt);
@@ -17216,6 +17240,7 @@ async function loadHcnManagementJobNimbusSnapshot({
         return {
           providerFileId: file.providerFileId,
           latestEvent,
+          documentSummary: documentEvidence.summary,
           eventSummary: {
             fetchedEventCount: result.rows.length,
             acceptedEventCount: accepted.length,
@@ -17268,6 +17293,7 @@ async function loadHcnManagementJobNimbusSnapshot({
       complete: true,
       files: initial.data.files.map((file) => ({
         ...file,
+        documentSummary: evidenceByProviderFileId.get(file.providerFileId)?.documentSummary,
         eventSummary:
           evidenceByProviderFileId.get(file.providerFileId)?.eventSummary
           || {

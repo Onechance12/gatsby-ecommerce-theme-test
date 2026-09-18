@@ -2438,6 +2438,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   let serveUnknownContactsWrapper = false;
   let ambiguousManagementReferenceId = "";
   let managementActivityOverride = null;
+  let managementDocumentOverride = null;
   let serveWrongManagementReferenceField = false;
   let hcnBoundedHistoryMode = false;
   let hcnDisjointActivityOverflowMode = false;
@@ -2879,16 +2880,20 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/files" && req.method === "GET") {
       assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      const fileFilter = JSON.parse(url.searchParams.get("filter") || "{}");
+      const requestedFile = fileFilter?.must?.[0]?.term?.["related.id"] || exactFileId;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        files: [{
+        files: requestedFile !== exactFileId ? [] : [{
           jnid: "jn-document-1",
           related: { id: exactFileId },
           name: "Settlement Estimate.pdf",
           record_type_name: "Carrier Document",
           content_type: "application/pdf",
           status_name: "New",
-          date_created: "2026-07-27T13:00:00.000Z"
+          date_created: "2026-07-27T13:00:00.000Z",
+          is_automated: true,
+          ...(managementDocumentOverride || {})
         }]
       }));
       return;
@@ -3124,7 +3129,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
           displayName: "Third Fixture Adjuster"
         }
       ]),
-      HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET: "7",
+      HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET: "10",
       OAUTH_SESSION_SECRET: "hcn-session-sealing-secret-for-tests",
       GPT_OAUTH_CLIENT_SECRET: "",
       WAVE_AUTH_USERS_JSON: JSON.stringify([
@@ -4368,6 +4373,18 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(macReport.schema, "hcn.console.management-sweep.v1");
   assert.equal(macReport.adjusters.length, 3);
   assert.equal(macReport.summary.eligibleFileCount, hpManagementSweep.summary.eligibleFileCount);
+  assert.equal(jobNimbusMutationRequests.length, hpMutationRequestsBefore);
+
+  managementDocumentOverride = { is_automated: false, created_by: chanceOwnerId, date_created: "2026-08-01T13:00:00.000Z" };
+  const uploadReportResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, {
+    method: "POST", headers: reportHeaders, body: JSON.stringify({ limitPerAdjuster: 10 })
+  });
+  managementDocumentOverride = null;
+  assert.equal(uploadReportResponse.status, 200);
+  const uploadReport = await uploadReportResponse.json();
+  assert.equal(uploadReport.adjusters[0].items[0].gaps.operationalActivity.lastAt, "2026-08-01T13:00:00.000Z");
+  assert.equal(uploadReport.adjusters[0].items[0].documentSummary.counted, 1);
+  assert.equal(uploadReport.summary.countedDocumentCount, 1);
   assert.equal(jobNimbusMutationRequests.length, hpMutationRequestsBefore);
 
   const managementRequestsBefore = hcnProviderRequests.length;
