@@ -786,6 +786,14 @@ const server = createServer(async (req, res) => {
         return res.end(consoleAsset.body);
       }
     }
+    // Public /health returns only liveness; full operational metadata (config
+    // flags, operator identities, run-policy counts) requires the bridge token
+    // so the service posture is not enumerable by anonymous callers.
+    if (req.method === "GET" && url.pathname === "/health") {
+      return send(res, 200, authorized(req)
+        ? health()
+        : { ok: true, service: "jobnimbus-chatgpt-bridge" });
+    }
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
     if (url.pathname.startsWith("/artifacts/") && (!BRIDGE_TOKEN || !authorized(req))) {
@@ -16600,7 +16608,7 @@ function googleAccessConfiguredForRequest() {
 }
 
 function isPublicRoute(method, pathname) {
-  return (method === "GET" && ["/health", "/api/v1/meta", "/openapi.json", "/openapi-chatgpt.json", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
+  return (method === "GET" && ["/health", "/privacy", "/handoff", "/voice/twiml"].includes(pathname))
     || (method === "POST" && ["/handoff", "/handoff/chunk"].includes(pathname));
 }
 
