@@ -134,6 +134,7 @@ import {
   resolveGoogleProviderEndpoint
 } from "./auth/google-provider-http.js";
 import { assertStrongOAuthSessionSecret } from "./auth/oauth-secret.js";
+import { checkHcnGmailHealth } from "./auth/hcn-google-health.js";
 import { buildPlatformMeta, buildPlatformSession } from "./platform/metadata.js";
 import { readReleaseGates } from "./platform/release-gates.js";
 import { getBuildInfo } from "./platform/build-info.js";
@@ -3583,6 +3584,18 @@ async function hcnConnectorStatus(input = {}) {
           calendarLinked ? "connected" : "not_connected",
         connectUrl: "/hcn/connect/google/start"
       };
+      if (gmailLinked) {
+        const health = await checkHcnGmailHealth({
+          getAccessToken: () => getHcnGoogleAccessToken(),
+          email: principal.email,
+          readProfile: (token) => fetchBoundedJson(fetch,
+            `${GMAIL_API_BASE_URL}/gmail/v1/users/me/profile`,
+            { headers: { authorization: `Bearer ${token}`, accept: "application/json" } },
+            { timeoutMs: 5_000, maxBytes: 4096, errorCode: "HCN_GMAIL_HEALTH_FAILED" })
+        });
+        google = { ...google, ...health,
+          status: health.gmail === "connected" ? google.status : health.gmail };
+      }
     } catch {
       // Keep the entire connector unavailable when encrypted status cannot
       // be authenticated. Never infer a link from provider configuration.
