@@ -3566,6 +3566,55 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     scope: "assigned"
   });
 
+  // The app entry preserves its destination through a fresh browser sign-in,
+  // then the existing, separate mailbox consent. No HCN workspace detour.
+  const appEntry = `${origin}/hcn/connect/google/jobrolo?email=chance%40wavepa.com`;
+  const entry = await fetch(appEntry, { redirect: "manual" });
+  assert.equal(entry.status, 302);
+  const journeyCookie = entry.headers.getSetCookie()[0].split(";", 1)[0];
+  assert.match(journeyCookie, /^__Host-hcn_jobrolo_google=1$/);
+  const appLogin = await fetch(new URL(entry.headers.get("location"), origin), { redirect: "manual" });
+  const appLoginCookie = appLogin.headers.getSetCookie()[0].split(";", 1)[0];
+  const appLoginAuthorize = new URL(appLogin.headers.get("location"));
+  assert.equal(appLoginAuthorize.searchParams.get("scope"), "openid email profile");
+  const appLoginCallback = await fetch(`${origin}/oauth/google/callback?${new URLSearchParams({
+    code: "hcn-google-code-second-session", state: appLoginAuthorize.searchParams.get("state")
+  })}`, { redirect: "manual", headers: { cookie: `${appLoginCookie}; ${journeyCookie}` } });
+  assert.match(appLoginCallback.headers.get("location"), /^\/hcn\/connect\/google\/jobrolo\?/);
+  const appSessionCookie = appLoginCallback.headers.getSetCookie().find(cookie => cookie.startsWith("__Host-hcn_session=")).split(";", 1)[0];
+  const appHeaders = { cookie: `${appSessionCookie}; ${journeyCookie}` };
+  const appConsent = await fetch(new URL(appLoginCallback.headers.get("location"), origin), { redirect: "manual", headers: appHeaders });
+  const appConsentAuthorize = new URL(appConsent.headers.get("location"));
+  assert.equal(appConsentAuthorize.origin, "https://accounts.google.com");
+  assert.equal(appConsentAuthorize.searchParams.get("scope"), hcnConnectorScopeText);
+  assert.equal(appConsentAuthorize.searchParams.get("access_type"), "offline");
+  const appConsentCallback = await fetch(`${origin}/oauth/google/callback?${new URLSearchParams({
+    code: "hcn-google-connector-code", state: appConsentAuthorize.searchParams.get("state")
+  })}`, { redirect: "manual", headers: appHeaders });
+  assert.equal(appConsentCallback.headers.get("location"), "/hcn/connect/google/jobrolo/return?google=connected");
+  const appReturn = await fetch(new URL(appConsentCallback.headers.get("location"), origin), { redirect: "manual", headers: appHeaders });
+  assert.equal(appReturn.headers.get("location"), "https://jobrolo.com/app/home?gmail=returned");
+  assert.match(appReturn.headers.getSetCookie()[0], /Max-Age=0/);
+  assert.doesNotMatch(appReturn.headers.get("location"), /token|code=|email|subject/);
+  const beforeAppErrors = providerRequests.length;
+  const wrongAccount = await fetch(`${origin}/hcn/connect/google/jobrolo?email=adjuster%40wavepa.com&afterLogin=1`,
+    { redirect: "manual", headers: appHeaders });
+  assert.equal(wrongAccount.headers.get("location"), "https://jobrolo.com/app/home?gmail=account_mismatch");
+  const switchAccount = await fetch(`${origin}/hcn/connect/google/jobrolo?email=adjuster%40wavepa.com`,
+    { redirect: "manual", headers: appHeaders });
+  assert.match(switchAccount.headers.get("location"), /^\/hcn\/auth\/login\?/);
+  const cancelBegin = await fetch(appEntry, { redirect: "manual", headers: appHeaders });
+  const cancelState = new URL(cancelBegin.headers.get("location")).searchParams.get("state");
+  const cancelled = await fetch(`${origin}/oauth/google/callback?${new URLSearchParams({ state: cancelState, error: "access_denied" })}`,
+    { redirect: "manual", headers: appHeaders });
+  const cancelledReturn = await fetch(new URL(cancelled.headers.get("location"), origin), { redirect: "manual", headers: appHeaders });
+  assert.equal(cancelledReturn.headers.get("location"), "https://jobrolo.com/app/home?gmail=cancelled");
+  const replay = await fetch(`${origin}/oauth/google/callback?${new URLSearchParams({ state: cancelState, code: "ignored" })}`,
+    { redirect: "manual", headers: appHeaders });
+  assert.equal(replay.headers.get("location"), "https://jobrolo.com/app/home?gmail=failed");
+  assert.equal(providerRequests.length, beforeAppErrors);
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
   const connectorStartResponse = await fetch(
     `${origin}/hcn/connect/google/start`,
     {
@@ -5665,7 +5714,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const publicSignInStyle = await fetch(`${origin}/hcn/sign-in.css?shell=v15`);
   assert.equal(publicSignInStyle.status, 200);
 
-  for (let index = 0; index < 3; index += 1) {
+  // The Jobrolo round trip above consumes one additional login admission.
+  for (let index = 0; index < 2; index += 1) {
     const retryLogin = await fetch(`${origin}/hcn/auth/login`, {
       redirect: "manual"
     });

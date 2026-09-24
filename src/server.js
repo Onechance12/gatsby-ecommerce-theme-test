@@ -8,6 +8,11 @@ import path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 
 import {
+  HCN_JOBROLO_GOOGLE_START, HCN_JOBROLO_GOOGLE_RETURN, HCN_JOBROLO_GOOGLE_COOKIE,
+  jobroloGoogleDestination, jobroloGoogleCookie, parseJobroloGoogleStart,
+  jobroloGoogleLoginPath
+} from "./auth/jobrolo-google-journey.js";
+import {
   analyzeClaimCall,
   assertApprovalDigest,
   buildClaimFilingPlan,
@@ -1420,6 +1425,18 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     requestPathname = url.pathname;
+    if (HCN_CONSOLE_ENABLED && req.method === "GET"
+      && url.pathname === HCN_JOBROLO_GOOGLE_START) {
+      return jobroloGoogleStart(req, res, url);
+    }
+    if (HCN_CONSOLE_ENABLED && req.method === "GET"
+      && url.pathname === HCN_JOBROLO_GOOGLE_RETURN) {
+      // A URL outcome is never proof of mailbox access. Jobrolo rechecks the
+      // live actor-bound Gmail profile after returning to its own session.
+      const outcome = url.searchParams.get("google");
+      return sendJobroloGoogleReturn(res, outcome === "connected" ? "returned"
+        : outcome === "cancelled" ? "cancelled" : "failed");
+    }
     if (req.method === "GET" && url.pathname === "/oauth/authorize") return oauthAuthorize(res, url);
     if (req.method === "GET" && url.pathname === "/oauth/google/callback") {
       return oauthGoogleCallback(req, res, url);
@@ -3155,6 +3172,8 @@ async function oauthGoogleCallback(req, res, url) {
       }
       return oauthHcnConsoleCallback(req, res, url, sealedState);
     } catch (error) {
+      if (isJobroloGoogleJourney(req)) return sendJobroloGoogleReturn(res, "failed",
+        [clearHcnLoginCookie(), clearHcnInvitationCookie()]);
       return redirectHcnOAuthFailure(
         res,
         "auth",
@@ -3264,6 +3283,10 @@ async function oauthHcnConsoleCallback(req, res, url, sealedState) {
     });
     res.end();
   } catch (error) {
+    if (isJobroloGoogleJourney(req)) {
+      return sendJobroloGoogleReturn(res, url.searchParams.get("error") === "access_denied" ? "cancelled" : "failed",
+        [clearHcnLoginCookie(), clearHcnInvitationCookie()]);
+    }
     redirectHcnOAuthFailure(
       res,
       "auth",
@@ -3488,11 +3511,53 @@ async function oauthHcnGoogleConnectorCallback(
     });
     res.end();
   } catch (error) {
+    if (isJobroloGoogleJourney(req)) return sendJobroloGoogleReturn(res, "failed");
     redirectHcnOAuthFailure(res, "google", error);
   }
 }
 
-async function hcnGoogleConnectorStart() {
+function isJobroloGoogleJourney(req) {
+  try { return readHcnCookie(req.headers.cookie, HCN_JOBROLO_GOOGLE_COOKIE) === "1"; }
+  catch { return false; }
+}
+
+function sendJobroloGoogleReturn(res, outcome, cookies = []) {
+  res.writeHead(302, { ...hcnNoStoreSecurityHeaders(), vary: "Cookie, Authorization",
+    location: jobroloGoogleDestination(outcome), "set-cookie": [...cookies, jobroloGoogleCookie(true)] });
+  res.end();
+}
+
+async function jobroloGoogleStart(req, res, url) {
+  try {
+    const requested = parseJobroloGoogleStart(url);
+    const authentication = await authenticateRequest(req);
+    const signedIn = authentication?.authenticationMethod === "hcn_cookie"
+      && authentication.identity?.type === "hcn_browser_session";
+    const sameEmail = signedIn
+      && authentication.identity.email?.toLowerCase() === requested.email;
+    if (!sameEmail) {
+      if (requested.afterLogin) return sendJobroloGoogleReturn(res, "account_mismatch");
+      res.writeHead(302, { ...hcnNoStoreSecurityHeaders(), vary: "Cookie, Authorization",
+        location: jobroloGoogleLoginPath(requested.email), "set-cookie": jobroloGoogleCookie() });
+      return res.end();
+    }
+    // The email query is only an account-selection guard, not authority. The
+    // existing cookie, role, fresh employee pin and immutable Google subject
+    // authorize the grant; no Jobrolo bearer or provider token crosses here.
+    if (!routeAllowed(authentication.identity, "GET", "/hcn/connect/google/start")) {
+      return sendJobroloGoogleReturn(res, "failed");
+    }
+    assertHcnCookieRequestSafety(req, authentication);
+    const result = await REQUEST_CONTEXT.run(authentication,
+      () => hcnGoogleConnectorStart({ jobroloReturn: true }));
+    res.writeHead(result.status, { ...result.headers, "set-cookie": jobroloGoogleCookie() });
+    res.end();
+  } catch {
+    return sendJobroloGoogleReturn(res, "failed");
+  }
+}
+
+async function hcnGoogleConnectorStart({ jobroloReturn = false } = {}) {
   const principal = assertHcnAssignedReadSession();
   if (!hcnGoogleConnectorOAuthConfigured()) {
     const error = new Error(
@@ -3508,7 +3573,7 @@ async function hcnGoogleConnectorStart() {
           "google-connector-oauth:v1"
         ),
         googleSubject: principal.googleSubject,
-        returnTo: "/hcn/"
+        returnTo: jobroloReturn ? HCN_JOBROLO_GOOGLE_RETURN : "/hcn/"
       })
   );
   return httpResponse(302, {
@@ -3643,6 +3708,8 @@ async function jobroloHcnStatus(input = {}) {
   const approvedEffects = jobroloGeneralApprovedEffectsActive();
   return Object.freeze({
     ...connectors,
+    google: { ...connectors.google,
+      jobroloConnectSupported: HCN_CONSOLE_ENABLED && hcnGoogleConnectorOAuthConfigured() },
     adapter: Object.freeze({
       status: HCN_JOBROLO_CONFIGURATION.ready ? "connected" : "unavailable",
       principalMode: "fixed_server_side",
