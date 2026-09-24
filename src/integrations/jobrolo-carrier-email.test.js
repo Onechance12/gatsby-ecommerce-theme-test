@@ -368,6 +368,12 @@ test("carrier HTTP facade drafts, sends, reads back, and never retries uncertain
     }
     if (
       req.method === "GET"
+      && url.pathname === "/gmail/v1/users/me/profile"
+    ) {
+      return carrierJson(res, 200, { emailAddress: principalEmail });
+    }
+    if (
+      req.method === "GET"
       && url.pathname === "/gmail/v1/users/me/messages"
     ) {
       return carrierJson(res, 200, {
@@ -563,7 +569,7 @@ test("carrier HTTP facade drafts, sends, reads back, and never retries uncertain
     { contract: JOBROLO_HCN_CARRIER_EMAIL_CONTRACT }
   );
   assert.equal(status.response.status, 200, status.text);
-  assert.equal(status.body.result.ready, true);
+  assert.equal(status.body.result.ready, true, JSON.stringify(status.body.result));
   assert.equal(status.body.result.draft.providerReadbackRequired, true);
   assert.equal(status.body.result.send.sentReadbackRequired, true);
 
