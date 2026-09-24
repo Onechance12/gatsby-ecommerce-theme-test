@@ -2492,6 +2492,12 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
 
   const fakeGoogle = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeGooglePort}`);
+    if (url.pathname === "/gmail/v1/users/me/profile" && req.method === "GET") {
+      const employee = String(req.headers.authorization).includes("hcn-employee-");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ emailAddress: employee ? "adjuster@wavepa.com" : "chance@wavepa.com" }));
+      return;
+    }
     if (url.pathname === "/revoke" && req.method === "POST") {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
@@ -3692,6 +3698,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     status: "connected",
     gmail: "connected",
     calendar: "connected",
+    verification: "live",
+    reason: "verified",
     connectUrl: "/hcn/connect/google/start"
   });
   const serializedConnectedStatus =
@@ -5251,6 +5259,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     status: "connected",
     gmail: "connected",
     calendar: "connected",
+    verification: "live",
+    reason: "verified",
     connectUrl: "/hcn/connect/google/start"
   });
   assert.equal(
