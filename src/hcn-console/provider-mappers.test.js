@@ -76,7 +76,9 @@ test('mapper boundary has no persistence, memory, Brain, Jobrolo, or server impo
     ),
   ].map((match) => match[1].toLowerCase());
 
-  assert.deepEqual(imports, []);
+  assert.deepEqual(imports, ['./communication-coverage.js']);
+  const coverage = await readFile(new URL('./communication-coverage.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(coverage, /\b(?:import|require|fetch|process|globalThis)\s*(?:\(|\.|["'{*])/);
   for (const forbidden of [
     'memory',
     'brain',
@@ -1523,6 +1525,7 @@ test('Quo mapper normalizes call/text aliases without exposing participants, lin
   const result = mapScopedQuoEnvelope(
     {
       ...FRESHNESS,
+      limitations: ['homeowner_phone_only', 'call_transcripts_not_reviewed', 'private-carrier-name'],
       scope: {
         providerFileId: FILE_ID,
         exactFileMatch: true,
@@ -1555,6 +1558,7 @@ test('Quo mapper normalizes call/text aliases without exposing participants, lin
   );
 
   assert.equal(result.data.items[0].channel, 'call');
+  assert.deepEqual(result.data.limitations, ['homeowner_phone_only', 'call_transcripts_not_reviewed']);
   assert.equal(result.data.items[0].direction, 'inbound');
   assert.equal(result.data.items[0].actionState, 'needs_reply');
   assert.equal(Array.from(result.data.items[0].preview).length, 240);

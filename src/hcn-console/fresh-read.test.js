@@ -186,7 +186,9 @@ test("module has no persistence, memory, Brain, or Jobrolo import boundary", asy
     )
   ].map((match) => match[1].toLowerCase());
 
-  assert.deepEqual(imports, []);
+  assert.deepEqual(imports, ["./communication-coverage.js"]);
+  const coverage = await readFile(new URL("./communication-coverage.js", import.meta.url), "utf8");
+  assert.doesNotMatch(coverage, /\b(?:import|require|fetch|process|globalThis)\s*(?:\(|\.|["'{*])/);
   for (const forbidden of ["memory", "brain", "jobrolo", "server.js"]) {
     assert.equal(
       imports.some((specifier) => specifier.includes(forbidden)),
@@ -1016,6 +1018,7 @@ test("employee Google refresh distinguishes invalid grants from provider/config 
 test("proved exact optional evidence remains visible when provider pagination is partial", async () => {
   const partial = gmailSuccess();
   partial.data.complete = false;
+  partial.data.limitations = ["bounded_identifier_search", "private-provider-value"];
   const result = await createService({
     dependencies: {
       loadGmailFile: async () => partial
@@ -1028,6 +1031,7 @@ test("proved exact optional evidence remains visible when provider pagination is
   assert.equal(result.sources.gmail.status, "fresh");
   assert.equal(result.sources.gmail.completeness, "partial");
   assert.equal(result.sources.gmail.failureCode, "source_partial");
+  assert.deepEqual(result.sources.gmail.limitations, ["bounded_identifier_search"]);
   assert.equal(result.recent.gmail.length, 1);
   assert.equal(result.evidenceStatus, "partial");
 });

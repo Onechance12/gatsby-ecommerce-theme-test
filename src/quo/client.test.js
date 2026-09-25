@@ -695,6 +695,72 @@ test("Quo inbox discovers recent conversations before reading incoming calls and
   }
 });
 
+test("Quo inbox honors explicit transcript limits and preserves bounded defaults", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const transcriptIds = [];
+  const calls = Array.from({ length: 26 }, (_, index) => ({
+    id: `CALL_${index}`,
+    createdAt: new Date(Date.now() - index * 1000).toISOString(),
+    direction: "incoming",
+    status: "completed",
+    duration: 30,
+    participants: ["+12145550199"]
+  }));
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.origin, "https://api.quo.test");
+    if (parsed.pathname === "/v1/phone-numbers") {
+      return jsonResponse(200, { data: [{
+        id: "PN_fixture", number: "+12145550100"
+      }] });
+    }
+    if (parsed.pathname === "/v1/conversations") {
+      return jsonResponse(200, { data: [{
+        id: "CN_fixture", phoneNumberId: "PN_fixture",
+        participants: ["+12145550199"]
+      }] });
+    }
+    if (parsed.pathname === "/v1/messages") return jsonResponse(200, { data: [] });
+    if (parsed.pathname === "/v1/calls") return jsonResponse(200, { data: calls });
+    if (parsed.pathname.startsWith("/v1/call-transcripts/")) {
+      transcriptIds.push(parsed.pathname.split("/").pop());
+      return jsonResponse(200, { data: {
+        status: "completed",
+        dialogue: [{ content: "Synthetic call transcript." }]
+      } });
+    }
+    assert.fail(`Unexpected synthetic Quo request: ${parsed.pathname}`);
+  };
+  try {
+    for (const [name, input, expected] of [
+      ["explicit zero disables hydration", { transcriptLimit: 0 }, 0],
+      ["omitted limit defaults to twelve", {}, 12],
+      ["null retains default behavior", { transcriptLimit: null }, 12],
+      ["positive limit", { transcriptLimit: 2 }, 2],
+      ["numeric string limit", { transcriptLimit: "2" }, 2],
+      ["fractional limit remains truncated", { transcriptLimit: 2.9 }, 2],
+      ["oversized limit remains capped", { transcriptLimit: 100 }, 25],
+      ["negative limit disables hydration", { transcriptLimit: -1 }, 0],
+      ["invalid string disables hydration", { transcriptLimit: "invalid" }, 0],
+      ["non-finite limit disables hydration", { transcriptLimit: Infinity }, 0],
+      ["NaN disables hydration", { transcriptLimit: NaN }, 0]
+    ]) {
+      await t.test(name, async () => {
+        transcriptIds.length = 0;
+        const result = await readQuoInbox({
+          apiKey: "fixture", baseUrl: "https://api.quo.test/v1"
+        }, input);
+        assert.equal(result.items.length, calls.length);
+        assert.equal(transcriptIds.length, expected);
+        assert.deepEqual(transcriptIds, calls.slice(0, expected).map((call) => call.id));
+        assert.equal(result.items.filter((item) => item.transcript).length, expected);
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Quo inbox reports partial results instead of silently hiding line failures", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
