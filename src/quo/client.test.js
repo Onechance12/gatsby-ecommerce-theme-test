@@ -39,6 +39,11 @@ test("Quo history reads matching communication across every team line", async ()
     assert.deepEqual(result.timeline.map((item) => item.line), ["Chance Pearson", "Andrea Ramirez"]);
     assert.equal(requests.filter((url) => url.includes("/messages?")).length, 2);
     assert.equal(requests.filter((url) => url.includes("/calls?")).length, 2);
+    for (const url of requests.filter((value) => /\/(messages|calls)\?/.test(value))) {
+      const params = new URL(url).searchParams;
+      assert.deepEqual(params.getAll("participants"), ["+12145550199"]);
+      assert.equal(params.has("participants[]"), false);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -523,6 +528,72 @@ test("strict Quo history rejects cross-line and cross-participant provider rows"
   }
 });
 
+test("strict Quo call scope accepts own plus target and rejects ambiguous responses", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const own = "+19725550101";
+  const target = "+12145550199";
+  const other = "+12145550188";
+  let record;
+  let lineNumber = own;
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    assert.equal(parsed.origin, "https://api.quo.test");
+    if (parsed.pathname.endsWith("/phone-numbers")) {
+      return jsonResponse(200, { data: [{ id: "PN_one", number: lineNumber }] });
+    }
+    assert.equal(parsed.searchParams.get("phoneNumberId"), "PN_one");
+    assert.deepEqual(parsed.searchParams.getAll("participants"), [target]);
+    assert.equal(parsed.searchParams.has("participants[]"), false);
+    if (parsed.pathname.endsWith("/messages")) return jsonResponse(200, { data: [] });
+    if (parsed.pathname.endsWith("/calls")) return jsonResponse(200, { data: [record] });
+    assert.fail(`Unexpected synthetic Quo request: ${parsed.pathname}`);
+  };
+  try {
+    for (const [name, participants, accepted, overrides = {}] of [
+      ["external alone", [target], true],
+      ["own then target", [own, target], true],
+      ["target then own", [target, own], true],
+      ["foreign line", [own, target], false, { phoneNumberId: "PN_other" }],
+      ["third participant", [own, target, other], false],
+      ["own alone", [own], false],
+      ["empty", [], false],
+      ["duplicate external", [target, target], false],
+      ["duplicate own", [own, own], false],
+      ["unrelated pair", [other, "+12145550177"], false],
+      ["two external", [target, other], false],
+      ["not an array", target, false],
+      ["null", [null, target], false],
+      ["object", [{ phoneNumber: own }, target], false],
+      ["number", [12145550199], false],
+      ["junk", [`caller ${target}`], false],
+      ["formatted string", ["(214) 555-0199"], false],
+      ["malformed own", ["+19725550101x", target], false],
+      ["missing inventory number", [target], false, { lineNumber: "" }],
+      ["malformed inventory number", [target], false, { lineNumber: `line ${own}` }]
+    ]) {
+      await t.test(name, async () => {
+        lineNumber = overrides.lineNumber ?? own;
+        record = { id: accepted ? "CALL_exact" : "SECRET_REJECTED_CALL",
+          phoneNumberId: overrides.phoneNumberId || "PN_one", participants,
+          createdAt: "2026-07-15T21:00:00Z" };
+        const read = () => readQuoHistoryStrict(
+          { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+          { phone: target, maxPages: 1 }
+        );
+        if (accepted) {
+          const result = await read();
+          assert.deepEqual(result.timeline.map((item) => item.id), ["CALL_exact"]);
+          assert.equal(result.completeness.complete, true);
+        } else {
+          await assert.rejects(read, strictProviderFailure);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Quo dry run never calls the API", async () => {
   const originalFetch = globalThis.fetch;
   let fetchCount = 0;
@@ -592,8 +663,14 @@ test("Quo inbox discovers recent conversations before reading incoming calls and
     assert.equal(result.items[0].line, "Andrea Ramirez");
     assert.equal(result.items[0].participant, "+12145550199");
     assert.equal(result.partial, false);
-    assert.match(requests.find((url) => url.includes("/conversations?")), /phoneNumbers%5B%5D=PN_chance/);
-    assert.match(requests.find((url) => url.includes("/messages?")), /participants%5B%5D=%2B12145550199/);
+    const conversationQuery = new URL(requests.find((url) => url.includes("/conversations?"))).searchParams;
+    assert.deepEqual(conversationQuery.getAll("phoneNumbers"), ["PN_chance", "PN_andrea"]);
+    assert.equal(conversationQuery.has("phoneNumbers[]"), false);
+    for (const url of requests.filter((value) => /\/(messages|calls)\?/.test(value))) {
+      const query = new URL(url).searchParams;
+      assert.deepEqual(query.getAll("participants"), ["+12145550199"]);
+      assert.equal(query.has("participants[]"), false);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
