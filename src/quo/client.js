@@ -506,15 +506,23 @@ function strictTimelineScopeVerdict(row, line, kind, expectedPhone) {
   if (providerLineId !== line.id) return "off-target";
 
   if (kind === "calls") {
+    const isE164 = (value) => typeof value === "string"
+      && /^\+[1-9]\d{1,14}$/.test(value);
     if (
       !Array.isArray(row.participants)
-      || row.participants.length !== 1
+      || row.participants.length < 1
+      || row.participants.length > 2
+      || !isE164(line.number)
+      || !row.participants.every(isE164)
+      || new Set(row.participants).size !== row.participants.length
     ) {
       return "unverifiable";
     }
-    const participant = toE164(row.participants[0]);
-    if (!participant) return "unverifiable";
-    return participant === expectedPhone ? "valid" : "off-target";
+    // Call responses may include the own number alongside the queried external number.
+    const external = row.participants.filter((phone) => phone !== line.number);
+    return external.length === 1 && external[0] === expectedPhone
+      ? "valid"
+      : "off-target";
   }
 
   const providerLineNumber = toE164(line.number || "");

@@ -619,6 +619,76 @@ test("strict Quo history quarantines off-target and unverifiable rows without le
   }
 });
 
+test("strict Quo call scope accepts documented participant shapes and rejects ambiguity", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const own = "+19725550101";
+  const target = "+12145550199";
+  const other = "+12145550188";
+  let record;
+  let lineNumber = own;
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    assert.equal(parsed.origin, "https://api.quo.test");
+    if (parsed.pathname.endsWith("/phone-numbers")) {
+      return jsonResponse(200, { data: [{ id: "PN_one", number: lineNumber }] });
+    }
+    assert.equal(parsed.searchParams.get("phoneNumberId"), "PN_one");
+    assert.deepEqual(parsed.searchParams.getAll("participants"), [target]);
+    assert.equal(parsed.searchParams.has("participants[]"), false);
+    if (parsed.pathname.endsWith("/messages")) return jsonResponse(200, { data: [] });
+    if (parsed.pathname.endsWith("/calls")) return jsonResponse(200, { data: [record] });
+    assert.fail(`Unexpected synthetic Quo request: ${parsed.pathname}`);
+  };
+  try {
+    for (const [name, participants, accepted, overrides = {}] of [
+      ["external number alone", [target], true],
+      ["own number then exact external number", [own, target], true],
+      ["exact external number then own number", [target, own], true],
+      ["foreign line", [own, target], false, { phoneNumberId: "PN_other" }],
+      ["third participant", [own, target, other], false],
+      ["own number alone", [own], false],
+      ["empty participants", [], false],
+      ["duplicate external participant", [target, target], false],
+      ["duplicate own participant", [own, own], false],
+      ["unrelated pair", [other, "+12145550177"], false],
+      ["target and foreign external participant", [target, other], false],
+      ["non-array participants", target, false],
+      ["null participant", [null, target], false],
+      ["object participant", [{ phoneNumber: own }, target], false],
+      ["numeric participant", [12145550199], false],
+      ["junk-bearing string", [`caller ${target}`], false],
+      ["formatted non-E.164 string", ["(214) 555-0199"], false],
+      ["malformed own number", ["+19725550101x", target], false],
+      ["missing inventory line number", [target], false, { lineNumber: "" }],
+      ["malformed inventory line number", [target], false, { lineNumber: `line ${own}` }]
+    ]) {
+      await t.test(name, async () => {
+        lineNumber = overrides.lineNumber ?? own;
+        record = {
+          id: accepted ? "CALL_exact" : "SECRET_REJECTED_CALL",
+          phoneNumberId: overrides.phoneNumberId || "PN_one",
+          participants,
+          createdAt: "2026-07-15T21:00:00Z"
+        };
+        const result = await readQuoHistoryStrict(
+          { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" },
+          { phone: target, maxPages: 1 }
+        );
+        assert.deepEqual(result.timeline.map((item) => item.id), accepted ? ["CALL_exact"] : []);
+        assert.equal(result.completeness.complete, accepted);
+        assert.deepEqual(result.completeness.reasons, accepted ? [] : ["provider_filter_mismatch"]);
+        assert.equal(
+          result.completeness.rejectedOffTargetCount + result.completeness.rejectedUnverifiableCount,
+          accepted ? 0 : 1
+        );
+        assert.doesNotMatch(JSON.stringify(result), /SECRET_REJECTED_CALL/);
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Quo dry run never calls the API", async () => {
   const originalFetch = globalThis.fetch;
   let fetchCount = 0;
