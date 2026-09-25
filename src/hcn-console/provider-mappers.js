@@ -378,6 +378,11 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
         `${source} evidence contains an invalid record.`,
       );
     }
+    // Missing history cannot establish that an inbound message is unanswered
+    // or that an outbound request is still awaiting a response.
+    if (!itemsComplete && ['needs_reply', 'awaiting_response'].includes(mapped.actionState)) {
+      mapped.actionState = 'no_action';
+    }
     items.push(mapped);
   }
   assertUniqueRecordIds(items, source);

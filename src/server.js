@@ -494,6 +494,7 @@ const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
 const GMAIL_FILE_COMPANY_CONTACTS = Symbol("gmailFileCompanyContacts");
+const GMAIL_MESSAGE_CORRELATION_CONTENT = Symbol("gmailMessageCorrelationContent");
 const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
@@ -8337,7 +8338,14 @@ async function gmailSearch(input) {
     ...(operatorFile ? { file: operatorFile, scope: operatorFileScopeLabel() } : {}),
     count: hydrated.length,
     messages: hydrated,
-    threads: groupGmailMessagesByThread(hydrated)
+    threads: groupGmailMessagesByThread(hydrated),
+    coverage: gmailReadCoverage({
+      scanned: rows.length,
+      returned: hydrated.length,
+      limit,
+      hasMore: Boolean(messages.nextPageToken),
+      windowDays: operatorFile ? clamp(Number(input.communicationDays || 365), 1, 3650) : null
+    })
   };
 }
 
@@ -8345,16 +8353,12 @@ async function gmailThread(input) {
   const operatorFile = await operatorCommunicationFile(input, "Gmail thread");
   const threadId = required(input.threadId, "threadId");
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
-  const messages = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
-  if (operatorFile) {
-    const correlations = messages.map((message) => gmailMessageFileCorrelation(message, operatorFile));
-    if (
-      !correlations.length
-      || correlations.some((item) => !item.complete || item.conflictingFileIds.length > 0)
-      || !correlations.some((item) => item.targetMatch)
-    ) {
-      operatorScopeError(`That Gmail thread is not exclusively correlated to the resolved ${operatorFileDescription()}.`);
-    }
+  const candidates = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
+  const messages = operatorFile
+    ? candidates.filter((message) => gmailMessageMatchesFile(message, operatorFile))
+    : candidates;
+  if (operatorFile && !messages.length) {
+    operatorScopeError(`That Gmail thread is not exclusively correlated to the resolved ${operatorFileDescription()}.`);
   }
   return {
     id: thread.id || threadId,
@@ -8362,7 +8366,12 @@ async function gmailThread(input) {
     historyId: thread.historyId || "",
     messageCount: messages.length,
     messages,
-    assistantRead: buildGmailAssistantRead(messages)
+    assistantRead: buildGmailAssistantRead(messages),
+    coverage: gmailReadCoverage({
+      scanned: candidates.length,
+      returned: messages.length,
+      truncated: messages.filter((message) => message.bodyTruncated).length
+    })
   };
 }
 
@@ -8523,26 +8532,30 @@ function operatorScopeError(message) {
 }
 
 function gmailMessageFileCorrelation(message, file) {
-  const headerText = [
+  const headerText = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.headers || [
     message.from,
     message.to,
     message.cc,
-    message.bcc,
-    message.subject
+    message.bcc
   ].map((value) => String(value || "")).join("\n").toLowerCase();
   const clientEmail = String(file.email || "").trim().toLowerCase();
   const headerAddresses = new Set(
     [...headerText.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)]
       .map((match) => String(match[0] || "").toLowerCase())
   );
-  const content = [
+  const content = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.content || [
     headerText,
+    message.subject,
     message.plainText,
     message.htmlText,
     message.snippet,
     ...(Array.isArray(message.attachments) ? message.attachments.map((row) => row.filename) : [])
   ].map((value) => String(value || "")).join("\n");
   const claimNumber = String(file.claimNumber || "").trim();
+  const claimIdentifiers = new Set(
+    (content.match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [])
+      .map((value) => hcnNormalizeCorrelationClaim(value))
+  );
   const targetMatch = Boolean(
     (
       file[GMAIL_FILE_EMAIL_UNIQUE] === true
@@ -8552,7 +8565,7 @@ function gmailMessageFileCorrelation(message, file) {
     || (
       file[GMAIL_FILE_CLAIM_UNIQUE] === true
       && normalizeCompare(claimNumber).length >= 6
-      && contentContainsExactIdentifier(content, claimNumber)
+      && claimIdentifiers.has(hcnNormalizeCorrelationClaim(claimNumber))
     )
   );
   const companyContacts = file[GMAIL_FILE_COMPANY_CONTACTS];
@@ -8579,7 +8592,7 @@ function gmailMessageFileCorrelation(message, file) {
     const emailMatch = [...emailInventory.values]
       .some((email) => headerAddresses.has(email));
     const claimMatch = [...claimInventory.values]
-      .some((claim) => claim.length >= 6 && contentContainsExactIdentifier(content, claim));
+      .some((claim) => claim.length >= 6 && claimIdentifiers.has(claim));
     if ((emailMatch || claimMatch) && contactId !== String(file.id || "")) {
       conflictingFileIds.push(contactId);
     }
@@ -8596,6 +8609,26 @@ function gmailMessageMatchesFile(message, file) {
   return correlation.complete
     && correlation.targetMatch
     && correlation.conflictingFileIds.length === 0;
+}
+
+function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, windowDays = null, truncated = 0 }) {
+  const withheldMessages = Math.max(0, scanned - returned);
+  return {
+    complete: !hasMore && !withheldMessages && !windowDays && !truncated,
+    scannedMessages: scanned,
+    returnedMessages: returned,
+    withheldMessages,
+    readLimit: limit,
+    hasMore,
+    windowDays,
+    ...(truncated ? { truncatedMessages: truncated } : {}),
+    limitationCodes: [
+      ...(windowDays ? ["bounded_history_window"] : []),
+      ...(hasMore ? ["provider_pagination_remaining"] : []),
+      ...(withheldMessages ? ["unverified_messages_withheld"] : []),
+      ...(truncated ? ["message_body_preview_truncated"] : [])
+    ]
+  };
 }
 
 function gmailDraftReconciliationShape(value = {}) {
@@ -8649,15 +8682,6 @@ function gmailImmutableSendDigest(value = {}) {
       }))
     }
   });
-}
-
-function contentContainsExactIdentifier(content, identifier) {
-  const expected = String(identifier || "").normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
-  if (expected.length < 6) return false;
-  const candidates = String(content || "").match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [];
-  return candidates.some((candidate) => (
-    candidate.normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase() === expected
-  ));
 }
 
 async function gmailDraft(input) {
@@ -10500,19 +10524,25 @@ async function buildChanceEvidencePacket(contact, input) {
               maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
               includeTranscripts: input.includeQuoTranscripts === true
             });
-        const historyComplete = !operatorRequest
-          || history?.completeness?.complete === true;
         quo = {
-          status: historyComplete ? "fresh" : "partial",
           ...history,
-          timeline: history.timeline.slice(-30).reverse()
+          status: "partial",
+          timeline: history.timeline.slice(-30).reverse(),
+          coverage: {
+            searchScope: "homeowner_phone_only",
+            carrierConversationsSearched: false,
+            transcriptReviewRequested: input.includeQuoTranscripts === true,
+            returnedTranscriptCount: Array.isArray(history.transcripts) ? history.transcripts.length : 0,
+            omittedTimelineItems: Math.max(0, history.timeline.length - 30),
+            complete: false
+          }
         };
       } catch (error) {
         quo = { status: "error", error: redactSensitiveText(error.message), timeline: [], transcripts: [] };
       }
     }
   }
-  sourceStatus.quo = { status: quo.status, at: new Date().toISOString() };
+  sourceStatus.quo = { status: quo.status, at: new Date().toISOString(), ...(quo.coverage ? { coverage: quo.coverage } : {}) };
 
   const sortedActivities = [...activities].sort(
     (a, b) => providerTimeMs(b.date_created) - providerTimeMs(a.date_created)
@@ -10524,7 +10554,7 @@ async function buildChanceEvidencePacket(contact, input) {
         - providerTimeMs(b.date_start || b.date_end)
     );
   const requestedSourcesComplete = [gmail.status, quo.status]
-    .every((status) => !["unavailable", "error", "partial"].includes(status));
+    .every((status) => !["unavailable", "error", "partial", "no_file_phone"].includes(status));
   const packet = {
     complete: requestedSourcesComplete,
     file,
@@ -11993,7 +12023,9 @@ async function loadHcnGmailFile({
       providerFileId: id,
       exactFileMatch: true
     },
-    itemsComplete: !String(nextPageToken || ""),
+    // Exhausting this identifier search cannot prove complete file history.
+    itemsComplete: false,
+    limitationCode: "bounded_history_window",
     ...hcnFreshnessWindow(requestedAt)
   }, {
     expectedProviderFileId: id
@@ -12028,7 +12060,8 @@ async function loadHcnQuoFile({
       providerFileId: id,
       exactFileMatch: true
     },
-    itemsComplete: history?.completeness?.complete === true,
+    // Homeowner phone history does not cover carrier-number calls or their transcripts.
+    itemsComplete: false,
     ...hcnFreshnessWindow(requestedAt)
   }, {
     expectedProviderFileId: id
@@ -14167,12 +14200,27 @@ function compactGmailMessage(message) {
 }
 
 function compactGmailFullMessage(message) {
-  return {
+  const plainText = extractGmailBody(message.payload, "text/plain");
+  const htmlText = stripHtml(extractGmailBody(message.payload, "text/html"));
+  const headers = gmailHeaders(message);
+  const compact = {
     ...compactGmailMessage(message),
-    plainText: extractGmailBody(message.payload, "text/plain").slice(0, 12000),
-    htmlText: stripHtml(extractGmailBody(message.payload, "text/html")).slice(0, 6000),
+    plainText: plainText.slice(0, 12000),
+    htmlText: htmlText.slice(0, 6000),
+    bodyTruncated: plainText.length > 12000 || htmlText.length > 6000,
     attachments: listGmailAttachments(message.payload)
   };
+  // Attribution must inspect full content, including Bcc and late conflicts.
+  Object.defineProperty(compact, GMAIL_MESSAGE_CORRELATION_CONTENT, {
+    value: {
+      headers: ["from", "to", "cc", "bcc"].map((key) => headers[key] || "").join("\n"),
+      content: [
+        ...Object.values(headers), plainText, htmlText,
+        message.snippet, ...compact.attachments.map((row) => row.filename)
+      ].join("\n")
+    }
+  });
+  return compact;
 }
 
 function compactGmailDraft(draft) {
@@ -14748,9 +14796,7 @@ const HCN_CONTACT_PHONE_KEYS = new Set([
   "workphone"
 ]);
 const HCN_CONTACT_EMAIL_KEYS = new Set([
-  "adjusteremail",
-  "carrierdaemail",
-  "cfstring9",
+  // Carrier/adjuster routing addresses cannot identify an individual client.
   "email",
   "primaryemail"
 ]);
@@ -15173,6 +15219,15 @@ function compactGmailEvidenceThread(thread) {
   return {
     id: thread.id,
     messageCount: thread.messageCount,
+    coverage: {
+      ...thread.coverage,
+      complete: false,
+      returnedMessages: messages.length,
+      omittedMessages: Math.max(0, thread.messageCount - messages.length),
+      previewMessageLimit: 5,
+      previewCharactersPerMessage: 1800,
+      limitationCodes: [...(thread.coverage?.limitationCodes || []), "bounded_thread_preview"]
+    },
     messages,
     assistantRead: thread.assistantRead
   };

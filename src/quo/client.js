@@ -204,7 +204,7 @@ export async function readQuoInbox(config, input = {}) {
   requireConfigured(config);
   const days = clamp(Number(input.days || 14), 1, 90);
   const maxResults = clamp(Number(input.maxResults || 50), 1, 50);
-  const transcriptLimit = clamp(Number(input.transcriptLimit || 12), 0, 25);
+  const transcriptLimit = clamp(Number(input.transcriptLimit ?? 12), 0, 25);
   const createdAfter = new Date(Date.now() - days * 86400000).toISOString();
   const numbers = await listQuoNumbers(config);
   const lineById = new Map(numbers.map((line) => [line.id, line]));
