@@ -15,7 +15,7 @@ Base: `d8259f8` on `jobnimbus-bridge`. This is NOT the HCN production branch.
 
 Both scoped Gmail regressions, syntax and diff checks passed. Quo client suite: 29/29. Mapper suite: 11/11. Final focused communication selection: 25/25 (includes nested tests). All synthetic, with no paid model/provider calls or client effects.
 
-The full suite is NOT green. After dependency setup, precheck passed 48/48; main run initially had four failures. One changed-behavior collision expectation was corrected and passed targeted tests. Three remaining assertions expect anonymous operational health/OpenAPI disclosures even though the pinned implementation protects them. They were inspected against `d8259f8`, not repaired by weakening authentication. Full main/postcheck acceptance remains blocked and must be resolved before release.
+The final full `TMPDIR=/private/tmp npm run check` passed: precheck 48/48 and main 488/488. This branch has no postcheck script. A prior main run had four failures: one changed-behavior collision expectation, and three stale fixtures expecting anonymous operational health/OpenAPI disclosures. The fixtures now verify anonymous and invalid-token health redaction, authenticated diagnostics and schemas, and rejection of browser cookies/scoped operator credentials from broader diagnostics. Their related Quo expectations now explicitly require partial coverage and prohibit inferring an unanswered exchange from incomplete history. Only tests changed in that follow-up; production authentication was not weakened.
 
 ## Release boundary
 

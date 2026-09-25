@@ -985,14 +985,14 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   };
 }
 
-test("server exposes claim actions and protects them when auth is unconfigured", async (t) => {
+test("server redacts anonymous health and requires authentication for diagnostics and claim schemas", async (t) => {
   const port = 18879;
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       PORT: String(port),
-      JOBNIMBUS_BRIDGE_TOKEN: "",
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
       JOBNIMBUS_API_KEY: "",
       RETELL_API_KEY: "",
       RETELL_AGENT_ID: "",
@@ -1032,7 +1032,20 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.match(consoleHtml, /HCN Operations Console/);
   assert.doesNotMatch(consoleHtml, /type=["']password["']/i);
 
-  const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
+  const diagnosticHeaders = { authorization: "Bearer fixture-shared-token" };
+  for (const headers of [{}, { authorization: "Bearer invalid-fixture-token" }]) {
+    const publicHealthResponse = await fetch(`http://127.0.0.1:${port}/health`, { headers });
+    assert.equal(publicHealthResponse.status, 200);
+    assert.deepEqual(await publicHealthResponse.json(), {
+      ok: true, service: "jobnimbus-chatgpt-bridge"
+    });
+    for (const pathname of ["/api/v1/meta", "/openapi.json", "/openapi-chatgpt.json"]) {
+      const deniedSchemaResponse = await fetch(`http://127.0.0.1:${port}${pathname}`, { headers });
+      assert.equal(deniedSchemaResponse.status, 401);
+      assert.deepEqual(await deniedSchemaResponse.json(), { error: "Unauthorized" });
+    }
+  }
+  const healthResponse = await fetch(`http://127.0.0.1:${port}/health`, { headers: diagnosticHeaders });
   assert.equal(healthResponse.status, 200);
   const health = await healthResponse.json();
   assert.equal(health.claimFiling.engine, "retell");
@@ -1102,7 +1115,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   );
   assert.equal(JSON.stringify(health.platform).includes(PLATFORM_FIXTURE_SECRET), false);
 
-  const platformMetaResponse = await fetch(`http://127.0.0.1:${port}/api/v1/meta`);
+  const platformMetaResponse = await fetch(`http://127.0.0.1:${port}/api/v1/meta`, { headers: diagnosticHeaders });
   assert.equal(platformMetaResponse.status, 200);
   const platformMeta = await platformMetaResponse.json();
   assert.equal(platformMeta.build.attested, true);
@@ -1120,7 +1133,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   const unauthenticatedSessionResponse = await fetch(`http://127.0.0.1:${port}/api/v1/session`);
   assert.equal(unauthenticatedSessionResponse.status, 401);
 
-  const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`);
+  const schemaResponse = await fetch(`http://127.0.0.1:${port}/openapi.json`, { headers: diagnosticHeaders });
   assert.equal(schemaResponse.status, 200);
   const schema = await schemaResponse.json();
   assert.equal(schema.paths["/api/v1/meta"].get.operationId, "readHcnPlatformMetadata");
@@ -1204,7 +1217,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
   assert.equal(schema.paths["/jobnimbus/upload-file"].post.operationId, "uploadJobNimbusFile");
   assert.equal(schema.paths["/weather/dol-research"].post.operationId, "researchPropertyHailDates");
 
-  const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`);
+  const chatgptSchemaResponse = await fetch(`http://127.0.0.1:${port}/openapi-chatgpt.json`, { headers: diagnosticHeaders });
   assert.equal(chatgptSchemaResponse.status, 200);
   const chatgptSchema = await chatgptSchemaResponse.json();
   assert.deepEqual(chatgptSchema.security, [{ googleOAuth: [] }]);
@@ -3649,7 +3662,16 @@ test("Codex operator security ledgers fail closed on corrupted JSON", async (t) 
     (await blockedPlanResponse.json()).error,
     /operator receipt recovery boundary is not ready/i
   );
-  const healthResponse = await fetch(`http://127.0.0.1:${bridgePort}/health`);
+  for (const healthHeaders of [{}, headers]) {
+    const publicHealthResponse = await fetch(`http://127.0.0.1:${bridgePort}/health`, { headers: healthHeaders });
+    assert.equal(publicHealthResponse.status, 200);
+    assert.deepEqual(await publicHealthResponse.json(), {
+      ok: true, service: "jobnimbus-chatgpt-bridge"
+    });
+  }
+  const healthResponse = await fetch(`http://127.0.0.1:${bridgePort}/health`, {
+    headers: { authorization: "Bearer fixture-shared-token" }
+  });
   assert.equal(healthResponse.status, 200);
   const health = await healthResponse.json();
   assert.equal(health.codexOperator.actionReceiptRecovery.status, "blocked");
@@ -5256,7 +5278,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const serializedBrowserSession = JSON.stringify(browserSession);
   assert.doesNotMatch(serializedBrowserSession, /chance@wavepa|hcn-google-subject|hcn-google-access-token/);
 
-  const fullOpenApiResponse = await fetch(`${origin}/openapi.json`);
+  const schemaHeaders = { authorization: "Bearer fixture-shared-bridge-token-for-ambiguity" };
+  for (const pathname of ["/openapi.json", "/openapi-chatgpt.json"]) {
+    const anonymousSchemaResponse = await fetch(`${origin}${pathname}`);
+    assert.equal(anonymousSchemaResponse.status, 401);
+    assert.deepEqual(await anonymousSchemaResponse.json(), { error: "Unauthorized" });
+    const browserSchemaResponse = await fetch(`${origin}${pathname}`, { headers: { cookie: sessionCookie } });
+    assert.equal(browserSchemaResponse.status, 403);
+  }
+  const fullOpenApiResponse = await fetch(`${origin}/openapi.json`, { headers: schemaHeaders });
   assert.equal(fullOpenApiResponse.status, 200);
   const fullOpenApi = await fullOpenApiResponse.json();
   assert.equal(
@@ -5285,7 +5315,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     ],
     true
   );
-  const chatGptOpenApiResponse = await fetch(`${origin}/openapi-chatgpt.json`);
+  const chatGptOpenApiResponse = await fetch(`${origin}/openapi-chatgpt.json`, { headers: schemaHeaders });
   assert.equal(chatGptOpenApiResponse.status, 200);
   const chatGptOpenApi = await chatGptOpenApiResponse.json();
   assert.equal(chatGptOpenApi.paths["/hcn/api/v1/work-center"], undefined);
@@ -5415,7 +5445,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     {
       jobnimbus: ["fresh", "complete"],
       gmail: ["fresh", "partial"],
-      quo: ["fresh", "complete"]
+      quo: ["fresh", "partial"]
     }
   );
   assert.equal(exactFile.recent.activities.length, 1);
@@ -5426,6 +5456,12 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.recent.gmail[0].direction, "inbound");
   assert.equal(exactFile.recent.quo.some((item) => item.direction === "inbound"), true);
   assert.equal(exactFile.recent.quo.some((item) => item.direction === "outbound"), true);
+  // Partial searches retain actual messages but cannot prove an unanswered
+  // exchange from message direction alone.
+  for (const item of [...exactFile.recent.gmail, ...exactFile.recent.quo]) {
+    assert.notEqual(item.actionState, "needs_reply");
+    assert.notEqual(item.actionState, "awaiting_response");
+  }
   assert.equal(
     exactFile.lanes.priority.some(
       (item) => item.reasonCode === "overdue_task"
@@ -5442,13 +5478,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     exactFile.lanes.priority.some(
       (item) => item.reasonCode === "reply_required"
     ),
-    true
+    false
   );
   assert.equal(
     exactFile.lanes.waiting.some(
       (item) => item.reasonCode === "awaiting_response"
     ),
-    true
+    false
   );
   const serializedExactFile = JSON.stringify(exactFile);
   for (const forbidden of [
