@@ -512,6 +512,7 @@ test('scoped communication mappers preserve bounded evidence while marking pagin
   assert.equal(result.data.complete, false);
   assert.equal(result.data.items.length, 1);
   assert.equal(result.data.items[0].providerRecordId, 'partial-message');
+  assert.equal(result.data.items[0].actionState, 'no_action');
 });
 
 test('Quo mapper normalizes call/text aliases without exposing participants, lines, or transcripts', () => {

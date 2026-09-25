@@ -430,6 +430,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
+        ...(options.gmailNextPageToken ? { nextPageToken: options.gmailNextPageToken } : {}),
         messages: [
           ...[...gmailMessages.values()].map((message) => ({
             id: message.id,
@@ -4178,13 +4179,13 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   assert.match((await unrelatedTranscriptResponse.json()).error, /not present in the current history/i);
 });
 
-test("Gmail exact-file reads reject mixed company claims while allowing identifier-less replies only in an exclusive target thread", async (t) => {
+test("Gmail exact-file reads admit shared carrier routing and withhold conflicting or identifierless thread messages", async (t) => {
   const bridgePort = 19124;
   const fakeApiPort = 19125;
   const gmailTextMessage = ({ id, threadId, subject, body, to = "claims@wavepa.com" }) => ({
     id,
     threadId,
-    snippet: body,
+    snippet: body.slice(0, 100),
     labelIds: ["INBOX"],
     payload: {
       mimeType: "text/plain",
@@ -4226,16 +4227,42 @@ test("Gmail exact-file reads reject mixed company claims while allowing identifi
     subject: "Claim ABC-123",
     body: "Carrier update for target claim ABC-123."
   });
+  const lateConflictMessage = gmailTextMessage({
+    id: "late-conflict-message", threadId: "mixed-company-thread",
+    subject: "Claim ABC-123", body: `${"x ".repeat(7000)} PRIVATE-LATE COMP-321`
+  });
+  const bccConflictMessage = gmailTextMessage({
+    id: "bcc-conflict-message", threadId: "mixed-company-thread",
+    subject: "Claim ABC-123", body: "Target claim with another client copied."
+  });
+  bccConflictMessage.payload.headers.push({ name: "Bcc", value: "company-client@example.test" });
+  const subjectEmailMessage = gmailTextMessage({
+    id: "subject-email-message", threadId: "mixed-company-thread",
+    subject: "client@example.test", body: "PRIVATE-SUBJECT is not a participant."
+  });
+  const longTargetMessage = gmailTextMessage({
+    id: "long-target-message", threadId: "long-target-thread",
+    subject: "Claim ABC-123", body: `Target claim ABC-123 ${"x ".repeat(7000)}`
+  });
   await startOperatorJobNimbusFixture(t, fakeApiPort, {
     communicationScope: true,
     companyOther: true,
-    gmailMessages: [mixedMessage],
+    chanceOverrides: {
+      adjusterEmail: "carrier@example.test",
+      "Carrier DA Email": "carrier@example.test",
+      cf_string_9: "carrier@example.test"
+    },
+    gmailNextPageToken: "fixture-next-page",
+    gmailMessages: [mixedMessage, lateConflictMessage, bccConflictMessage, subjectEmailMessage],
     gmailThreads: [{
       id: "exclusive-target-thread",
       messages: [targetThreadMessage, identifierlessReply]
     }, {
       id: "mixed-company-thread",
-      messages: [mixedThreadTargetMessage, foreignThreadMessage]
+      messages: [mixedThreadTargetMessage, foreignThreadMessage, lateConflictMessage, bccConflictMessage, subjectEmailMessage]
+    }, {
+      id: "long-target-thread",
+      messages: [longTargetMessage]
     }]
   });
   const child = spawn(process.execPath, ["src/server.js"], {
@@ -4269,20 +4296,29 @@ test("Gmail exact-file reads reject mixed company claims while allowing identifi
   const searchResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ fileQuery: "2739", limit: 10 })
+    body: JSON.stringify({ fileQuery: "2739", limit: 25 })
   });
   assert.equal(searchResponse.status, 200);
   const search = await searchResponse.json();
   assert.equal(search.messages.some((message) => message.id === mixedMessage.id), false);
   assert.equal(search.messages.some((message) => message.id === "claim-exact-message"), true);
+  assert.equal(search.messages.some((message) => [lateConflictMessage.id, bccConflictMessage.id, subjectEmailMessage.id].includes(message.id)), false);
+  assert.equal(search.coverage.complete, false);
+  assert.equal(search.coverage.hasMore, true);
+  assert.equal(search.coverage.windowDays, 365);
+  assert.equal(search.coverage.withheldMessages, search.coverage.scannedMessages - search.count);
+  assert.deepEqual(search.coverage.limitationCodes, ["bounded_history_window", "provider_pagination_remaining", "unverified_messages_withheld"]);
 
   const mixedThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
     method: "POST",
     headers,
     body: JSON.stringify({ fileQuery: "2739", threadId: "mixed-company-thread" })
   });
-  assert.equal(mixedThreadResponse.status, 403);
-  assert.match((await mixedThreadResponse.json()).error, /not exclusively correlated/i);
+  assert.equal(mixedThreadResponse.status, 200);
+  const mixedThread = await mixedThreadResponse.json();
+  assert.deepEqual(mixedThread.messages.map((message) => message.id), [mixedThreadTargetMessage.id]);
+  assert.equal(mixedThread.coverage.withheldMessages, 4);
+  assert.doesNotMatch(JSON.stringify(mixedThread), /COMP-321|company-client|PRIVATE-/);
 
   const exclusiveThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
     method: "POST",
@@ -4293,9 +4329,20 @@ test("Gmail exact-file reads reject mixed company claims while allowing identifi
   const exclusiveThread = await exclusiveThreadResponse.json();
   assert.deepEqual(
     exclusiveThread.messages.map((message) => message.id),
-    [targetThreadMessage.id, identifierlessReply.id]
+    [targetThreadMessage.id]
   );
-  assert.match(exclusiveThread.messages[1].plainText, /received this update/i);
+  assert.equal(exclusiveThread.coverage.withheldMessages, 1);
+  assert.doesNotMatch(JSON.stringify(exclusiveThread), /received this update/i);
+  const longThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
+    method: "POST", headers,
+    body: JSON.stringify({ fileQuery: "2739", threadId: "long-target-thread" })
+  });
+  assert.equal(longThreadResponse.status, 200);
+  const longThread = await longThreadResponse.json();
+  assert.equal(longThread.messages[0].plainText.length, 12000);
+  assert.equal(longThread.messages[0].bodyTruncated, true);
+  assert.equal(longThread.coverage.complete, false);
+  assert.equal(longThread.coverage.truncatedMessages, 1);
 });
 
 test("Quo exact-file reads fail closed on a company home-phone collision hidden by a different mobile phone", async (t) => {
@@ -4379,7 +4426,7 @@ test("Quo exact-file reads fail closed on a company home-phone collision hidden 
   assert.equal(fixtureApi.getQuoHistoryReadCount(), 0);
 });
 
-test("Capped company contact pagination finds page-two adjuster-field Gmail and Quo collisions before downstream reads", async (t) => {
+test("Capped company contact pagination separates carrier routing from client identity and preserves Gmail and Quo collision denials", async (t) => {
   const bridgePort = 19108;
   const fakeApiPort = 19109;
   const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-capped-contact-correlation-"));
@@ -4440,12 +4487,42 @@ test("Capped company contact pagination finds page-two adjuster-field Gmail and 
     headers,
     body: JSON.stringify({ fileQuery: "2739", limit: 10 })
   });
-  assert.equal([400, 403, 409, 503].includes(gmailResponse.status), true);
+  assert.equal(gmailResponse.status, 200);
+  const emailScoped = await gmailResponse.json();
+  // The page-two claim collision prevents claim-only attribution, but the
+  // client's unique email is not invalidated by another file's adjuster field.
+  assert.deepEqual(emailScoped.messages.map((message) => message.id), ["client-message"]);
+  assert.equal(emailScoped.coverage.complete, false);
+
+  companyFile.cf_string_2 = "COMP-321";
+  const uniqueClaimResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", limit: 10 })
+  });
+  assert.equal(uniqueClaimResponse.status, 200);
+  const uniqueClaim = await uniqueClaimResponse.json();
+  assert.deepEqual(uniqueClaim.messages.map((message) => message.id), ["client-message", "claim-exact-message"]);
+  assert.doesNotMatch(JSON.stringify(uniqueClaim.messages), /COMP-321|company-client@example\.test/);
+
+  // A real page-two client email collision plus the shared claim still denies
+  // scope before any Gmail read; carrier-routing exclusions cannot bypass it.
+  const distinctCompanyEmail = companyFile.email;
+  companyFile.email = chanceFile.email;
+  companyFile.cf_string_2 = chanceFile.cf_string_2;
+  const readsBeforeClientCollision = fixtureApi.getGmailEvidenceReadCount();
+  const clientCollisionResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", limit: 10 })
+  });
+  companyFile.email = distinctCompanyEmail;
+  assert.equal([400, 403, 409, 503].includes(clientCollisionResponse.status), true);
   assert.match(
-    (await gmailResponse.json()).error,
+    (await clientCollisionResponse.json()).error,
     /(?:unique|ambiguous|strongly correlated|communication scope)/i
   );
-  assert.equal(fixtureApi.getGmailEvidenceReadCount(), 0);
+  assert.equal(fixtureApi.getGmailEvidenceReadCount(), readsBeforeClientCollision);
 
   const quoResponse = await fetch(`http://127.0.0.1:${bridgePort}/quo/history`, {
     method: "POST",
@@ -5323,7 +5400,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.schema, "hcn.console.file.v1");
   assert.equal(exactFile.ephemeral, true);
   assert.equal(exactFile.cachePolicy, "no_store");
-  assert.equal(exactFile.evidenceStatus, "complete");
+  assert.equal(exactFile.evidenceStatus, "partial");
   assert.equal(exactFile.file.fileRef, fileRef);
   assert.equal(exactFile.file.jobNumber, "HCN-1001");
   assert.equal(exactFile.file.displayName, "Fixture Active Homeowner");
@@ -5337,7 +5414,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     ),
     {
       jobnimbus: ["fresh", "complete"],
-      gmail: ["fresh", "complete"],
+      gmail: ["fresh", "partial"],
       quo: ["fresh", "complete"]
     }
   );
