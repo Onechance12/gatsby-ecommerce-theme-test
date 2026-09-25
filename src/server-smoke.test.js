@@ -5076,7 +5076,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/quo/messages" && req.method === "GET") {
       assert.equal(req.headers.authorization, "hcn-quo-api-key");
       assert.equal(url.searchParams.get("phoneNumberId"), "quo-line-1");
-      assert.equal(url.searchParams.get("participants[]"), "+12145551212");
+      assert.deepEqual(url.searchParams.getAll("participants"), ["+12145551212"]);
+      assert.equal(url.searchParams.has("participants[]"), false);
       hcnProviderRequests.push(`quo:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
@@ -5096,7 +5097,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/quo/calls" && req.method === "GET") {
       assert.equal(req.headers.authorization, "hcn-quo-api-key");
       assert.equal(url.searchParams.get("phoneNumberId"), "quo-line-1");
-      assert.equal(url.searchParams.get("participants[]"), "+12145551212");
+      assert.deepEqual(url.searchParams.getAll("participants"), ["+12145551212"]);
+      assert.equal(url.searchParams.has("participants[]"), false);
       hcnProviderRequests.push(`quo:${url.pathname}`);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
