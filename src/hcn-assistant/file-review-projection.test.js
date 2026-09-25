@@ -107,6 +107,8 @@ test("file review projection preserves operational truth within provider replay 
   assert.equal(projected.schema, "hcn.console.file.v1");
   assert.equal(projected.file.fileRef, FILE_REF);
   assert.equal(projected.sources.jobnimbus.completeness, "complete");
+  review.sources.quo.limitations = ['homeowner_phone_only', 'call_transcripts_not_reviewed', 'private-carrier-name'];
+  assert.deepEqual(projectHcnAssistantFileReview(review).sources.quo.limitations, ['homeowner_phone_only', 'call_transcripts_not_reviewed']);
   assert.equal(
     projected.intelligence.lastMeaningfulActivity.occurredAt,
     "2026-08-04T15:00:00.000Z"

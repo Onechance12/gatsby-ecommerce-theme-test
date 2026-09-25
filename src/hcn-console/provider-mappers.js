@@ -7,6 +7,8 @@
  * import any persistence, memory, Brain, or Jobrolo module.
  */
 
+import { communicationLimitations } from './communication-coverage.js';
+
 export const HCN_PROVIDER_MAPPER_LIMITS = Object.freeze({
   maximumIndexContacts: 5000,
   maximumCollectionItems: 500,
@@ -537,6 +539,7 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
     data: {
       providerFileId: expectedProviderFileId,
       complete: itemsComplete,
+      limitations: communicationLimitations(input?.limitations),
       items: resolvedItems,
     },
   });

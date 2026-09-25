@@ -27,6 +27,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     display_name: "Fixture Homeowner",
     status_name: "Active",
     email: "client@example.test",
+    cf_string_9: "carrier@example.test",
     mobile_phone: "2145551212",
     cf_string_2: options.communicationScope ? "ABC-123" : "ABC123"
   };
@@ -58,6 +59,28 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   let taskUpdateCount = 0;
   let companyNoteCreateCount = 0;
   let taskCompleted = false;
+  const reliabilityMessage = (id, body, subject = "Claim ABC-123", to = "someone@example.test") => ({
+    id,
+    threadId: "mixed-file-thread",
+    snippet: body.slice(0, 100),
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "carrier@example.test" },
+        { name: "To", value: to },
+        { name: "Subject", value: subject }
+      ],
+      body: { data: Buffer.from(body).toString("base64url") }
+    }
+  });
+  const reliabilityMessages = [
+    reliabilityMessage("mixed-target", "Claim ABC-123"),
+    reliabilityMessage("mixed-foreign", "PRIVATE-FOREIGN Claim XYZ-999", "Claim XYZ-999"),
+    reliabilityMessage("mixed-conflicting", "Claim ABC-123 and PRIVATE-CONFLICT XYZ-999"),
+    reliabilityMessage("mixed-late-conflict", `${"x ".repeat(7000)} PRIVATE-LATE XYZ-999`),
+    reliabilityMessage("mixed-identifierless", "PRIVATE-UNVERIFIED reply", "Re: Status"),
+    reliabilityMessage("mixed-other-client", "Claim ABC-123", "Claim ABC-123", "company-client@example.test")
+  ];
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     if (options.communicationScope && url.pathname === "/oauth-token") {
@@ -68,6 +91,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
+        ...(options.gmailReliability ? { nextPageToken: "fixture-next-page" } : {}),
         messages: [
           { id: "client-message", threadId: "client-thread" },
           { id: "claim-exact-message", threadId: "claim-exact-thread" },
@@ -77,9 +101,23 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
           ...(options.companyOther
             ? [{ id: "company-claim-message", threadId: "company-claim-thread" }]
             : []),
-          { id: "unrelated-message", threadId: "unrelated-thread" }
+          { id: "unrelated-message", threadId: "unrelated-thread" },
+          ...(options.gmailReliability
+            ? reliabilityMessages.map(({ id, threadId }) => ({ id, threadId }))
+            : [])
         ]
       }));
+      return;
+    }
+    if (options.gmailReliability && url.pathname === "/gmail/v1/users/me/threads/mixed-file-thread") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "mixed-file-thread", messages: reliabilityMessages }));
+      return;
+    }
+    if (options.gmailReliability && url.pathname.startsWith("/gmail/v1/users/me/messages/mixed-")) {
+      const message = reliabilityMessages.find((row) => url.pathname.endsWith(`/${row.id}`));
+      res.writeHead(message ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(message || {}));
       return;
     }
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages/claim-exact-message" && req.method === "GET") {
@@ -2013,7 +2051,9 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   await startOperatorJobNimbusFixture(t, fakeApiPort, {
     communicationScope: true,
     secondAssigned: true,
-    duplicateEmail: true
+    duplicateEmail: true,
+    companyOther: true,
+    gmailReliability: true
   });
   const child = spawn(process.execPath, ["src/server.js"], {
     cwd: process.cwd(),
@@ -2060,12 +2100,44 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   const gmailSearchResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/search`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ fileQuery: "2739", limit: 10 })
+    body: JSON.stringify({ fileQuery: "2739", limit: 25 })
   });
   assert.equal(gmailSearchResponse.status, 200);
   const gmailSearch = await gmailSearchResponse.json();
   assert.equal(gmailSearch.scope, "chance_assigned_file");
-  assert.deepEqual(gmailSearch.messages.map((row) => row.id), ["claim-exact-message"]);
+  assert.deepEqual(gmailSearch.messages.map((row) => row.id), ["claim-exact-message", "mixed-target"]);
+  assert.deepEqual(gmailSearch.coverage, {
+    complete: false,
+    scannedMessages: 13,
+    returnedMessages: 2,
+    withheldMessages: 11,
+    readLimit: 25,
+    hasMore: true,
+    windowDays: 365,
+    limitationCodes: ["bounded_history_window", "provider_pagination_remaining", "unverified_messages_withheld"]
+  });
+  const mixedThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ fileQuery: "2739", threadId: "mixed-file-thread" })
+  });
+  assert.equal(mixedThreadResponse.status, 200);
+  const mixedThread = await mixedThreadResponse.json();
+  assert.deepEqual(mixedThread.messages.map((row) => row.id), ["mixed-target"]);
+  assert.equal(mixedThread.messageCount, 1);
+  assert.equal(mixedThread.coverage.complete, false);
+  assert.equal(mixedThread.coverage.withheldMessages, 5);
+  assert.doesNotMatch(JSON.stringify(mixedThread), /PRIVATE-|XYZ-999|COMP-321|company-client/);
+  assert.equal(JSON.stringify(mixedThread).includes("contact-chance-second"), false);
+  const conflictingAttachmentResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/attachment-review`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      fileQuery: "2739", messageId: "mixed-conflicting",
+      attachmentId: "unverified-attachment", filename: "claim.pdf"
+    })
+  });
+  assert.equal(conflictingAttachmentResponse.status, 403);
 
   const unrelatedThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
     method: "POST",
@@ -2368,7 +2440,10 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     "Claim #": "HCN-CLAIM-1001",
     "Policy #": "HCN-POLICY-1001",
     "Date of Loss": "2026-05-18",
-    "Carrier DA": "Fixture Adjuster"
+    "Carrier DA": "Fixture Adjuster",
+    "Carrier DA Email": "carrier@example.test",
+    adjusterEmail: "carrier@example.test",
+    cf_string_9: "carrier@example.test"
   };
   const inactiveChanceContact = {
     ...activeContact,
@@ -2966,7 +3041,9 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
             { name: "Date", value: "Mon, 27 Jul 2026 11:00:00 -0500" }
           ],
           body: {
-            data: Buffer.from("Fresh synthetic homeowner reply")
+            data: Buffer.from(hcnGmailFailureMode === "foreign_claim"
+              ? "HCN-CLAIM-1001 and PRIVATE-FOREIGN HCN-CLAIM-1003"
+              : "Fresh synthetic homeowner reply")
               .toString("base64url")
           }
         }
@@ -3003,7 +3080,9 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
           ],
           body: {
             data: Buffer.from(
-              "Fresh synthetic sent carrier follow-up"
+              hcnGmailFailureMode === "late_foreign_claim"
+                ? `${"x ".repeat(7000)} PRIVATE-LATE HCN-CLAIM-1003`
+                : "Fresh synthetic sent carrier follow-up"
             ).toString("base64url")
           }
         }
@@ -4070,7 +4149,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.cachePolicy, "no_store");
   assert.equal(
     exactFile.evidenceStatus,
-    "complete",
+    "partial",
     JSON.stringify({
       sources: exactFile.sources,
       providerRequests: hcnProviderRequests
@@ -4114,8 +4193,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     ),
     {
       jobnimbus: ["fresh", "complete"],
-      gmail: ["fresh", "complete"],
-      quo: ["fresh", "complete"]
+      gmail: ["fresh", "partial"],
+      quo: ["fresh", "partial"]
     }
   );
   assert.equal(exactFile.recent.activities.length, 1);
@@ -4123,6 +4202,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.recent.documents.length, 1);
   assert.equal(exactFile.recent.gmail.length, 2);
   assert.equal(exactFile.recent.quo.length, 3);
+  assert.deepEqual(exactFile.sources.quo.limitations, ["homeowner_phone_only", "call_transcripts_not_reviewed"]);
   assert.equal(
     exactFile.recent.gmail.some((item) => item.direction === "inbound"),
     true
@@ -4153,13 +4233,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     exactFile.lanes.priority.some(
       (item) => item.reasonCode === "reply_required"
     ),
-    true
+    false
   );
   assert.equal(
     exactFile.lanes.waiting.some(
       (item) => item.reasonCode === "awaiting_response"
     ),
-    true
+    false
   );
   const serializedExactFile = JSON.stringify(exactFile);
   for (const forbidden of [
@@ -4222,7 +4302,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     boundedHistory.file.displayName,
     "Fixture Active Homeowner"
   );
-  assert.equal(boundedHistory.evidenceStatus, "complete");
+  assert.equal(boundedHistory.evidenceStatus, "partial");
   assert.equal(
     boundedHistory.sources.jobnimbus.failureCode,
     null
@@ -5476,6 +5556,24 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   // Only email is unique: do not let claim matching mask email-alias bugs.
   assert.equal(aliasFile.recent.gmail.length, 1);
   assert.equal(aliasFile.recent.gmail[0].direction, "inbound");
+
+  for (const [mode, retainedDirection] of [
+    ["foreign_claim", "outbound"],
+    ["late_foreign_claim", "inbound"]
+  ]) {
+    hcnGmailFailureMode = mode;
+    const conflictRead = await fetch(`${origin}/hcn/api/v1/file-review`, {
+      method: "POST",
+      headers: hcnReadHeaders,
+      body: JSON.stringify({ fileRef, recentLimit: 10 })
+    });
+    hcnGmailFailureMode = "";
+    assert.equal(conflictRead.status, 200);
+    const conflictFile = await conflictRead.json();
+    assert.equal(conflictFile.sources.gmail.completeness, "partial");
+    assert.deepEqual(conflictFile.recent.gmail.map((row) => row.direction), [retainedDirection]);
+    assert.doesNotMatch(JSON.stringify(conflictFile), /PRIVATE-FOREIGN|PRIVATE-LATE|HCN-CLAIM-1003/);
+  }
 
   for (const failureMode of ["list", "detail", "malformed"]) {
     hcnGmailFailureMode = failureMode;

@@ -938,6 +938,8 @@ const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
 const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
+const GMAIL_FILE_COMPANY_CONTACTS = Symbol("gmailFileCompanyContacts");
+const GMAIL_MESSAGE_CORRELATION_CONTENT = Symbol("gmailMessageCorrelationContent");
 const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
@@ -14925,7 +14927,14 @@ async function gmailSearch(input) {
     ...(operatorFile ? { file: operatorFile, scope: operatorFileScopeLabel() } : {}),
     count: hydrated.length,
     messages: hydrated,
-    threads: groupGmailMessagesByThread(hydrated)
+    threads: groupGmailMessagesByThread(hydrated),
+    coverage: gmailReadCoverage({
+      scanned: rows.length,
+      returned: hydrated.length,
+      limit,
+      hasMore: Boolean(messages.nextPageToken),
+      windowDays: operatorFile ? clamp(Number(input.communicationDays || 365), 1, 3650) : null
+    })
   };
 }
 
@@ -14933,8 +14942,11 @@ async function gmailThread(input) {
   const operatorFile = await operatorCommunicationFile(input, "Gmail thread");
   const threadId = required(input.threadId, "threadId");
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
-  const messages = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
-  if (operatorFile && !messages.some((message) => gmailMessageMatchesFile(message, operatorFile))) {
+  const candidates = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
+  const messages = operatorFile
+    ? candidates.filter((message) => gmailMessageMatchesFile(message, operatorFile))
+    : candidates;
+  if (operatorFile && !messages.length) {
     operatorScopeError(`That Gmail thread is not strongly correlated to the resolved ${operatorFileDescription()}.`);
   }
   return {
@@ -14943,7 +14955,12 @@ async function gmailThread(input) {
     historyId: thread.historyId || "",
     messageCount: messages.length,
     messages,
-    assistantRead: buildGmailAssistantRead(messages)
+    assistantRead: buildGmailAssistantRead(messages),
+    coverage: gmailReadCoverage({
+      scanned: candidates.length,
+      returned: messages.length,
+      truncated: messages.filter((message) => message.bodyTruncated).length
+    })
   };
 }
 
@@ -15031,31 +15048,30 @@ async function operatorCommunicationFile(input, label) {
   if (
     file[GMAIL_FILE_EMAIL_UNIQUE] === undefined
     || file[GMAIL_FILE_CLAIM_UNIQUE] === undefined
+    || file[GMAIL_FILE_COMPANY_CONTACTS] === undefined
   ) {
     const email = String(file.email || "").trim().toLowerCase();
     const claimNumber = normalizeCompare(file.claimNumber);
-    const contacts =
-      email || claimNumber.length >= 6
-        ? await listContacts({ maxPages: 25 })
-        : [];
+    const index = await listHcnResourceComplete("/contacts", { maxRecords: 5000 });
+    if (!index.complete) operatorScopeError("The company contact index is incomplete; Gmail file correlation is unavailable.");
+    const contacts = index.rows;
+    Object.defineProperty(file, GMAIL_FILE_COMPANY_CONTACTS, { value: contacts });
+    const emailCorrelation = hcnGlobalScalarCorrelation(
+      contacts, email, HCN_CONTACT_EMAIL_KEYS, hcnNormalizeCorrelationEmail
+    );
+    const claimCorrelation = hcnGlobalScalarCorrelation(
+      contacts, claimNumber, HCN_CONTACT_CLAIM_KEYS, hcnNormalizeCorrelationClaim
+    );
     const matchingEmailFiles = email
-      ? contacts.filter(
-          (contact) =>
-            String(compactContact(contact).email || "")
-              .trim()
-              .toLowerCase() === email
-        )
+      ? emailCorrelation.matches
       : [];
     const matchingClaimFiles = claimNumber.length >= 6
-      ? contacts.filter(
-          (contact) =>
-            normalizeCompare(compactContact(contact).claimNumber)
-              === claimNumber
-        )
+      ? claimCorrelation.matches
       : [];
     Object.defineProperty(file, GMAIL_FILE_EMAIL_UNIQUE, {
       value:
         Boolean(email)
+        && emailCorrelation.complete
         && matchingEmailFiles.length === 1
         && String(
           matchingEmailFiles[0]?.jnid
@@ -15067,6 +15083,7 @@ async function operatorCommunicationFile(input, label) {
     Object.defineProperty(file, GMAIL_FILE_CLAIM_UNIQUE, {
       value:
         claimNumber.length >= 6
+        && claimCorrelation.complete
         && matchingClaimFiles.length === 1
         && String(
           matchingClaimFiles[0]?.jnid
@@ -15092,40 +15109,75 @@ function operatorScopeError(message) {
 }
 
 function gmailMessageMatchesFile(message, file) {
-  const headerText = [
+  const headerText = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.headers || [
     message.from,
     message.to,
     message.cc,
-    message.bcc,
-    message.subject
+    message.bcc
   ].map((value) => String(value || "")).join("\n").toLowerCase();
   const clientEmail = String(file.email || "").trim().toLowerCase();
   const headerAddresses = new Set(
     [...headerText.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)]
       .map((match) => String(match[0] || "").toLowerCase())
   );
-  if (file[GMAIL_FILE_EMAIL_UNIQUE] === true && clientEmail && headerAddresses.has(clientEmail)) return true;
-
-  const content = [
+  const content = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.content || [
     headerText,
+    message.subject,
     message.plainText,
     message.htmlText,
     message.snippet,
     ...(Array.isArray(message.attachments) ? message.attachments.map((row) => row.filename) : [])
   ].map((value) => String(value || "")).join("\n");
   const claimNumber = String(file.claimNumber || "").trim();
-  return file[GMAIL_FILE_CLAIM_UNIQUE] === true
+  const claimIdentifiers = new Set(
+    (content.match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [])
+      .map((value) => hcnNormalizeCorrelationClaim(value))
+  );
+  const normalizedClaim = hcnNormalizeCorrelationClaim(claimNumber);
+  const emailMatch = file[GMAIL_FILE_EMAIL_UNIQUE] === true
+    && clientEmail && headerAddresses.has(clientEmail);
+  const claimMatch = file[GMAIL_FILE_CLAIM_UNIQUE] === true
     && normalizeCompare(claimNumber).length >= 6
-    && contentContainsExactIdentifier(content, claimNumber);
+    && claimIdentifiers.has(normalizedClaim);
+  if (!emailMatch && !claimMatch) return false;
+  const contacts = file[GMAIL_FILE_COMPANY_CONTACTS];
+  if (!Array.isArray(contacts)) return false;
+  for (const contact of contacts) {
+    const contactId = String(contact?.jnid || contact?.id || "");
+    if (!contactId) return false;
+    const emails = hcnContactScalarInventory(contact, HCN_CONTACT_EMAIL_KEYS, hcnNormalizeCorrelationEmail);
+    const claims = hcnContactScalarInventory(contact, HCN_CONTACT_CLAIM_KEYS, hcnNormalizeCorrelationClaim);
+    if (!emails.complete || !claims.complete) return false;
+    if (contactId === String(file.id || "")) continue;
+    // Carrier/adjuster addresses are routing metadata, never client identity.
+    // A shared target identifier is handled by the uniqueness gates above.
+    if ([...emails.values].some((email) => email !== clientEmail && headerAddresses.has(email))) return false;
+    if ([...claims.values].some((claim) =>
+      claim !== normalizedClaim
+      && claim.length >= 6 && claimIdentifiers.has(claim)
+    )) return false;
+  }
+  return true;
 }
 
-function contentContainsExactIdentifier(content, identifier) {
-  const expected = String(identifier || "").normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase();
-  if (expected.length < 6) return false;
-  const candidates = String(content || "").match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [];
-  return candidates.some((candidate) => (
-    candidate.normalize("NFKC").replace(/[^A-Za-z0-9]/g, "").toLowerCase() === expected
-  ));
+function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, windowDays = null, truncated = 0 }) {
+  const withheldMessages = Math.max(0, scanned - returned);
+  return {
+    complete: !hasMore && !withheldMessages && !windowDays && !truncated,
+    scannedMessages: scanned,
+    returnedMessages: returned,
+    withheldMessages,
+    readLimit: limit,
+    hasMore,
+    windowDays,
+    ...(truncated ? { truncatedMessages: truncated } : {}),
+    limitationCodes: [
+      ...(windowDays ? ["bounded_history_window"] : []),
+      ...(hasMore ? ["provider_pagination_remaining"] : []),
+      ...(withheldMessages ? ["unverified_messages_withheld"] : []),
+      ...(truncated ? ["message_body_preview_truncated"] : [])
+    ]
+  };
 }
 
 function gmailDraftReconciliationShape(value = {}) {
@@ -17615,7 +17667,9 @@ async function loadHcnGmailFile({
         providerFileId: id,
         exactFileMatch: true
       },
-      itemsComplete: !String(nextPageToken || ""),
+      // Even an exhausted search page covers only this 365-day identifier query.
+      itemsComplete: false,
+      limitations: ["bounded_identifier_search"],
       ...hcnFreshnessWindow(requestedAt)
     }, {
       expectedProviderFileId: id
@@ -17715,7 +17769,10 @@ async function loadHcnQuoFile({
       providerFileId: id,
       exactFileMatch: true
     },
-    itemsComplete: history?.completeness?.complete === true,
+    // Exhausting the homeowner's phone timeline is not an exhaustive file review.
+    // Carrier-number calls and their transcript contents were not searched here.
+    itemsComplete: false,
+    limitations: ["homeowner_phone_only", "call_transcripts_not_reviewed"],
     ...hcnFreshnessWindow(requestedAt)
   }, {
     expectedProviderFileId: id
@@ -17767,6 +17824,8 @@ async function buildHcnExactCommunicationScope(
     throw new Error("Exact communication scope is unavailable.");
   }
   const file = compactContact(contact);
+
+  Object.defineProperty(file, GMAIL_FILE_COMPANY_CONTACTS, { value: index.rows });
 
   const email = hcnNormalizeCorrelationEmail(
     hcnCommunicationFieldValue(contact, [
@@ -19662,12 +19721,26 @@ function hcnGmailActionState(message, direction) {
 }
 
 function compactGmailFullMessage(message) {
-  return {
+  const plainText = extractGmailBody(message.payload, "text/plain");
+  const htmlText = stripHtml(extractGmailBody(message.payload, "text/html"));
+  const compact = {
     ...compactGmailMessage(message),
-    plainText: extractGmailBody(message.payload, "text/plain").slice(0, 12000),
-    htmlText: stripHtml(extractGmailBody(message.payload, "text/html")).slice(0, 6000),
+    plainText: plainText.slice(0, 12000),
+    htmlText: htmlText.slice(0, 6000),
+    bodyTruncated: plainText.length > 12000 || htmlText.length > 6000,
     attachments: listGmailAttachments(message.payload)
   };
+  // Correlate before preview truncation; a late conflicting claim must veto.
+  Object.defineProperty(compact, GMAIL_MESSAGE_CORRELATION_CONTENT, {
+    value: {
+      headers: ["from", "to", "cc", "bcc"].map((key) => gmailHeaders(message)[key] || "").join("\n"),
+      content: [
+        ...Object.values(gmailHeaders(message)), plainText, htmlText,
+        message.snippet, ...compact.attachments.map((row) => row.filename)
+      ].join("\n")
+    }
+  });
+  return compact;
 }
 
 function compactGmailDraft(draft) {
@@ -20730,6 +20803,15 @@ function compactGmailEvidenceThread(thread) {
   return {
     id: thread.id,
     messageCount: thread.messageCount,
+    coverage: {
+      ...thread.coverage,
+      complete: false,
+      returnedMessages: messages.length,
+      omittedMessages: Math.max(0, thread.messageCount - messages.length),
+      previewMessageLimit: 5,
+      previewCharactersPerMessage: 1800,
+      limitationCodes: [...(thread.coverage?.limitationCodes || []), "bounded_thread_preview"]
+    },
     messages,
     assistantRead: thread.assistantRead
   };

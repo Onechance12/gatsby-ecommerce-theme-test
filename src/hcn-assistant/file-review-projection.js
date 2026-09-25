@@ -1,3 +1,5 @@
+import { communicationLimitations } from '../hcn-console/communication-coverage.js';
+
 const MODEL_FILE_REVIEW_MAX_BYTES = 24 * 1024;
 const RECENT_DETAIL_LIMIT = 5;
 const MAX_LANE_ITEMS = 20;
@@ -205,11 +207,13 @@ function projectSources(value) {
 
 function projectSource(value, fallbackName) {
   const source = isRecord(value) ? value : {};
+  const limitations = communicationLimitations(source.limitations);
   return {
     source: text(source.source || fallbackName, 32),
     status: text(source.status, 32),
     completeness: text(source.completeness, 32),
     failureCode: optionalText(source.failureCode, 64),
+    ...(limitations.length ? { limitations } : {}),
     asOf: optionalText(source.asOf, 40),
     checkedAt: optionalText(source.checkedAt, 40),
     validUntil: optionalText(source.validUntil, 40),

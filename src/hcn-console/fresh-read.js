@@ -5,6 +5,8 @@
  * does not read configuration, persist data, or expose provider identifiers.
  */
 
+import { communicationLimitations } from './communication-coverage.js';
+
 export const HCN_WORK_CENTER_SCHEMA = "hcn.console.work-center.v1";
 export const HCN_FILE_SCHEMA = "hcn.console.file.v1";
 
@@ -883,7 +885,8 @@ async function readOptionalSource({
       : {
           ...sourceSummary,
           completeness: "partial",
-          failureCode: "source_partial"
+          failureCode: "source_partial",
+          limitations: communicationLimitations(fresh.data.limitations)
         },
     items: normalized.items
   };
