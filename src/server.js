@@ -311,6 +311,11 @@ import {
   validateJobroloReceiptDetailInput
 } from "./integrations/jobrolo-contracts.js";
 import {
+  createJobroloActivityExportService,
+  jobroloActivityExportEnabled,
+  HCN_JOBROLO_ACTIVITY_EXPORT_ROUTE
+} from "./integrations/jobrolo-activity-export.js";
+import {
   assertJobroloCarrierPlan,
   HCN_JOBROLO_CARRIER_EMAIL_ROUTES,
   projectJobroloCarrierEnvelope,
@@ -1398,6 +1403,7 @@ const HCN_JOBROLO_ROUTES = new Map([
   ["POST /integrations/jobrolo/v1/status", jobroloHcnStatus],
   ["POST /integrations/jobrolo/v1/work-center", hcnReadWorkCenter],
   ["POST /integrations/jobrolo/v1/file-review", hcnReadFile],
+  [`POST ${HCN_JOBROLO_ACTIVITY_EXPORT_ROUTE}`, jobroloHcnActivityExport],
   ["POST /integrations/jobrolo/v1/communication-sweep", hcnReadCommunicationSweep],
   ["POST /integrations/jobrolo/v1/quo-phone-history", hcnReadQuoPhoneHistory],
   ["POST /integrations/jobrolo/v1/management-sweep", hcnReadManagementSweep],
@@ -5496,6 +5502,35 @@ function hcnManagementSweepExclusions(providerExclusions, coreExclusions) {
     });
   }
   return results;
+}
+
+async function jobroloHcnActivityExport(input = {}) {
+  const principal = assertHcnAssignedReadSession();
+  const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  return withHcnReadAdmission(() => createJobroloActivityExportService({
+    enabled: jobroloActivityExportEnabled(process.env),
+    accountScope: principal.googleSubject,
+    sourceRecordRef: (provider, identity) => references.sourceRecordRef(provider, identity),
+    resolveFile: (fileRef) => {
+      // This endpoint promises a fresh before/after assignment check, not a
+      // second read of the request-local cached authorization result.
+      const cache = hcnFreshProviderCache();
+      if (cache) {
+        cache.contactIndexPromise = null;
+        cache.contactIndexMaximum = 0;
+        cache.contactPromises.clear();
+      }
+      return resolveHcnAssistantAssignedFile({ fileRef, principal });
+    },
+    loaders: {
+      jobnimbus: (request) => loadHcnJobNimbusFile({ ...request,
+        assignedOwnerId: principal.jobNimbusOwnerId, retainedActivity: true }),
+      gmail: (request) => loadHcnGmailFile({ ...request,
+        assignedOwnerId: principal.jobNimbusOwnerId, retainedActivity: true }),
+      quo: (request) => loadHcnQuoFile({ ...request,
+        assignedOwnerId: principal.jobNimbusOwnerId, retainedActivity: true })
+    }
+  })(input));
 }
 
 async function hcnReadFile(input = {}) {
@@ -17488,7 +17523,8 @@ async function loadHcnJobNimbusFile({
   providerFileId,
   recentLimit,
   requestedAt,
-  assignedOwnerId
+  assignedOwnerId,
+  retainedActivity = false
 } = {}) {
   const id = hcnProviderFileId(providerFileId);
   const maximumRelated = Math.min(
@@ -17529,7 +17565,8 @@ async function loadHcnJobNimbusFile({
   }, {
     assignedOwnerId,
     expectedProviderFileId: id,
-    knownProviderFileIds
+    knownProviderFileIds,
+    includeActivityText: retainedActivity
   });
   hcnRememberJobNimbusCollectionCoverage(
     mapped.data.file.jobNumber,
@@ -17551,14 +17588,44 @@ async function loadHcnJobNimbusFile({
       })
     }
   );
-  return mapped;
+  if (!retainedActivity) return mapped;
+  const taskById = new Map(tasks.rows.map((row) => [String(row.jnid || row.id || ""), row]));
+  return {
+    providerFileId: id, exactFileMatch: true, complete: false,
+    limitations: ["bounded_recent_activity", "document_metadata_only", "task_metadata_only"],
+    items: [
+      ...mapped.data.activities.map((item) => ({ ...item, providerFileId: id,
+        kind: "note", title: item.label || "JobNimbus activity", body: item.activityText?.text || "",
+        status: item.state, contentCompleteness: item.activityText?.text
+          ? item.activityText.truncated ? "partial" : "complete" : "metadata_only" })),
+      ...mapped.data.tasks.map((item) => {
+        const raw = taskById.get(item.providerRecordId);
+        return { ...item, providerFileId: id, kind: "task", title: item.label || "JobNimbus task",
+          occurredAt: retainedProviderTimestamp(raw?.date_created || raw?.created_at || raw?.createdAt),
+          body: "", contentCompleteness: "metadata_only" };
+      }),
+      ...mapped.data.documents.map((item) => ({ ...item, providerFileId: id,
+        kind: "document", occurredAt: item.createdAt, title: item.fileName || "Document",
+        body: "", status: item.reviewState, contentCompleteness: "metadata_only" }))
+    ]
+  };
+}
+
+function retainedProviderTimestamp(value) {
+  if (!["string", "number"].includes(typeof value) || value === "") return null;
+  const numeric = Number(value);
+  const parsed = Number.isFinite(numeric)
+    ? new Date(numeric < 1e12 ? numeric * 1000 : numeric)
+    : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
 async function loadHcnGmailFile({
   providerFileId,
   recentLimit,
   requestedAt,
-  assignedOwnerId
+  assignedOwnerId,
+  retainedActivity = false
 } = {}) {
   if (!(await hcnGoogleConnectorLinkedForCurrentRequest())) {
     throw hcnOptionalSourceFailure(
@@ -17660,7 +17727,7 @@ async function loadHcnGmailFile({
         actionState: hcnGmailActionState(message, direction)
       });
     }
-    return mapScopedGmailEnvelope({
+    const mapped = mapScopedGmailEnvelope({
       providerFileId: id,
       items,
       scope: {
@@ -17674,6 +17741,20 @@ async function loadHcnGmailFile({
     }, {
       expectedProviderFileId: id
     });
+    if (!retainedActivity) return mapped;
+    const rawById = new Map(items.map((item) => [item.id, item]));
+    return {
+      providerFileId: id, exactFileMatch: true, complete: false,
+      limitations: ["bounded_identifier_search", "attachments_not_copied"],
+      items: mapped.data.items.map((item) => {
+        const raw = rawById.get(item.providerRecordId);
+        const body = raw.plainText || raw.htmlText || "";
+        return { ...item, providerFileId: id, kind: "email", title: raw.subject,
+          body, status: item.deliveryState,
+          direction: item.direction === "inbound" ? "incoming" : item.direction === "outbound" ? "outgoing" : "unknown",
+          contentCompleteness: body ? raw.bodyTruncated ? "partial" : "complete" : "metadata_only" };
+      })
+    };
   } catch (error) {
     if (error?.hcnSourceFailureCode === "google_not_linked") {
       throw hcnOptionalSourceFailure(
@@ -17692,7 +17773,8 @@ async function loadHcnQuoFile({
   providerFileId,
   recentLimit,
   requestedAt,
-  assignedOwnerId
+  assignedOwnerId,
+  retainedActivity = false
 } = {}) {
   const id = hcnProviderFileId(providerFileId);
   let scope;
@@ -17762,7 +17844,7 @@ async function loadHcnQuoFile({
       ...item,
       providerFileId: id
     }));
-  return mapScopedQuoEnvelope({
+  const mapped = mapScopedQuoEnvelope({
     providerFileId: id,
     items,
     scope: {
@@ -17777,6 +17859,21 @@ async function loadHcnQuoFile({
   }, {
     expectedProviderFileId: id
   });
+  if (!retainedActivity) return mapped;
+  const rawById = new Map(items.map((item) => [item.id, item]));
+  return {
+    providerFileId: id, exactFileMatch: true, complete: false,
+    limitations: ["homeowner_phone_only", "call_transcripts_not_reviewed"],
+    items: mapped.data.items.map((item) => {
+      const raw = rawById.get(item.providerRecordId);
+      const isCall = item.channel === "call";
+      return { ...item, providerFileId: id, kind: isCall ? "call" : "sms",
+        title: isCall ? "Quo call" : "Quo text", body: isCall ? "" : raw.text || "",
+        status: item.disposition,
+        direction: item.direction === "inbound" ? "incoming" : item.direction === "outbound" ? "outgoing" : "unknown",
+        contentCompleteness: isCall || !raw.text ? "metadata_only" : "complete" };
+    })
+  };
 }
 
 async function hcnExactCommunicationScope(
@@ -25568,6 +25665,15 @@ const OPENAPI = {
         fileRef: { type: "string", pattern: "^subject_[a-f0-9]{32}$" },
         recentLimit: { type: "integer", minimum: 1, maximum: 20 }
       }, ["fileRef", "recentLimit"])
+    }),
+    "/integrations/jobrolo/v1/file-activity-export": jobroloHcnReadOpenApi({
+      operationId: "exportJobroloHcnFileActivity",
+      description: "Explicit bounded private job history retention export for one exact assigned file. Disabled unless its dedicated export feature gate is enabled. No provider writes or automatic collection. Existing file-review remains no_store.",
+      inputSchema: openApiStrictObject({
+        fileRef: { type: "string", pattern: "^subject_[a-f0-9]{32}$" },
+        retentionIntent: { type: "string", enum: ["private_job_history"] },
+        recentLimit: { type: "integer", minimum: 1, maximum: 20 }
+      }, ["fileRef", "retentionIntent"])
     }),
     "/integrations/jobrolo/v1/communication-sweep": jobroloHcnReadOpenApi({
       operationId: "readJobroloHcnCommunicationSweep",

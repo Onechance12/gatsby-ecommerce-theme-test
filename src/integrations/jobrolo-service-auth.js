@@ -15,6 +15,7 @@ export const JOBROLO_HCN_READ_ROUTES = Object.freeze([
   "/integrations/jobrolo/v1/status",
   "/integrations/jobrolo/v1/work-center",
   "/integrations/jobrolo/v1/file-review",
+  "/integrations/jobrolo/v1/file-activity-export",
   "/integrations/jobrolo/v1/communication-sweep",
   "/integrations/jobrolo/v1/quo-phone-history",
   "/integrations/jobrolo/v1/management-sweep"

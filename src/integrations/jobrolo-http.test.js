@@ -345,6 +345,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       HCN_JOBROLO_CLIENT_ID: CLIENT_ID,
       HCN_JOBROLO_SHARED_SECRET: SHARED_SECRET,
       HCN_JOBROLO_PRINCIPAL_EMAIL: EMAIL,
+      JOBROLO_ACTIVITY_EXPORT_ENABLED: "true",
       HCN_JOBROLO_ADDITIONAL_PROFILES_JSON: JSON.stringify({
         schema: "hcn.jobrolo.general-profiles.v1",
         profiles: [{
@@ -505,6 +506,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     "/integrations/jobrolo/v1/status",
     "/integrations/jobrolo/v1/work-center",
     "/integrations/jobrolo/v1/file-review",
+    "/integrations/jobrolo/v1/file-activity-export",
     "/integrations/jobrolo/v1/communication-sweep",
     "/integrations/jobrolo/v1/quo-phone-history",
     "/integrations/jobrolo/v1/management-sweep"
@@ -562,6 +564,42 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     fileReview.body.result.recent.quo[0].preview,
     "Verified line-12 fixture message."
   );
+  assert.equal(providerWrites.length, 0);
+
+  const activityInput = {
+    fileRef: workCenterByName.get("Assigned File Fixture").fileRef,
+    retentionIntent: "private_job_history", recentLimit: 20
+  };
+  const retained = await signedPost(origin, "/integrations/jobrolo/v1/file-activity-export", {
+    requestId: `request_${"d1".repeat(16)}`, sessionRef,
+    nonce: `nonce_${"ad01".repeat(8)}`, input: activityInput
+  });
+  assert.equal(retained.response.status, 200, retained.text);
+  assert.equal(retained.body.result.schema, "hcn.job_activity.export.v1");
+  assert.equal(retained.body.result.records.length, 1);
+  assert.equal(retained.body.result.records[0].body, "Verified line-12 fixture message.");
+  assert.equal(retained.body.result.records[0].contentCompleteness, "complete");
+  assert.equal(retained.body.result.coverage.gmail.status, "unavailable");
+  assert.ok(retained.body.result.coverage.quo.limitations.includes("homeowner_phone_only"));
+  assert.doesNotMatch(retained.text, /MSG_line_12|assigned-file-provider-id|google-subject-fixture/);
+  const retainedReplay = await signedPost(origin, "/integrations/jobrolo/v1/file-activity-export", {
+    requestId: `request_${"d2".repeat(16)}`, sessionRef,
+    nonce: `nonce_${"ad02".repeat(8)}`, input: activityInput
+  });
+  assert.equal(retainedReplay.response.status, 200, retainedReplay.text);
+  assert.deepEqual(retainedReplay.body.result.records, retained.body.result.records);
+  const foreignRetention = await signedPost(origin, "/integrations/jobrolo/v1/file-activity-export", {
+    requestId: `request_${"d3".repeat(16)}`, sessionRef,
+    nonce: `nonce_${"ad03".repeat(8)}`, input: activityInput,
+    clientId: SECOND_GENERAL_CLIENT_ID, secret: SECOND_GENERAL_SHARED_SECRET
+  });
+  assert.equal(foreignRetention.response.status, 404, foreignRetention.text);
+  const noteCredentialRetention = await signedPost(origin, "/integrations/jobrolo/v1/file-activity-export", {
+    requestId: `request_${"d4".repeat(16)}`, sessionRef,
+    nonce: `nonce_${"ad04".repeat(8)}`, input: activityInput,
+    clientId: NOTE_CLIENT_ID, secret: NOTE_SHARED_SECRET
+  });
+  assert.equal(noteCredentialRetention.response.status, 401, noteCredentialRetention.text);
   assert.equal(providerWrites.length, 0);
 
   const communicationSweep = await signedPost(
