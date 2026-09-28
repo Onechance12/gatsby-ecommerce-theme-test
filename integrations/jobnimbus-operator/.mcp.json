@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "jobnimbus-operator": {
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "./mcp/server.mjs"
+      ],
+      "tool_timeout_sec": 300
+    }
+  }
+}

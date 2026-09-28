@@ -5,6 +5,8 @@ import {
   CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
   CHANCE_OPERATOR_ALLOWED_STAGE_EVIDENCE_SOURCES,
+  CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
   CHANCE_OPERATOR_RUN_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
@@ -112,6 +114,32 @@ test("loads the immediately previous four-action manifest without enabling sends
   assert.equal(summary.existingDraftSendAllowed, false);
   assert.equal(summary.rawGmailSendAllowed, false);
   assert.equal(summary.allowedActionTypes.includes("gmail.send_existing_draft"), false);
+});
+
+test("approved notes require the separately reviewed opt-in manifest and leave legacy pins unchanged", () => {
+  const options = { now: Date.parse("2026-08-23T00:00:00.000Z") };
+  const legacy = loadChanceOperatorRunManifest(manifestInput(), options);
+  assert.equal(chanceOperatorRunManifestSummary(legacy).noteCreationAllowed, false);
+  assert.equal(legacy.allowedActionTypes.includes("jobnimbus.create_note"), false);
+  assert.throws(() => loadChanceOperatorRunManifest(manifestInput({
+    allowedActionTypes: [...CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES]
+  }), options), /action types/);
+  assert.throws(() => loadChanceOperatorRunManifest(manifestInput({
+    id: CHANCE_OPERATOR_NOTES_RUN_POLICY_ID
+  }), options), /action types/);
+  const notes = loadChanceOperatorRunManifest(manifestInput({
+    id: CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
+    allowedActionTypes: [...CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES]
+  }), options);
+  const summary = chanceOperatorRunManifestSummary(notes);
+  assert.equal(summary.noteCreationAllowed, true);
+  assert.equal(summary.noteMentionsAllowed, false);
+  assert.equal(summary.noteMentionRequestsAllowed, true);
+  assert.equal(summary.noteCreationSoleOperation, true);
+  assert.notEqual(legacy.sha256, notes.sha256);
+  assert.throws(() => resolveChanceOperatorRunPolicy({ id: legacy.id, sha256: legacy.sha256 }, notes), /not pinned/);
+  assert.equal(summary.taskCompletionAllowed, false);
+  assert.equal(summary.rawGmailSendAllowed, false);
 });
 
 test("manifest rejects expiry, duplicates, excluded file, and non-58 rosters", () => {
