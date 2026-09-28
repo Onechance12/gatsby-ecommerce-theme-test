@@ -1,8 +1,24 @@
-# Approved JobNimbus notes — unreleased candidate
+# Approved JobNimbus notes — live release
 
-This worktree adds an **off-by-default** exact-file, sole-operation plain-note
-lane. It has not been deployed or installed. The currently deployed Mac operator
-still rejects note creation; its JobNimbus authentication is not disconnected.
+The bridge release is live with the opt-in exact-file, sole-operation note lane.
+JobNimbus authentication was not disconnected; the former policy excluded notes.
+
+## Verified deployment — 2026-09-28
+
+- PR #45 merged into `jobnimbus-bridge`.
+- Provider-attested bridge commit: `c81d30343e608331160ab6246ba1a5ae8dc2de8a`.
+- Render deployment: `dep-data64ft8q1s73e86v4g`, observed `live`.
+- Installed Mac operator: `0.5.0+codex.20260928172616`.
+- Activated policy hash: `08490f603cf1c6d451e49f9cf4a195d8ca52b2253e06e2572b08a82a3a43ab1d`.
+- Fresh installed-process attestation: ready, operator and recovery boundaries
+  attested, zero unresolved receipts, zero hard-blocked receipts.
+- Separate management gap-report status: ready and read-only; no external writes.
+- No paid AI tests, JobNimbus notes, emails, or calls were executed.
+- Old authoring source preserved at
+  `/Users/chancepearson/plugins/jobnimbus-operator.pre-notes-20260928-1726`.
+
+Start a new Codex thread to load the updated plugin tools. Prepare fresh exact
+note plans and obtain their approvals before any client note execution.
 
 ## Scope
 
@@ -23,7 +39,7 @@ user `kyd3walzugh6dlji6wpygdj`. The observed editor save implementation sends th
 note text, not a separate mention payload. The public activity API does not
 prove notification delivery.
 
-This candidate accepts exactly one canonical `@RichardR` token, with the
+This release accepts exactly one canonical `@RichardR` token, with the
 intended recipient and unconfirmed notification status shown in the approval
 plan and bound to the immutable receipt. Other mentions remain blocked.
 `mentionsVerified` and `accountingNotified` remain false: exact note readback is
@@ -36,8 +52,9 @@ No payment note or accounting notification has been posted by this change.
 Activation requires a reviewed bridge build, explicitly activated new manifest
 (`chance-58-files-notes-v1`), its exact hash, coordinated historical-isolation
 binding, and an installed plugin pinned to that same build and manifest. The
-compiled release settings are intentionally disabled and have no candidate
-commit/hash filled in. Tests use synthetic local pins only.
+merged source leaves plugin pins disabled; this local release record and the
+installed plugin bind the exact reviewed build and manifest above. Tests cover
+both disabled and activated configurations.
 
 Do not change the active plugin cache, borrow legacy credentials, relax a live
 grant, or auto-migrate the six historical receipts to make the feature work.
@@ -63,13 +80,12 @@ effect is necessary for these checks.
 
 ## Offline verification (2026-09-28)
 
-- Bridge: final 27 targeted note/policy tests passed, including rejection of a
-  provider-reused activity ID. Before that last guard, the complete check passed
-  (48 precheck tests and 525 main tests).
-- Plugin: complete suite passed (239 passed, four optional service integration
-  tests skipped); plugin manifest validator passed. Approval-display checks are
-  included.
+- Bridge: 48 precheck and 530 main tests passed; 30 targeted tests also passed,
+  including real backend plans checked by the plugin approval validator.
+- Plugin: 245 tests passed in disabled, synthetic enabled, and final pinned
+  configurations, with four optional service integration tests skipped.
+- Plugin manifest and skill validators passed.
 - Syntax and tracked diff whitespace checks passed.
 
-These are local fixture tests, not evidence of production note delivery or a
-Richard notification. No paid model test, live deployment, note, or tag ran.
+Fixture tests and live read-only attestation are not proof of production note
+delivery or a Richard notification. Those require an approved live note.

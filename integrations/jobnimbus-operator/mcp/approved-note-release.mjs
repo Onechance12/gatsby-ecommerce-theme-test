@@ -1,11 +1,11 @@
-// Source-only release candidate. Never derive these pins from a tool request,
+// Reviewed installed release. Never derive these pins from a tool request,
 // environment variable, or provider response. Enable only after a reviewed,
 // coordinated bridge/manifest/legacy-isolation release.
 export const APPROVED_NOTE_RELEASE = Object.freeze({
-  enabled: false,
+  enabled: true,
   policyId: "chance-58-files-notes-v1",
-  policySha256: "",
-  bridgeCommit: ""
+  policySha256: "08490f603cf1c6d451e49f9cf4a195d8ca52b2253e06e2572b08a82a3a43ab1d",
+  bridgeCommit: "c81d30343e608331160ab6246ba1a5ae8dc2de8a"
 });
 
 export function validateApprovedNoteRelease(release) {
