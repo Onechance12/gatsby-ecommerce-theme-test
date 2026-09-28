@@ -1,0 +1,28 @@
+{
+  "name": "jobnimbus-operator",
+  "version": "0.5.0+codex.20260918151817",
+  "description": "Thresher-locked Mac operator for the exact 58 Chance JobNimbus files, with approved notes, JobNimbus/Gmail actions and single-file Retell claim filing.",
+  "author": {
+    "name": "Chance Pearson"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "JobNimbus Operator",
+    "shortDescription": "Work the 58 Chance files and open claims with exact approvals.",
+    "longDescription": "Connects Codex to an immutable 58-file Chance roster through an exact provider-attested bridge build and six-receipt historical-isolation attestation. JobNimbus writes and Gmail draft creation stay in the existing approval batch; one reviewed bridge-created draft may be sent only through a later sole-operation plan and separate exact approval with Gmail Sent readback. The activated notes release adds one exact approved note with provider ID and text-hash readback, optionally binding one canonical @RichardR mention request without claiming notification delivery. A separate single-file Retell lane can file a new claim or find an existing claim only after fresh evidence, live agent-configuration verification, complete plan display, and exact Chance approval. #2628, automatic writeback, raw sends, direct notes, task completion, calendar writes, generic/homeowner/follow-up calls, company mutations, and backward stage moves remain blocked.",
+    "developerName": "Chance Pearson",
+    "category": "Productivity",
+    "capabilities": [
+      "JobNimbus fresh evidence",
+      "Exact-file Gmail and Quo review",
+      "Pinned 58-file run manifest",
+      "Unified scheduling",
+      "Approval-gated operations",
+      "Approved exact-file notes",
+      "Reviewed Gmail draft delivery",
+      "Single-file Retell claim filing"
+    ],
+    "defaultPrompt": "Run bridge_restart_verify first and require the exact provider-attested build, Mac identity, six-receipt historical-isolation attestation, pinned JobNimbus action-batch plus single-file Retell claim-filing boundary, 58-file manifest, ready:true, unresolvedCount:0, and hardBlockedCount:0. Reconcile only explicitly eligible new unresolved receipts; historical attention is never replayed and hard-blocked receipts stop work. For claim filing, verify the live Retell configuration, prepare only one exact manifest file with includeCarrierBatch:false and goal file_new_claim or find_existing_claim, show the complete plan/destination/digest/approval ID, and call only after exact current approval. Never touch #2628, expose claim writeback, or use raw/direct sends. A reviewed bridge-created Gmail draft may be sent only through a later sole-operation gmail.send_existing_draft plan and separate exact current approval."
+  },
+  "mcpServers": "./.mcp.json"
+}

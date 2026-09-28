@@ -82,6 +82,12 @@ import {
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
+import {
+  approvedNoteCreatedId,
+  approvedNoteIntentMatches,
+  approvedNoteRecordMatches,
+  validateApprovedNotePayload
+} from "./jobnimbus/approved-note.js";
 import { createLorPdf } from "./documents/lor.js";
 import { createDocumentResearchService, DOCUMENT_RESEARCH_ROUTES } from "./documents/research-access.js";
 import { createDocumentResearchProvider } from "./documents/research-provider.js";
@@ -93,6 +99,8 @@ import {
   CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
   CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS,
+  CHANCE_OPERATOR_RUN_POLICY_ID,
+  CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
   loadChanceOperatorRunManifest,
@@ -7292,6 +7300,9 @@ async function verifyThresherTransitionEvidence(contact, evidence = {}) {
       if (noteInactive || noteRemoved) {
         badRequest("A deleted, archived, or explicitly inactive JobNimbus Note cannot prove a completed Thresher stage gate.");
       }
+      if (await operatorAuthoredNote(providerRecord, contact.jnid)) {
+        badRequest("An operator-authored JobNimbus note cannot prove a Thresher stage gate. Use independent provider evidence, not this lane's own writeback.");
+      }
     } else if (source === "gmail_message") {
       scopedCommunicationFile ||= await operatorCommunicationFile({ fileQuery: String(file.number) }, "Thresher Gmail evidence");
       providerRecord = compactGmailFullMessage(await gmailApi(
@@ -7740,6 +7751,118 @@ async function createNote(input) {
   const file = compactContact(contact);
   const memoryCloseout = await closeoutJobNimbusAction(file, "create_note", result, "Created approved JobNimbus internal note.");
   return { mode: "executed", file, result, memoryCloseout };
+}
+
+async function approvedNoteInventory(fileId) {
+  const filter = JSON.stringify({ must: [{ term: { "primary.id": fileId } }] });
+  const rows = await listResourcePages("/activities", 5, { filter, maxRecords: 5000 });
+  const seen = new Set();
+  for (const row of rows) {
+    const id = approvedNoteCreatedId(row);
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(id) || seen.has(id)
+      || String(row?.primary?.id || "") !== fileId) {
+      conflictError("The exact-file note inventory is incomplete or ambiguous. No note may be created or retried.");
+    }
+    seen.add(id);
+  }
+  return rows;
+}
+
+async function operatorAuthoredNote(record, fileId) {
+  const id = String(record?.jnid || record?.id || "");
+  const note = String(record?.note || "");
+  const ledger = await readActionBatchLedger();
+  return ledger.some((row) => (
+    (row.completed || []).some((item) => item.type === "jobnimbus.create_note"
+      && String(item.receipt?.externalId || "") === id)
+    || (row.intents || []).some((intent) => approvedNoteIntentMatches(intent, fileId, note))
+  ));
+}
+
+async function prepareApprovedNote(input, expectedFileId = "") {
+  let approved;
+  try { approved = validateApprovedNotePayload(input); } catch (error) { badRequest(error.message); }
+  const { contact } = await findChanceContact(input.query, { expectedFileId });
+  assertOperatorContactScope(contact);
+  const file = compactContact(contact);
+  const inventory = await approvedNoteInventory(file.id);
+  if (inventory.some((record) => approvedNoteRecordMatches(record, {
+    fileId: file.id, note: approved.note
+  }))) {
+    conflictError("An identical active note already exists on this exact file. No duplicate note will be posted; review the existing activity.");
+  }
+  // This plan is persisted as immutable intent before the sole provider POST.
+  return {
+    mode: "dry_run", file,
+    plan: {
+      endpoint: "/activities",
+      note: approved.note,
+      noteSha256: approved.noteSha256,
+      mentionRequested: approved.mentionRequested,
+      intendedRecipient: approved.intendedRecipient,
+      mentionsVerified: false,
+      accountingNotified: false,
+      notificationNotice: approved.mentionRequested
+        ? "The exact @RichardR tag will be saved. Notification delivery to Richard is not confirmed by the API."
+        : "No notification requested.",
+      beforeIds: inventory.map((row) => String(row.jnid || row.id)).sort(),
+      body: { note: approved.note, record_type_name: "Note", primary: { id: file.id } }
+    }
+  };
+}
+
+async function createApprovedNote(input, prepared, recordProviderNoteId) {
+  if (!ALLOW_WRITES) badRequest("Writes are disabled. Nothing was posted.");
+  const fileId = preparedActionFile(prepared).id;
+  const fresh = await prepareApprovedNote(input, fileId);
+  if (digest(fresh.plan) !== digest(prepared?.plan?.plan)) {
+    conflictError("The approved note or exact-file activity inventory changed. No note was posted; prepare a new approval.");
+  }
+  if (typeof recordProviderNoteId !== "function") {
+    conflictError("A durable provider note receipt writer is unavailable. Nothing was posted.");
+  }
+  const result = await jobNimbus("/activities", {
+    approvedNote: true,
+    method: "POST", body: { ...fresh.plan.body, date_created: Math.floor(Date.now() / 1000) }
+  });
+  const externalId = approvedNoteCreatedId(result);
+  if (!externalId) {
+    conflictError("The provider did not return a usable note ID. Outcome is uncertain; never retry this POST.");
+  }
+  if (fresh.plan.beforeIds.includes(externalId)) {
+    conflictError("The provider returned a pre-existing activity ID for a new note. Outcome requires manual reconciliation; never retry this POST.");
+  }
+  // Save the provider's actual create ID before readback. Content equality
+  // alone cannot distinguish our POST from another user's identical note.
+  await recordProviderNoteId(externalId);
+  const record = await jobNimbus(`/activities/${encodeURIComponent(externalId)}`, { approvedNote: true });
+  if (!approvedNoteRecordMatches(record, { id: externalId, fileId, note: fresh.plan.note })) {
+    conflictError("The provider note readback does not match the approved ID, file and exact content. Outcome requires reconciliation; never retry this POST.");
+  }
+  return {
+    mode: "executed", file: fresh.file, result: { id: externalId },
+    verifiedByReadback: true, noteSha256: fresh.plan.noteSha256,
+    mentionRequested: fresh.plan.mentionRequested, intendedRecipient: fresh.plan.intendedRecipient,
+    mentionsVerified: false, accountingNotified: false
+  };
+}
+
+async function reconcileApprovedNoteIntent(intent, providerNoteId) {
+  const expected = intent.reconciliation || {};
+  if (!approvedNoteIntentMatches(intent, intent.fileId, expected.note)
+    || !Array.isArray(expected.beforeIds) || expected.beforeIds.some((id) => typeof id !== "string")) {
+    conflictError("The interrupted approved note lacks an immutable exact note and inventory. Never retry it.");
+  }
+  if (!/^[A-Za-z0-9_-]{8,100}$/.test(String(providerNoteId || ""))
+    || expected.beforeIds.includes(providerNoteId)) {
+    conflictError("The interrupted note lacks a durable create-response ID. Matching content cannot prove our POST; manual reconciliation is required and another POST is forbidden.");
+  }
+  const externalId = providerNoteId;
+  const record = await jobNimbus(`/activities/${encodeURIComponent(externalId)}`, { approvedNote: true });
+  if (!approvedNoteRecordMatches(record, { id: externalId, fileId: intent.fileId, note: expected.note })) {
+    conflictError("The interrupted note readback changed or does not exactly match. Never retry this POST.");
+  }
+  return { applied: true, externalId };
 }
 
 async function createTask(input) {
@@ -9297,24 +9420,44 @@ async function reconcileGmailSendIntent(intent) {
   };
 }
 
-function operatorDraftCreationRunPolicyShas() {
+function operatorCompatibleReceiptRunPolicies() {
   const current = CHANCE_OPERATOR_RUN_MANIFEST;
-  if (!current) return new Set();
-  const accepted = new Set([current.sha256]);
+  if (!current) return new Map();
+  const key = (manifest) => `${manifest.id}:${manifest.sha256}`;
+  const accepted = new Map([[key(current), { requireVerifiedReadback: true }]]);
   if (current.allowedActionTypes.includes("gmail.send_existing_draft")) {
-    const immediatePredecessor = loadChanceOperatorRunManifest({
+    // Reconstruct receipt identities even after expiry; this never extends the
+    // separately enforced current manifest's authorization lifetime.
+    const historicalHashOptions = { now: Date.parse(current.expiresAt) - 1 };
+    // Only explicit reviewed predecessor variants of this exact roster,
+    // expiry, scope and field allowlist can supply an existing bridge draft.
+    // The notes manifest has an exact six-action contract; subtracting a send
+    // action from that ID would create an invalid manifest, not a predecessor.
+    const predecessorBase = {
       schemaVersion: current.schemaVersion,
-      id: current.id,
+      id: CHANCE_OPERATOR_RUN_POLICY_ID,
       operatorScope: current.operatorScope,
       expiresAt: current.expiresAt,
       files: current.files.map((row) => ({ number: row.number, fileId: row.fileId })),
       excludedFileNumbers: current.excludedFileNumbers,
-      allowedActionTypes: current.allowedActionTypes.filter(
-        (type) => type !== "gmail.send_existing_draft"
-      ),
       allowedContactFields: current.allowedContactFields
-    });
-    accepted.add(immediatePredecessor.sha256);
+    };
+    if (current.id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID) {
+      const previousFiveAction = loadChanceOperatorRunManifest({
+        ...predecessorBase,
+        allowedActionTypes: [...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES]
+      }, historicalHashOptions);
+      accepted.set(key(previousFiveAction), { requireVerifiedReadback: true });
+    }
+    const previousFourAction = loadChanceOperatorRunManifest({
+      ...predecessorBase,
+      allowedActionTypes: CHANCE_OPERATOR_ALLOWED_ACTION_TYPES.filter(
+        (type) => type !== "gmail.send_existing_draft"
+      )
+    }, historicalHashOptions);
+    // Preserve the established four-action migration, which re-attests the
+    // provider's immutable draft snapshot before offering a fresh send plan.
+    accepted.set(key(previousFourAction), { requireVerifiedReadback: false });
   }
   return accepted;
 }
@@ -9324,15 +9467,15 @@ async function assertOperatorDraftProvenance(file, draftId, options = {}) {
   const currentPrincipalHash = options.currentRunOnly === true
     ? actionApprovalIdentityHash()
     : "";
-  const acceptedRunPolicyShas = operatorDraftCreationRunPolicyShas();
+  const acceptedRunPolicies = operatorCompatibleReceiptRunPolicies();
   let matched = null;
   for (const batch of batches) {
+    const creationPolicy = acceptedRunPolicies.get(`${batch.runPolicyId}:${batch.runPolicySha256}`);
     if (options.currentRunOnly === true) {
       if (
         batch.principalHash !== currentPrincipalHash
         || batch.operatorScope !== "assigned"
-        || batch.runPolicyId !== CHANCE_OPERATOR_RUN_MANIFEST?.id
-        || !acceptedRunPolicyShas.has(batch.runPolicySha256)
+        || !creationPolicy
         || batch.status !== "completed"
         || Number(batch.operationCount) !== 1
         || Number(batch.fileCount) !== 1
@@ -9355,7 +9498,7 @@ async function assertOperatorDraftProvenance(file, draftId, options = {}) {
       && String(row.receipt?.externalId || "") === String(draftId)
       && (
         options.currentRunOnly !== true
-        || batch.runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST?.sha256
+        || creationPolicy?.requireVerifiedReadback === false
         || row.receipt?.verifiedByReadback === true
       )
       && row.receipt?.manualVerificationRequired !== true
@@ -10833,6 +10976,10 @@ async function operatorRunPolicy() {
         && row.recovery?.fileScopedQuarantine !== true
       )
       || (
+        ["manual_quarantined", "legacy_quarantined", "completed_pending_verification"].includes(row.status)
+        && actionBatchResourceLockScope(row).global
+      )
+      || (
         row.status === "completed_pending_verification"
         && validatedQuarantineFileScope(row).length === 0
       )
@@ -11051,7 +11198,12 @@ function minimizedActionBatchReceipt(row, options = {}) {
       index: intent.index,
       type: intent.type,
       fileNumber: intent.fileNumber || "",
-      intentDigest: intent.intentDigest || ""
+      intentDigest: intent.intentDigest || "",
+      ...(intent.type === "jobnimbus.create_note" ? {
+        noteSha256: intent.reconciliation?.noteSha256 || "",
+        mentionRequested: intent.reconciliation?.mentionRequested,
+        intendedRecipient: intent.reconciliation?.intendedRecipient
+      } : {})
     })),
     completed: completed.map((item) => ({
       index: item.index,
@@ -11064,6 +11216,13 @@ function minimizedActionBatchReceipt(row, options = {}) {
         sourceDraftId: item.receipt?.sourceDraftId || "",
         sourceDraftRetention: item.receipt?.sourceDraftRetention || "",
         verifiedByReadback: item.receipt?.verifiedByReadback,
+        ...(item.type === "jobnimbus.create_note" && item.receipt?.noteSha256 ? {
+          noteSha256: item.receipt.noteSha256,
+          mentionRequested: item.receipt.mentionRequested,
+          intendedRecipient: item.receipt.intendedRecipient,
+          mentionsVerified: false,
+          accountingNotified: false
+        } : {}),
         deliveryStatus: item.receipt?.deliveryStatus || "",
         deliveryConfirmed: item.receipt?.deliveryConfirmed,
         manualVerificationRequired: item.receipt?.manualVerificationRequired
@@ -11270,6 +11429,10 @@ async function actionBatchReconcile(input = {}) {
         }
         applied = matched.length === 1;
         externalId = matched.length === 1 ? taskRecordId(matched[0]) : "";
+      } else if (intent.type === "jobnimbus.create_note") {
+        const noteReconciliation = await reconcileApprovedNoteIntent(intent, row.current.providerNoteId);
+        applied = noteReconciliation.applied;
+        externalId = noteReconciliation.externalId;
       } else if (intent.type === "gmail.create_draft") {
         const draftReconciliation = await reconcileGmailDraftIntent(intent);
         applied = draftReconciliation.applied;
@@ -11300,6 +11463,13 @@ async function actionBatchReconcile(input = {}) {
             fileNumber: intent.fileNumber,
             externalId,
             verifiedByReadback: true,
+            ...(intent.type === "jobnimbus.create_note" ? {
+              noteSha256: intent.reconciliation.noteSha256,
+              mentionRequested: intent.reconciliation.mentionRequested,
+              intendedRecipient: intent.reconciliation.intendedRecipient,
+              mentionsVerified: false,
+              accountingNotified: false
+            } : {}),
             ...(intent.type === "gmail.send_existing_draft" ? {
               sourceDraftId: String(intent.reconciliation?.draftId || ""),
               sourceDraftRetention: "retained_for_separate_cleanup"
@@ -11392,7 +11562,7 @@ async function processActionBatch(input = {}) {
     return {
       mode: "blocked_duplicate",
       reason: `This exact approved batch is already ${reservation.existing.status}. Review its receipt before attempting anything again.`,
-      batch: reservation.existing
+      batch: actionBatchPublicResult(reservation.existing)
     };
   }
   const batch = reservation.batch;
@@ -11412,7 +11582,13 @@ async function processActionBatch(input = {}) {
     const operationCurrent = { ...batch.current };
     let verifiedReceipt = null;
     try {
-      const result = await executeActionOperation(operations[index], plans[index]);
+      const result = await executeActionOperation(operations[index], plans[index], {
+        recordProviderNoteId: async (providerNoteId) => {
+          batch.current.providerNoteId = providerNoteId;
+          operationCurrent.providerNoteId = providerNoteId;
+          await updateActionBatch(batch);
+        }
+      });
       verifiedReceipt = summarizeOperationResult(result);
       batch.completed.push({ index, type: operations[index].type, status: "executed", receipt: verifiedReceipt });
       delete batch.current;
@@ -11445,7 +11621,7 @@ async function processActionBatch(input = {}) {
       await updateActionBatch(batch);
       return {
         mode: "partial_failure",
-        batch,
+        batch: actionBatchPublicResult(batch),
         reason: "Execution stopped immediately. Fresh-read the failed file, preserve completed receipts, and do not retry failed or unattempted actions without a new review and approval."
       };
     }
@@ -11454,7 +11630,28 @@ async function processActionBatch(input = {}) {
   batch.notAttempted = [];
   batch.completedAt = new Date().toISOString();
   await updateActionBatch(batch);
-  return { mode: "executed", batch };
+  return { mode: "executed", batch: actionBatchPublicResult(batch) };
+}
+
+function actionBatchPublicResult(batch) {
+  if (!(batch.intents || []).some((intent) => intent.type === "jobnimbus.create_note" && intent.reconciliation?.noteSha256)) {
+    return batch;
+  }
+  // Exact text is shown only in the approval plan and held in the private
+  // immutable intent ledger for recovery, not echoed in execution receipts.
+  return {
+    ...batch,
+    intents: batch.intents.map((intent) => intent.type === "jobnimbus.create_note" ? {
+      index: intent.index, type: intent.type, fileId: intent.fileId,
+      fileNumber: intent.fileNumber, intentDigest: intent.intentDigest,
+      reconciliation: {
+        noteSha256: intent.reconciliation.noteSha256,
+        mentionRequested: intent.reconciliation.mentionRequested,
+        intendedRecipient: intent.reconciliation.intendedRecipient,
+        mentionsVerified: false
+      }
+    } : intent)
+  };
 }
 
 async function assertNoUnresolvedBatchOverlap(batchScope) {
@@ -11519,6 +11716,12 @@ async function prepareCanonicalActionBatch(operationsInput, options = {}) {
   const operations = normalizeActionOperations(operationsInput);
   const runPolicy = options.runPolicy || null;
   if (runPolicy?.enforced) {
+    if (operations.some((operation) => operation.type === "jobnimbus.create_note")) {
+      if (operations.length !== 1) {
+        badRequest("An approved JobNimbus note must be the only operation in its action batch.");
+      }
+      try { validateApprovedNotePayload(operations[0].payload); } catch (error) { badRequest(error.message); }
+    }
     const singleOperationGmailTypes = new Set([
       "gmail.create_draft",
       "gmail.send_existing_draft"
@@ -13726,8 +13929,7 @@ function actionBatchResourceLockScope(row) {
   if (runPolicyId || runPolicySha256) {
     if (
       !CHANCE_OPERATOR_RUN_MANIFEST
-      || runPolicyId !== CHANCE_OPERATOR_RUN_MANIFEST.id
-      || runPolicySha256 !== CHANCE_OPERATOR_RUN_MANIFEST.sha256
+      || !operatorCompatibleReceiptRunPolicies().has(`${runPolicyId}:${runPolicySha256}`)
       || files.some(
         (file) => !chanceManifestFileBinding(
           CHANCE_OPERATOR_RUN_MANIFEST,
@@ -14064,7 +14266,7 @@ async function hcnGmailApi(endpoint, options = {}) {
 
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
-  if (isHcnRestrictedEffectRequest()) {
+  if (isHcnRestrictedEffectRequest() || options.approvedNote === true) {
     return fetchBoundedJson(
       fetch,
       `${API_BASE}${endpoint}`,
@@ -15344,7 +15546,9 @@ async function prepareActionOperation(operation, options = {}) {
       enforceThresher: options.runPolicy?.enforced === true
     }); break;
     case "jobnimbus.process_update": plan = await processUpdate(input); break;
-    case "jobnimbus.create_note": plan = await createNote(input); break;
+    case "jobnimbus.create_note": plan = options.runPolicy?.enforced
+      ? await prepareApprovedNote(operation.payload)
+      : await createNote(input); break;
     case "jobnimbus.create_task": plan = await createTask(input); break;
     case "jobnimbus.update_task": plan = await updateTask(input); break;
     case "jobnimbus.ensure_current_task": plan = await ensureCurrentTask(input); break;
@@ -15361,7 +15565,7 @@ async function prepareActionOperation(operation, options = {}) {
   return { type: operation.type, plan };
 }
 
-async function executeActionOperation(operation, prepared) {
+async function executeActionOperation(operation, prepared, options = {}) {
   const input = { ...operation.payload, execute: true };
   switch (operation.type) {
     case "jobnimbus.update_contact": return updateContact({
@@ -15377,7 +15581,9 @@ async function executeActionOperation(operation, prepared) {
       expectedThresherTransition: prepared.plan.plan.thresherTransition
     });
     case "jobnimbus.process_update": return processUpdate(input);
-    case "jobnimbus.create_note": return createNote(input);
+    case "jobnimbus.create_note": return prepared?.plan?.plan?.noteSha256
+      ? createApprovedNote(operation.payload, prepared, options.recordProviderNoteId)
+      : createNote(input);
     case "jobnimbus.create_task": return createTask(input);
     case "jobnimbus.update_task": return updateTask(input);
     case "jobnimbus.ensure_current_task": return ensureCurrentTask({
@@ -15598,6 +15804,15 @@ function actionBatchIntent(operation, prepared, file, index) {
       after: plan.after || {},
       controlInventoryDigest: plan.controlInventoryDigest || ""
     };
+  } else if (operation.type === "jobnimbus.create_note" && plan.noteSha256) {
+    reconciliation = {
+      note: plan.note,
+      noteSha256: plan.noteSha256,
+      beforeIds: plan.beforeIds,
+      mentionRequested: plan.mentionRequested,
+      intendedRecipient: plan.intendedRecipient,
+      mentionsVerified: false
+    };
   } else if (operation.type === "gmail.create_draft") {
     const subject = String(plan.subject || "").trim();
     reconciliation = {
@@ -15804,12 +16019,19 @@ function summarizeOperationResult(result) {
     && result?.mode === "executed"
     && result?.verifiedByReadback !== true
     && !deliveryStatus;
-  return cleanObject({
+  const receipt = cleanObject({
     mode: result?.mode || "executed",
     fileId: result?.file?.id || "",
     fileNumber: result?.file?.number || "",
     externalId: resultId(result?.message || result?.draft || result?.result || result?.results || result),
     verifiedByReadback: result?.verifiedByReadback,
+    ...(result?.noteSha256 ? {
+      noteSha256: result.noteSha256,
+      mentionRequested: result.mentionRequested,
+      intendedRecipient: result.intendedRecipient,
+      mentionsVerified: false,
+      accountingNotified: false
+    } : {}),
     deliveryStatus,
     deliveryConfirmed: deliveryStatus ? deliveryConfirmed : undefined,
     manualVerificationRequired: deliveryStatus
@@ -15820,6 +16042,10 @@ function summarizeOperationResult(result) {
     memoryReceiptId: result?.memoryCloseout?.receipt?.id || "",
     clientSnapshotRefreshed: result?.memoryCloseout?.clientMemoryRefresh?.refreshed === true
   });
+  // An explicit null distinguishes a plain note from an omitted/unknown
+  // recipient. Preserve it despite the generic compact-receipt cleanup.
+  if (result?.noteSha256) receipt.intendedRecipient = result.intendedRecipient;
+  return receipt;
 }
 
 function resultId(result) {

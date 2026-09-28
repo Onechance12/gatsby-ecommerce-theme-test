@@ -17,6 +17,7 @@ import {
 import {
   CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
+  CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES,
   loadChanceOperatorRunManifest
 } from "./operations/thresher-policy.js";
 
@@ -88,7 +89,7 @@ function retellConfigurationPacketFixture() {
 function lockedOperatorManifestFixture(options = {}) {
   const input = {
     schemaVersion: 1,
-    id: "chance-58-files-v1",
+    id: options.notesVariant ? "chance-58-files-notes-v1" : "chance-58-files-v1",
     operatorScope: "assigned",
     expiresAt: options.expiresAt || "2099-01-01T00:00:00.000Z",
     files: [
@@ -100,7 +101,7 @@ function lockedOperatorManifestFixture(options = {}) {
       }))
     ],
     excludedFileNumbers: ["2628"],
-    allowedActionTypes: [...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES],
+    allowedActionTypes: [...(options.notesVariant ? CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES : CHANCE_OPERATOR_ALLOWED_ACTION_TYPES)],
     allowedContactFields: [...CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS]
   };
   const manifest = loadChanceOperatorRunManifest(input);
@@ -12262,6 +12263,143 @@ test("locked Mac operator sends only a separately approved bridge-created draft 
   });
   assert.equal(adverseRetryResponse.status, 409);
   assert.equal(fixtureApi.getGmailSendCount(), 2);
+});
+
+test("notes manifest accepts only exact current and explicit predecessor bridge draft provenance", async (t) => {
+  const bridgePort = 19278;
+  const fakeApiPort = 19279;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-notes-draft-provenance-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixtureApi = await startOperatorJobNimbusFixture(t, fakeApiPort, { communicationScope: true, secondAssigned: true });
+  const manifest = lockedOperatorManifestFixture({ notesVariant: true });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, NODE_ENV: "test", PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "fixture-shared-token",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key", GOOGLE_CLIENT_ID: "fixture-client",
+      GOOGLE_CLIENT_SECRET: "fixture-secret", GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false", ALLOW_GMAIL_SEND: "false", QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot, REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input), BRIDGE_ALLOW_WRITES: "true"
+    }, stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  async function request(operations, approval) {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+      method: "POST",
+      headers: { authorization: "Bearer fixture-codex-mac-operator-token-1234567890", "content-type": "application/json" },
+      body: JSON.stringify({
+        runPolicy: manifest.runPolicy, operations, execute: Boolean(approval),
+        ...(approval ? { approvalDigest: approval.approvalDigest, approvalChallenge: approval.approvalChallenge } : {})
+      })
+    });
+    return { status: response.status, body: await response.json() };
+  }
+  const draft = [{ type: "gmail.create_draft", payload: {
+    query: "2739", insuranceClaimEmail: true, to: "carrier@example.test", subject: "ABC-123", body: "Approved carrier draft."
+  } }];
+  const draftPlan = await request(draft);
+  assert.equal(draftPlan.status, 200, JSON.stringify(draftPlan.body));
+  const created = await request(draft, draftPlan.body);
+  assert.equal(created.body.mode, "executed", JSON.stringify(created.body));
+  const draftId = created.body.batch.completed[0].receipt.externalId;
+  const send = [{ type: "gmail.send_existing_draft", payload: { query: "2739", draftId } }];
+  const current = await request(send);
+  assert.equal(current.status, 200, JSON.stringify(current.body));
+  assert.equal(current.body.operations[0].plan.plan.draftProvenance.immediatePredecessorReattested, false);
+
+  const ledgerPath = path.join(memoryRoot, "bridge", "action-batches.json");
+  const original = JSON.parse(await readFile(ledgerPath, "utf8"));
+  async function withCreationPolicy(policy, { verified = true, id = policy.id, sha = policy.sha256 } = {}) {
+    const ledger = structuredClone(original);
+    const batch = ledger.find((row) => row.id === created.body.batch.id);
+    batch.runPolicyId = id;
+    batch.runPolicySha256 = sha;
+    if (!verified) delete batch.completed[0].receipt.verifiedByReadback;
+    await writeFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`, "utf8");
+    return request(send);
+  }
+  const five = lockedOperatorManifestFixture().summary;
+  const oldFive = await withCreationPolicy(five);
+  assert.equal(oldFive.status, 200, JSON.stringify(oldFive.body));
+  assert.equal(oldFive.body.operations[0].plan.plan.draftProvenance.immediatePredecessorReattested, true);
+  assert.equal(oldFive.body.operations[0].plan.plan.draftProvenance.creationRunPolicySha256, five.sha256);
+  for (const policy of [manifest.summary, five]) {
+    assert.equal((await withCreationPolicy(policy, { verified: false })).status, 403);
+    assert.equal((await withCreationPolicy(policy, { id: "unrelated-run-v1" })).status, 403);
+    assert.equal((await withCreationPolicy(policy, { sha: "f".repeat(64) })).status, 403);
+  }
+  // The digest alone is insufficient: policy ID and hash must be an admitted pair.
+  assert.equal((await withCreationPolicy(five, { id: manifest.summary.id })).status, 403);
+  assert.equal((await withCreationPolicy(manifest.summary, { id: five.id })).status, 403);
+  const changedExpiry = lockedOperatorManifestFixture({ expiresAt: "2098-01-01T00:00:00.000Z" }).summary;
+  assert.equal((await withCreationPolicy(changedExpiry)).status, 403);
+  const changedRoster = loadChanceOperatorRunManifest({
+    ...lockedOperatorManifestFixture().input,
+    files: five.files.map((row, index) => index === 57 ? { ...row, fileId: "unrelated-roster-file" } : row)
+  });
+  assert.equal((await withCreationPolicy(changedRoster)).status, 403);
+  const four = loadChanceOperatorRunManifest({
+    ...lockedOperatorManifestFixture().input,
+    allowedActionTypes: CHANCE_OPERATOR_ALLOWED_ACTION_TYPES.filter((type) => type !== "gmail.send_existing_draft")
+  });
+  assert.equal((await withCreationPolicy(four, { verified: false })).status, 200);
+  const restored = await withCreationPolicy(five);
+  assert.equal(restored.status, 200);
+  const sent = await request(send, restored.body);
+  assert.equal(sent.body.mode, "executed", JSON.stringify(sent.body));
+  assert.equal(sent.body.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(fixtureApi.getGmailSendCount(), 1);
+
+  // Prior-policy quarantines retain their exact file lock after activation;
+  // neither our own nor another principal's immutable receipt is rewritten.
+  const readPolicy = async () => {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/run-policy`, {
+      headers: { authorization: "Bearer fixture-codex-mac-operator-token-1234567890" }
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const ownPrincipal = original.find((row) => row.id === created.body.batch.id).principalHash;
+  for (const principalHash of [ownPrincipal, "9".repeat(64)]) {
+    const quarantine = {
+      schemaVersion: 2, id: `old-policy-quarantine-${principalHash.slice(0, 8)}`,
+      principalHash, operatorScope: "assigned", status: "manual_quarantined",
+      createdAt: "2026-08-23T12:00:00.000Z", runPolicyId: five.id, runPolicySha256: five.sha256,
+      operationCount: 1, fileCount: 1, batchMode: "assigned_single_file_v2",
+      files: [{ id: "contact-chance", number: "2739", operationIndexes: [0], operationTypes: ["jobnimbus.update_contact"] }],
+      completed: [], recovery: { fileScopedQuarantine: true, automaticRetryAllowed: false },
+      manualQuarantine: { fileId: "contact-chance", fileIds: ["contact-chance"], fileNumber: "2739", fileNumbers: ["2739"], scope: "file" }
+    };
+    await writeFile(ledgerPath, `${JSON.stringify([quarantine], null, 2)}\n`, "utf8");
+    const policy = await readPolicy();
+    assert.equal(policy.ready, true, JSON.stringify(policy));
+    assert.equal(policy.receipts.hardBlockedCount, 0);
+    const correction = (query) => [{ type: "jobnimbus.update_contact", payload: { query, fields: { city: "Dallas" } } }];
+    assert.equal((await request(correction("2739"))).status, 409);
+    const unrelatedPlan = await request(correction("2741"));
+    assert.equal(unrelatedPlan.status, 200, JSON.stringify(unrelatedPlan.body));
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath, "utf8")), [quarantine]);
+    for (const changes of [
+      { runPolicyId: "unrelated-run-v1" },
+      { runPolicySha256: "f".repeat(64) },
+      { runPolicySha256: changedExpiry.sha256 },
+      { files: [{ ...quarantine.files[0], id: "unrelated-file-id" }] }
+    ]) {
+      await writeFile(ledgerPath, `${JSON.stringify([{ ...quarantine, ...changes }], null, 2)}\n`, "utf8");
+      const blocked = await readPolicy();
+      assert.equal(blocked.ready, false, JSON.stringify(blocked));
+      assert.equal(blocked.receipts.hardBlockedCount, 1);
+      assert.equal((await request(correction("2741"))).status, 409);
+    }
+  }
+  assert.equal(fixtureApi.getContactUpdateCount(), 0);
 });
 
 test("locked Chance run fails closed when matching or mismatching Gmail drafts appear after approval", async (t) => {
