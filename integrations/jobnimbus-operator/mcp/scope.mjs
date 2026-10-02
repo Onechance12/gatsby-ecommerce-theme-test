@@ -1,22 +1,26 @@
 import { createHash } from "node:crypto";
 import {
   APPROVED_NOTE_RELEASE,
-  APPROVED_NOTES_ENABLED,
+  APPROVED_NOTES_ENABLED as LEGACY_NOTES_ENABLED,
   approvedNoteMentionIntent,
   matchesApprovedNoteMentionIntent,
   validateApprovedNoteOperation
 } from "./approved-note-release.mjs";
+import { PDF_UPLOAD_RELEASE, PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
+import { PDF_UPLOAD_TYPE, validatePdfPayload, validatePdfMetadata, assertPdfReceipt } from "./pdf-upload-contract.mjs";
+const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_UPLOADS_ENABLED;
+const ACTIVE_RELEASE = PDF_UPLOADS_ENABLED ? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE;
 
 export const CHANCE_RUN_POLICY = Object.freeze({
-  id: APPROVED_NOTES_ENABLED ? APPROVED_NOTE_RELEASE.policyId : "chance-58-files-v1",
-  sha256: APPROVED_NOTES_ENABLED ? APPROVED_NOTE_RELEASE.policySha256 : "40c8a7d418d9349b0b3315b693ce70486040092dcef250043f3397dc10a1c458"
+  id: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.policyId : "chance-58-files-v1",
+  sha256: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.policySha256 : "40c8a7d418d9349b0b3315b693ce70486040092dcef250043f3397dc10a1c458"
 });
 
 export const EXPECTED_BRIDGE_BUILD = Object.freeze({
   service: "jobnimbus-chatgpt-bridge",
   apiVersion: "v1",
   schemaVersion: "0.1.0",
-  sourceCommit: APPROVED_NOTES_ENABLED ? APPROVED_NOTE_RELEASE.bridgeCommit : "49465dded1707d5be6c019fd99de0baa90393c10",
+  sourceCommit: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.bridgeCommit : "49465dded1707d5be6c019fd99de0baa90393c10",
   sourceCommitTrust: "provider_attested",
   attested: true
 });
@@ -145,7 +149,8 @@ export const CHANCE_RUN_ACTION_TYPES = Object.freeze([
   "jobnimbus.ensure_current_task",
   "gmail.create_draft",
   "gmail.send_existing_draft",
-  ...(APPROVED_NOTES_ENABLED ? ["jobnimbus.create_note"] : [])
+  ...(APPROVED_NOTES_ENABLED ? ["jobnimbus.create_note"] : []),
+  ...(PDF_UPLOADS_ENABLED ? [PDF_UPLOAD_TYPE] : [])
 ]);
 
 export const CHANCE_RUN_ALLOWED_STAGE_EVIDENCE_SOURCES = Object.freeze([
@@ -579,6 +584,9 @@ export function assertRunPolicyAttestation(
       || (APPROVED_NOTES_ENABLED && policy.noteMentionsAllowed !== false)
       || (APPROVED_NOTES_ENABLED && policy.noteMentionRequestsAllowed !== true)
       || (APPROVED_NOTES_ENABLED && policy.noteCreationSoleOperation !== true)
+      || (PDF_UPLOADS_ENABLED && (policy.pdfUploadAllowed !== true || policy.pdfUploadSoleOperation !== true
+        || policy.pdfUploadContentReadbackRequired !== true || policy.pdfUploadMaxBytes !== 8388608))
+      || (!PDF_UPLOADS_ENABLED && policy.pdfUploadAllowed === true)
       || policy.backwardStageMovesAllowed !== false
       || policy.stageEvidenceRequired !== true
     ) {
@@ -855,6 +863,13 @@ export function assertExecutionReceiptAttestation(
         throw new Error("The immutable note intent differs from the approved text or intended mention recipient.");
       }
     }
+    if (descriptor.type === PDF_UPLOAD_TYPE) {
+      const expected = validatePdfPayload(operations[index]?.payload).metadata;
+      if (!PDF_UPLOADS_ENABLED || operations.length !== 1
+        || Object.entries(expected).some(([key, value]) => intent.reconciliation[key] !== value)) {
+        throw new Error("PDF intent differs from the approved bytes or metadata.");
+      }
+    }
     intentIndexes.add(index);
   }
 
@@ -910,6 +925,7 @@ export function assertExecutionReceiptAttestation(
       }
     }
     completedIndexes.add(index);
+    if (descriptor.type === PDF_UPLOAD_TYPE) assertPdfReceipt(receipt, operations[index]?.payload);
   }
 
   const notAttemptedIndexes = new Set();
@@ -1056,6 +1072,7 @@ export function assertReconciliationReceiptAttestation(response, batchId) {
   const intentIndexes = new Set();
   const noteIntentHashes = new Map();
   const noteMentionIntents = new Map();
+  const pdfIntents = new Map();
   for (const intent of receipt.intents) {
     const descriptor = descriptors.get(intent?.index);
     if (
@@ -1078,6 +1095,7 @@ export function assertReconciliationReceiptAttestation(response, batchId) {
       noteMentionIntents.set(intent.index, intent);
     }
     intentIndexes.add(intent.index);
+    if (descriptor.type === PDF_UPLOAD_TYPE) pdfIntents.set(intent.index, validatePdfMetadata(intent));
   }
 
   const completedIndexes = new Set();
@@ -1110,6 +1128,10 @@ export function assertReconciliationReceiptAttestation(response, batchId) {
       }
     }
     completedIndexes.add(item.index);
+    if (descriptor.type === PDF_UPLOAD_TYPE) {
+      if (!PDF_UPLOADS_ENABLED || receipt.operationCount !== 1) throw new Error("PDF recovery is not activated or is mixed with other actions.");
+      assertPdfReceipt(item.receipt, pdfIntents.get(item.index));
+    }
   }
   const notAttemptedIndexes = new Set();
   for (const item of receipt.notAttempted) {
@@ -1302,7 +1324,13 @@ export function scopedOperations(operations, operatorScope) {
   if (!["assigned", "company"].includes(operatorScope)) {
     throw new Error("Operator scope must be assigned or company.");
   }
-  validateApprovedNoteOperation(operations, operatorScope);
+  validateApprovedNoteOperation(operations, operatorScope, { enabled: APPROVED_NOTES_ENABLED });
+  if (operations.some((operation) => operation?.type === PDF_UPLOAD_TYPE)) {
+    if (!PDF_UPLOADS_ENABLED || operatorScope !== "assigned" || operations.length !== 1) {
+      throw new Error("PDF uploads require the activated release and one sole assigned-file operation.");
+    }
+    validatePdfPayload(operations[0].payload);
+  }
   const existingDraftSends = operations.filter(
     (operation) => operation?.type === "gmail.send_existing_draft"
   );

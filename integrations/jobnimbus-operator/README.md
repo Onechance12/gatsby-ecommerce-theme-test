@@ -1,5 +1,69 @@
 # JobNimbus Operator for Mac
 
+## Inactive PDF upload candidate
+
+`mcp/pdf-upload-release.mjs` defaults **disabled**. This source introduces
+`pdf_upload_plan` / `pdf_upload_execute` over the existing action-batch gate;
+it does not activate a direct upload route, install itself or change live pins.
+The active PDF release must be separately reviewed with an exact bridge commit,
+`chance-58-files-pdf-v1` policy hash and matching historical-isolation binding.
+The seven-action manifest preserves all six note-release actions and the exact
+58-file roster. Generic/direct upload capability remains absent.
+
+Fred selects a reviewed local regular PDF and explicit privacy. The Operator
+captures at most 8 MiB in its one-use local approval slot and displays only the
+exact file, filename, size, SHA-256, privacy and digest. After exact approval,
+it re-attests the unchanged boundary, executes those captured bytes and verifies
+the new provider document ID, exact-file metadata and downloaded byte hash.
+No PDF bytes, local paths, bearer credentials or presigned URLs enter bridge
+approval/receipt ledgers or chat. Receipt recovery never retries a reservation,
+PUT or completion. No browser or raw-provider fallback is permitted.
+
+See the packaged skill's PDF workflow. Deployment, coordinated pin/manifest
+migration and a fresh process are separate approval gates. Existing installed
+tools are intentionally unchanged by building/testing this candidate.
+
+Release checklist (do not run as part of development approval):
+
+- Review this isolated source diff and synthetic tests. The baseline is the
+  deployed notes bridge `c81d30343e608331160ab6246ba1a5ae8dc2de8a`, not the
+  separate SPOTIO/Jobrolo branches. Preserve unrelated releases.
+- Confirm the existing JobNimbus credential already permits file creation;
+  never enlarge its access profile as an implicit fix. Confirm provider file
+  metadata exposes the exact ID, filename, related file and `is_private` or
+  `isPrivate` boolean. Missing/ambiguous proof fails closed.
+- Under explicit activation approval, derive the new manifest from the live
+  reviewed notes manifest: change only its ID and append `jobnimbus.upload_pdf`.
+  Preserve roster, expiry, exclusions and field restrictions. Rebind only the
+  existing six-entry legacy-isolation policy ID/hash; never change fingerprints
+  or replay receipts. Do not reuse the old notes activation script.
+- Deploy the reviewed bridge commit, then pin its provider-attested full commit
+  and exact new manifest SHA in the PDF release constant. Publish/install a new
+  versioned Operator release. Repoint Fred's read-only launcher to that reviewed
+  installed version without adding writes. Recheck separate management/research
+  build pins for the new bridge commit without expanding either profile.
+  Do not edit a running cached plugin or disable attestation to bridge the gap.
+- Start a fresh persistent Mac tool session, require full readiness and zero
+  unresolved/hard-blocked receipts. Use the new skill workflow for a separately
+  approved exact PDF. A successful synthetic test is not a live upload receipt.
+- If activation cannot attest, stop. Any rollback must retain receipts and
+  quarantine unknown provider outcomes; never blindly resume the old manifest
+  or retry a reservation/upload/completion. A draft/send needs its own approval.
+
+The transport reuses the existing Files API reservation/PUT/completion flow.
+No live provider upload was performed during development. PDF framing checks
+are not structural validation, malware scanning or review of document content.
+Duplicate checks cover filenames, verified upload receipts and bounded same-size
+existing documents. If an older document exposes no size, renamed equal bytes
+cannot be ruled out by that check; review the exact-file inventory before approval.
+
+Development verification: `npm run test:pdf-upload` passes 280 tests, including
+35 new PDF/upload/local-approval/transport tests; four existing optional research
+integration tests are skipped. `npm run check` also passes the 530-test core
+bridge suite. The packaged skill validator and syntax/diff checks pass. Tests
+use synthetic bytes and local/mock providers, never client uploads. The installed
+Operator, live policy and production service are unchanged.
+
 ## Approved-note release
 
 This release adds the sixth action, `jobnimbus.create_note`, when

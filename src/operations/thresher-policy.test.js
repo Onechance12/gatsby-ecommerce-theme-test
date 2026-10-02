@@ -72,7 +72,8 @@ function manifestInput(overrides = {}) {
   };
 }
 
-test("loads and pins an exact immutable 58-file run manifest", () => {
+test("loads and pins an exact immutable 58-file run manifest", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-08-23T00:00:00.000Z") });
   const manifest = loadChanceOperatorRunManifest(manifestInput(), {
     now: Date.parse("2026-08-23T00:00:00.000Z")
   });

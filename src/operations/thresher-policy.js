@@ -4,6 +4,7 @@ export const CHANCE_OPERATOR_RUN_POLICY_ID = "chance-58-files-v1";
 // Separate reviewed manifest/pin required. Merely deploying this code does not
 // grant note access to the existing five-action production manifest.
 export const CHANCE_OPERATOR_NOTES_RUN_POLICY_ID = "chance-58-files-notes-v1";
+export const CHANCE_OPERATOR_PDF_RUN_POLICY_ID = "chance-58-files-pdf-v1";
 export const CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION = 1;
 export const CHANCE_OPERATOR_RUN_FILE_COUNT = 58;
 
@@ -20,6 +21,9 @@ export const CHANCE_OPERATOR_ALLOWED_ACTION_TYPES = Object.freeze([
 export const CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES = Object.freeze([
   ...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
   "jobnimbus.create_note"
+]);
+export const CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES = Object.freeze([
+  ...CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES, "jobnimbus.upload_pdf"
 ]);
 
 const CHANCE_OPERATOR_LEGACY_ALLOWED_ACTION_TYPES = Object.freeze(
@@ -191,7 +195,7 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
     throw new Error(`The Chance operator run manifest requires schemaVersion ${CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION}.`);
   }
   const id = String(input.id || "").trim();
-  if (![CHANCE_OPERATOR_RUN_POLICY_ID, CHANCE_OPERATOR_NOTES_RUN_POLICY_ID].includes(id)) {
+  if (![CHANCE_OPERATOR_RUN_POLICY_ID, CHANCE_OPERATOR_NOTES_RUN_POLICY_ID, CHANCE_OPERATOR_PDF_RUN_POLICY_ID].includes(id)) {
     throw new Error(`The Chance operator run manifest id must be ${CHANCE_OPERATOR_RUN_POLICY_ID}.`);
   }
   if (String(input.operatorScope || "").trim().toLowerCase() !== "assigned") {
@@ -205,7 +209,10 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
   if (!exactStringSet(input.excludedFileNumbers, CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS)) {
     throw new Error("The Chance operator run manifest must exclude JobNimbus file #2628.");
   }
-  const allowedActionTypes = id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID
+  const allowedActionTypes = id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID
+    ? (exactStringSet(input.allowedActionTypes, CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES)
+      ? CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES : null)
+    : id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID
     ? (exactStringSet(input.allowedActionTypes, CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES)
       ? CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES : null)
     : exactStringSet(
@@ -276,11 +283,15 @@ export function chanceOperatorRunManifestSummary(manifest) {
     outboundSendAllowed: false,
     existingDraftSendAllowed: manifest.allowedActionTypes.includes("gmail.send_existing_draft"),
     rawGmailSendAllowed: false,
-    noteCreationAllowed: manifest.id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
-    ...(manifest.id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID ? {
+    noteCreationAllowed: manifest.allowedActionTypes.includes("jobnimbus.create_note"),
+    ...(manifest.allowedActionTypes.includes("jobnimbus.create_note") ? {
       noteMentionsAllowed: false,
       noteMentionRequestsAllowed: true,
       noteCreationSoleOperation: true
+    } : {}),
+    ...(manifest.id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID ? {
+      pdfUploadAllowed: true, pdfUploadSoleOperation: true,
+      pdfUploadContentReadbackRequired: true, pdfUploadMaxBytes: 8388608
     } : {}),
     backwardStageMovesAllowed: false,
     stageEvidenceRequired: true

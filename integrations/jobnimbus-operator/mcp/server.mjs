@@ -9,6 +9,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { CHANCE_RUN_ACTION_TYPES } from "./scope.mjs";
 import { APPROVED_NOTES_ENABLED } from "./approved-note-release.mjs";
+import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
+import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { createOperatorCoordinator } from "./operator-coordinator.mjs";
 import { createInstalledManagementReportClient } from "./management-report.mjs";
 import {
@@ -35,7 +37,8 @@ const FILE_CACHE = path.join(
   KEYCHAIN_SERVICE,
   "files"
 );
-const ACTION_TYPES = [...CHANCE_RUN_ACTION_TYPES];
+// PDF bytes enter only through the local-file tools, not a chat base64 payload.
+const ACTION_TYPES = CHANCE_RUN_ACTION_TYPES.filter((type) => type !== PDF_UPLOAD_TYPE);
 
 function operatorToken() {
   try {
@@ -732,10 +735,25 @@ const operationSchema = z.object({
   }
 });
 
+if (PDF_UPLOADS_ENABLED) {
+  register(
+    "pdf_upload_plan",
+    "Snapshot one reviewed local PDF for one active Chance-manifest file. No upload yet. Show the exact client, filename, privacy, size, SHA-256 and approvalDigest to Chance. PDF contents are not printed or persisted by the bridge. A new plan invalidates older approvals. Upload approval does not approve an email draft or send.",
+    { query: z.string().regex(/^#?\d+$/), path: z.string().min(1), filename: z.string().min(1), isPrivate: z.boolean() },
+    (input) => OPERATOR.planPdfUpload(input)
+  );
+  register(
+    "pdf_upload_execute",
+    "Upload only after Chance explicitly approves the unchanged immediately preceding PDF plan. Uses the captured immutable bytes and the one-use approvalDigest, re-attests the bridge, then verifies provider ID, client, metadata and downloaded bytes. Any uncertain outcome stops; use receipt recovery, never retry or fall back to browser/raw API. Drafting and sending remain separately approved actions.",
+    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/) },
+    ({ approvalDigest }) => OPERATOR.executePdfUpload(approvalDigest)
+  );
+}
+
 register(
   "action_batch_plan",
   "Prepare an exact dry-run JobNimbus/Gmail batch under the pinned 58-file Thresher manifest. The wrapper freshly re-attests the exact bridge build, boot, policy, six-receipt historical isolation, runtime, identity, capabilities, and ready receipt boundary before posting. Up to five exact Chance files may contain one contact correction, one forward stage move, and one current-control task each, in that order. Gmail draft creation remains a sole-operation batch and is not a send. A reviewed bridge-created draft may be sent only in a later sole-operation gmail.send_existing_draft batch with exactly {query,draftId} and a new approval. "
-    + (APPROVED_NOTES_ENABLED
+    + (APPROVED_NOTES_ENABLED || PDF_UPLOADS_ENABLED
       ? "One exact-file JobNimbus note may be prepared as a sole-operation batch with exactly {query,note}. Only one canonical @RichardR mention request is accepted, bound to Richard R's exact user ID in the displayed plan. All other @ text is blocked. Mention rendering and notification delivery are unverified: preserve mentionsVerified:false and accountingNotified:false. "
       : "JobNimbus notes are not activated and remain blocked. ")
     + "Raw sends, #2628, completions, calendar writes, backward moves, and every call outside the separate single-file Retell claim-filing lane are blocked. Show the complete returned plan and approvalDigest to Chance before execution.",
