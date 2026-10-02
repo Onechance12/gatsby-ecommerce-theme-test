@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
+import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
+import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
+import { readLocalPdf } from "./local-pdf.mjs";
 
 import {
   CHANCE_RUN_ACTION_TYPES,
@@ -674,7 +677,8 @@ export function createOperatorCoordinator({
       throw new Error("The bridge did not certify that the approval display is complete.");
     }
     assertRunPolicyAttestation(response, { requireFullSurface: true });
-    assertApprovedNotePlan(response, operations, operatorScope);
+    assertApprovedNotePlan(response, operations, operatorScope, { enabled: CHANCE_RUN_ACTION_TYPES.includes("jobnimbus.create_note") });
+    assertPdfPlan(response, operations);
     const expiresAt = Date.parse(String(response?.approvalExpiresAt || ""));
     if (!Number.isFinite(expiresAt) || expiresAt <= now()) {
       throw new Error("The bridge did not return a live approval expiry. Nothing was approved.");
@@ -683,6 +687,7 @@ export function createOperatorCoordinator({
       kind: "action_batch",
       challenge,
       operations: canonical(operations),
+      ...(operations[0]?.type === PDF_UPLOAD_TYPE ? { pdfFileId: response.files[0].id } : {}),
       operatorScope,
       runPolicy: canonical(CHANCE_RUN_POLICY),
       attestedBoundary: canonical(attestedBoundary),
@@ -735,6 +740,10 @@ export function createOperatorCoordinator({
         approvalDigest,
         approvalChallenge: pending.challenge
       });
+      if (pending.pdfFileId && (response?.batch?.files?.length !== 1
+        || response.batch.files[0].id !== pending.pdfFileId)) {
+        throw new Error("PDF receipt target differs from the approved provider file ID. Reconcile before retrying.");
+      }
       assertExecutionReceiptAttestation(response, approvalDigest, {
         operations,
         bridgeBootId: currentBoundary.bridgeBootId
@@ -835,6 +844,26 @@ export function createOperatorCoordinator({
     return stripApprovalSecrets(response);
   }
 
+  async function planPdfUpload(input) {
+    const generation = invalidateLocalApprovals();
+    if (!PDF_UPLOADS_ENABLED) throw new Error("PDF upload is built but not activated. A reviewed coordinated release is required.");
+    const payload = await readLocalPdf(input);
+    requireCurrentApprovalGeneration(generation);
+    // The immutable byte snapshot is retained only in the one-use local
+    // approval slot. No base64 or source path is returned to chat or a ledger.
+    return planActionBatch([{ type: PDF_UPLOAD_TYPE, payload }], "assigned");
+  }
+
+  async function executePdfUpload(approvalDigest) {
+    const pending = approvals.get(approvalDigest);
+    if (!PDF_UPLOADS_ENABLED || pending?.kind !== "action_batch") throw new Error("No current approved PDF snapshot exists.");
+    const operations = JSON.parse(pending.operations);
+    if (operations.length !== 1 || operations[0].type !== PDF_UPLOAD_TYPE) throw new Error("This digest is not a sole PDF-upload plan.");
+    // Never reopen a potentially changed path, accept replacement bytes, or
+    // re-create an expired/lost plan. Execution uses exactly the reviewed bytes.
+    return executeActionBatch(approvalDigest, operations, "assigned");
+  }
+
   return Object.freeze({
     verifiedBridgeSession,
     restartVerifiedBridgeSession,
@@ -845,6 +874,8 @@ export function createOperatorCoordinator({
     listPendingClaimCallbacks,
     planActionBatch,
     executeActionBatch,
-    reconcileActionBatch
+    reconcileActionBatch,
+    planPdfUpload,
+    executePdfUpload
   });
 }

@@ -89,6 +89,9 @@ import {
   validateApprovedNotePayload
 } from "./jobnimbus/approved-note.js";
 import { createLorPdf } from "./documents/lor.js";
+import { createApprovedPdfService } from "./jobnimbus/approved-pdf.js";
+import { createPdfUploadTransport } from "./jobnimbus/pdf-upload-transport.js";
+import { PDF_UPLOAD_TYPE, validatePdfMetadata } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
 import { createDocumentResearchService, DOCUMENT_RESEARCH_ROUTES } from "./documents/research-access.js";
 import { createDocumentResearchProvider } from "./documents/research-provider.js";
 import { getBuildInfo } from "./platform/build-info.js";
@@ -101,6 +104,8 @@ import {
   CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS,
   CHANCE_OPERATOR_RUN_POLICY_ID,
   CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
+  CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
   loadChanceOperatorRunManifest,
@@ -8213,6 +8218,45 @@ async function uploadJobNimbusFile(input) {
   };
 }
 
+function approvedPdfService() {
+  const transport = createPdfUploadTransport({
+    apiKey: API_KEY,
+    fileBase: JOBNIMBUS_FILE_BASE_URL,
+    // A synthetic local provider is available only in NODE_ENV=test. There is
+    // no runtime production override for the JobNimbus upload API origin.
+    ...(process.env.NODE_ENV === "test" && process.env.PDF_UPLOAD_TEST_API_BASE ? {
+      fileApiBase: process.env.PDF_UPLOAD_TEST_API_BASE, allowLoopback: true
+    } : {})
+  });
+  return createApprovedPdfService({
+    ...transport,
+    resolveFile: async (query, expectedFileId) => {
+      const number = query.replace(/^#/, "");
+      const binding = CHANCE_OPERATOR_RUN_MANIFEST?.files.find((row) => row.number === number);
+      if (!binding || (expectedFileId && binding.fileId !== expectedFileId)) {
+        conflictError("PDF target is not bound to the exact approved manifest file.");
+      }
+      // Numeric upload queries already have an immutable ID binding. Read just
+      // that record, never re-enumerate the company contact index for an upload.
+      const contact = await jobNimbus(`/contacts/${encodeURIComponent(binding.fileId)}`, { approvedPdf: true });
+      assertOperatorContactScope(contact);
+      if (!isExplicitlyOpenActive(contact)
+        || String(contact.jnid || contact.id || "") !== binding.fileId
+        || (contact.jnid !== undefined && contact.id !== undefined && contact.jnid !== contact.id)
+        || String(contact.number) !== number
+        || !chanceManifestFileBinding(CHANCE_OPERATOR_RUN_MANIFEST, contact.number, binding.fileId)) {
+        conflictError("PDF upload target must be an active exact assigned manifest file.");
+      }
+      return compactContact(contact);
+    },
+    listFiles: (id) => listRelated("/files", id, 5000),
+    readDocument: (id) => jobNimbus(`/files/${encodeURIComponent(id)}`, { approvedPdf: true }),
+    wasUploaded: async (fileId, sha256) => (await readActionBatchLedger()).some((row) =>
+      (row.completed || []).some((item) => item.type === PDF_UPLOAD_TYPE
+        && item.receipt?.fileId === fileId && item.receipt?.sha256 === sha256))
+  });
+}
+
 function jobNimbusUploadPlan(contact, input) {
   return {
     filename: safeMimeFilename(input.filename),
@@ -9442,7 +9486,14 @@ function operatorCompatibleReceiptRunPolicies() {
       excludedFileNumbers: current.excludedFileNumbers,
       allowedContactFields: current.allowedContactFields
     };
-    if (current.id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID) {
+    if (current.id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID) {
+      const previousNotes = loadChanceOperatorRunManifest({
+        ...predecessorBase, id: CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
+        allowedActionTypes: [...CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES]
+      }, historicalHashOptions);
+      accepted.set(key(previousNotes), { requireVerifiedReadback: true });
+    }
+    if ([CHANCE_OPERATOR_NOTES_RUN_POLICY_ID, CHANCE_OPERATOR_PDF_RUN_POLICY_ID].includes(current.id)) {
       const previousFiveAction = loadChanceOperatorRunManifest({
         ...predecessorBase,
         allowedActionTypes: [...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES]
@@ -11203,7 +11254,8 @@ function minimizedActionBatchReceipt(row, options = {}) {
         noteSha256: intent.reconciliation?.noteSha256 || "",
         mentionRequested: intent.reconciliation?.mentionRequested,
         intendedRecipient: intent.reconciliation?.intendedRecipient
-      } : {})
+      } : {}),
+      ...(intent.type === PDF_UPLOAD_TYPE ? validatePdfMetadata(intent.reconciliation) : {})
     })),
     completed: completed.map((item) => ({
       index: item.index,
@@ -11222,6 +11274,9 @@ function minimizedActionBatchReceipt(row, options = {}) {
           intendedRecipient: item.receipt.intendedRecipient,
           mentionsVerified: false,
           accountingNotified: false
+        } : {}),
+        ...(item.type === PDF_UPLOAD_TYPE ? {
+          ...validatePdfMetadata(item.receipt), contentVerified: item.receipt.contentVerified
         } : {}),
         deliveryStatus: item.receipt?.deliveryStatus || "",
         deliveryConfirmed: item.receipt?.deliveryConfirmed,
@@ -11433,6 +11488,10 @@ async function actionBatchReconcile(input = {}) {
         const noteReconciliation = await reconcileApprovedNoteIntent(intent, row.current.providerNoteId);
         applied = noteReconciliation.applied;
         externalId = noteReconciliation.externalId;
+      } else if (intent.type === PDF_UPLOAD_TYPE) {
+        const reconciled = await approvedPdfService().reconcile(intent, row.current.providerDocumentId);
+        applied = reconciled.applied;
+        externalId = reconciled.externalId;
       } else if (intent.type === "gmail.create_draft") {
         const draftReconciliation = await reconcileGmailDraftIntent(intent);
         applied = draftReconciliation.applied;
@@ -11463,6 +11522,9 @@ async function actionBatchReconcile(input = {}) {
             fileNumber: intent.fileNumber,
             externalId,
             verifiedByReadback: true,
+            ...(intent.type === PDF_UPLOAD_TYPE ? {
+              ...validatePdfMetadata(intent.reconciliation), contentVerified: true
+            } : {}),
             ...(intent.type === "jobnimbus.create_note" ? {
               noteSha256: intent.reconciliation.noteSha256,
               mentionRequested: intent.reconciliation.mentionRequested,
@@ -11583,6 +11645,11 @@ async function processActionBatch(input = {}) {
     let verifiedReceipt = null;
     try {
       const result = await executeActionOperation(operations[index], plans[index], {
+        recordProviderDocumentId: async (providerDocumentId) => {
+          batch.current.providerDocumentId = providerDocumentId;
+          operationCurrent.providerDocumentId = providerDocumentId;
+          await updateActionBatch(batch);
+        },
         recordProviderNoteId: async (providerNoteId) => {
           batch.current.providerNoteId = providerNoteId;
           operationCurrent.providerNoteId = providerNoteId;
@@ -11715,6 +11782,11 @@ function throwUnresolvedBatchOverlap(blocking) {
 async function prepareCanonicalActionBatch(operationsInput, options = {}) {
   const operations = normalizeActionOperations(operationsInput);
   const runPolicy = options.runPolicy || null;
+  if (operations.some((operation) => operation.type === PDF_UPLOAD_TYPE)
+    && (!isMacCodexOperatorRequest() || operatorCompanyScopeActive() || !runPolicy?.enforced
+      || runPolicy.id !== CHANCE_OPERATOR_PDF_RUN_POLICY_ID || operations.length !== 1)) {
+    badRequest("PDF upload requires the separately activated PDF manifest and a sole exact assigned-file operation.");
+  }
   if (runPolicy?.enforced) {
     if (operations.some((operation) => operation.type === "jobnimbus.create_note")) {
       if (operations.length !== 1) {
@@ -14266,7 +14338,7 @@ async function hcnGmailApi(endpoint, options = {}) {
 
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
-  if (isHcnRestrictedEffectRequest() || options.approvedNote === true) {
+  if (isHcnRestrictedEffectRequest() || options.approvedNote === true || options.approvedPdf === true) {
     return fetchBoundedJson(
       fetch,
       `${API_BASE}${endpoint}`,
@@ -15521,6 +15593,7 @@ function normalizeActionOperations(value) {
 }
 
 const ACTION_OPERATION_TYPES = new Set([
+  PDF_UPLOAD_TYPE,
   "jobnimbus.update_contact",
   "jobnimbus.update_status",
   "jobnimbus.process_update",
@@ -15540,6 +15613,7 @@ async function prepareActionOperation(operation, options = {}) {
   const input = { ...operation.payload, execute: false };
   let plan;
   switch (operation.type) {
+    case PDF_UPLOAD_TYPE: plan = await approvedPdfService().prepare(operation.payload); break;
     case "jobnimbus.update_contact": plan = await updateContact(input); break;
     case "jobnimbus.update_status": plan = await updateStatus({
       ...input,
@@ -15568,6 +15642,7 @@ async function prepareActionOperation(operation, options = {}) {
 async function executeActionOperation(operation, prepared, options = {}) {
   const input = { ...operation.payload, execute: true };
   switch (operation.type) {
+    case PDF_UPLOAD_TYPE: return approvedPdfService().execute(operation.payload, prepared.plan, options.recordProviderDocumentId);
     case "jobnimbus.update_contact": return updateContact({
       ...input,
       expectedFileId: preparedActionFile(prepared).id,
@@ -15792,7 +15867,9 @@ function withActionBatchMutation(callback) {
 function actionBatchIntent(operation, prepared, file, index) {
   const plan = prepared?.plan?.plan || {};
   let reconciliation = null;
-  if (operation.type === "jobnimbus.update_contact") {
+  if (operation.type === PDF_UPLOAD_TYPE) {
+    reconciliation = { ...validatePdfMetadata(plan), beforeIds: plan.beforeIds };
+  } else if (operation.type === "jobnimbus.update_contact") {
     reconciliation = { before: plan.before || {}, after: plan.fields || {} };
   } else if (operation.type === "jobnimbus.update_status") {
     reconciliation = { before: plan.before || {}, after: plan.body || {} };
@@ -16025,6 +16102,9 @@ function summarizeOperationResult(result) {
     fileNumber: result?.file?.number || "",
     externalId: resultId(result?.message || result?.draft || result?.result || result?.results || result),
     verifiedByReadback: result?.verifiedByReadback,
+    ...(result?.contentVerified === true ? {
+      ...validatePdfMetadata(result), contentVerified: true
+    } : {}),
     ...(result?.noteSha256 ? {
       noteSha256: result.noteSha256,
       mentionRequested: result.mentionRequested,
@@ -18280,6 +18360,7 @@ const OPENAPI = {
               "jobnimbus.update_contact", "jobnimbus.update_status", "jobnimbus.process_update",
               "jobnimbus.create_note", "jobnimbus.create_task", "jobnimbus.update_task",
               "jobnimbus.ensure_current_task",
+              "jobnimbus.upload_pdf",
               "jobnimbus.create_calendar_event", "jobnimbus.update_calendar_event",
               "gmail.create_draft", "gmail.send", "gmail.send_existing_draft", "quo.send_text"
             ]
@@ -18287,7 +18368,7 @@ const OPENAPI = {
           payload: {
             type: "object",
             additionalProperties: true,
-            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {query:'JN',taskId:'ID',completed:true}; calendar update {query:'JN',eventId:'ID',fields:{...}}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. In the locked assigned-file lane, a reviewed bridge draft may be sent later only with gmail.send_existing_draft {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy."
+            description: "Exact payload. Do not include execute or approvalDigest. Examples: task {query:'JN',taskId:'ID',completed:true}; calendar update {query:'JN',eventId:'ID',fields:{...}}; note {query:'JN',note:'Exact'}; fields/status {query:'JN',fields:{...},status:'Exact'}; first Gmail draft with exact content. In the locked assigned-file lane, a reviewed bridge draft may be sent later only with gmail.send_existing_draft {query:'JN',draftId:'RETURNED_DRAFT_ID'}; never recreate or raw-send a second copy. jobnimbus.upload_pdf is available only through a separately activated PDF manifest as a sole-operation assigned Mac batch with query,filename,contentType,sizeBytes,sha256,isPrivate,contentBase64. The native PDF tools supply bytes internally; never paste base64 into chat. No legacy or direct upload access is added."
           }
         },
         required: ["type", "payload"]

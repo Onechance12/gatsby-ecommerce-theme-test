@@ -5,6 +5,45 @@ description: Use the Mac JobNimbus Operator for HCN/Wave evidence, exact-file Gm
 
 # JobNimbus Operator
 
+## Reviewed local PDF upload — inactive candidate
+
+This source adds `pdf_upload_plan` and `pdf_upload_execute`, but they are exposed
+only after a separately approved coordinated release pins the bridge commit,
+`chance-58-files-pdf-v1` manifest hash and unchanged six-receipt historical
+isolation. Source code, build/test approval, old document approval or this skill
+does not activate the capability. If the tools or attestation are missing, stop;
+do not retry discovery, request another API key, use a browser/raw API upload,
+or regenerate a finished PDF. Preserve the artifact and report the release gate.
+
+Once activated and fully attested:
+
+1. Review the final PDF's actual pages and exact client/claim facts using the
+   PDF and applicable HCN/preflight skills. The transport checks framing and
+   byte integrity, not legal sufficiency, malware or document correctness.
+2. Call `pdf_upload_plan` with exactly `{query,path,filename,isPrivate}`. Use one
+   exact manifest file number, absolute local regular `.pdf` path (no symlinks),
+   safe `.pdf` filename and explicit privacy. Maximum size is 8 MiB. A Library
+   ID or a remote URL is not a local path; transfer through an authorized file
+   route first. Never paste base64 or credentials into chat.
+3. Show the complete client/file binding, filename, privacy, size, SHA-256,
+   expiry and `approvalDigest`; obtain Chance's approval of that exact upload.
+4. Call `pdf_upload_execute` with only the unchanged `approvalDigest` in the
+   same persistent MCP session. It uploads the captured bytes, not a reopened
+   path. New plans/restart invalidate approval; edits require a new plan.
+5. Require the completed receipt's provider `externalId`, exact file, filename,
+   size, privacy, SHA-256, `verifiedByReadback:true` and `contentVerified:true`.
+   Unknown/partial outcomes use existing receipt recovery; never reupload,
+   complete an interrupted reservation, overwrite, delete, or infer success.
+6. For a later email draft, use the verified JobNimbus `externalId` as
+   `{"source":"jobnimbus","documentQuery":"EXACT-DOCUMENT-ID"}`. Draft creation
+   and sending each retain their separate plan and approval. An upload sends
+   nothing and does not prove carrier receipt or a stage transition.
+
+The PDF release retains the same 58 files, #2628 exclusion, old supported
+actions and read-only helper. Fred uses this native persistent Mac Operator
+session; the read-only `fred.mjs` launcher does not upload. No second AI reviewer
+or new model API is required. HCN data stays out of Jobrolo and Chance Brain.
+
 ## Approved JobNimbus notes
 
 The sixth action is available only when the compiled release is enabled and
