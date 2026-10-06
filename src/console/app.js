@@ -700,6 +700,7 @@
       "receipt-detail-fields",
       "connections-status",
       "connections-refresh",
+      "connections-app-return",
       "connections-sign-in",
       "connections-alert",
       "connections-locked",
@@ -5632,6 +5633,9 @@
   }
 
   function renderConnections(connections) {
+    // This flag exposes navigation only, never connection/verification truth.
+    elements["connections-app-return"].hidden =
+      new URLSearchParams(window.location.search).getAll("quoSetup").join(",") !== "1";
     setText(
       elements["connections-profile-name"],
       connections.profile.displayName || "Signed-in employee"

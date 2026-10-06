@@ -63,6 +63,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     inviteToken: secondInvitation.inviteToken
   });
   const providerCalls = [];
+  const quoActivityLines = [];
   const providerWrites = [];
   let createdNote = null;
   const assignedContact = {
@@ -166,6 +167,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     }
     if (req.method === "GET" && url.pathname === "/messages") {
       const lineId = url.searchParams.get("phoneNumberId");
+      quoActivityLines.push(lineId);
       const line = quoLines.find((candidate) => candidate.id === lineId);
       return json(res, 200, {
         data: lineId === "PN_12" ? [{
@@ -181,6 +183,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     }
     if (req.method === "GET" && url.pathname === "/calls") {
       const lineId = url.searchParams.get("phoneNumberId");
+      quoActivityLines.push(lineId);
       return json(res, 200, {
         data: includeOffTargetQuoCalls && lineId === "PN_12"
           ? [{
@@ -385,7 +388,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       QUO_API_KEY: "quo-http-fixture-key",
       QUO_API_BASE_URL:
         `http://127.0.0.1:${provider.address().port}`,
-      QUO_DEFAULT_FROM_NUMBER: "+19725551000",
+      QUO_DEFAULT_FROM_NUMBER: "+19725551011",
       TWILIO_AUTH_TOKEN: "",
       RETELL_API_KEY: "",
       OPENAI_API_KEY: "",
@@ -421,6 +424,11 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(status.body.result.adapter.managementSweepReady, true);
   assert.equal(status.body.result.adapter.communicationSweepReady, true);
   assert.equal(status.body.result.adapter.quoPhoneHistoryReady, true);
+  assert.equal(status.body.result.quo.status, "connected");
+  assert.equal(status.body.result.quo.senderSelection, "authenticated_employee");
+  assert.equal(status.body.result.quo.jobroloConnectSupported, true);
+  assert.equal(status.body.result.quo.sendReady, false, "a linked line cannot enable a disabled send gate");
+  assert.equal(status.body.result.quo.sendBlockReason, "send_disabled");
   const secondStatus = await signedPost(
     origin,
     "/integrations/jobrolo/v1/status",
@@ -435,6 +443,8 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   );
   assert.equal(secondStatus.response.status, 200, secondStatus.text);
   assert.equal(secondStatus.body.result.profile.email, "second@wavepa.com");
+  assert.equal(secondStatus.body.result.quo.status, "not_connected", "another employee cannot borrow Chance's default line");
+  assert.equal(secondStatus.body.result.quo.line, null);
   includeActiveForeignDuplicate = true;
   const secondWorkCenter = await signedPost(
     origin,
@@ -558,6 +568,8 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(fileReview.body.result.schema, "hcn.console.file.v1");
   assert.equal(fileReview.body.result.sources.quo.status, "fresh");
   assert.equal(fileReview.body.result.recent.quo.length, 1);
+  assert.ok(fileReview.body.result.sources.quo.limitations.includes("signed_in_employee_line_only"));
+  assert.deepEqual([...new Set(quoActivityLines)], ["PN_12"], "personal exact-file review never probes other employees' history");
   assert.equal(
     fileReview.body.result.recent.quo[0].preview,
     "Verified line-12 fixture message."

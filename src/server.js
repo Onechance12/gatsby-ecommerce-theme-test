@@ -12,6 +12,8 @@ import {
   jobroloGoogleDestination, jobroloGoogleCookie, parseJobroloGoogleStart,
   jobroloGoogleLoginPath
 } from "./auth/jobrolo-google-journey.js";
+import { HCN_JOBROLO_QUO_START, HCN_JOBROLO_QUO_CONSOLE, parseJobroloQuoStart,
+  jobroloQuoLoginPath, jobroloQuoDestination } from "./auth/jobrolo-quo-journey.js";
 import {
   analyzeClaimCall,
   assertApprovalDigest,
@@ -1427,6 +1429,10 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     requestPathname = url.pathname;
+    if (HCN_CONSOLE_ENABLED && req.method === "GET"
+      && url.pathname === HCN_JOBROLO_QUO_START) {
+      return jobroloQuoStart(req, res, url);
+    }
     if (HCN_CONSOLE_ENABLED && req.method === "GET"
       && url.pathname === HCN_JOBROLO_GOOGLE_START) {
       return jobroloGoogleStart(req, res, url);
@@ -3587,6 +3593,32 @@ async function hcnGoogleConnectorStart({ jobroloReturn = false } = {}) {
   });
 }
 
+async function jobroloQuoStart(req, res, url) {
+  const redirect = (location) => {
+    res.writeHead(302, { ...hcnNoStoreSecurityHeaders(), vary: "Cookie, Authorization", location });
+    res.end();
+  };
+  try {
+    const requested = parseJobroloQuoStart(url);
+    const authentication = await authenticateRequest(req);
+    const signedIn = authentication?.authenticationMethod === "hcn_cookie"
+      && authentication.identity?.type === "hcn_browser_session";
+    if (!signedIn || authentication.identity.email?.toLowerCase() !== requested.email) {
+      return redirect(requested.afterLogin ? jobroloQuoDestination("account_mismatch") : jobroloQuoLoginPath(requested.email));
+    }
+    if (!routeAllowed(authentication.identity, "POST", "/hcn/api/v1/connectors/status")) {
+      return redirect(jobroloQuoDestination("failed"));
+    }
+    assertHcnCookieRequestSafety(req, authentication);
+    await REQUEST_CONTEXT.run(authentication, () => assertHcnAssignedReadSession());
+    // No automatic challenge, SMS, provider grant or Jobrolo session transfer.
+    // The console's existing CSRF/employee-bound form handles any verification.
+    return redirect(HCN_JOBROLO_QUO_CONSOLE);
+  } catch {
+    return redirect(jobroloQuoDestination("failed"));
+  }
+}
+
 async function withHcnGoogleConnectorAdmission(callback) {
   const sessionBinding = hcnSessionDerivedHash(
     "google-connector-admission:v1"
@@ -3673,7 +3705,11 @@ async function hcnConnectorStatus(input = {}) {
   if (QUO_API_KEY) {
     try {
       const line = await authorizedQuoLine();
-      quo = line.number
+      // The legacy Chance default is configuration, not proof that the line
+      // still exists. Personal connection health must verify it with Quo.
+      const verified = line.source !== "chance_default" ? Boolean(line.number)
+        : (await listQuoNumbers(quoConfig())).filter(row => normalizePhone(row.number) === line.number).length === 1;
+      quo = line.number && verified
         ? {
             status: "connected",
             line: {
@@ -3708,10 +3744,18 @@ async function hcnConnectorStatus(input = {}) {
 async function jobroloHcnStatus(input = {}) {
   const connectors = await hcnConnectorStatus(input);
   const approvedEffects = jobroloGeneralApprovedEffectsActive();
+  const actionReady = approvedEffects && ALLOW_WRITES && HCN_ACTION_EXECUTION_ENABLED
+    && Boolean(HCN_ACTION_RECEIPT_STORE_PATH);
+  const quoSendReady = actionReady && ALLOW_QUO_SEND && connectors.quo.status === "connected";
   return Object.freeze({
     ...connectors,
     google: { ...connectors.google,
       jobroloConnectSupported: HCN_CONSOLE_ENABLED && hcnGoogleConnectorOAuthConfigured() },
+    quo: { ...connectors.quo, jobroloConnectSupported: HCN_CONSOLE_ENABLED,
+      senderSelection: "authenticated_employee", sendReady: Boolean(quoSendReady),
+      sendBlockReason: connectors.quo.status === "unavailable" ? "provider_unavailable"
+        : connectors.quo.status !== "connected" ? "work_line_needed"
+        : !approvedEffects ? "read_only" : !actionReady || !ALLOW_QUO_SEND ? "send_disabled" : "none" },
     adapter: Object.freeze({
       status: HCN_JOBROLO_CONFIGURATION.ready ? "connected" : "unavailable",
       principalMode: "fixed_server_side",
@@ -17719,34 +17763,29 @@ async function loadHcnQuoFile({
       phoneFailure.message
     );
   }
-  const allTeamLines = jobroloGeneralChanceAllLineQuoReadActive();
-  let employeeLine = null;
-  if (!allTeamLines) {
-    try {
-      employeeLine = await authorizedQuoLine();
-    } catch {
-      throw hcnOptionalSourceFailure(
-        "work_line_not_linked",
-        "The signed-in employee's Quo work line could not be verified."
-      );
-    }
-    if (!employeeLine.number && !employeeLine.id) {
-      throw hcnOptionalSourceFailure(
-        "work_line_not_linked",
-        "The signed-in employee has no linked Quo work line."
-      );
-    }
+  // Exact-file personal reviews always use the employee's own line. Separate,
+  // explicitly admitted management/sweep routes keep their existing scope.
+  let employeeLine;
+  try {
+    employeeLine = await authorizedQuoLine();
+  } catch {
+    throw hcnOptionalSourceFailure(
+      "work_line_not_linked",
+      "The signed-in employee's Quo work line could not be verified."
+    );
+  }
+  if (!employeeLine.number && !employeeLine.id) {
+    throw hcnOptionalSourceFailure(
+      "work_line_not_linked",
+      "The signed-in employee has no linked Quo work line."
+    );
   }
   let history;
   try {
     history = await readQuoHistoryStrict(quoConfig(), {
       phone: scope.file.phone,
-      ...(allTeamLines
-        ? {}
-        : {
-            lineId: employeeLine.id,
-            lineNumber: employeeLine.number
-          }),
+      lineId: employeeLine.id,
+      lineNumber: employeeLine.number,
       maxResults: Math.min(50, Math.max(10, Number(recentLimit || 20))),
       maxPages: 5
     });
@@ -17772,7 +17811,7 @@ async function loadHcnQuoFile({
     // Exhausting the homeowner's phone timeline is not an exhaustive file review.
     // Carrier-number calls and their transcript contents were not searched here.
     itemsComplete: false,
-    limitations: ["homeowner_phone_only", "call_transcripts_not_reviewed"],
+    limitations: ["homeowner_phone_only", "call_transcripts_not_reviewed", "signed_in_employee_line_only"],
     ...hcnFreshnessWindow(requestedAt)
   }, {
     expectedProviderFileId: id
