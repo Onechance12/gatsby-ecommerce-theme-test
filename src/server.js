@@ -64,6 +64,7 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { verifyCreatedJobNimbusNote } from "./jobnimbus/note-create-readback.js";
+import { decodeJobNimbusPdfByteArray } from "./jobnimbus/file-content.js";
 import {
   projectCompleteJobNimbusUserIds,
   resolveUniqueActiveJobNimbusUser,
@@ -18676,7 +18677,7 @@ async function downloadJobNimbusFile(doc) {
     throw error;
   }
   return {
-    bytes,
+    bytes: decodeJobNimbusPdfByteArray(bytes),
     contentType: response.headers.get("content-type") || "",
     filename: doc.name || doc.filename || doc.file_name || ""
   };
@@ -21560,7 +21561,7 @@ async function handleJobroloImportDocumentContent({
       "initial_target_rejected", "redirect_target_rejected", "redirect_limit",
       "request_budget_exceeded", "invalid_response", "upstream_http",
       "encoding_rejected", "length_invalid", "byte_limit",
-      "deadline_exceeded", "network_failed"
+      "deadline_exceeded", "network_failed", "format_rejected"
     ]);
     // Coarse transport diagnosis only: never log the file, URL, signed query,
     // authorization headers, source bytes or provider error payload.

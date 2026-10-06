@@ -34,6 +34,13 @@ const ACCOUNT_USER_ID = "private-account-user-id";
 const CUSTOMER_ID = "private-customer-account-id";
 const DOCUMENT_BYTES = Buffer.from("%PDF-1.7\nfixture document bytes\n", "utf8");
 
+function wrapPdfByteArray(bytes) {
+  const prefix = Buffer.from("aced0005757200025b42acf317f8060854e00200007870", "hex");
+  const length = Buffer.alloc(4);
+  length.writeInt32BE(bytes.length);
+  return Buffer.concat([prefix, length, bytes]);
+}
+
 test("dedicated import routes are signed, exact, bounded, and provider-read-only", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hcn-import-http-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -147,12 +154,15 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
         res.writeHead(302, { location: "https://private.invalid/secret" });
         return res.end();
       }
+      const payload = state.mode === "binary_java_array" || state.mode === "binary_bad_java_array"
+        ? wrapPdfByteArray(DOCUMENT_BYTES) : DOCUMENT_BYTES;
+      if (state.mode === "binary_bad_java_array") payload.writeInt32BE(DOCUMENT_BYTES.length + 1, 23);
       res.writeHead(200, {
         "content-type": "application/pdf",
-        "content-length": String(DOCUMENT_BYTES.byteLength),
+        "content-length": String(payload.byteLength),
         "content-encoding": "identity"
       });
-      return res.end(DOCUMENT_BYTES);
+      return res.end(payload);
     }
     return json(res, 404, { error: "not found" });
   });
@@ -333,6 +343,29 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
     "document provider-call budget"
   );
   assert.equal(state.writes, 0);
+
+  state.mode = "binary_java_array";
+  const wrappedDocument = await signedBinaryPost(origin, JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE, {
+    schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+    requestId: `request_${"c1".repeat(16)}`,
+    sourceFileRef, sourceRecordRef: manifest.document.sourceRecordRef, manifestDigest
+  }, `nonce_${"c1".repeat(16)}`);
+  assert.equal(wrappedDocument.response.status, 200);
+  verifyDocumentResponse(wrappedDocument, {
+    sourceFileRef, sourceRecordRef: manifest.document.sourceRecordRef, manifestDigest
+  });
+  assert.equal(state.writes, 0, "normalization must not write to the provider");
+  state.mode = "binary_bad_java_array";
+  const malformedDocument = await signedPost(origin, JOBROLO_IMPORT_DOCUMENT_CONTENT_ROUTE, {
+    schema: JOBROLO_IMPORT_DOCUMENT_CONTENT_REQUEST_SCHEMA,
+    requestId: `request_${"c2".repeat(16)}`,
+    sourceFileRef, sourceRecordRef: manifest.document.sourceRecordRef, manifestDigest
+  }, `nonce_${"c2".repeat(16)}`);
+  assert.equal(malformedDocument.response.status, 503);
+  assert.equal(malformedDocument.body.error.code, "jobrolo_import_unavailable");
+  assert.doesNotMatch(malformedDocument.text, /private-document|%PDF|serialized|byte\[\]/);
+  assert.equal(state.writes, 0, "malformed framing cannot cause a provider write");
+  state.mode = "normal";
 
   const callsBeforeStale = state.calls.length;
   const staleManifest = await signedPost(

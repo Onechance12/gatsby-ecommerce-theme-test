@@ -37,6 +37,54 @@ test("bounded binary fetch disables redirects, requests identity, and hashes exa
 const initialUrl = "https://app.jobnimbus.com/files/synthetic-file";
 const cdnUrl = "https://files.jobnimbus.com/synthetic.pdf?signature=fixture-private";
 
+function serializedByteArray(bytes) {
+  const prefix = Buffer.from("aced0005757200025b42acf317f8060854e00200007870", "hex");
+  const length = Buffer.alloc(4);
+  length.writeInt32BE(bytes.length);
+  return Buffer.concat([prefix, length, bytes]);
+}
+
+test("JobNimbus decodes only exact Java byte-array PDF framing after bounded transport", async () => {
+  const pdf = Buffer.from("%PDF-1.4\nsynthetic document\n%%EOF\n");
+  const framed = serializedByteArray(pdf);
+  for (const redirect of [false, true]) {
+    let calls = 0;
+    const result = await fetchJobNimbusBinary(async () => {
+      calls++;
+      return redirect && calls === 1
+        ? new Response(null, { status: 302, headers: { location: cdnUrl } })
+        : new Response(framed, { headers: { "content-length": String(framed.length) } });
+    }, initialUrl, {}, { consumeRequest() {} });
+    assert.deepEqual(result.bytes, pdf);
+    assert.equal(result.contentLength, pdf.length);
+    assert.equal(result.contentSha256, (await import("node:crypto")).createHash("sha256").update(pdf).digest("hex"));
+    assert.equal(calls, redirect ? 2 : 1);
+  }
+});
+
+test("JobNimbus rejects malformed, nested, object and non-PDF Java frames without scanning for PDF markers", async () => {
+  const pdf = Buffer.from("%PDF-1.4\nsynthetic\n%%EOF\n");
+  const frame = serializedByteArray(pdf);
+  const wrongLength = Buffer.from(frame); wrongLength.writeInt32BE(pdf.length + 1, 23);
+  const negativeLength = Buffer.from(frame); negativeLength.writeInt32BE(-1, 23);
+  const wrongDescriptor = Buffer.from(frame); wrongDescriptor[8] = 0x4c;
+  for (const bytes of [frame.subarray(0, 26), frame.subarray(0, -1),
+    Buffer.concat([frame, Buffer.from("extra")]), wrongLength, negativeLength, wrongDescriptor,
+    Buffer.concat([Buffer.from("aced000573", "hex"), pdf]), serializedByteArray(frame),
+    serializedByteArray(Buffer.from("<html>synthetic login page</html>"))]) {
+    await assert.rejects(fetchJobNimbusBinary(async () => new Response(bytes), initialUrl, {}, {
+      consumeRequest() {}
+    }), error => error.failureReason === "format_rejected");
+  }
+});
+
+test("JobNimbus enforces the wire byte cap before decoding a valid wrapped PDF", async () => {
+  const bytes = serializedByteArray(Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(245)]));
+  await assert.rejects(fetchJobNimbusBinary(async () => new Response(bytes), initialUrl, {}, {
+    consumeRequest() {}, maxBytes: 256
+  }), error => error.failureReason === "byte_limit");
+});
+
 test("JobNimbus accepts one fixed CDN hop, drops credentials, and shares the deadline and budget", async () => {
   for (const status of [302, 303, 307, 308]) {
     const calls = [], bytes = Buffer.from("bounded fixture bytes");
