@@ -6852,6 +6852,14 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     owners: [{ id: "someone-else" }]
   };
   const fixturePdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "ascii");
+  // Synthetic provider variant: one serialized Java primitive byte[] holding
+  // the same PDF. Native attachment and signed reads must return the PDF only.
+  const pdfArrayLength = Buffer.alloc(4);
+  pdfArrayLength.writeInt32BE(fixturePdf.length);
+  const fixtureWrappedPdf = Buffer.concat([
+    Buffer.from("aced0005757200025b42acf317f8060854e00200007870", "hex"),
+    pdfArrayLength, fixturePdf
+  ]);
   let fixtureTaskCompleted = false;
   let fixtureNoteCreated = false;
   let relatedFilterRequests = 0;
@@ -7043,7 +7051,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     }
     if (url.pathname === "/file-content/file-1") {
       res.writeHead(200, { "content-type": "application/pdf" });
-      res.end(fixturePdf);
+      res.end(fixtureWrappedPdf);
       return;
     }
     if (url.pathname === "/file-content/file-policy") {

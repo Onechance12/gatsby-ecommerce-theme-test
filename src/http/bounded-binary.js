@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { decodeJobNimbusPdfByteArray, JobNimbusFileContentError } from "../jobnimbus/file-content.js";
 
 /** One authenticated JobNimbus download followed by, at most, its fixed CDN. */
 export async function fetchJobNimbusBinary(
@@ -18,7 +19,7 @@ export async function fetchJobNimbusBinary(
       throw providerFailure(errorCode, 503, "request_budget_exceeded");
     }
   };
-  return fetchBoundedBinary(async (initialUrl, initialOptions) => {
+  const downloaded = await fetchBoundedBinary(async (initialUrl, initialOptions) => {
     consume();
     const response = await fetchImpl(initialUrl, {
       ...initialOptions,
@@ -57,6 +58,20 @@ export async function fetchJobNimbusBinary(
     }
     return downloaded;
   }, url, options, limits);
+  // Validate wire bounds before removing known provider framing, then hash and
+  // sign exactly the PDF bytes that the consumer receives.
+  let bytes;
+  try { bytes = decodeJobNimbusPdfByteArray(downloaded.bytes); } catch (error) {
+    if (error instanceof JobNimbusFileContentError) {
+      throw providerFailure(errorCode, 502, "format_rejected");
+    }
+    throw error;
+  }
+  return bytes === downloaded.bytes ? downloaded : {
+    bytes,
+    contentLength: bytes.byteLength,
+    contentSha256: createHash("sha256").update(bytes).digest("hex")
+  };
 }
 
 function exactHttpsUrl(value, host, errorCode) {
