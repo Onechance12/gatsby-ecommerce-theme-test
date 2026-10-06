@@ -3,6 +3,7 @@ const ALLOWED = new Set([
   'bounded_identifier_search',
   'homeowner_phone_only',
   'call_transcripts_not_reviewed',
+  'signed_in_employee_line_only',
 ]);
 
 export function communicationLimitations(value) {

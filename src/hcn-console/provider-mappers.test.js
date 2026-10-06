@@ -1525,7 +1525,7 @@ test('Quo mapper normalizes call/text aliases without exposing participants, lin
   const result = mapScopedQuoEnvelope(
     {
       ...FRESHNESS,
-      limitations: ['homeowner_phone_only', 'call_transcripts_not_reviewed', 'private-carrier-name'],
+      limitations: ['homeowner_phone_only', 'call_transcripts_not_reviewed', 'signed_in_employee_line_only', 'private-carrier-name'],
       scope: {
         providerFileId: FILE_ID,
         exactFileMatch: true,
@@ -1558,7 +1558,7 @@ test('Quo mapper normalizes call/text aliases without exposing participants, lin
   );
 
   assert.equal(result.data.items[0].channel, 'call');
-  assert.deepEqual(result.data.limitations, ['homeowner_phone_only', 'call_transcripts_not_reviewed']);
+  assert.deepEqual(result.data.limitations, ['homeowner_phone_only', 'call_transcripts_not_reviewed', 'signed_in_employee_line_only']);
   assert.equal(result.data.items[0].direction, 'inbound');
   assert.equal(result.data.items[0].actionState, 'needs_reply');
   assert.equal(Array.from(result.data.items[0].preview).length, 240);

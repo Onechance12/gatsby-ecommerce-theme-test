@@ -3676,6 +3676,22 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.match(appReturn.headers.getSetCookie()[0], /Max-Age=0/);
   assert.doesNotMatch(appReturn.headers.get("location"), /token|code=|email|subject/);
   const beforeAppErrors = providerRequests.length;
+  const quoEntry = `${origin}/hcn/connect/quo/jobrolo?email=chance%40wavepa.com`;
+  const quoSetup = await fetch(quoEntry, { redirect: "manual", headers: appHeaders });
+  assert.equal(quoSetup.status, 302);
+  assert.equal(quoSetup.headers.get("location"), "/hcn/?quoSetup=1#connections");
+  assert.match(quoSetup.headers.get("cache-control"), /no-store/);
+  const quoLogin = await fetch(quoEntry, { redirect: "manual" });
+  const quoLoginLocation = new URL(quoLogin.headers.get("location"), origin);
+  assert.equal(quoLoginLocation.pathname, "/hcn/auth/login");
+  assert.equal(quoLoginLocation.searchParams.get("returnTo"), "/hcn/connect/quo/jobrolo?email=chance%40wavepa.com&afterLogin=1");
+  const quoMismatch = await fetch(`${origin}/hcn/connect/quo/jobrolo?email=adjuster%40wavepa.com&afterLogin=1`,
+    { redirect: "manual", headers: appHeaders });
+  assert.equal(quoMismatch.headers.get("location"), "https://jobrolo.com/app/home?quo=account_mismatch");
+  const quoForeignReturn = await fetch(`${quoEntry}&returnTo=https%3A%2F%2Fevil.test`,
+    { redirect: "manual", headers: appHeaders });
+  assert.equal(quoForeignReturn.headers.get("location"), "https://jobrolo.com/app/home?quo=failed");
+  assert.equal(providerRequests.length, beforeAppErrors, "opening Quo setup cannot send a verification code or obtain a mailbox grant");
   const wrongAccount = await fetch(`${origin}/hcn/connect/google/jobrolo?email=adjuster%40wavepa.com&afterLogin=1`,
     { redirect: "manual", headers: appHeaders });
   assert.equal(wrongAccount.headers.get("location"), "https://jobrolo.com/app/home?gmail=account_mismatch");
@@ -4202,7 +4218,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.recent.documents.length, 1);
   assert.equal(exactFile.recent.gmail.length, 2);
   assert.equal(exactFile.recent.quo.length, 3);
-  assert.deepEqual(exactFile.sources.quo.limitations, ["homeowner_phone_only", "call_transcripts_not_reviewed"]);
+  assert.deepEqual(exactFile.sources.quo.limitations, ["homeowner_phone_only", "call_transcripts_not_reviewed", "signed_in_employee_line_only"]);
   assert.equal(
     exactFile.recent.gmail.some((item) => item.direction === "inbound"),
     true

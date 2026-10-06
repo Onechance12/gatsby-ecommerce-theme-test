@@ -628,7 +628,10 @@ test("employee console shows one simple HCN data-protection status", async () =>
   assert.match(html, /Your HCN account controls what you can see/);
   assert.match(script, /HCN data protection/);
   assert.match(script, /your account controls what Thresher can read/);
-  assert.doesNotMatch(html, /Chance Brain|Jobrolo|legacy client memory/i);
+  // The sole app reference is a fixed, initially hidden navigation return.
+  // It carries no client data; the HCN data-protection UI remains separate.
+  const withoutReturn = html.replace(/<a id="connections-app-return" class="button button-surface"\s+href="https:\/\/jobrolo\.com\/app\/home\?quo=returned" hidden>Back to Jobrolo<\/a>/, "");
+  assert.doesNotMatch(withoutReturn, /Chance Brain|Jobrolo|legacy client memory/i);
   assert.doesNotMatch(script, /Chance Brain|Jobrolo|legacy client memory/i);
 });
 
@@ -1775,6 +1778,8 @@ test("Connections links each authenticated employee to safe, memory-only work ac
   assert.match(html, /id="quo-code"[\s\S]*pattern="\[0-9\]\{6\}"/);
   assert.match(html, /id="quo-use-code"/);
   assert.match(html, /id="quo-restart"/);
+  assert.match(html, /id="connections-app-return"[\s\S]*href="https:\/\/jobrolo\.com\/app\/home\?quo=returned" hidden/);
+  assert.match(script, /getAll\("quoSetup"\)/);
   assert.match(html, /id="home-auth-alert"[\s\S]*aria-live="polite"/);
   assert.match(html, /id="work-center-previous"/);
   assert.match(html, /id="work-center-page"/);

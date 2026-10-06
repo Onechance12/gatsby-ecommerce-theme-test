@@ -396,6 +396,17 @@ shared Chance-line fallback. Actual email, text, calendar, write, or call
 effects still require their exact reviewed plan, explicit action-time approval,
 route capability, and enabled runtime gates.
 
+Jobrolo can open this existing employee ceremony through
+`GET /hcn/connect/quo/jobrolo?email=<work-email>`. The email is only a bounded
+sign-in hint: the HCN cookie and current immutable employee pin still authorize
+setup. Opening the route does not send a verification code, select a caller,
+or grant provider access. The console offers a fixed **Back to Jobrolo** link;
+`quo=returned` is navigation, not proof of a successful link. Jobrolo must check
+the employee's live connector status again. That status distinguishes a linked
+work line from runtime send permission. Personal exact-file reviews use only
+that employee's line and still reject ambiguous client-phone correlation;
+separately admitted management/sweep routes retain their existing boundaries.
+
 `HCN_QUO_LINE_STORE_PATH` points to the single encrypted authorization store.
 `HCN_QUO_LINK_KEY` must be new canonical unpadded base64url encoding of 32 to
 128 random bytes, distinct from every HCN, OAuth, provider, bridge, Thresher,
