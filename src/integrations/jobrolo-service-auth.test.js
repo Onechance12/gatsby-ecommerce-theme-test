@@ -43,6 +43,7 @@ test("general adapter read surface is explicit and excludes every effect route",
     "/integrations/jobrolo/v1/status",
     "/integrations/jobrolo/v1/work-center",
     "/integrations/jobrolo/v1/file-review",
+    "/integrations/jobrolo/v1/file-activity-export",
     "/integrations/jobrolo/v1/communication-sweep",
     "/integrations/jobrolo/v1/quo-phone-history",
     "/integrations/jobrolo/v1/management-sweep"

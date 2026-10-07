@@ -781,6 +781,7 @@ test("server exposes claim actions and protects them when auth is unconfigured",
     "/integrations/jobrolo/v1/status": "readJobroloHcnStatus",
     "/integrations/jobrolo/v1/work-center": "readJobroloHcnWorkCenter",
     "/integrations/jobrolo/v1/file-review": "readJobroloHcnFile",
+    "/integrations/jobrolo/v1/file-activity-export": "exportJobroloHcnFileActivity",
     "/integrations/jobrolo/v1/communication-sweep":
       "readJobroloHcnCommunicationSweep",
     "/integrations/jobrolo/v1/quo-phone-history":
