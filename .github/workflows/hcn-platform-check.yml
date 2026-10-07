@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - jobnimbus-bridge
+      - codex/hcn-platform-foundation
   push:
     branches:
       - codex/hcn-platform-foundation
