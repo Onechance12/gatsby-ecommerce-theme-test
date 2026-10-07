@@ -2,6 +2,9 @@
 
 Principal claim: `codex/hcn-exact-phone-match-20261007`, based on reviewed
 HCN platform source `7fc25b88775eede6a7d7c389d6b55aade36da311`.
+Packaging incorporated newly merged platform PR51 at
+`2a298f23c23bd7953d9bbfecd39510ec4b91f3a5`; its importer/admission changes
+and tests remain intact.
 
 Implementation claim (October 7, owner authorized): extend this candidate's
 ephemeral file-anchor helper, the native exact-file Gmail/Quo readers and
@@ -72,7 +75,7 @@ remain mandatory. The all-line and locked Mac Operator gates are unchanged.
   Logs: `/private/tmp/hcn-multi-property-release-final-20261007.log`,
   `/private/tmp/hcn-multi-property-postcheck-final-20261007.log` and
   `/private/tmp/hcn-multi-property-management-final-20261007.log`.
-- Do not describe the last combined `npm run check` invocation as green: its
+- An earlier combined `npm run check` invocation was not green: its
   postcheck child aborted on a native Node 26 `InternalCallbackScope` assertion
   after the pre/main/journey phases passed. The unchanged postchecks then passed
   when run separately. An earlier legacy Gmail fixture returned HTTP500 once;
@@ -80,20 +83,27 @@ remain mandatory. The all-line and locked Mac Operator gates are unchanged.
   passed. No assertion, runtime limit or production guard was weakened to hide
   either failure. Tests use independent synthetic conversations to stay inside
   the unchanged per-session action admission limits.
+- After incorporating current platform PR51, the complete `npm run check`
+  passed at implementation merge `43b8afe` with canonical `TMPDIR=/private/tmp`:
+  201 prechecks, 832 main, 4 journey, 61 management/smoke, 19 company-roster,
+  12 identity/projection and 43 portfolio postchecks. Exit 0; no test omission
+  or runtime/assertion relaxation. The earlier Node native abort's cause remains
+  unproven. Log: `/private/tmp/hcn-multi-property-rebased-check-20261007.log`.
 
 ## Release boundary
 
 Chance authorized implementation of the systemic repair, not deployment.
 This candidate now covers native Gmail/Quo attribution and native exact-file
 text recipient/approval preflight. The legacy locked Operator still retains
-`assertUniqueChanceFilePhone`. A separate Jobrolo parser candidate must accept
+`assertUniqueChanceFilePhone`. Independent Jobrolo draft PR394 must accept
 the finite coverage codes before this HCN candidate is published. Private
 saved-file continuity PR392 remains separate and currently has a failed hosted
 browser check (expired-session auth postcheck timed out); its local verification
 is not a substitute for resolving/re-verifying that gate.
 
 Reviewed Customer reuse with a new Project is still missing from the active
-portfolio-import workflow. Another Codex owns PR393's importer paths, and
+portfolio-import workflow, including newly merged PR393. Another Codex owns
+portfolio publication/pilot paths, and
 coordination approval is pending. Do not claim this candidate supplies that
 workflow or merge records automatically by phone/email/name. No importer paths
 were edited here, no relationship was applied and no existing source values
