@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { createHcnInvitationStore } from "../auth/hcn-invitation-store.js";
+import { createHcnGoogleGrantStore } from "../auth/hcn-google-grant-store.js";
+import { createHcnReferenceFactory } from "../hcn-ops/references.js";
 import {
   JOBROLO_HCN_GENERAL_EFFECT_ROUTES,
   signJobroloHcnRequest
@@ -65,6 +67,14 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   const providerCalls = [];
   const quoActivityLines = [];
   const providerWrites = [];
+  const quoProviderWrites = [];
+  let gmailMessages = [];
+  const grantKey = Buffer.alloc(32, 0x63).toString("base64url");
+  const grantPath = path.join(root, "platform", "google-grants.enc.json");
+  const grantStore = createHcnGoogleGrantStore({ filePath: grantPath, encryptionKey: grantKey });
+  const principalRef = `principal_${createHcnReferenceFactory({
+    hmacKey: Buffer.from(REFERENCE_KEY, "base64url"), tenantId: "tenant_0123456789abcdef"
+  }).subjectId("hcn_operator", `google:${SUBJECT}`).slice("subject_".length)}`;
   let createdNote = null;
   const assignedContact = {
     jnid: "assigned-file-provider-id",
@@ -150,25 +160,51 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   let includeConflictingTargetDuplicate = false;
   let includeAmbiguousMalformedEligible = false;
   let includeOffTargetQuoCalls = false;
+  let sharedPhoneTexts = null;
   let freshAssignedPhoneOverride = null;
+  let withdrawOwnQuoLine = false;
   const provider = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://provider.invalid");
     providerCalls.push(url.pathname);
+    if (req.method === "GET" && url.pathname === "/gmail/v1/users/me/profile") return json(res, 200, { emailAddress: EMAIL });
+    if (req.method === "GET" && url.pathname === "/gmail/v1/users/me/messages") {
+      return json(res, 200, { messages: gmailMessages.map(row => ({ id: row.id })), resultSizeEstimate: gmailMessages.length });
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/gmail/v1/users/me/messages/")) {
+      return json(res, 200, gmailMessages.find(row => row.id === url.pathname.split("/").at(-1)));
+    }
     const quoLines = Array.from({ length: 12 }, (_, index) => ({
       id: `PN_${String(index + 1).padStart(2, "0")}`,
       name: `Team Line ${index + 1}`,
       number: `+1972555${String(1000 + index).slice(-4)}`
     }));
     if (req.method === "GET" && url.pathname === "/phone-numbers") {
-      return json(res, 200, { data: quoLines });
+      return json(res, 200, { data: withdrawOwnQuoLine ? quoLines.filter(line => line.id !== "PN_12") : quoLines });
     }
     if (req.method === "GET" && url.pathname === "/conversations") {
       return json(res, 200, { data: [] });
+    }
+    if (req.method === "POST" && url.pathname === "/messages") {
+      let raw = "";
+      req.setEncoding("utf8");
+      req.on("data", chunk => { raw += chunk; });
+      req.on("end", () => {
+        const body = JSON.parse(raw);
+        quoProviderWrites.push(body);
+        json(res, 200, { data: { id: "synthetic-sms-id", phoneNumberId: body.from, to: body.to, status: "queued" } });
+      });
+      return;
     }
     if (req.method === "GET" && url.pathname === "/messages") {
       const lineId = url.searchParams.get("phoneNumberId");
       quoActivityLines.push(lineId);
       const line = quoLines.find((candidate) => candidate.id === lineId);
+      if (lineId === "PN_12" && sharedPhoneTexts) {
+        return json(res, 200, { data: sharedPhoneTexts.map((content, index) => ({
+          id: `MSG_shared_${index}`, phoneNumberId: lineId, from: QUO_CLIENT_PHONE,
+          to: [line.number], direction: "incoming", createdAt: "2026-08-20T14:00:00.000Z", content
+        })) });
+      }
       return json(res, 200, {
         data: lineId === "PN_12" ? [{
           id: "MSG_line_12",
@@ -377,9 +413,11 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
       GOOGLE_REFRESH_TOKEN: "",
-      HCN_GOOGLE_CLIENT_ID: "",
-      HCN_GOOGLE_CLIENT_SECRET: "",
-      HCN_GOOGLE_GRANT_KEY: "",
+      HCN_GOOGLE_CLIENT_ID: "fixture-hcn-google-client",
+      HCN_GOOGLE_CLIENT_SECRET: "fixture-hcn-google-secret",
+      HCN_GOOGLE_GRANT_KEY: grantKey,
+      HCN_GOOGLE_GRANT_STORE_PATH: grantPath,
+      GMAIL_API_BASE_URL: `http://127.0.0.1:${provider.address().port}`,
       HCN_QUO_LINK_KEY: "",
       HCN_ASSISTANT_HISTORY_KEY:
         Buffer.alloc(32, 0x62).toString("base64url"),
@@ -395,6 +433,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       OAUTH_SESSION_SECRET: "",
       GPT_OAUTH_CLIENT_SECRET: "",
       BRIDGE_ALLOW_WRITES: "true",
+      ALLOW_QUO_SEND: "true",
       HCN_ACTION_EXECUTION_ENABLED: "true",
       HCN_THRESHER_ENABLED: "false",
       HCN_THRESHER_STORE_KEY: "",
@@ -427,8 +466,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(status.body.result.quo.status, "connected");
   assert.equal(status.body.result.quo.senderSelection, "authenticated_employee");
   assert.equal(status.body.result.quo.jobroloConnectSupported, true);
-  assert.equal(status.body.result.quo.sendReady, false, "a linked line cannot enable a disabled send gate");
-  assert.equal(status.body.result.quo.sendBlockReason, "send_disabled");
+  assert.equal(status.body.result.quo.sendReady, true, "the isolated fixture explicitly enables native sending");
   const secondStatus = await signedPost(
     origin,
     "/integrations/jobrolo/v1/status",
@@ -567,14 +605,236 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   assert.equal(fileReview.response.status, 200, fileReview.text);
   assert.equal(fileReview.body.result.schema, "hcn.console.file.v1");
   assert.equal(fileReview.body.result.sources.quo.status, "fresh");
-  assert.equal(fileReview.body.result.recent.quo.length, 1);
+  assert.equal(fileReview.body.result.recent.quo.length, 0);
   assert.ok(fileReview.body.result.sources.quo.limitations.includes("signed_in_employee_line_only"));
   assert.deepEqual([...new Set(quoActivityLines)], ["PN_12"], "personal exact-file review never probes other employees' history");
-  assert.equal(
-    fileReview.body.result.recent.quo[0].preview,
-    "Verified line-12 fixture message."
-  );
+  assert.ok(fileReview.body.result.sources.quo.limitations.includes("no_unique_file_anchor"));
+  assert.ok(fileReview.body.result.sources.quo.limitations.includes("unattributed_phone_history_withheld"));
   assert.equal(providerWrites.length, 0);
+
+  // A shared destination is not proof of file membership. Only uniquely
+  // anchored own-line messages and minimized contact opt-outs are attributable.
+  assignedContact.address_line1 = "21 Maple Ave";
+  assignedContact.cf_string_2 = "SYNTH-614027ZX";
+  activeForeignDuplicateContact.address_line1 = "90 Birch Ct";
+  activeForeignDuplicateContact.cf_string_2 = "SYNTH-95281740";
+  activeForeignDuplicateContact.status_name = "Billed";
+  includeActiveForeignDuplicate = true;
+  sharedPhoneTexts = [
+    "Please send the policy for 21 Maple Ave.", "STOP",
+    "SECRET_OTHER_PROPERTY: policy for 90 Birch Ct",
+    "SECRET_MIXED_PROPERTY: 21 Maple Ave and 90 Birch Ct",
+    "SECRET_UNATTRIBUTED: here is the policy"
+  ];
+  quoActivityLines.length = 0;
+  const exactSharedReview = token => signedPost(origin, "/integrations/jobrolo/v1/file-review", {
+    requestId: `request_${token.repeat(16)}`, sessionRef, nonce: `nonce_${token.repeat(16)}`,
+    input: { fileRef: workCenterByName.get("Assigned File Fixture").fileRef, recentLimit: 20 }
+  });
+  const sharedReview = await exactSharedReview("f1");
+  assert.equal(sharedReview.response.status, 200, sharedReview.text);
+  assert.equal(sharedReview.body.result.sources.quo.status, "fresh");
+  assert.equal(sharedReview.body.result.sources.quo.completeness, "partial");
+  assert.deepEqual([...new Set(quoActivityLines)], ["PN_12"]);
+  assert.equal(sharedReview.body.result.recent.quo.length, 2);
+  assert.ok(sharedReview.body.result.recent.quo.some(item => /policy for 21 Maple Ave/.test(item.preview)));
+  assert.ok(sharedReview.body.result.recent.quo.some(item => /opt-out.*Do not send/.test(item.preview)));
+  for (const code of ["shared_phone_exact_file_messages_only", "unattributed_phone_history_withheld", "signed_in_employee_line_only"]) {
+    assert.ok(sharedReview.body.result.sources.quo.limitations.includes(code));
+  }
+  assert.doesNotMatch(JSON.stringify(sharedReview.body), /SECRET_|90 Birch Ct|SYNTH-95281740|active-foreign-duplicate-provider-id/);
+  assert.equal(providerWrites.length, 0);
+
+  sharedPhoneTexts = sharedPhoneTexts.slice(2);
+  const unattributedReview = await exactSharedReview("f2");
+  assert.equal(unattributedReview.response.status, 200, unattributedReview.text);
+  assert.equal(unattributedReview.body.result.recent.quo.length, 0);
+  assert.equal(unattributedReview.body.result.sources.quo.completeness, "partial");
+  assert.ok(unattributedReview.body.result.sources.quo.limitations.includes("unattributed_phone_history_withheld"));
+  assert.doesNotMatch(JSON.stringify(unattributedReview.body), /SECRET_/);
+
+  // Shared email AND claim token: a unique property is an independent anchor.
+  assignedContact.email = activeForeignDuplicateContact.email = "owner@example.test";
+  activeForeignDuplicateContact.cf_string_2 = assignedContact.cf_string_2;
+  await grantStore.upsert({ principalRef, refreshToken: "fixture-private-refresh", accessToken: "fixture-cached-access",
+    accessExpiresAt: new Date(Date.now() + 3600_000).toISOString(), scopes: ["https://www.googleapis.com/auth/gmail.modify"] });
+  const gmailFixture = (id, text, labels = ["INBOX"]) => ({
+    id, threadId: `thread_${id}`, labelIds: labels, internalDate: String(Date.now()), snippet: text,
+    payload: { mimeType: "text/plain", headers: [
+      { name: "From", value: labels.includes("SENT") ? EMAIL : "adjuster@carrier.example.test" },
+      { name: "To", value: labels.includes("SENT") ? "owner@example.test" : EMAIL },
+      { name: "Subject", value: "Property policy review" },
+    ], body: { data: Buffer.from(text).toString("base64url") } }
+  });
+  gmailMessages = [
+    gmailFixture("target_incoming", "Policy for 21 Maple Avenue"),
+    gmailFixture("target_sent", "Policy requested for 21 Maple Ave", ["SENT"]),
+    gmailFixture("foreign_property", "SECRET_FOREIGN_EMAIL: policy for 90 Birch Ct"),
+    gmailFixture("mixed_properties", "SECRET_MIXED_EMAIL: 21 Maple Ave and 90 Birch Court"),
+    gmailFixture("unattributed", "SECRET_UNBOUND_EMAIL: the policy is attached"),
+  ];
+  const sharedEmailReview = await exactSharedReview("e1");
+  assert.equal(sharedEmailReview.response.status, 200, sharedEmailReview.text);
+  assert.equal(sharedEmailReview.body.result.sources.gmail.status, "fresh");
+  assert.equal(sharedEmailReview.body.result.sources.gmail.completeness, "partial");
+  assert.equal(sharedEmailReview.body.result.recent.gmail.length, 2);
+  assert.doesNotMatch(JSON.stringify(sharedEmailReview.body.result.recent.gmail), /SECRET_|foreign_property|mixed_properties|unattributed/);
+  assert.ok(sharedEmailReview.body.result.recent.gmail.some(item => item.deliveryState === "sent_verified"), JSON.stringify(sharedEmailReview.body.result.recent.gmail));
+  await grantStore.revoke({ principalRef });
+  gmailMessages = [];
+  delete assignedContact.email;
+  delete activeForeignDuplicateContact.email;
+  activeForeignDuplicateContact.cf_string_2 = "SYNTH-95281740";
+
+  // Same policyholder and destination across two assigned files is legitimate.
+  const originalB = { phone: assignedContactB.mobile_phone, name: assignedContactB.display_name };
+  assignedContactB.mobile_phone = QUO_CLIENT_PHONE;
+  assignedContactB.display_name = assignedContact.display_name;
+  assignedContactB.address_line1 = "77 Pine Ln";
+  assignedContactB.cf_string_2 = "SYNTH-SECOND-2026";
+  sharedPhoneTexts = ["Policy requested for 21 Maple Ave", "SECRET_OTHER_PROPERTY: policy for 90 Birch Ct"];
+  let smsSessionRef = `session_${"a".repeat(32)}`;
+  let smsRequestNumber = 900;
+  const smsRequest = (pathname, input) => {
+    const token = (++smsRequestNumber).toString(16).padStart(32, "0");
+    return signedPost(origin, pathname, { requestId: `request_${token}`, nonce: `nonce_${token}`, sessionRef: smsSessionRef, input });
+  };
+  const smsInput = {
+    fileRef: workCenterByName.get("Assigned File Fixture").fileRef,
+    operations: [{ type: "quo.send_text", input: { to: QUO_CLIENT_PHONE, content: "Please email the policy for 21 Maple Ave." } }]
+  };
+  quoActivityLines.length = 0;
+  const preparedSms = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+  assert.equal(preparedSms.response.status, 200, preparedSms.text);
+  assert.equal(preparedSms.body.result.plan.operations[0].material.to, QUO_CLIENT_PHONE);
+  assert.equal(preparedSms.body.result.plan.operations[0].material.from, "+19725551011");
+  assert.match(preparedSms.body.result.plan.file.displayLabel, /2739.*21 Maple Ave.*SYNTH-614027ZX/);
+  assert.deepEqual([...new Set(quoActivityLines)], ["PN_12"]);
+  assert.equal(quoProviderWrites.length, 0);
+  const secondFileSms = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", {
+    fileRef: workCenterByName.get("Assigned File Fixture B").fileRef,
+    operations: [{ type: "quo.send_text", input: { to: QUO_CLIENT_PHONE, content: "Policy requested for 77 Pine Ln." } }]
+  });
+  assert.equal(secondFileSms.response.status, 200, secondFileSms.text);
+  assert.match(secondFileSms.body.result.plan.file.displayLabel, /2740.*77 Pine Ln.*SYNTH-SECOND-2026/);
+  assert.notEqual(secondFileSms.body.result.plan.file.reference, preparedSms.body.result.plan.file.reference);
+  assert.notEqual(secondFileSms.body.result.plan.approvalDigest, preparedSms.body.result.plan.approvalDigest);
+  assert.equal(quoProviderWrites.length, 0, "both separate assigned files can prepare for the same verified person");
+  const readsBeforeWrongRecipient = quoActivityLines.length;
+  const arbitraryRecipient = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", {
+    ...smsInput, operations: [{ type: "quo.send_text", input: { to: "+12145550008", content: "Must not be prepared." } }]
+  });
+  assert.notEqual(arbitraryRecipient.response.status, 200);
+  assert.equal(quoActivityLines.length, readsBeforeWrongRecipient);
+  sharedPhoneTexts = ["STOP about 90 Birch Ct", "Please don't text me about 90 Birch Ct"];
+  const optOut = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+  assert.notEqual(optOut.response.status, 200);
+  assert.match(optOut.text, /contact-level opt-out/);
+  assert.doesNotMatch(optOut.text, /90 Birch Ct/);
+  assert.equal(quoProviderWrites.length, 0);
+  sharedPhoneTexts = ["Policy requested for 21 Maple Ave"];
+  const staleCandidate = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+  assert.equal(staleCandidate.response.status, 200, staleCandidate.text);
+  const smsApproval = plan => ({ schema: "jobrolo.approval-attestation.v1", approvalRequestId: "approval_shared_phone_fixture",
+    planDigest: plan.approvalDigest, approvedAt: new Date().toISOString(), approvedByUserId: "user_0123456789abcdef" });
+  assignedContact.address_line1 = "22 Maple Ave";
+  const changedProperty = await smsRequest("/integrations/jobrolo/v1/action-plans/execute", {
+    planId: staleCandidate.body.result.plan.planId, approval: smsApproval(staleCandidate.body.result.plan)
+  });
+  assert.equal(changedProperty.response.status, 409, changedProperty.text);
+  assert.equal(quoProviderWrites.length, 0);
+  assignedContact.address_line1 = "21 Maple Ave";
+  for (const [field, replacement] of [
+    ["cf_string_2", "SYNTH-CHANGED-CLAIM"], ["address_line2", "Apt 3"],
+    ["display_name", "Changed Policyholder Fixture"], ["mobile_phone", "+12145550197"]
+  ]) {
+    // Independent conversations keep each prepare/execute pair inside the
+    // unchanged production per-session admission limits.
+    smsSessionRef = `session_${(++smsRequestNumber).toString(16).padStart(32, "0")}`;
+    const candidate = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+    assert.equal(candidate.response.status, 200, candidate.text);
+    const previous = assignedContact[field];
+    assignedContact[field] = replacement;
+    const changedIdentity = await smsRequest("/integrations/jobrolo/v1/action-plans/execute", {
+      planId: candidate.body.result.plan.planId, approval: smsApproval(candidate.body.result.plan)
+    });
+    if (previous === undefined) delete assignedContact[field];
+    else assignedContact[field] = previous;
+    assert.equal(changedIdentity.response.status, 409, `${field}: ${changedIdentity.text}`);
+    assert.equal(quoProviderWrites.length, 0);
+  }
+  for (const revoked of ["assignment", "own-line"]) {
+    smsSessionRef = `session_${(++smsRequestNumber).toString(16).padStart(32, "0")}`;
+    const candidate = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+    assert.equal(candidate.response.status, 200, candidate.text);
+    const owners = assignedContact.owners;
+    if (revoked === "assignment") assignedContact.owners = [{ id: SECOND_OWNER_ID }];
+    else withdrawOwnQuoLine = true;
+    const denied = await smsRequest("/integrations/jobrolo/v1/action-plans/execute", {
+      planId: candidate.body.result.plan.planId, approval: smsApproval(candidate.body.result.plan)
+    });
+    assignedContact.owners = owners;
+    withdrawOwnQuoLine = false;
+    assert.notEqual(denied.response.status, 200, `${revoked}: ${denied.text}`);
+    assert.equal(quoProviderWrites.length, 0, "revocation must precede every provider effect");
+    const readback = await smsRequest("/integrations/jobrolo/v1/action-receipts/detail", { planId: candidate.body.result.plan.planId });
+    assert.notEqual(readback.response.status, 200, "a failed preflight must not create a false uncertain-send receipt");
+  }
+  smsSessionRef = `session_${(++smsRequestNumber).toString(16).padStart(32, "0")}`;
+  const beforeNewOptOut = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+  assert.equal(beforeNewOptOut.response.status, 200, beforeNewOptOut.text);
+  sharedPhoneTexts = ["STOP"];
+  const newOptOut = await smsRequest("/integrations/jobrolo/v1/action-plans/execute", {
+    planId: beforeNewOptOut.body.result.plan.planId, approval: smsApproval(beforeNewOptOut.body.result.plan)
+  });
+  assert.equal(newOptOut.response.status, 409, newOptOut.text);
+  assert.match(newOptOut.text, /contact-level opt-out/);
+  assert.equal(quoProviderWrites.length, 0);
+  const optOutReceipt = await smsRequest("/integrations/jobrolo/v1/action-receipts/detail", { planId: beforeNewOptOut.body.result.plan.planId });
+  assert.notEqual(optOutReceipt.response.status, 200);
+  sharedPhoneTexts = ["Policy requested for 21 Maple Ave"];
+  freshAssignedPhoneOverride = "+12145550197";
+  const changedRecipient = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+  assert.notEqual(changedRecipient.response.status, 200);
+  assert.equal(quoProviderWrites.length, 0);
+  freshAssignedPhoneOverride = null;
+  const finalSms = await smsRequest("/integrations/jobrolo/v1/action-plans/prepare", smsInput);
+  assert.equal(finalSms.response.status, 200, finalSms.text);
+  const approvedSmsInput = { planId: finalSms.body.result.plan.planId, approval: smsApproval(finalSms.body.result.plan) };
+  const sentSms = await smsRequest("/integrations/jobrolo/v1/action-plans/execute", approvedSmsInput);
+  assert.equal(sentSms.response.status, 200, sentSms.text);
+  assert.equal(quoProviderWrites.length, 1);
+  assert.equal(quoProviderWrites[0].from, "PN_12");
+  assert.deepEqual(quoProviderWrites[0].to, [QUO_CLIENT_PHONE]);
+  const replaySms = await smsRequest("/integrations/jobrolo/v1/action-plans/execute", approvedSmsInput);
+  assert.equal(replaySms.response.status, 409);
+  assert.equal(quoProviderWrites.length, 1);
+  assignedContactB.mobile_phone = originalB.phone;
+  assignedContactB.display_name = originalB.name;
+  delete assignedContactB.address_line1;
+  delete assignedContactB.cf_string_2;
+
+  delete assignedContact.address_line1;
+  delete assignedContact.cf_string_2;
+  const readsBeforeMissingAnchors = quoActivityLines.length;
+  const missingAnchorReview = await exactSharedReview("f3");
+  assert.equal(missingAnchorReview.response.status, 200, missingAnchorReview.text);
+  assert.equal(missingAnchorReview.body.result.sources.quo.failureCode, "phone_match_shared_active_files");
+  assert.equal(missingAnchorReview.body.result.recent.quo.length, 0);
+  assert.equal(quoActivityLines.length, readsBeforeMissingAnchors);
+  assert.equal(providerWrites.length, 0);
+  delete activeForeignDuplicateContact.address_line1;
+  delete activeForeignDuplicateContact.cf_string_2;
+  activeForeignDuplicateContact.status_name = "Ready for Review";
+  sharedPhoneTexts = null;
+  includeActiveForeignDuplicate = false;
+  includeAmbiguousMalformedEligible = true;
+  const readsBeforeMalformedMatch = quoActivityLines.length;
+  const malformedMatchReview = await exactSharedReview("f4");
+  assert.equal(malformedMatchReview.response.status, 200, malformedMatchReview.text);
+  assert.equal(malformedMatchReview.body.result.sources.quo.failureCode, "phone_match_unverified");
+  assert.equal(quoActivityLines.length, readsBeforeMalformedMatch);
+  includeAmbiguousMalformedEligible = false;
 
   const communicationSweep = await signedPost(
     origin,

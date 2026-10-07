@@ -3125,7 +3125,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
             createdAt: "2026-07-27T17:00:00.000Z",
             direction: "incoming",
             status: "delivered",
-            content: "Fresh synthetic text reply"
+            content: "Fresh synthetic text reply for HCN-CLAIM-1001"
           },
           {
             id: "quo-message-2",
@@ -3135,7 +3135,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
             createdAt: "2026-07-27T18:30:00.000Z",
             direction: "outgoing",
             status: "delivered",
-            content: "Fresh synthetic follow-up"
+            content: "Fresh synthetic follow-up for HCN-CLAIM-1001"
           }
         ]
       }));
@@ -4217,8 +4217,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(exactFile.recent.tasks.length, 1);
   assert.equal(exactFile.recent.documents.length, 1);
   assert.equal(exactFile.recent.gmail.length, 2);
-  assert.equal(exactFile.recent.quo.length, 3);
-  assert.deepEqual(exactFile.sources.quo.limitations, ["homeowner_phone_only", "call_transcripts_not_reviewed", "signed_in_employee_line_only"]);
+  assert.equal(exactFile.recent.quo.length, 2, "the unbound call is not evidence for this case");
+  assert.deepEqual(exactFile.sources.quo.limitations, ["homeowner_phone_only", "call_transcripts_not_reviewed", "signed_in_employee_line_only", "exact_file_messages_only", "unattributed_phone_history_withheld"]);
   assert.equal(
     exactFile.recent.gmail.some((item) => item.direction === "inbound"),
     true
@@ -5646,7 +5646,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         completeness: "none",
         failureCode:
           source === "quo"
-            ? "phone_match_unverified"
+            ? "phone_match_shared_active_files"
             : "scope_check_failed"
       }
     );
@@ -7597,7 +7597,7 @@ test("prepare route reads fresh evidence and enforces Chance ownership", async (
     headers: { authorization: "Bearer fixture-token", "content-type": "application/json" },
     body: JSON.stringify({ operations: [changingDraftOperation], execute: false })
   });
-  assert.equal(changingDraftBatchResponse.status, 200);
+  assert.equal(changingDraftBatchResponse.status, 200, await changingDraftBatchResponse.clone().text());
   const changingDraftBatch = await changingDraftBatchResponse.json();
   const executeChangingDraftResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
     method: "POST",

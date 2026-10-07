@@ -973,6 +973,39 @@ test("Quo live send resolves the configured number to its PN line id", async () 
   }
 });
 
+test("recipient opt-out is checked before truncation and never borrowed from another line or number", async () => {
+  const originalFetch = globalThis.fetch;
+  let includeOwnStop = true;
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith('/phone-numbers')) return jsonResponse(200, { data: [
+      { id: 'PN_one', number: '+19725550101' }, { id: 'PN_other', number: '+19725550102' }
+    ] });
+    assert.equal(parsed.searchParams.get('phoneNumberId'), 'PN_one');
+    if (parsed.pathname.endsWith('/calls')) return jsonResponse(200, { data: [] });
+    return jsonResponse(200, { data: [
+      ...(includeOwnStop ? [scopedMessage('PN_one', '+19725550101', { id: 'old-stop', direction: 'incoming', content: 'STOP', createdAt: '2026-07-14T14:00:00Z' })] : []),
+      scopedMessage('PN_one', '+19725550101', { id: 'latest', direction: 'incoming', content: 'Latest reply', createdAt: '2026-07-15T14:00:00Z' }),
+      scopedMessage('PN_other', '+19725550102', { id: 'foreign-stop', direction: 'incoming', content: 'STOP' }),
+      scopedMessage('PN_one', '+19725550101', { id: 'foreign-destination', direction: 'incoming', from: '+12145550998', content: 'STOP' }),
+    ] });
+  };
+  try {
+    const result = await readQuoHistoryStrict({ apiKey: 'fixture', baseUrl: 'https://api.quo.test/v1' }, {
+      phone: '+12145550199', lineId: 'PN_one', lineNumber: '+19725550101', maxResults: 1
+    });
+    assert.deepEqual(result.timeline.map(item => item.id), ['latest']);
+    assert.equal(result.contactSafety.observedOptOut, true);
+    assert.doesNotMatch(JSON.stringify(result), /foreign-stop|foreign-destination/);
+    includeOwnStop = false;
+    const noOwnStop = await readQuoHistoryStrict({ apiKey: 'fixture', baseUrl: 'https://api.quo.test/v1' }, {
+      phone: '+12145550199', lineId: 'PN_one', lineNumber: '+19725550101', maxResults: 1
+    });
+    assert.equal(noOwnStop.contactSafety.observedOptOut, false);
+    assert.doesNotMatch(JSON.stringify(noOwnStop), /foreign-stop|foreign-destination/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 function scopedMessage(phoneNumberId, lineNumber, values = {}) {
   return {
     phoneNumberId,

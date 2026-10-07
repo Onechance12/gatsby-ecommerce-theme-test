@@ -1489,6 +1489,7 @@ test("file selection completes a fresh exact review before an explicit blank cha
     ["file_phone_missing", "file phone missing"],
     ["google_not_linked", "not linked"],
     ["phone_match_unverified", "phone match unverified"],
+    ["phone_match_shared_active_files", "phone shared across files"],
     ["provider_check_failed", "provider check failed"],
     ["scope_check_failed", "file scope check failed"],
     ["work_line_not_linked", "work line not linked"]
@@ -1504,6 +1505,7 @@ test("file selection completes a fresh exact review before an explicit blank cha
     "The Quo work line is not linked; texts were not checked.",
     "This file has no phone number for the ",
     "The file phone could not be matched safely; ",
+    "Multiple active files use this phone. A unique current property or claim is needed to match texts; this is not a Quo line connection failure.",
     "Current JobNimbus file facts were checked; older activity or task history is outside this review window.",
     "provider check failed; source records were not evaluated.",
     "could not be verified; source records were not evaluated."

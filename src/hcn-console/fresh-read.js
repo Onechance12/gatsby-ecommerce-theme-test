@@ -35,6 +35,7 @@ const OPTIONAL_SOURCE_FAILURE_CODES = Object.freeze([
   "file_phone_missing",
   "google_not_linked",
   "phone_match_unverified",
+  "phone_match_shared_active_files",
   "provider_check_failed",
   "scope_check_failed",
   "work_line_not_linked"

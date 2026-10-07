@@ -37,6 +37,10 @@ import {
   readQuoTranscript,
   sendQuoText
 } from "./quo/client.js";
+import {
+  projectSharedPhoneFileHistory
+} from "./quo/exact-file-history.js";
+import { exactFileEvidenceAnchors, exactFileRecipientProof, messageConflictsWithFile, messageMatchesFile } from "./communications/exact-file-evidence.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import {
@@ -958,6 +962,7 @@ const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
 const GMAIL_FILE_COMPANY_CONTACTS = Symbol("gmailFileCompanyContacts");
+const GMAIL_FILE_EXACT_ANCHORS = Symbol("gmailFileExactAnchors");
 const GMAIL_MESSAGE_CORRELATION_CONTENT = Symbol("gmailMessageCorrelationContent");
 const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
 const GOOGLE_IDENTITY_CACHE = new Map();
@@ -10005,6 +10010,11 @@ async function hcnExecuteActionPlan(input = {}) {
         sessionBinding,
         planId
       });
+      if (pending.operations.some(operation => operation.type === "quo.send_text") && pending.status !== "pending") {
+        throw new HcnBrowserActionContractError(
+          "plan_not_pending", 409, "This text plan is no longer pending. Do not retry it; review its current status."
+        );
+      }
       const scope = await resolveHcnActionScope({
         fileRef: pending.fileRef,
         taskRefs: hcnTaskRefsFromPresentation(pending.operations),
@@ -10012,6 +10022,23 @@ async function hcnExecuteActionPlan(input = {}) {
         documentRefs: hcnDocumentRefsFromPresentation(pending.operations),
         draftRefs: hcnDraftRefsFromPresentation(pending.operations)
       });
+      for (const operation of pending.operations.filter(operation => operation.type === "quo.send_text")) {
+        // Recipient/line/opt-out failures are preflight failures, not unknown
+        // provider effects. Reuse the same deterministic dry-run boundary before
+        // consuming approval or creating an executing receipt; the engine still
+        // rechecks immediately before its effect.
+        try {
+          const material = operation.material;
+          const refreshed = await quoSend({
+            query: scope.providerJobId,
+            to: material.to, content: material.content, execute: false
+          });
+          if (refreshed.plan.from !== material.from || refreshed.plan.to !== material.to
+            || refreshed.plan.content !== material.content) throw hcnActionScopeChanged();
+        } catch (error) {
+          throw hcnPublicActionError(error, "execute");
+        }
+      }
       const execution = HCN_PENDING_ACTION_PLANS.beginExecution({
         sessionBinding,
         planId,
@@ -10719,7 +10746,8 @@ async function resolveHcnActionScope({
   }
 
   const compact = compactContact(contact);
-  const rawLabel = `${compact.number || ""} ${compact.name || ""}`
+  const rawLabel = [`${compact.number || ""} ${compact.name || ""}`, compact.address, compact.claimNumber ? `Claim ${compact.claimNumber}` : ""]
+    .filter(Boolean).join(" · ")
     .replace(/[\x00-\x1f\x7f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -10727,7 +10755,7 @@ async function resolveHcnActionScope({
     .slice(0, 256)
     .join("");
   const fileScopeBinding = createHash("sha256")
-    .update("hcn-console:action-file-scope:v2", "utf8")
+    .update("hcn-console:action-file-scope:v3", "utf8")
     .update("\0", "utf8")
     .update(fileRef, "utf8")
     .update("\0", "utf8")
@@ -10737,6 +10765,14 @@ async function resolveHcnActionScope({
     .update("\0", "utf8")
     .update(
       JSON.stringify({
+        caseIdentity: {
+          address: compact.address, claimNumber: compact.claimNumber,
+          policyNumber: compact.policyNumber, dateOfLoss: compact.dateOfLoss
+        },
+        recipients: {
+          clientName: compact.name, clientPhone: compact.phone,
+          adjusterName: compact.adjusterName, adjusterPhone: compact.adjusterPhone
+        },
         tasks: [...providerTaskIds.entries()]
           .sort(([left], [right]) => left.localeCompare(right)),
         events: [...providerEventIds.entries()]
@@ -15275,7 +15311,10 @@ function gmailMessageMatchesFile(message, file) {
   const claimMatch = file[GMAIL_FILE_CLAIM_UNIQUE] === true
     && normalizeCompare(claimNumber).length >= 6
     && claimIdentifiers.has(normalizedClaim);
-  if (!emailMatch && !claimMatch) return false;
+  const anchors = file[GMAIL_FILE_EXACT_ANCHORS];
+  const anchoredMatch = anchors && messageMatchesFile(content, anchors);
+  if (!emailMatch && !claimMatch && !anchoredMatch) return false;
+  if (anchors && messageConflictsWithFile(content, anchors)) return false;
   const contacts = file[GMAIL_FILE_COMPANY_CONTACTS];
   if (!Array.isArray(contacts)) return false;
   for (const contact of contacts) {
@@ -16156,8 +16195,11 @@ async function quoSend(input = {}) {
   const file = compactContact(contact);
   const to = String(input.to || file.phone || "").trim();
   const content = required(input.content || input.message || input.text, "content");
+  let recipientProof = null;
   if (isRestrictedEffectRequest()) {
-    await assertUniqueChanceFilePhone(file, "Quo sending");
+    // Legacy Operator permissions stay unchanged. Native exact-file actions
+    // prove recipient membership, not globally unique contact methods.
+    if (!isHcnRestrictedEffectRequest()) await assertUniqueChanceFilePhone(file, "Quo sending");
     if (input.userId !== undefined && String(input.userId || "").trim()) {
       badRequest("This restricted action cannot select an arbitrary Quo userId.");
     }
@@ -16165,12 +16207,51 @@ async function quoSend(input = {}) {
       [file.phone, file.adjusterPhone].map(normalizePhone).filter(Boolean)
     );
     if (!allowedRecipients.has(normalizePhone(to))) {
+      if (isHcnRestrictedEffectRequest()) throw new HcnBrowserActionContractError(
+        "recipient_not_verified", 409, "The recipient is not a current verified client or desk adjuster on this file. Nothing was sent."
+      );
       badRequest("This restricted action may text only a freshly verified client or desk-adjuster phone on the resolved file.");
+    }
+    if (isHcnRestrictedEffectRequest()) {
+      recipientProof = exactFileRecipientProof(file, to);
+      if (!recipientProof) throw new HcnBrowserActionContractError(
+        "recipient_not_verified", 409, "The selected file's current recipient could not be verified. Nothing was sent."
+      );
     }
   }
   const authorizedLine = await authorizedQuoLine();
   const from = authorizedLine.number;
-  if (!from) badRequest("No Quo sending line is configured for the authenticated employee.");
+  if (!from) {
+    if (recipientProof) throw new HcnBrowserActionContractError(
+      "work_line_not_linked", 409, "Your current Quo work line could not be verified. Nothing was sent."
+    );
+    badRequest("No Quo sending line is configured for the authenticated employee.");
+  }
+  if (recipientProof) {
+    let history;
+    try {
+      history = await readQuoHistoryStrict(quoConfig(), {
+        phone: recipientProof.recipient,
+        lineId: authorizedLine.id, lineNumber: from,
+        maxResults: 50, maxPages: 5
+      });
+    } catch {
+      throw new HcnBrowserActionContractError(
+        "recipient_safety_unavailable", 503, "The recipient safety check on your own Quo line is unavailable. Nothing was sent."
+      );
+    }
+    if (history?.contactSafety?.observedOptOut === true) {
+      throw new HcnBrowserActionContractError(
+        "recipient_opt_out", 409, "A contact-level opt-out was observed on your Quo line. Do not send a text."
+      );
+    }
+    if (history?.contactSafety?.observedOptOut !== false
+      || history?.completeness?.reasons?.some(reason => ["restricted_line", "line_inventory_ceiling", "provider_filter_mismatch"].includes(reason))) {
+      throw new HcnBrowserActionContractError(
+        "recipient_safety_incomplete", 409, "The recipient safety check on your own Quo line is incomplete. Nothing was sent."
+      );
+    }
+  }
   const preview = await sendQuoText(quoConfig(), {
     from,
     to,
@@ -16179,14 +16260,17 @@ async function quoSend(input = {}) {
     execute: false
   });
   const plan = { ...preview.plan, attemptId: String(input.attemptId || "initial") };
-  const approvalDigest = digest({ channel: "quo", action: "send_text", fileId: file.id, plan });
+  const approvalDigest = digest({ channel: "quo", action: "send_text", fileId: file.id, plan,
+    ...(recipientProof ? { recipientProof } : {}) });
   if (input.execute !== true) {
     return {
       mode: "dry_run",
       file,
       plan,
       approvalDigest,
-      instruction: "Nothing was sent. After the signed-in user approves this exact text and recipient, repeat with execute:true and this approvalDigest."
+      instruction: recipientProof
+        ? "Nothing was sent. Approval is for this selected property/claim, exact text, recipient and own work line. The recipient safety check is bounded; earlier history may be missing."
+        : "Nothing was sent. After the signed-in user approves this exact text and recipient, repeat with execute:true and this approvalDigest."
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Quo texts.");
@@ -17158,7 +17242,8 @@ async function findChanceContact(query) {
   const selectedId = matches[0].contact.jnid || matches[0].contact.id;
   const contact = await jobNimbus(`/contacts/${encodeURIComponent(selectedId)}`);
   if (
-    !isInsuranceFile(contact)
+    String(contact?.jnid || contact?.id || "") !== String(selectedId)
+    || !isInsuranceFile(contact)
     || (!companyScope && !assignedTo(contact, assignedOwnerId))
     || (
       isHcnRestrictedEffectRequest()
@@ -17721,10 +17806,11 @@ async function loadHcnGmailFile({
   if (
     scope.file[GMAIL_FILE_EMAIL_UNIQUE] !== true
     && scope.file[GMAIL_FILE_CLAIM_UNIQUE] !== true
+    && !scope.file[GMAIL_FILE_EXACT_ANCHORS]
   ) {
     throw hcnOptionalSourceFailure(
       "scope_check_failed",
-      "The file's email or claim number could not be matched uniquely for Gmail."
+      "No unique current property or claim anchor is available for this file's Gmail evidence."
     );
   }
   try {
@@ -17841,7 +17927,12 @@ async function loadHcnQuoFile({
     );
   }
   if (!scope.file.phone) {
-    const phoneFailure = scope.phoneFailureCode === "phone_match_unverified"
+    const phoneFailure = scope.phoneFailureCode === "phone_match_shared_active_files"
+      ? {
+          code: "phone_match_shared_active_files",
+          message: "This phone belongs to multiple active files; a unique current property or claim anchor is required."
+        }
+      : scope.phoneFailureCode === "phone_match_unverified"
       ? {
           code: "phone_match_unverified",
           message: "The file's phone number could not be matched uniquely for a Quo check."
@@ -17887,9 +17978,16 @@ async function loadHcnQuoFile({
       "Quo could not check this file's calls and texts."
     );
   }
-  const items = (Array.isArray(history?.timeline)
-    ? history.timeline
-    : []).map((item) => ({
+  const timeline = Array.isArray(history?.timeline) ? history.timeline : [];
+  // A currently unique phone can still have history for an old property/claim.
+  // Partition every exact-file history; contact safety does not need a case anchor.
+  const projection = projectSharedPhoneFileHistory(timeline, scope.evidenceAnchors || {
+    claims: new Set(), addresses: new Set(), foreignClaims: new Set(), foreignAddresses: new Set()
+  });
+  if (!projection) {
+    throw hcnOptionalSourceFailure("phone_match_unverified", "Exact-file Quo attribution could not be verified.");
+  }
+  const items = projection.items.map((item) => ({
       ...item,
       providerFileId: id
     }));
@@ -17903,7 +18001,14 @@ async function loadHcnQuoFile({
     // Exhausting the homeowner's phone timeline is not an exhaustive file review.
     // Carrier-number calls and their transcript contents were not searched here.
     itemsComplete: false,
-    limitations: ["homeowner_phone_only", "call_transcripts_not_reviewed", "signed_in_employee_line_only"],
+    limitations: [
+      "homeowner_phone_only",
+      "call_transcripts_not_reviewed",
+      "signed_in_employee_line_only",
+      scope.sharedPhoneAnchors ? "shared_phone_exact_file_messages_only" : "exact_file_messages_only",
+      ...(!scope.evidenceAnchors ? ["no_unique_file_anchor"] : []),
+      ...(projection.withheld ? ["unattributed_phone_history_withheld"] : [])
+    ],
     ...hcnFreshnessWindow(requestedAt)
   }, {
     expectedProviderFileId: id
@@ -17957,6 +18062,8 @@ async function buildHcnExactCommunicationScope(
   const file = compactContact(contact);
 
   Object.defineProperty(file, GMAIL_FILE_COMPANY_CONTACTS, { value: index.rows });
+  const evidenceAnchors = exactFileEvidenceAnchors(contact, index.rows);
+  Object.defineProperty(file, GMAIL_FILE_EXACT_ANCHORS, { value: evidenceAnchors });
 
   const email = hcnNormalizeCorrelationEmail(
     hcnCommunicationFieldValue(contact, [
@@ -18027,18 +18134,35 @@ async function buildHcnExactCommunicationScope(
         || phoneCorrelation.matches[0]?.id
         || ""
     ) === providerFileId;
-  if (!phoneMatchVerified) {
+  // The exact-file adapter can attribute individual own-line messages with a
+  // second independent, unique file anchor. The all-line phone-history route
+  // still requires one globally unique active file and is not changed here.
+  const freshPhoneInventory = phone ? hcnContactPhoneInventory(contact, phone) : null;
+  const sharedPhone = Boolean(phone)
+    && phoneCorrelation.complete
+    && phoneCorrelation.matches.length > 1
+    && freshPhoneInventory?.complete === true
+    && freshPhoneInventory.phones.has(phone)
+    && phoneCorrelation.matches.some(row => String(row?.jnid || row?.id || "") === providerFileId);
+  const sharedPhoneAnchors = sharedPhone
+    ? evidenceAnchors
+    : null;
+  if (!phoneMatchVerified && !sharedPhoneAnchors) {
     file.phone = "";
   }
   return {
     contact,
     file,
+    evidenceAnchors,
+    sharedPhoneAnchors,
     phoneFailureCode:
       !phone
         ? "file_phone_missing"
-        : phoneMatchVerified
+        : phoneMatchVerified || sharedPhoneAnchors
           ? null
-          : "phone_match_unverified"
+          : sharedPhone
+            ? "phone_match_shared_active_files"
+            : "phone_match_unverified"
   };
 }
 
@@ -20408,7 +20532,7 @@ function compactContact(contact, fieldMapping = null) {
     number: contact.number || String(contact.recid || ""),
     name: contact.display_name || [contact.first_name, contact.last_name].filter(Boolean).join(" "),
     status: contact.status_name || "",
-    address: [contact.address_line1, contact.city, contact.state_text, contact.zip].filter(Boolean).join(", "),
+    address: [contact.address_line1, contact.address_line2, contact.city, contact.state_text, contact.zip].filter(Boolean).join(", "),
     phone: contact.mobile_phone || contact.home_phone || contact.work_phone || "",
     email: contact.email || "",
     carrier: fieldValue(contact, ["Insurance Company", "Carrier", "insurance_company", "cf_string_1"]),

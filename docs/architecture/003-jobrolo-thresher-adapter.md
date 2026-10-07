@@ -42,6 +42,26 @@ exactly the configured management adjusters and the six Estimating-board
 statuses. It ranks complete JobNimbus activity reads only and explicitly does
 not claim Gmail, Quo, or calendar coverage.
 
+The employee exact-file reader is narrower than that all-line phone-history
+route: it derives only the employee's authorized work line. Phone/email/name
+are contact methods or candidates, not immutable case identifiers. One
+policyholder may have several properties or repeated claims at one address.
+Every admitted phone history, including a currently unique phone, is projected
+to individual messages with a unique, current property/claim anchor from the
+complete provider index. Shared street addresses, claim tokens and homeowner
+details cannot become unique anchors. Address normalization retains unit
+identifiers; mixed, unanchored, malformed or stale evidence is withheld. Calls
+without reviewed file anchors are not attributed. An inbound contact-level
+opt-out is exposed only as a minimized safety fact on the destination/work-line
+pair. Gmail can use a unique property/claim anchor when the client email or
+claim token is shared, and known foreign-property/claim content is vetoed.
+Existing unique-email/claim admission is preserved; a bounded result does not
+prove that an attachment belongs to this claim or provides current coverage.
+The result remains explicitly partial, and zero attributed messages is not
+proof of no prior communication. Fixed attribution/withheld-history limitation
+codes must survive Jobrolo's finite read/model projection. This does not change
+the separate all-line route, employee/file authority or action permissions.
+
 The general credential does not expose claim filing, Retell, team management,
 connector mutations, legacy routes, arbitrary provider calls, or a general
 bridge proxy. Claim filing, ordinary-chat note writeback, and import transport
@@ -174,6 +194,20 @@ Execution requires all of the following:
 Changed, stale, replayed, superseded, or mismatched material fails closed.
 There is no automatic action, automatic retry, or model approval. Jobrolo
 approval is an additional gate; it does not replace HCN's existing controls.
+
+Native exact-file Quo actions verify the proposed recipient against the current
+client or desk-adjuster phone on that exact file, not a globally unique phone
+lookup. The server derives the employee's own sending line and checks bounded
+same-line recipient safety; an observed opt-out blocks texting across that
+person's properties. Missing/unverifiable history is not consent or empty
+history. The action approval binds file identity, property/unit, claim, policy,
+date of loss, recipient identity, exact text and sending line. Fresh changes
+require a reviewed plan. A known recipient/line/opt-out failure is checked
+before entering execution or creating an executing receipt; it is not labeled
+an uncertain send. The engine independently rechecks at effect time and retains
+durable idempotency and conservative reconciliation for uncertain outcomes.
+Provider acceptance/queued status is not carrier delivery confirmation. The
+separate locked Mac Operator and all-line phone-history gates are unchanged.
 
 ### Ordinary-chat one-note capability profile
 
