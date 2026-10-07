@@ -154,6 +154,19 @@ import {
   MANAGEMENT_REPORT_SESSION_ROUTE
 } from "./auth/hcn-management-report-auth.js";
 import {
+  createCompanyRosterAuthenticator,
+  isCompanyRosterIdentity,
+  COMPANY_ROSTER_ROUTES,
+  COMPANY_ROSTER_SESSION_ROUTE,
+  COMPANY_ROSTER_ROUTE
+} from "./auth/hcn-company-roster-auth.js";
+import {
+  COMPANY_ROSTER_LIMITS,
+  CompanyRosterError,
+  readCompanyRoster,
+  validateCompanyRosterInput
+} from "./hcn-console/company-roster.js";
+import {
   HCN_CONSOLE_SECURITY_HEADERS,
   isPublicHcnConsoleAsset,
   readHcnConsoleAsset
@@ -356,6 +369,7 @@ const BRIDGE_TOKEN = process.env.JOBNIMBUS_BRIDGE_TOKEN || "";
 const CODEX_OPERATOR_TOKEN = process.env.CODEX_OPERATOR_TOKEN || "";
 const CODEX_MAC_OPERATOR_TOKEN = process.env.CODEX_MAC_OPERATOR_TOKEN || "";
 const authenticateManagementReport = createManagementReportAuthenticator(process.env);
+const authenticateCompanyRoster = createCompanyRosterAuthenticator(process.env);
 const ALLOW_WRITES = RELEASE_GATES.BRIDGE_ALLOW_WRITES;
 const HCN_ACTION_EXECUTION_ENABLED =
   RELEASE_GATES.HCN_ACTION_EXECUTION_ENABLED;
@@ -1301,6 +1315,8 @@ const routes = new Map([
   ["POST /hcn/api/v1/work-center", hcnReadWorkCenter],
   ["POST /hcn/api/v1/management-sweep", hcnReadManagementSweep],
   [`GET ${MANAGEMENT_REPORT_SESSION_ROUTE}`, hcnManagementReportSession],
+  [`GET ${COMPANY_ROSTER_SESSION_ROUTE}`, hcnCompanyRosterSession],
+  [`POST ${COMPANY_ROSTER_ROUTE}`, hcnReadCompanyRoster],
   ["POST /hcn/api/v1/closed-file-benchmark", hcnReadClosedFileBenchmark],
   ["POST /hcn/api/v1/file-review", hcnReadFile],
   ["POST /hcn/api/v1/assistant/conversations/list", hcnListAssistantConversations],
@@ -1587,6 +1603,14 @@ const server = createServer(async (req, res) => {
     }
     const handler = routes.get(`${req.method} ${url.pathname}`);
     if (!handler) return send(res, 404, { error: "Not found" });
+    if ([COMPANY_ROSTER_SESSION_ROUTE, COMPANY_ROSTER_ROUTE].includes(url.pathname)) {
+      // Frozen CLI-only request shape. No query tokens, filters, actor, tenant
+      // override, browser Origin, or effects can be selected by the caller.
+      if (url.search || req.headers.origin
+        || (req.method === "POST" && !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(String(req.headers["content-type"] || "")))) {
+        return send(res, 400, { error: "Invalid company roster request." });
+      }
+    }
     if (url.pathname.startsWith("/artifacts/") && (!BRIDGE_TOKEN || !authorized(req))) {
       return send(res, 401, { error: "Artifact mailbox requires bridge bearer authentication." });
     }
@@ -1612,6 +1636,7 @@ const server = createServer(async (req, res) => {
             ? hcnApiBodyLimit(url.pathname)
             : MAX_JSON_BODY_BYTES
         );
+    if (url.pathname === COMPANY_ROSTER_ROUTE) validateCompanyRosterInput(body);
     const operatorScope = resolveCodexOperatorRequestScope(
       identity,
       req.method,
@@ -4935,6 +4960,68 @@ function hcnManagementReportSession() {
     configuredAdjusterCount: HCN_MANAGEMENT_ADJUSTERS.adjusters.length,
     rankingMode: "jobnimbus_activity_only"
   };
+}
+
+function assertHcnCompanyRosterIdentity() {
+  const identity = currentRequestIdentity();
+  if (currentRequestAuthentication()?.authenticationMethod !== "bearer"
+    || !isCompanyRosterIdentity(identity)
+    || identity.tenantId !== HCN_REFERENCE_CONFIGURATION.requireFactory().tenantId) {
+    const error = new Error("The isolated company roster identity is required.");
+    error.statusCode = 403;
+    throw error;
+  }
+  return identity;
+}
+
+function hcnCompanyRosterSession() {
+  const identity = assertHcnCompanyRosterIdentity();
+  return {
+    schema: "hcn.company-roster-session.v1",
+    ready: hcnConsoleFreshReadConfigured(),
+    identity,
+    build: getBuildInfo(),
+    routes: [...COMPANY_ROSTER_ROUTES],
+    limits: COMPANY_ROSTER_LIMITS,
+    scope: "configured_jobnimbus_account_metadata",
+    anchorVerification: "existing_active_chance_jobnimbus_identity",
+    readOnly: true,
+    externalWrites: false
+  };
+}
+
+async function hcnReadCompanyRoster(input) {
+  validateCompanyRosterInput(input);
+  const identity = assertHcnCompanyRosterIdentity();
+  if (!hcnConsoleFreshReadConfigured()) throw new CompanyRosterError();
+  const result = await withHcnReadAdmission(() => readCompanyRoster({
+    referenceFactory: HCN_REFERENCE_CONFIGURATION.requireFactory(),
+    anchorEmail: CHANCE_GOOGLE_EMAIL,
+    anchorUserId: CHANCE_OWNER_ID,
+    fetchPage: async (endpoint, budget) => {
+      if (!isCompanyRosterIdentity(identity)) throw new CompanyRosterError();
+      const path = endpoint.split("?")[0];
+      if (!["/account/users", "/contacts", "/jobs"].includes(path)
+        || !Number.isSafeInteger(budget?.used)
+        || budget.used >= budget.maximum) throw new CompanyRosterError();
+      const remaining = Math.min(budget.deadlineAt, Date.parse(identity.grantExpiresAt)) - Date.now();
+      if (remaining < 100) throw new CompanyRosterError();
+      budget.used += 1;
+      try {
+        return await fetchBoundedJson(fetch, `${API_BASE}${endpoint}`, {
+          method: "GET",
+          headers: { authorization: `Bearer ${API_KEY}`, accept: "application/json" }
+        }, {
+          timeoutMs: Math.min(15_000, remaining),
+          maxBytes: 4 * 1024 * 1024,
+          errorCode: "HCN_COMPANY_ROSTER_READ_FAILED"
+        });
+      } catch { throw new CompanyRosterError(); }
+    }
+  }));
+  // A grant that expires during the final provider read cannot return data.
+  assertHcnCompanyRosterIdentity();
+  return { ...result, build: getBuildInfo() };
 }
 
 async function hcnReadClosedFileBenchmark(input = {}) {
@@ -11227,6 +11314,8 @@ async function withHcnReadAdmission(callback) {
           namespace: "hcn-console:fresh-read:session:v1",
           value: sessionId
         }
+      : context?.authenticationMethod === "bearer" && isCompanyRosterIdentity(identity)
+        ? { namespace: "hcn-console:fresh-read:company-roster:v1", value: `${identity.subject}:${identity.tenantId}` }
       : context?.authenticationMethod === "bearer" && isManagementReportIdentity(identity)
         ? { namespace: "hcn-console:fresh-read:management-report:v1", value: identity.subject }
       : (
@@ -22491,6 +22580,8 @@ async function authenticateRequest(req) {
 async function authenticateBearerRequest(req) {
   const token = bearerToken(req);
   if (!token) return null;
+  const rosterIdentity = authenticateCompanyRoster(token);
+  if (rosterIdentity) return rosterIdentity;
   const reportIdentity = authenticateManagementReport(token);
   if (reportIdentity) return reportIdentity;
   if (BRIDGE_TOKEN && token === BRIDGE_TOKEN) {
