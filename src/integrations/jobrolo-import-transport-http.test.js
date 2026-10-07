@@ -33,6 +33,8 @@ const RAW_FILE_ID = "private-provider-file-id";
 const ACCOUNT_USER_ID = "private-account-user-id";
 const CUSTOMER_ID = "private-customer-account-id";
 const DOCUMENT_BYTES = Buffer.from("%PDF-1.7\nfixture document bytes\n", "utf8");
+const PORTFOLIO_GRANT_REF = `grant_${"d".repeat(32)}`;
+const PORTFOLIO_REQUEST_SCHEMA = "jobrolo.jobnimbus-import.portfolio-request.v1";
 
 function wrapPdfByteArray(bytes) {
   const prefix = Buffer.from("aced0005757200025b42acf317f8060854e00200007870", "hex");
@@ -47,6 +49,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   const state = {
     mode: "normal",
     detailAssigned: true,
+    portfolioOwner: false,
     dateOfLoss: "2026-05-17",
     calls: [],
     writes: 0
@@ -94,7 +97,7 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
       && url.pathname === `/contacts/${RAW_FILE_ID}`
     ) {
       return json(res, 200, contact({
-        owners: [{ id: state.detailAssigned ? OWNER_ID : "other-owner" }],
+        owners: [{ id: state.portfolioOwner ? ACCOUNT_USER_ID : state.detailAssigned ? OWNER_ID : "other-owner" }],
         "Date of Loss": state.dateOfLoss
       }));
     }
@@ -194,6 +197,14 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
       HCN_JOBROLO_IMPORT_SHARED_SECRET: SECRET,
       HCN_JOBROLO_IMPORT_PRINCIPAL_EMAIL: EMAIL,
       HCN_JOBROLO_IMPORT_CONNECTION_REF: CONNECTION_REF,
+      HCN_JOBROLO_IMPORT_PORTFOLIO_ENABLED: "true",
+      HCN_JOBROLO_IMPORT_PORTFOLIO_GRANTS_JSON: JSON.stringify({
+        schema: "hcn.jobrolo.import-portfolio-grants.v1",
+        grants: [{ grantRef: PORTFOLIO_GRANT_REF, tenantId: "tenant_0123456789abcdef",
+          clientId: CLIENT_ID, connectionRef: CONNECTION_REF,
+          issuedAt: new Date(Date.now() - 1_000).toISOString(),
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(), providerFileIds: [RAW_FILE_ID] }]
+      }),
       HCN_JOBROLO_ADAPTER_ENABLED: "",
       HCN_JOBROLO_CLIENT_ID: "",
       HCN_JOBROLO_SHARED_SECRET: "",
@@ -667,6 +678,44 @@ test("dedicated import routes are signed, exact, bounded, and provider-read-only
   assertNoPrivateMaterial(unavailable.text);
   assert.doesNotMatch(unavailable.text, /private\.invalid|RAW_PROVIDER_SECRET/);
   assert.equal(state.writes, 0);
+
+  state.mode = "normal";
+  state.portfolioOwner = true;
+  const portfolioCatalog = await signedPost(origin, JOBROLO_IMPORT_CATALOG_ROUTE, {
+    schema: PORTFOLIO_REQUEST_SCHEMA, operation: "catalog_page", grantRef: PORTFOLIO_GRANT_REF,
+    requestId: `request_${"d1".repeat(16)}`, afterRef: null
+  }, `nonce_${"d1".repeat(16)}`);
+  assert.equal(portfolioCatalog.response.status, 200, portfolioCatalog.text);
+  verifyResponse(portfolioCatalog, JOBROLO_IMPORT_CATALOG_ROUTE);
+  assert.equal(portfolioCatalog.body.payload.source.scope, "reviewed_portfolio");
+  assert.equal(portfolioCatalog.body.payload.page.totalSelection, 1);
+  assert.equal(portfolioCatalog.body.payload.page.nextCursor, null);
+  assert.equal(portfolioCatalog.body.payload.items[0].sourceFileRef, sourceFileRef);
+  assertNoPrivateMaterial(portfolioCatalog.text);
+  const portfolioSnapshot = await signedPost(origin, JOBROLO_IMPORT_SNAPSHOT_ROUTE, {
+    schema: PORTFOLIO_REQUEST_SCHEMA, operation: "snapshot", grantRef: PORTFOLIO_GRANT_REF,
+    requestId: `request_${"d2".repeat(16)}`, sourceFileRef
+  }, `nonce_${"d2".repeat(16)}`);
+  assert.equal(portfolioSnapshot.response.status, 200, portfolioSnapshot.text);
+  verifyResponse(portfolioSnapshot, JOBROLO_IMPORT_SNAPSHOT_ROUTE);
+  assert.equal(portfolioSnapshot.body.payload.schema, "jobrolo.jobnimbus-import.snapshot.v2");
+  assert.equal(portfolioSnapshot.body.payload.file.assignmentVerified, false);
+  assert.deepEqual(portfolioSnapshot.body.payload.sourceOwners.map(owner => owner.displayName), ["Verified User"]);
+  assertNoPrivateMaterial(portfolioSnapshot.text);
+  const noGrantCalls = state.calls.length;
+  const noGrant = await signedPost(origin, JOBROLO_IMPORT_CATALOG_ROUTE, {
+    schema: PORTFOLIO_REQUEST_SCHEMA, operation: "catalog_page", grantRef: `grant_${"e".repeat(32)}`,
+    requestId: `request_${"d3".repeat(16)}`, afterRef: null
+  }, `nonce_${"d3".repeat(16)}`);
+  assert.equal(noGrant.response.status, 401);
+  assert.equal(state.calls.length, noGrantCalls, "unknown grant rejected before provider reads");
+  const foreignRef = await signedPost(origin, JOBROLO_IMPORT_SNAPSHOT_ROUTE, {
+    schema: PORTFOLIO_REQUEST_SCHEMA, operation: "snapshot", grantRef: PORTFOLIO_GRANT_REF,
+    requestId: `request_${"d4".repeat(16)}`, sourceFileRef: `subject_${"e".repeat(32)}`
+  }, `nonce_${"d4".repeat(16)}`);
+  assert.equal(foreignRef.response.status, 404);
+  assert.equal(state.calls.length, noGrantCalls + 1, "unknown file performs only principal directory check");
+  assert.equal(state.writes, 0, "portfolio admission permits provider reads only");
 });
 
 function contact(overrides = {}) {
@@ -799,7 +848,8 @@ async function signedPost(
       requestId: body.requestId,
       requestNonce: nonce,
       requestTimestamp: timestamp,
-      requestBodyHash: headers[JOBROLO_IMPORT_REQUEST_HEADERS.contentSha256]
+      requestBodyHash: headers[JOBROLO_IMPORT_REQUEST_HEADERS.contentSha256],
+      ...(body.grantRef ? { portfolioGrantRef: body.grantRef } : {})
     }
   };
 }

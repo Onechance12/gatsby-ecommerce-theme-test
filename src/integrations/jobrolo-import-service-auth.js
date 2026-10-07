@@ -482,6 +482,7 @@ export function createJobroloImportAuthenticator({
         requestTimestamp: timestamp,
         requestBodyHash: bodyHash,
         sourceFileRef: request.sourceFileRef || null,
+        ...(request.grantRef ? { portfolioGrantRef: request.grantRef, afterRef: request.afterRef ?? null } : {}),
         ...(request.includeActivityText === true ? { includeActivityText: true } : {}),
         sourceRecordRef: request.sourceRecordRef || null,
         manifestDigest: request.manifestDigest || null
@@ -539,9 +540,9 @@ export function createJobroloImportTransportResponse({
   if (parseIsoUtc(verifiedRequest.requestTimestamp) === null) serviceFailure();
   if (!SHA256.test(verifiedRequest.requestBodyHash)) serviceFailure();
   const expectedPayloadSchema = kind === "catalog"
-    ? "jobrolo.jobnimbus-import.catalog.v1"
+    ? verifiedRequest.portfolioGrantRef ? "jobrolo.jobnimbus-import.portfolio-catalog.v1" : "jobrolo.jobnimbus-import.catalog.v1"
     : kind === "snapshot"
-      ? JOBROLO_JOBNIMBUS_IMPORT_SNAPSHOT_SCHEMA
+      ? verifiedRequest.portfolioGrantRef ? "jobrolo.jobnimbus-import.snapshot.v2" : JOBROLO_JOBNIMBUS_IMPORT_SNAPSHOT_SCHEMA
       : "";
   if (!expectedPayloadSchema || payload?.schema !== expectedPayloadSchema) {
     serviceFailure();
@@ -807,6 +808,18 @@ export function projectJobroloImportError(error) {
 }
 
 function validateImportRequest(pathname, value) {
+  if (value?.schema === "jobrolo.jobnimbus-import.portfolio-request.v1") {
+    const catalog = pathname === JOBROLO_IMPORT_CATALOG_ROUTE;
+    if (!catalog && pathname !== JOBROLO_IMPORT_SNAPSHOT_ROUTE) requestFailure();
+    const activityText = Object.hasOwn(value, "includeActivityText");
+    exactRecord(value, ["schema", "requestId", "grantRef", "operation",
+      ...(catalog ? ["afterRef"] : ["sourceFileRef", ...(activityText ? ["includeActivityText"] : [])])]);
+    if (!REQUEST_ID.test(value.requestId) || !/^grant_[a-f0-9]{32}$/.test(value.grantRef)
+      || value.operation !== (catalog ? "catalog_page" : "snapshot")
+      || (catalog ? value.afterRef !== null && !SOURCE_FILE_REF.test(value.afterRef)
+        : !SOURCE_FILE_REF.test(value.sourceFileRef) || activityText && typeof value.includeActivityText !== "boolean")) requestFailure();
+    return value;
+  }
   if (pathname === JOBROLO_IMPORT_CATALOG_ROUTE) {
     exactRecord(value, ["schema", "requestId"]);
     if (

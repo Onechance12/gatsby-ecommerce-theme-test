@@ -6,6 +6,7 @@ import {
   canonicalJson,
   JOBROLO_IMPORT_TRANSPORT_LIMITS
 } from "./jobrolo-import-service-auth.js";
+import { jobroloPortfolioPage, JOBROLO_PORTFOLIO_CATALOG_SCHEMA } from "./jobrolo-import-portfolio.js";
 
 export const JOBROLO_IMPORT_CATALOG_SCHEMA =
   "jobrolo.jobnimbus-import.catalog.v1";
@@ -44,6 +45,7 @@ export function createJobroloImportReadService({
   referenceFactory,
   loadAssignedIndex,
   loadExactFile,
+  portfolioGrant = null,
   now = Date.now
 } = {}) {
   if (!CONNECTION_REF.test(String(connectionRef || ""))) {
@@ -62,8 +64,14 @@ export function createJobroloImportReadService({
     throw new TypeError("loadExactFile is invalid");
   }
   if (typeof now !== "function") throw new TypeError("now is invalid");
+  if (portfolioGrant && (portfolioGrant.connectionRef !== connectionRef
+    || !Array.isArray(portfolioGrant.files) || !portfolioGrant.files.length
+    || !portfolioGrant.authorization || !Number.isFinite(Date.parse(portfolioGrant.expiresAt)))) sourceUnavailable();
 
-  const loadScope = async (requestedAt, currentMs) => {
+  const assertPortfolioCurrent = () => {
+    if (portfolioGrant && currentTime(now) >= Date.parse(portfolioGrant.expiresAt)) sourceUnavailable();
+  };
+  const loadScope = async (requestedAt, currentMs, selectedFiles = null) => {
     let loaded;
     try {
       loaded = await loadAssignedIndex({
@@ -71,12 +79,17 @@ export function createJobroloImportReadService({
         maximumContacts:
           JOBROLO_IMPORT_READ_LIMITS.maximumProviderIndexContacts,
         maximumEligibleFiles:
-          JOBROLO_IMPORT_READ_LIMITS.maximumEligibleFiles
+          JOBROLO_IMPORT_READ_LIMITS.maximumEligibleFiles,
+        ...(selectedFiles ? { selectedFiles } : {})
       });
     } catch {
       sourceUnavailable();
     }
-    const index = normalizeAssignedIndex(loaded, currentMs);
+    const index = normalizeAssignedIndex(loaded, currentMs, Boolean(portfolioGrant));
+    if (selectedFiles && (index.files.length !== selectedFiles.length
+      || index.files.some(file => !selectedFiles.some(selected => selected.providerFileId === file.providerFileId)))) {
+      sourceChanged();
+    }
     if (
       index.files.length
       > JOBROLO_IMPORT_READ_LIMITS.maximumEligibleFiles
@@ -106,22 +119,28 @@ export function createJobroloImportReadService({
   };
 
   return Object.freeze({
-    async readCatalog() {
+    async readCatalog({ afterRef = null } = {}) {
+      assertPortfolioCurrent();
+      if (!portfolioGrant && afterRef !== null) invalidRequest();
       const currentMs = currentTime(now);
       const requestedAt = new Date(currentMs).toISOString();
-      const scope = await loadScope(requestedAt, currentMs);
+      const page = portfolioGrant ? jobroloPortfolioPage(portfolioGrant, afterRef) : null;
+      const scope = await loadScope(requestedAt, currentMs, page?.files);
       assertFreshness(scope, currentTime(now));
+      assertPortfolioCurrent();
       const catalog = deepFreeze({
-        schema: JOBROLO_IMPORT_CATALOG_SCHEMA,
+        schema: portfolioGrant ? JOBROLO_PORTFOLIO_CATALOG_SCHEMA : JOBROLO_IMPORT_CATALOG_SCHEMA,
         source: {
           system: "jobnimbus",
           connectionRef,
-          scope: "assigned",
+          scope: portfolioGrant ? "reviewed_portfolio" : "assigned",
           complete: true
         },
         asOf: scope.asOf,
         checkedAt: scope.checkedAt,
-        validUntil: scope.validUntil,
+        validUntil: portfolioGrant ? [scope.validUntil, portfolioGrant.expiresAt].sort()[0] : scope.validUntil,
+        ...(portfolioGrant ? { portfolioAuthorization: portfolioGrant.authorization,
+          page: { afterRef, nextCursor: page.nextCursor, totalSelection: portfolioGrant.files.length } } : {}),
         returnedItems: scope.files.length,
         items: scope.files.map((file) => ({
           sourceFileRef: file.sourceFileRef,
@@ -144,9 +163,10 @@ export function createJobroloImportReadService({
         invalidRequest();
       }
       if (typeof includeActivityText !== "boolean") invalidRequest();
+      assertPortfolioCurrent();
       const currentMs = currentTime(now);
       const requestedAt = new Date(currentMs).toISOString();
-      const scope = await loadScope(requestedAt, currentMs);
+      const scope = portfolioGrant ? { files: portfolioGrant.files } : await loadScope(requestedAt, currentMs);
       const matches = scope.files.filter(
         (file) => file.sourceFileRef === sourceFileRef
       );
@@ -154,8 +174,9 @@ export function createJobroloImportReadService({
       const selected = matches[0];
 
       let envelope;
+      let sourceOwners;
       try {
-        envelope = await loadExactFile({
+        const loaded = await loadExactFile({
           providerFileId: selected.providerFileId,
           knownProviderFileIds: scope.files.map(
             (file) => file.providerFileId
@@ -165,6 +186,8 @@ export function createJobroloImportReadService({
           maximumCollectionItems:
             JOBROLO_IMPORT_READ_LIMITS.maximumCollectionItems
         });
+        if (portfolioGrant) { envelope = loaded?.envelope; sourceOwners = loaded?.sourceOwners; }
+        else envelope = loaded;
       } catch (error) {
         if (
           [
@@ -181,7 +204,8 @@ export function createJobroloImportReadService({
         snapshot = adaptJobNimbusFileEnvelopeToImportSnapshot(envelope, {
           connectionRef,
           referenceFactory,
-          includeActivityText
+          includeActivityText,
+          ...(portfolioGrant ? { portfolioAuthorization: portfolioGrant.authorization, sourceOwners } : {})
         });
       } catch (error) {
         if (
@@ -198,10 +222,11 @@ export function createJobroloImportReadService({
         || snapshot.file.sourceFileRef !== sourceFileRef
         || snapshot.source.connectionRef !== connectionRef
         || snapshot.source.system !== "jobnimbus"
-        || snapshot.source.scope !== "assigned"
+        || snapshot.source.scope !== (portfolioGrant ? "reviewed_portfolio" : "assigned")
         || snapshot.source.complete !== true
       ) sourceChanged();
       assertFreshness(snapshot, currentTime(now));
+      assertPortfolioCurrent();
       if (
         Buffer.byteLength(canonicalJson(snapshot), "utf8")
         > JOBROLO_JOBNIMBUS_IMPORT_ADAPTER_LIMITS
@@ -212,7 +237,7 @@ export function createJobroloImportReadService({
   });
 }
 
-function normalizeAssignedIndex(value, currentMs) {
+function normalizeAssignedIndex(value, currentMs, portfolio = false) {
   exactRecord(value, ["status", "asOf", "checkedAt", "validUntil", "data"]);
   if (value.status !== "ok") sourceUnavailable();
   exactRecord(value.data, ["complete", "files"]);
@@ -225,7 +250,7 @@ function normalizeAssignedIndex(value, currentMs) {
   ) boundsExceeded();
   const freshness = assertFreshness(value, currentMs);
   const files = value.data.files.map((file) =>
-    normalizeAssignedFile(file, freshness.asOfMs)
+    normalizeAssignedFile(file, freshness.asOfMs, portfolio)
   );
   if (
     new Set(files.map((file) => file.providerFileId)).size !== files.length
@@ -238,8 +263,9 @@ function normalizeAssignedIndex(value, currentMs) {
   };
 }
 
-function normalizeAssignedFile(value, asOfMs) {
-  exactRecord(value, INDEX_FIELDS);
+function normalizeAssignedFile(value, asOfMs, portfolio = false) {
+  exactRecord(value, portfolio ? INDEX_FIELDS.map(field => field === "assignedToCurrentUser"
+    ? "authorizedByReviewedPortfolio" : field) : INDEX_FIELDS);
   if (!PROVIDER_ID.test(value.providerFileId)) sourceUnavailable();
   if (!SAFE_JOB_NUMBER.test(value.jobNumber)) sourceUnavailable();
   const displayName = requiredSafeText(value.displayName, 120, 480);
@@ -249,7 +275,7 @@ function normalizeAssignedFile(value, asOfMs) {
     value.fileTypeCode !== "insurance"
     || value.isInsuranceFile !== true
     || value.isActive !== true
-    || value.assignedToCurrentUser !== true
+    || (portfolio ? value.authorizedByReviewedPortfolio !== true : value.assignedToCurrentUser !== true)
   ) sourceUnavailable();
   const updatedAtMs = parseIsoUtc(value.updatedAt);
   if (

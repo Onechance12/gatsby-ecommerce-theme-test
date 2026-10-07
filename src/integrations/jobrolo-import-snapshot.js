@@ -167,17 +167,17 @@ export function issueJobNimbusImportReferences(
 export function projectJobNimbusFileEnvelopeToImportSnapshot(
   providerEnvelope,
   issuedReferences,
-  { includeActivityText = false } = {}
+  { includeActivityText = false, portfolioAuthorization, sourceOwners } = {}
 ) {
   const normalized = normalizeProviderEnvelope(providerEnvelope);
   const references = normalizeIssuedReferences(issuedReferences, normalized);
 
   const snapshot = {
-    schema: JOBROLO_JOBNIMBUS_IMPORT_SNAPSHOT_SCHEMA,
+    schema: portfolioAuthorization ? "jobrolo.jobnimbus-import.snapshot.v2" : JOBROLO_JOBNIMBUS_IMPORT_SNAPSHOT_SCHEMA,
     source: {
       system: "jobnimbus",
       connectionRef: references.connectionRef,
-      scope: "assigned",
+      scope: portfolioAuthorization ? "reviewed_portfolio" : "assigned",
       complete: true
     },
     sourceFileRef: references.sourceFileRef,
@@ -193,7 +193,7 @@ export function projectJobNimbusFileEnvelopeToImportSnapshot(
       fileTypeCode: "insurance",
       isInsuranceFile: true,
       isActive: true,
-      assignmentVerified: true,
+      assignmentVerified: !portfolioAuthorization,
       updatedAt: normalized.file.updatedAt,
       nextAppointmentAt: normalized.file.nextAppointmentAt,
       primaryEmail: normalized.file.primaryEmail,
@@ -228,6 +228,29 @@ export function projectJobNimbusFileEnvelopeToImportSnapshot(
       ["kind", "reviewState", "createdAt", "fileName"]
     )
   };
+  if (normalized.file.authorizedByReviewedPortfolio === true) {
+    if (!hasExactFields(portfolioAuthorization, ["grantRef", "grantDigest", "expiresAt"])
+      || !/^grant_[a-f0-9]{32}$/.test(portfolioAuthorization.grantRef)
+      || !/^[a-f0-9]{64}$/.test(portfolioAuthorization.grantDigest)
+      || !ISO_UTC.test(portfolioAuthorization.expiresAt)
+      || !Number.isFinite(Date.parse(portfolioAuthorization.expiresAt))
+      || new Date(Date.parse(portfolioAuthorization.expiresAt)).toISOString() !== portfolioAuthorization.expiresAt
+      || Date.parse(portfolioAuthorization.expiresAt) <= Date.parse(snapshot.checkedAt)
+      || !Array.isArray(sourceOwners) || !sourceOwners.length || sourceOwners.length > 50
+      || new Set(sourceOwners.map(owner => owner?.sourceUserRef)).size !== sourceOwners.length
+      || sourceOwners.some(owner => !hasExactFields(owner, ["sourceUserRef", "displayName", "isActive"])
+        || !SOURCE_RECORD_REF.test(owner.sourceUserRef)
+        || typeof owner.displayName !== "string" || !owner.displayName || owner.displayName !== owner.displayName.trim()
+        || Array.from(owner.displayName).length > 120 || Buffer.byteLength(owner.displayName, "utf8") > 480
+        || CONTROL_CHARACTERS.test(owner.displayName) || ![true, false, null].includes(owner.isActive))) {
+      fail("invalid_source_scope", "Reviewed portfolio authorization is required.");
+    }
+    snapshot.portfolioAuthorization = portfolioAuthorization;
+    snapshot.sourceOwners = sourceOwners;
+    snapshot.validUntil = [snapshot.validUntil, portfolioAuthorization.expiresAt].sort()[0];
+  } else if (portfolioAuthorization || sourceOwners) {
+    fail("invalid_source_scope", "Portfolio authority cannot impersonate an assigned read.");
+  }
 
   if (includeActivityText === true) {
     snapshot.activityText = projectActivityText(normalized.activities, references.activities);
@@ -419,22 +442,24 @@ function normalizeProviderEnvelope(value) {
 function normalizeFile(value) {
   const currentUserFields = [...FILE_BASE_FIELDS, "assignedToCurrentUser"];
   const legacyFields = [...FILE_BASE_FIELDS, "assignedToChance"];
+  const portfolioFields = [...FILE_BASE_FIELDS, "authorizedByReviewedPortfolio"];
   const hasCurrentAssignment = hasExactFields(value, currentUserFields);
   const hasLegacyAssignment = hasExactFields(value, legacyFields);
-  if (!hasCurrentAssignment && !hasLegacyAssignment) {
+  const hasPortfolioAuthorization = hasExactFields(value, portfolioFields);
+  if (!hasCurrentAssignment && !hasLegacyAssignment && !hasPortfolioAuthorization) {
     fail(
       "invalid_provider_envelope",
       "Normalized provider file contains unsupported fields."
     );
   }
-  const assignmentField = hasCurrentAssignment
+  const assignmentField = hasPortfolioAuthorization ? "authorizedByReviewedPortfolio" : hasCurrentAssignment
     ? "assignedToCurrentUser"
     : "assignedToChance";
   requireLiteral(
     value[assignmentField],
     true,
     "assignment_not_verified",
-    "Provider assignment must be verified."
+    "Provider read authority must be verified."
   );
 
   const providerFileId = requireProviderId(value.providerFileId);
@@ -507,6 +532,7 @@ function normalizeFile(value) {
 
   return {
     providerFileId,
+    authorizedByReviewedPortfolio: hasPortfolioAuthorization,
     jobNumber,
     displayName,
     statusCode,
