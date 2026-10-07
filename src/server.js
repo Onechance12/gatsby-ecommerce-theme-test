@@ -355,6 +355,8 @@ import {
 import {
   createJobroloImportReadService
 } from "./integrations/jobrolo-import-transport.js";
+import { resolveJobroloPortfolioGrant, jobroloPortfolioSourceOwners,
+  HCN_JOBROLO_PORTFOLIO_LIMITS } from "./integrations/jobrolo-import-portfolio.js";
 import {
   projectJobNimbusDocumentManifest
 } from "./integrations/jobrolo-import-snapshot.js";
@@ -21539,8 +21541,16 @@ async function handleJobroloImportHttpRequest(req, res, url) {
   ) {
     jobroloImportAuthorizationFailure();
   }
+  const referenceFactory = HCN_REFERENCE_CONFIGURATION.requireFactory();
+  // An explicit, expiring, exact-file grant is resolved before any provider
+  // read. It neither rebinds the service principal nor widens legacy requests.
+  const portfolioGrant = verified.portfolioGrantRef ? resolveJobroloPortfolioGrant({
+    environment: process.env, profile: transportProfile, tenantId: referenceFactory.tenantId,
+    grantRef: verified.portfolioGrantRef, referenceFactory, now: startedAt
+  }) : null;
   const providerReadBudget = {
-    maximum: routeBounds.maximumProviderRequests,
+    maximum: portfolioGrant && url.pathname === HCN_JOBROLO_IMPORT_CATALOG_ROUTE
+      ? HCN_JOBROLO_PORTFOLIO_LIMITS.pageSize + 1 : routeBounds.maximumProviderRequests,
     used: 0,
     deadlineAt: startedAt + routeBounds.deadlineMs
   };
@@ -21561,9 +21571,12 @@ async function handleJobroloImportHttpRequest(req, res, url) {
   }
   const readService = createJobroloImportReadService({
     connectionRef: verified.connectionRef,
-    referenceFactory: HCN_REFERENCE_CONFIGURATION.requireFactory(),
-    loadAssignedIndex: ({ requestedAt }) =>
-      loadJobroloImportAssignedIndex({
+    referenceFactory,
+    portfolioGrant,
+    loadAssignedIndex: ({ requestedAt, selectedFiles }) => portfolioGrant
+      ? loadJobroloImportPortfolioPage({ requestedAt, selectedFiles, portfolioGrant,
+          assignedOwnerId: principal.jobNimbusOwnerId, requestBudget: providerReadBudget })
+      : loadJobroloImportAssignedIndex({
         requestedAt,
         assignedOwnerId: principal.jobNimbusOwnerId,
         requestBudget: providerReadBudget
@@ -21573,6 +21586,7 @@ async function handleJobroloImportHttpRequest(req, res, url) {
         ...input,
         assignedOwnerId: principal.jobNimbusOwnerId,
         knownProviderUserIds: principal.jobNimbusUserIds,
+        ...(portfolioGrant ? { portfolioGrant, knownProviderUsers: principal.jobNimbusUsers } : {}),
         requestBudget: providerReadBudget
       })
   });
@@ -21580,7 +21594,7 @@ async function handleJobroloImportHttpRequest(req, res, url) {
     ? "catalog"
     : "snapshot";
   const payload = kind === "catalog"
-    ? await readService.readCatalog()
+    ? await readService.readCatalog({ afterRef: verified.afterRef ?? null })
     : await readService.readSnapshot({
         sourceFileRef: verified.sourceFileRef,
         includeActivityText: verified.includeActivityText === true
@@ -21901,9 +21915,10 @@ async function authenticateJobroloImportPrincipal(
   }
   let activeJobNimbusUser = null;
   let jobNimbusUserIds = null;
+  let jobNimbusUsers = null;
   if (principal) {
     try {
-      const jobNimbusUsers = validateCompleteJobNimbusUserSnapshot(
+      jobNimbusUsers = validateCompleteJobNimbusUserSnapshot(
         await jobroloImportJobNimbus("/account/users", {
           requestBudget
         })
@@ -21934,7 +21949,8 @@ async function authenticateJobroloImportPrincipal(
     authenticationMethod: "jobrolo_jobnimbus_import_hmac",
     identityType: "hcn_jobrolo_jobnimbus_import_service",
     jobNimbusOwnerId: String(principal.jobNimbusOwnerId),
-    jobNimbusUserIds
+    jobNimbusUserIds,
+    jobNimbusUsers
   });
 }
 
@@ -21966,6 +21982,19 @@ async function loadJobroloImportAssignedIndex({
   });
 }
 
+async function loadJobroloImportPortfolioPage({ requestedAt, selectedFiles, portfolioGrant,
+  assignedOwnerId, requestBudget }) {
+  if (!Array.isArray(selectedFiles) || selectedFiles.length > HCN_JOBROLO_PORTFOLIO_LIMITS.pageSize) {
+    jobroloImportAuthorizationFailure();
+  }
+  const contacts = await Promise.all(selectedFiles.map(file => jobroloImportJobNimbus(
+    `/contacts/${encodeURIComponent(hcnProviderFileId(file.providerFileId))}`, { requestBudget }
+  )));
+  return mapJobNimbusIndexEnvelope({ contacts, contactsComplete: true,
+    ...hcnFreshnessWindow(requestedAt) }, { assignedOwnerId,
+    approvedPortfolioFileIds: portfolioGrant.providerFileIds });
+}
+
 async function loadJobroloImportExactFile({
   providerFileId,
   knownProviderFileIds,
@@ -21973,7 +22002,9 @@ async function loadJobroloImportExactFile({
   includeActivityText = false,
   assignedOwnerId,
   knownProviderUserIds,
-  requestBudget
+  requestBudget,
+  portfolioGrant = null,
+  knownProviderUsers = null
 } = {}) {
   const id = hcnProviderFileId(providerFileId);
   const [contact, activities, tasks, documents] = await Promise.all([
@@ -22004,7 +22035,7 @@ async function loadJobroloImportExactFile({
     error.statusCode = 503;
     throw error;
   }
-  return mapJobNimbusFileEnvelope({
+  const envelope = mapJobNimbusFileEnvelope({
     contact,
     activities: activities.rows,
     tasks: tasks.rows,
@@ -22018,6 +22049,7 @@ async function loadJobroloImportExactFile({
     expectedProviderFileId: id,
     knownProviderFileIds,
     knownProviderUserIds,
+    ...(portfolioGrant ? { approvedPortfolioFileIds: portfolioGrant.providerFileIds } : {}),
     includePhotoDocuments: true,
     includeActivityText,
     // This import-only boundary may disclose mapped activity/task/document
@@ -22027,6 +22059,9 @@ async function loadJobroloImportExactFile({
     // contact; every unknown id still fails closed.
     requireExactContactReferences: true
   });
+  return portfolioGrant ? { envelope, sourceOwners: jobroloPortfolioSourceOwners(
+    contact, knownProviderUsers, HCN_REFERENCE_CONFIGURATION.requireFactory()
+  ) } : envelope;
 }
 
 async function listJobroloImportExactActivities(
