@@ -4,6 +4,8 @@ const ALLOWED = new Set([
   'homeowner_phone_only',
   'call_transcripts_not_reviewed',
   'signed_in_employee_line_only',
+  'exact_file_messages_only',
+  'no_unique_file_anchor',
   'shared_phone_exact_file_messages_only',
   'unattributed_phone_history_withheld',
 ]);

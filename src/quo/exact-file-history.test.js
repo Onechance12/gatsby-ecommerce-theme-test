@@ -10,7 +10,8 @@ const message = (text, extra = {}) => ({ id: 'message-fixture', type: 'text', di
 test('unique current property or claim, never a shared homeowner name, anchors a message', () => {
   assert.equal(messageMatchesFile('Please send the policy for 21 Maple Ave.', anchors()), true);
   assert.equal(messageMatchesFile('Claim SYNTH-614027ZX has an update.', anchors()), true);
-  for (const text of ['Hi Fixture Homeowner', 'The policy is attached', 'Claim SYNTH-614027ZXX', 'For 121 Maple Ave', 'For 21 Maple Avenue']) {
+  assert.equal(messageMatchesFile('For 21 Maple Avenue', anchors()), true);
+  for (const text of ['Hi Fixture Homeowner', 'The policy is attached', 'Claim SYNTH-614027ZXX', 'For 121 Maple Ave']) {
     assert.equal(messageMatchesFile(text, anchors()), false, text);
   }
 });

@@ -3,6 +3,7 @@
 // Sending remains approval-gated by both execute:true and ALLOW_QUO_SEND=true.
 
 import { fetchBoundedJson } from "../http/bounded-json.js";
+import { isContactOptOut } from "../communications/exact-file-evidence.js";
 
 const MIN_REQUEST_INTERVAL_MS = 140;
 let requestQueue = Promise.resolve();
@@ -190,6 +191,9 @@ export async function readQuoHistoryStrict(config, input = {}) {
     messageCount: timeline.filter((item) => item.type === "text").length,
     callCount: timeline.filter((item) => item.type === "call").length,
     timeline,
+    // Evaluate every verified scanned message before the display-result cap.
+    // This is an observed safety fact, never proof no earlier opt-out exists.
+    contactSafety: { observedOptOut: matchedTimeline.some(isContactOptOut) },
     completeness: {
       complete: reasons.length === 0,
       reasons,
