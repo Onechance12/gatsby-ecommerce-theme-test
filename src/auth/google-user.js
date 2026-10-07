@@ -3,6 +3,7 @@ import {
   resolveGoogleProviderEndpoint
 } from "./google-provider-http.js";
 import { isManagementReportIdentity, MANAGEMENT_REPORT_ROUTES, MANAGEMENT_REPORT_SESSION_ROUTE } from "./hcn-management-report-auth.js";
+import { isCompanyRosterIdentity, COMPANY_ROSTER_ROUTES, COMPANY_ROSTER_SESSION_ROUTE, COMPANY_ROSTER_ROUTE } from "./hcn-company-roster-auth.js";
 
 export const WAVE_ROLE_POLICIES = {
   chance: { allRoutes: true },
@@ -392,6 +393,12 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (identity.type === "hcn_company_roster_token") {
+    return isCompanyRosterIdentity(identity) && COMPANY_ROSTER_ROUTES.includes(route);
+  }
+  // Deny before the legacy bridge/chance wildcard. This is not a scope
+  // expansion for Google, browser managers, either Operator, or the 3x10 tool.
+  if ([COMPANY_ROSTER_SESSION_ROUTE, COMPANY_ROSTER_ROUTE].includes(pathname)) return false;
   if (identity.type === "hcn_management_report_token") {
     return isManagementReportIdentity(identity) && MANAGEMENT_REPORT_ROUTES.includes(route);
   }

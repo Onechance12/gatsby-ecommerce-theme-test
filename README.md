@@ -464,6 +464,67 @@ reference that no longer resolves to one current, active, employee-assigned file
 returns `404`. The routes do not call Chance Brain, Jobrolo, legacy client
 memory, model advisories, or any persistence layer.
 
+### Isolated whole-company metadata roster
+
+The roster is a separate, explicitly activated read-only capability, not an
+upgrade to the Mac Operator, HP Operator, employee sessions, or 3x10 report.
+It reuses this HCN service's configured JobNimbus connection and read-admission
+limiter. Its credential admits exactly:
+
+- `GET /hcn/api/v1/company-roster-session` (no provider enumeration).
+- `POST /hcn/api/v1/company-roster` with only `{}`.
+
+Configure `HCN_COMPANY_ROSTER_ENABLED=true`, the SHA-256 digest of a fresh,
+distinct 32-byte lowercase-hex token in `HCN_COMPANY_ROSTER_TOKEN_SHA256`, the
+exact existing `HCN_TENANT_ID` in `HCN_COMPANY_ROSTER_TENANT_ID`, and a finite
+UTC ISO timestamp in `HCN_COMPANY_ROSTER_EXPIRES_AT`. Keep the token only in
+macOS Keychain (`com.wavepa.hcn-company-roster` / `codex-mac-company-roster`).
+The grant defaults off and stops authenticating at expiry. Never reuse an
+existing provider, Operator, OAuth, bridge, report, import, or encryption secret.
+
+The reader verifies the existing active Chance JobNimbus identity against the
+complete account employee directory. It then reads only `/contacts` and `/jobs`
+metadata with no owner or status filter. Short pages do not imply completion:
+each collection must end with an explicit empty page, respect any reported
+total, and have unique stable source IDs. A changed total, ambiguous response,
+repeated ID, bound exhaustion, mixed account identifiers, or provider failure
+returns no partial roster. Bounds are 10,000 rows per collection, 100 provider
+GETs, and a 60-second overall provider deadline. Responses are ephemeral and
+`no-store`; notes, documents, financial values, email/phone and model calls are
+not included or requested from their dedicated endpoints.
+
+Each source contact/property file remains its own row. Contacts and jobs have
+separate totals and explicit known contact relationships; repeated client names
+are never merged. Insurance-contact, owner, status, lifecycle, missing-address,
+unassigned and unknown-owner counts aid reconciliation. This is a complete
+API-visible catalog, not proof against provider permission restrictions,
+deleted/hidden records, or concurrent source edits. Workflow status labels are
+preserved rather than interpreted as claim counts or final closure decisions.
+
+The private CLI requires a separately reviewed exact deployment pin; it never
+updates the installed Operator profile or falls back after failed attestation.
+Create a private regular JSON profile (mode `600`) outside source control:
+
+```json
+{
+  "schema": "hcn.company-roster-profile.v1",
+  "baseUrl": "https://hcn-operations-platform.onrender.com",
+  "expectedCommit": "<exact-reviewed-40-character-deployed-commit>",
+  "tenantId": "<existing-HCN-tenant>",
+  "grantExpiresAt": "<exact-configured-grant-expiry>"
+}
+```
+
+Run `node scripts/company-roster.mjs --profile /absolute/private/profile.json
+--status`, then the same command with `--output /absolute/private/new-roster.json`
+instead of `--status`. The output directory must be mode `700`, outside a Git
+working tree. Existing files are never overwritten; new inventories are mode
+`600`. Status verifies provider-attested exact release, company, expiry, route
+set and read-only scope before the CLI will read a roster. It verifies the
+roster's build, completion proofs, source IDs and inventory digest before saving.
+Do not import this operational inventory into Jobrolo or Chance Brain. Import
+mapping and client-record changes require a separate reviewed workflow.
+
 ### Three-adjuster JobNimbus activity-gap sweep
 
 The Mac plugin can also use the dedicated **report-only** identity
