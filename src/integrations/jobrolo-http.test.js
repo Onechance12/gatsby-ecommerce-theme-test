@@ -150,6 +150,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   let includeConflictingTargetDuplicate = false;
   let includeAmbiguousMalformedEligible = false;
   let includeOffTargetQuoCalls = false;
+  let sharedPhoneTexts = null;
   let freshAssignedPhoneOverride = null;
   const provider = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://provider.invalid");
@@ -169,6 +170,12 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       const lineId = url.searchParams.get("phoneNumberId");
       quoActivityLines.push(lineId);
       const line = quoLines.find((candidate) => candidate.id === lineId);
+      if (lineId === "PN_12" && sharedPhoneTexts) {
+        return json(res, 200, { data: sharedPhoneTexts.map((content, index) => ({
+          id: `MSG_shared_${index}`, phoneNumberId: lineId, from: QUO_CLIENT_PHONE,
+          to: [line.number], direction: "incoming", createdAt: "2026-08-20T14:00:00.000Z", content
+        })) });
+      }
       return json(res, 200, {
         data: lineId === "PN_12" ? [{
           id: "MSG_line_12",
@@ -575,6 +582,69 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     "Verified line-12 fixture message."
   );
   assert.equal(providerWrites.length, 0);
+
+  // A shared destination is not proof of file membership. Only uniquely
+  // anchored own-line messages and minimized contact opt-outs are attributable.
+  assignedContact.address_line1 = "21 Maple Ave";
+  assignedContact.cf_string_2 = "SYNTH-614027ZX";
+  activeForeignDuplicateContact.address_line1 = "90 Birch Ct";
+  activeForeignDuplicateContact.cf_string_2 = "SYNTH-95281740";
+  activeForeignDuplicateContact.status_name = "Billed";
+  includeActiveForeignDuplicate = true;
+  sharedPhoneTexts = [
+    "Please send the policy for 21 Maple Ave.", "STOP",
+    "SECRET_OTHER_PROPERTY: policy for 90 Birch Ct",
+    "SECRET_MIXED_PROPERTY: 21 Maple Ave and 90 Birch Ct",
+    "SECRET_UNATTRIBUTED: here is the policy"
+  ];
+  quoActivityLines.length = 0;
+  const exactSharedReview = token => signedPost(origin, "/integrations/jobrolo/v1/file-review", {
+    requestId: `request_${token.repeat(16)}`, sessionRef, nonce: `nonce_${token.repeat(16)}`,
+    input: { fileRef: workCenterByName.get("Assigned File Fixture").fileRef, recentLimit: 20 }
+  });
+  const sharedReview = await exactSharedReview("f1");
+  assert.equal(sharedReview.response.status, 200, sharedReview.text);
+  assert.equal(sharedReview.body.result.sources.quo.status, "fresh");
+  assert.equal(sharedReview.body.result.sources.quo.completeness, "partial");
+  assert.deepEqual([...new Set(quoActivityLines)], ["PN_12"]);
+  assert.equal(sharedReview.body.result.recent.quo.length, 2);
+  assert.ok(sharedReview.body.result.recent.quo.some(item => /policy for 21 Maple Ave/.test(item.preview)));
+  assert.ok(sharedReview.body.result.recent.quo.some(item => /opt-out.*Do not send/.test(item.preview)));
+  for (const code of ["shared_phone_exact_file_messages_only", "unattributed_phone_history_withheld", "signed_in_employee_line_only"]) {
+    assert.ok(sharedReview.body.result.sources.quo.limitations.includes(code));
+  }
+  assert.doesNotMatch(JSON.stringify(sharedReview.body), /SECRET_|90 Birch Ct|SYNTH-95281740|active-foreign-duplicate-provider-id/);
+  assert.equal(providerWrites.length, 0);
+
+  sharedPhoneTexts = sharedPhoneTexts.slice(2);
+  const unattributedReview = await exactSharedReview("f2");
+  assert.equal(unattributedReview.response.status, 200, unattributedReview.text);
+  assert.equal(unattributedReview.body.result.recent.quo.length, 0);
+  assert.equal(unattributedReview.body.result.sources.quo.completeness, "partial");
+  assert.ok(unattributedReview.body.result.sources.quo.limitations.includes("unattributed_phone_history_withheld"));
+  assert.doesNotMatch(JSON.stringify(unattributedReview.body), /SECRET_/);
+
+  delete assignedContact.address_line1;
+  delete assignedContact.cf_string_2;
+  const readsBeforeMissingAnchors = quoActivityLines.length;
+  const missingAnchorReview = await exactSharedReview("f3");
+  assert.equal(missingAnchorReview.response.status, 200, missingAnchorReview.text);
+  assert.equal(missingAnchorReview.body.result.sources.quo.failureCode, "phone_match_shared_active_files");
+  assert.equal(missingAnchorReview.body.result.recent.quo.length, 0);
+  assert.equal(quoActivityLines.length, readsBeforeMissingAnchors);
+  assert.equal(providerWrites.length, 0);
+  delete activeForeignDuplicateContact.address_line1;
+  delete activeForeignDuplicateContact.cf_string_2;
+  activeForeignDuplicateContact.status_name = "Ready for Review";
+  sharedPhoneTexts = null;
+  includeActiveForeignDuplicate = false;
+  includeAmbiguousMalformedEligible = true;
+  const readsBeforeMalformedMatch = quoActivityLines.length;
+  const malformedMatchReview = await exactSharedReview("f4");
+  assert.equal(malformedMatchReview.response.status, 200, malformedMatchReview.text);
+  assert.equal(malformedMatchReview.body.result.sources.quo.failureCode, "phone_match_unverified");
+  assert.equal(quoActivityLines.length, readsBeforeMalformedMatch);
+  includeAmbiguousMalformedEligible = false;
 
   const communicationSweep = await signedPost(
     origin,

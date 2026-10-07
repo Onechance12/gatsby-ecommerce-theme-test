@@ -42,6 +42,17 @@ exactly the configured management adjusters and the six Estimating-board
 statuses. It ranks complete JobNimbus activity reads only and explicitly does
 not claim Gmail, Quo, or calendar coverage.
 
+The employee exact-file reader is narrower than that all-line phone-history
+route: it derives only the employee's authorized work line. If the fresh
+destination is shared by several active records, the server may attribute
+individual messages only using a second unique, current property/claim anchor
+from the complete provider index. Mixed, unanchored, malformed or stale evidence
+is withheld; calls without reviewed file anchors are not attributed. An inbound
+destination-level opt-out is exposed only as a minimized safety fact. The
+result remains explicitly partial, and zero attributed messages is not proof
+of no prior communication. This does not change the separate all-line route,
+employee/file authority, action permissions, or approval/readback gates.
+
 The general credential does not expose claim filing, Retell, team management,
 connector mutations, legacy routes, arbitrary provider calls, or a general
 bridge proxy. Claim filing, ordinary-chat note writeback, and import transport

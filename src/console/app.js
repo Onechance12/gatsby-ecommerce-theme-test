@@ -303,6 +303,7 @@
     file_phone_missing: "file phone missing",
     google_not_linked: "not linked",
     phone_match_unverified: "phone match unverified",
+    phone_match_shared_active_files: "phone shared across files",
     provider_check_failed: "provider check failed",
     scope_check_failed: "file scope check failed",
     source_partial: "some items skipped",
@@ -9216,6 +9217,9 @@
     if (source.failureCode === "phone_match_unverified") {
       return "The file phone could not be matched safely; "
         + label + " was not checked.";
+    }
+    if (source.failureCode === "phone_match_shared_active_files") {
+      return "Multiple active files use this phone. A unique current property or claim is needed to match texts; this is not a Quo line connection failure.";
     }
     if (source.failureCode === "provider_check_failed") {
       return label + " provider check failed; source records were not evaluated.";

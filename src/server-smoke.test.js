@@ -5646,7 +5646,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
         completeness: "none",
         failureCode:
           source === "quo"
-            ? "phone_match_unverified"
+            ? "phone_match_shared_active_files"
             : "scope_check_failed"
       }
     );

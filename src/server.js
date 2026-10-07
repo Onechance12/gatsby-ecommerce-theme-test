@@ -37,6 +37,10 @@ import {
   readQuoTranscript,
   sendQuoText
 } from "./quo/client.js";
+import {
+  projectSharedPhoneFileHistory,
+  sharedPhoneFileAnchors
+} from "./quo/exact-file-history.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import { evaluateGuardedEndCall } from "./claim-filing-core/endCallGuard.js";
 import {
@@ -17839,7 +17843,12 @@ async function loadHcnQuoFile({
     );
   }
   if (!scope.file.phone) {
-    const phoneFailure = scope.phoneFailureCode === "phone_match_unverified"
+    const phoneFailure = scope.phoneFailureCode === "phone_match_shared_active_files"
+      ? {
+          code: "phone_match_shared_active_files",
+          message: "This phone belongs to multiple active files; a unique current property or claim anchor is required."
+        }
+      : scope.phoneFailureCode === "phone_match_unverified"
       ? {
           code: "phone_match_unverified",
           message: "The file's phone number could not be matched uniquely for a Quo check."
@@ -17885,9 +17894,14 @@ async function loadHcnQuoFile({
       "Quo could not check this file's calls and texts."
     );
   }
-  const items = (Array.isArray(history?.timeline)
-    ? history.timeline
-    : []).map((item) => ({
+  const timeline = Array.isArray(history?.timeline) ? history.timeline : [];
+  const sharedProjection = scope.sharedPhoneAnchors
+    ? projectSharedPhoneFileHistory(timeline, scope.sharedPhoneAnchors)
+    : null;
+  if (scope.sharedPhoneAnchors && !sharedProjection) {
+    throw hcnOptionalSourceFailure("phone_match_unverified", "Exact-file Quo attribution could not be verified.");
+  }
+  const items = (sharedProjection ? sharedProjection.items : timeline).map((item) => ({
       ...item,
       providerFileId: id
     }));
@@ -17901,7 +17915,13 @@ async function loadHcnQuoFile({
     // Exhausting the homeowner's phone timeline is not an exhaustive file review.
     // Carrier-number calls and their transcript contents were not searched here.
     itemsComplete: false,
-    limitations: ["homeowner_phone_only", "call_transcripts_not_reviewed", "signed_in_employee_line_only"],
+    limitations: [
+      "homeowner_phone_only",
+      "call_transcripts_not_reviewed",
+      "signed_in_employee_line_only",
+      ...(sharedProjection ? ["shared_phone_exact_file_messages_only"] : []),
+      ...(sharedProjection?.withheld ? ["unattributed_phone_history_withheld"] : [])
+    ],
     ...hcnFreshnessWindow(requestedAt)
   }, {
     expectedProviderFileId: id
@@ -18025,18 +18045,34 @@ async function buildHcnExactCommunicationScope(
         || phoneCorrelation.matches[0]?.id
         || ""
     ) === providerFileId;
-  if (!phoneMatchVerified) {
+  // The exact-file adapter can attribute individual own-line messages with a
+  // second independent, unique file anchor. The all-line phone-history route
+  // still requires one globally unique active file and is not changed here.
+  const freshPhoneInventory = phone ? hcnContactPhoneInventory(contact, phone) : null;
+  const sharedPhone = Boolean(phone)
+    && phoneCorrelation.complete
+    && phoneCorrelation.matches.length > 1
+    && freshPhoneInventory?.complete === true
+    && freshPhoneInventory.phones.has(phone)
+    && phoneCorrelation.matches.some(row => String(row?.jnid || row?.id || "") === providerFileId);
+  const sharedPhoneAnchors = sharedPhone
+    ? sharedPhoneFileAnchors(contact, index.rows)
+    : null;
+  if (!phoneMatchVerified && !sharedPhoneAnchors) {
     file.phone = "";
   }
   return {
     contact,
     file,
+    sharedPhoneAnchors,
     phoneFailureCode:
       !phone
         ? "file_phone_missing"
-        : phoneMatchVerified
+        : phoneMatchVerified || sharedPhoneAnchors
           ? null
-          : "phone_match_unverified"
+          : sharedPhone
+            ? "phone_match_shared_active_files"
+            : "phone_match_unverified"
   };
 }
 
