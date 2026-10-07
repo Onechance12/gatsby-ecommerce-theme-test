@@ -10681,6 +10681,7 @@ async function buildChanceEvidencePacket(contact, input) {
         const search = await gmailSearch({
           query,
           limit: clamp(Number(input.gmailLimit || 8), 1, 15),
+          communicationDays: input.communicationDays,
           [INTERNAL_COMMUNICATION_SCOPE]: communicationScope
         });
         const threads = [];
@@ -10691,7 +10692,34 @@ async function buildChanceEvidencePacket(contact, input) {
           });
           threads.push(compactGmailEvidenceThread(thread));
         }
-        gmail = { status: "fresh", query, messages: search.messages, threads };
+        const omittedThreadCount = Math.max(0, search.threads.length - threads.length);
+        const threadLimitationCodes = threads.flatMap((thread) => thread.coverage?.limitationCodes || []);
+        const providerScanComplete = search.coverage?.hasMore !== true
+          && omittedThreadCount === 0
+          && threads.every((thread) => (
+            Number(thread.coverage?.omittedMessages || 0) === 0
+            && Number(thread.coverage?.truncatedMessages || 0) === 0
+            && Number(thread.coverage?.previewTruncatedMessages || 0) === 0
+            && Number(thread.coverage?.withheldMessages || 0) === 0
+          ));
+        gmail = {
+          status: "fresh",
+          query,
+          messages: search.messages,
+          threads,
+          coverage: {
+            providerScanComplete,
+            search: search.coverage || null,
+            returnedThreadCount: search.threads.length,
+            reviewedThreadCount: threads.length,
+            omittedThreadCount,
+            limitationCodes: [...new Set([
+              ...(search.coverage?.limitationCodes || []),
+              ...threadLimitationCodes,
+              ...(omittedThreadCount ? ["unreviewed_exact_file_threads"] : [])
+            ])].sort()
+          }
+        };
       } catch (error) {
         gmail = { status: "error", error: redactSensitiveText(error.message), messages: [], threads: [] };
       }
@@ -10718,16 +10746,17 @@ async function buildChanceEvidencePacket(contact, input) {
               maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
               includeTranscripts: input.includeQuoTranscripts === true
             });
+        const timelineLimit = operatorRequest ? 50 : 30;
         quo = {
           ...history,
           status: "partial",
-          timeline: history.timeline.slice(-30).reverse(),
+          timeline: history.timeline.slice(-timelineLimit).reverse(),
           coverage: {
             searchScope: "homeowner_phone_only",
             carrierConversationsSearched: false,
             transcriptReviewRequested: input.includeQuoTranscripts === true,
             returnedTranscriptCount: Array.isArray(history.transcripts) ? history.transcripts.length : 0,
-            omittedTimelineItems: Math.max(0, history.timeline.length - 30),
+            omittedTimelineItems: Math.max(0, history.timeline.length - timelineLimit),
             complete: false
           }
         };
@@ -15481,15 +15510,20 @@ function buildFileGmailQuery(file, requestedDays) {
 }
 
 function compactGmailEvidenceThread(thread) {
-  const messages = (Array.isArray(thread.messages) ? thread.messages : []).slice(-5).map((message) => ({
-    id: message.id,
-    date: message.date,
-    from: message.from,
-    to: message.to,
-    subject: message.subject,
-    text: String(message.plainText || message.htmlText || message.snippet || "").slice(0, 1800),
-    attachments: message.attachments
-  }));
+  let previewTruncatedMessages = 0;
+  const messages = (Array.isArray(thread.messages) ? thread.messages : []).slice(-5).map((message) => {
+    const text = String(message.plainText || message.htmlText || message.snippet || "");
+    if (text.length > 1800) previewTruncatedMessages += 1;
+    return {
+      id: message.id,
+      date: message.date,
+      from: message.from,
+      to: message.to,
+      subject: message.subject,
+      text: text.slice(0, 1800),
+      attachments: message.attachments
+    };
+  });
   return {
     id: thread.id,
     messageCount: thread.messageCount,
@@ -15498,9 +15532,14 @@ function compactGmailEvidenceThread(thread) {
       complete: false,
       returnedMessages: messages.length,
       omittedMessages: Math.max(0, thread.messageCount - messages.length),
+      previewTruncatedMessages,
       previewMessageLimit: 5,
       previewCharactersPerMessage: 1800,
-      limitationCodes: [...(thread.coverage?.limitationCodes || []), "bounded_thread_preview"]
+      limitationCodes: [
+        ...(thread.coverage?.limitationCodes || []),
+        ...(previewTruncatedMessages ? ["message_text_preview_truncated"] : []),
+        "bounded_thread_preview"
+      ]
     },
     messages,
     assistantRead: thread.assistantRead

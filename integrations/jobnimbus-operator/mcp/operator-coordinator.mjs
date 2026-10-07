@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
 import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
@@ -135,6 +135,224 @@ const CLAIM_FILING_INPUT_KEYS = new Set([
   "overrides",
   ...CLAIM_FILING_OPTIONAL_STRING_KEYS
 ]);
+const CLAIM_COMMUNICATION_REVIEW_INPUT = Object.freeze({
+  limit: 1,
+  activeOnly: false,
+  includeGmail: true,
+  includeQuo: true,
+  includeQuoTranscripts: true,
+  communicationDays: 3650,
+  gmailLimit: 15,
+  gmailThreadLimit: 5,
+  quoLimit: 50
+});
+const CLAIM_COMMUNICATION_STOP_PATTERNS = Object.freeze([
+  Object.freeze({
+    code: "claim_number_present_in_evidence",
+    pattern: /\bclaim\s*(?:number|no\.?|#)\s*(?::|#|is|-)?\s*(?=[a-z0-9._/-]{5,}\b)(?=[a-z0-9._/-]*\d)[a-z0-9][a-z0-9._/-]*\b/i
+  }),
+  Object.freeze({
+    code: "claim_already_filed",
+    pattern: /\b(?:(?:claim|loss)\s+(?:(?:was|has been|is|already)\s+)?(?:successfully\s+)?(?:filed|opened|reported|submitted)|(?:filed|opened|reported|submitted)\s+(?:a|the)\s+(?:claim|loss))\b/i,
+    exclude: /\b(?:no\s+(?:claim|loss)\s+(?:(?:was|has been|is)\s+)?(?:filed|opened|reported|submitted)|(?:claim|loss)\s+(?:(?:was|has been|is)\s+)?(?:not|never)\s+(?:filed|opened|reported|submitted)|(?:not|never)\s+(?:successfully\s+)?(?:filed|opened|reported|submitted)\s+(?:a|the)\s+(?:claim|loss))\b/i
+  }),
+  Object.freeze({
+    code: "prior_claim_filing_attempt",
+    pattern: /\b(?:called|contacted|spoke|tried|attempted)\b[^.\n]{0,100}\b(?:to\s+)?(?:file|open|report|submit)(?:ing)?\s+(?:a|the)\s+(?:claim|loss)\b/i
+  }),
+  Object.freeze({
+    code: "existing_claim_confirmed",
+    pattern: /\b(?:existing\s+claim|claim\s+(?:already\s+)?exists)\b/i
+  }),
+  Object.freeze({
+    code: "carrier_claim_receipt",
+    pattern: /\b(?:received|acknowledged)\s+(?:the\s+)?(?:claim|notice of loss|loss report)\b/i
+  }),
+  Object.freeze({
+    code: "adjuster_already_assigned",
+    pattern: /\b(?:(?:desk\s+)?adjuster\s+(?:has been|was|is)\s+assigned|assigned\s+(?:a\s+)?(?:desk\s+)?adjuster)\b/i
+  }),
+  Object.freeze({
+    code: "claim_inspection_already_scheduled",
+    pattern: /\b(?:(?:(?:carrier|claim|adjuster|field adjuster)\s+inspection)|(?:inspection\s+(?:with|by)\s+(?:the\s+)?(?:carrier|adjuster|field adjuster)))[^.\n]{0,60}\b(?:scheduled|set|booked)\b/i
+  }),
+  Object.freeze({
+    code: "carrier_callback_unresolved",
+    pattern: /\b(?:(?:requested|awaiting|pending|scheduled)\s+(?:a\s+)?(?:carrier|adjuster)\s+callback|(?:carrier|adjuster)\s+(?:callback|will\s+call\s+back|to\s+call\s+back))\b/i
+  })
+]);
+
+function sha256(value) {
+  return createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
+function evidenceFingerprints(rows) {
+  if (!Array.isArray(rows)) return null;
+  return rows.map((row) => sha256(canonical(row))).sort();
+}
+
+function claimCommunicationReviewRequest(input) {
+  return {
+    query: input.query,
+    ...CLAIM_COMMUNICATION_REVIEW_INPUT
+  };
+}
+
+function claimCommunicationSnapshot(review, packet) {
+  const file = packet.file || {};
+  const live = packet.liveJobNimbus || {};
+  const gmail = packet.gmail || {};
+  const quo = packet.quo || {};
+  return {
+    scope: String(review?.scope || ""),
+    query: String(review?.query || ""),
+    file: {
+      id: String(file.id || ""),
+      number: exactFileNumber(file.number),
+      status: String(file.status || ""),
+      address: String(file.address || ""),
+      carrier: String(file.carrier || ""),
+      policyNumber: String(file.policyNumber || ""),
+      claimNumber: String(file.claimNumber || ""),
+      dateOfLoss: String(file.dateOfLoss || "")
+    },
+    jobNimbus: {
+      recentActivities: evidenceFingerprints(live.recentActivities),
+      openTasks: evidenceFingerprints(live.openTasks),
+      operationalDocuments: evidenceFingerprints(live.operationalDocuments)
+    },
+    gmail: {
+      status: String(gmail.status || ""),
+      query: String(gmail.query || ""),
+      messages: evidenceFingerprints(gmail.messages),
+      threads: evidenceFingerprints(gmail.threads),
+      coverage: gmail.coverage || null
+    },
+    quo: {
+      status: String(quo.status || ""),
+      phone: String(quo.phone || ""),
+      timeline: evidenceFingerprints(quo.timeline),
+      transcripts: evidenceFingerprints(quo.transcripts),
+      completeness: quo.completeness || null,
+      coverage: quo.coverage || null
+    }
+  };
+}
+
+function communicationTextEntries(packet) {
+  const entries = [];
+  const add = (source, id, values) => {
+    const text = values.map((value) => String(value || "").trim()).filter(Boolean).join("\n");
+    if (text) entries.push({ source, id: String(id || ""), text });
+  };
+  for (const row of packet?.liveJobNimbus?.recentActivities || []) {
+    add("jobnimbus_activity", row.id, [row.type, row.note]);
+  }
+  for (const row of packet?.gmail?.messages || []) {
+    add("gmail_message", row.id, [row.subject, row.snippet, row.text, row.plainText, row.htmlText]);
+  }
+  for (const thread of packet?.gmail?.threads || []) {
+    for (const row of thread?.messages || []) {
+      add("gmail_message", row.id || thread.id, [row.subject, row.snippet, row.text]);
+    }
+  }
+  for (const row of packet?.quo?.timeline || []) {
+    add("quo_timeline", row.id, [row.text, row.voicemail, row.transcript]);
+  }
+  for (const transcript of packet?.quo?.transcripts || []) {
+    add(
+      "quo_transcript",
+      transcript.callId,
+      (transcript.dialogue || []).map((segment) => segment?.text)
+    );
+  }
+  return entries;
+}
+
+function claimCommunicationStopSignals(packet) {
+  const found = new Map();
+  for (const entry of communicationTextEntries(packet)) {
+    for (const rule of CLAIM_COMMUNICATION_STOP_PATTERNS) {
+      const segments = entry.text.split(/\n+|(?<=[.!?])\s+/).filter(Boolean);
+      const matched = segments.some((segment) => (
+        rule.pattern.test(segment)
+        && (!rule.exclude || !rule.exclude.test(segment))
+      ));
+      if (!matched || found.has(rule.code)) continue;
+      found.set(rule.code, { code: rule.code, source: entry.source, id: entry.id });
+    }
+  }
+  return [...found.values()].sort((left, right) => left.code.localeCompare(right.code));
+}
+
+function assertClaimCommunicationReview(review, input) {
+  const packets = Array.isArray(review?.packets) ? review.packets : [];
+  const packet = packets.length === 1 ? packets[0] : null;
+  const requestedFileNumber = exactFileNumber(input.query);
+  const fileNumber = exactFileNumber(packet?.file?.number);
+  const gmail = packet?.gmail || {};
+  const quo = packet?.quo || {};
+  const failures = [
+    [review?.scope !== "chance_assigned_file", "scope_not_exact_chance_file"],
+    [packets.length !== 1, "packet_count_not_one"],
+    [!String(packet?.file?.id || "").trim(), "missing_file_id"],
+    [fileNumber !== requestedFileNumber, "file_mismatch"],
+    [gmail.status !== "fresh", "gmail_not_fresh"],
+    [!Array.isArray(gmail.messages) || !Array.isArray(gmail.threads), "gmail_evidence_incomplete"],
+    [gmail?.coverage?.providerScanComplete !== true, "gmail_provider_scan_incomplete"],
+    [!["fresh", "partial"].includes(String(quo.status || "")), "quo_not_reviewed"],
+    [quo?.completeness?.complete !== true, "quo_provider_scan_incomplete"],
+    [quo?.coverage?.transcriptReviewRequested !== true, "quo_transcripts_not_requested"],
+    [Number(quo?.coverage?.omittedTimelineItems || 0) > 0, "quo_timeline_preview_incomplete"],
+    [!Array.isArray(quo.timeline) || !Array.isArray(quo.transcripts), "quo_evidence_incomplete"],
+    [!Array.isArray(packet?.liveJobNimbus?.recentActivities), "jobnimbus_activity_incomplete"],
+    [!Array.isArray(packet?.liveJobNimbus?.openTasks), "jobnimbus_tasks_incomplete"],
+    [!Array.isArray(packet?.liveJobNimbus?.operationalDocuments), "jobnimbus_documents_incomplete"]
+  ].filter(([failed]) => failed).map(([, code]) => code);
+  if (failures.length) {
+    throw new Error(
+      `The required exact-file Gmail/Quo claim-filing review is incomplete. Failed checks: ${failures.join(", ")}. No call plan or approval was created.`
+    );
+  }
+
+  const stopSignals = input.goal === "file_new_claim"
+    ? claimCommunicationStopSignals(packet)
+    : [];
+  if (stopSignals.length) {
+    throw new Error(
+      `Fresh exact-file communications contain a possible existing claim, prior filing attempt, carrier receipt, appointment, or unresolved callback. Stop signals: ${stopSignals.map((signal) => signal.code).join(", ")}. Review those records before preparing a new-claim call. No approval was created.`
+    );
+  }
+
+  const snapshot = claimCommunicationSnapshot(review, packet);
+  const limitationCodes = [
+    ...(gmail?.coverage?.limitationCodes || []),
+    ...(gmail.threads || []).flatMap((thread) => thread?.coverage?.limitationCodes || []),
+    ...(quo?.coverage?.complete === false ? ["quo_homeowner_phone_history_only"] : []),
+    ...(quo?.coverage?.carrierConversationsSearched === false ? ["quo_carrier_conversations_not_searched"] : []),
+    ...(Number(quo?.coverage?.omittedTimelineItems || 0) > 0 ? ["quo_timeline_preview_omitted_items"] : [])
+  ];
+  return {
+    ready: true,
+    digest: sha256(canonical(snapshot)),
+    fileNumber,
+    reviewedAt: String(review?.generatedAt || ""),
+    sources: {
+      jobNimbus: "fresh_exact_file",
+      gmail: "fresh_exact_file",
+      quo: "fresh_exact_file_bounded"
+    },
+    evidenceCounts: {
+      jobNimbusActivities: packet.liveJobNimbus.recentActivities.length,
+      gmailMessages: gmail.messages.length,
+      gmailThreads: gmail.threads.length,
+      quoTimelineItems: quo.timeline.length,
+      quoTranscripts: quo.transcripts.length
+    },
+    limitationCodes: [...new Set(limitationCodes)].sort(),
+    stopSignals: []
+  };
+}
 
 function normalizedClaimFileQuery(value) {
   const number = String(value || "").trim().replace(/^#/, "");
@@ -508,6 +726,15 @@ export function createOperatorCoordinator({
     const verification = await verifiedBridgeSession();
     requireCurrentApprovalGeneration(generation);
     const attestedBoundary = requireReadyForNormalWork(verification);
+    const communicationPreflight = assertClaimCommunicationReview(
+      await bridgeRequest(
+        "POST",
+        "/ops/review-chance-files",
+        claimCommunicationReviewRequest(normalizedInput)
+      ),
+      normalizedInput
+    );
+    requireCurrentApprovalGeneration(generation);
     const configuration = assertClaimFilingConfiguration(
       await bridgeRequest("POST", "/claim-filing/configuration", {}),
       { requireReady: true }
@@ -533,13 +760,15 @@ export function createOperatorCoordinator({
       fileNumber,
       attestedBoundary: canonical(attestedBoundary),
       configuration: canonical(configuration),
+      communicationDigest: communicationPreflight.digest,
       generation,
       expiresAt
     });
     return {
       ...stripApprovalSecrets(response),
       approvalId,
-      approvedInput: normalizedInput
+      approvedInput: normalizedInput,
+      communicationPreflight
     };
   }
 
@@ -573,6 +802,20 @@ export function createOperatorCoordinator({
       if (pending.attestedBoundary !== canonical(currentBoundary)) {
         throw new Error(
           "The bridge boot/build/policy/runtime boundary changed after call approval. Nothing was called."
+        );
+      }
+      const communicationPreflight = assertClaimCommunicationReview(
+        await bridgeRequest(
+          "POST",
+          "/ops/review-chance-files",
+          claimCommunicationReviewRequest(normalizedInput)
+        ),
+        normalizedInput
+      );
+      requireCurrentApprovalGeneration(pending.generation);
+      if (pending.communicationDigest !== communicationPreflight.digest) {
+        throw new Error(
+          "The exact-file JobNimbus, Gmail, or Quo evidence changed after call approval. Nothing was called; review a fresh plan."
         );
       }
       const configuration = assertClaimFilingConfiguration(

@@ -159,7 +159,7 @@ function normalizeApprovedDamageOpening(value) {
 
 function isUsableApprovedDamage(value) {
   const detail = String(value || "").trim();
-  const concreteComponent = /\b(?:roof|shingle|tile|metal|soft metal|flashing|fascia|soffit|gutter|downspout|vent|chimney|skylight|siding|window|screen|door|garage|fence|decking|sheathing|ceiling|wall|drywall|floor|flooring|paint|interior|room|hvac|air conditioner|a\/c|duct|coil|compressor|personal property|contents?)\b/i;
+  const concreteComponent = /\b(?:roofs?|shingles?|tiles?|metals?|soft metals?|flashings?|fascia|soffits?|gutters?|downspouts?|vents?|chimneys?|skylights?|siding|windows?|screens?|doors?|garages?|fences?|decking|sheathing|ceilings?|walls?|drywall|floors?|flooring|paint|interiors?|rooms?|hvac|air conditioners?|a\/c|ducts?|coils?|compressors?|personal property|contents?)\b/i;
   if (
     !detail
     || /^(?:missing|unknown|undetermined|not applicable|n\/?a|none|no specific damage categories)\b/i.test(detail)

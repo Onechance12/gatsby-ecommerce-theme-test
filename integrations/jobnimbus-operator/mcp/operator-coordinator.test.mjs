@@ -261,6 +261,81 @@ function claimConfigurationFixture() {
   };
 }
 
+function claimCommunicationReviewFixture() {
+  return {
+    generatedAt: "2090-01-01T00:00:00.000Z",
+    owner: { id: "owner-1", name: "Chance Pearson" },
+    scope: "chance_assigned_file",
+    query: "#2787",
+    complete: false,
+    packets: [{
+      complete: false,
+      file: {
+        id: "contact-2787",
+        number: "2787",
+        name: "Ronald",
+        status: "Ready for PA Review",
+        address: "100 Fixture Way, Dallas, TX 75001",
+        carrier: "USAA",
+        policyNumber: "POL-2787",
+        claimNumber: "",
+        dateOfLoss: "06/01/2026"
+      },
+      liveJobNimbus: {
+        recentActivities: [],
+        openTasks: [],
+        operationalDocuments: []
+      },
+      gmail: {
+        status: "fresh",
+        query: "fixture exact-file query",
+        messages: [],
+        threads: [],
+        coverage: {
+          providerScanComplete: true,
+          search: {
+            complete: false,
+            scannedMessages: 0,
+            returnedMessages: 0,
+            withheldMessages: 0,
+            readLimit: 15,
+            hasMore: false,
+            windowDays: 3650,
+            limitationCodes: ["bounded_history_window"]
+          },
+          returnedThreadCount: 0,
+          reviewedThreadCount: 0,
+          omittedThreadCount: 0,
+          limitationCodes: ["bounded_history_window"]
+        }
+      },
+      quo: {
+        status: "partial",
+        phone: "+12145550199",
+        messageCount: 0,
+        callCount: 0,
+        timeline: [],
+        transcripts: [],
+        completeness: {
+          complete: true,
+          reasons: [],
+          lineCount: 1,
+          pagesScanned: 2,
+          returnedCount: 0
+        },
+        coverage: {
+          searchScope: "homeowner_phone_only",
+          carrierConversationsSearched: false,
+          transcriptReviewRequested: true,
+          returnedTranscriptCount: 0,
+          omittedTimelineItems: 0,
+          complete: false
+        }
+      }
+    }]
+  };
+}
+
 function policyFixture() {
   const historicalSummaries = HISTORICAL_IDS.map((batchId, index) => {
     const pendingVerification = index === HISTORICAL_IDS.length - 1;
@@ -382,6 +457,7 @@ function harness() {
     session: sessionFixture(),
     policy: policyFixture(),
     claimConfiguration: claimConfigurationFixture(),
+    claimCommunicationReview: claimCommunicationReviewFixture(),
     beforeClaimPrepare: null,
     mutateExecutionResponse: null,
     mutateClaimPlan: null,
@@ -472,6 +548,9 @@ function harness() {
     }
     if (method === "POST" && pathname === "/claim-filing/configuration") {
       return structuredClone(state.claimConfiguration);
+    }
+    if (method === "POST" && pathname === "/ops/review-chance-files") {
+      return structuredClone(state.claimCommunicationReview);
     }
     if (method === "POST" && pathname === "/claim-filing/prepare") {
       await state.beforeClaimPrepare?.();
@@ -1203,9 +1282,30 @@ test("Retell plan is one-file, freshly attested, configuration-pinned, and chall
   assert.equal(response.approvalId, CLAIM_APPROVAL_ID);
   assert.equal(response.planDigest, CLAIM_PLAN_DIGEST);
   assert.equal(Object.hasOwn(response, "approvalChallenge"), false);
+  assert.equal(response.communicationPreflight.ready, true);
+  assert.match(response.communicationPreflight.digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(response.communicationPreflight.stopSignals, []);
+  assert.deepEqual(response.communicationPreflight.limitationCodes, [
+    "bounded_history_window",
+    "quo_carrier_conversations_not_searched",
+    "quo_homeowner_phone_history_only"
+  ]);
   assert.deepEqual(response.approvedInput, {
     ...CLAIM_INPUT,
     includeCarrierBatch: false
+  });
+  assert.equal(claimPosts(h, "/ops/review-chance-files").length, 1);
+  assert.deepEqual(claimPosts(h, "/ops/review-chance-files")[0].body, {
+    query: "#2787",
+    limit: 1,
+    activeOnly: false,
+    includeGmail: true,
+    includeQuo: true,
+    includeQuoTranscripts: true,
+    communicationDays: 3650,
+    gmailLimit: 15,
+    gmailThreadLimit: 5,
+    quoLimit: 50
   });
   assert.equal(claimPosts(h, "/claim-filing/configuration").length, 1);
   assert.equal(claimPosts(h, "/claim-filing/prepare").length, 1);
@@ -1220,6 +1320,106 @@ test("Retell plan is one-file, freshly attested, configuration-pinned, and chall
   assert.equal(pending.fileNumber, "2787");
   assert.equal(typeof pending.attestedBoundary, "string");
   assert.equal(typeof pending.configuration, "string");
+  assert.equal(pending.communicationDigest, response.communicationPreflight.digest);
+});
+
+test("Retell planning fails closed when exact-file Gmail or Quo review is unavailable or incomplete", async (t) => {
+  const cases = [
+    ["gmail_not_fresh", review => { review.packets[0].gmail.status = "error"; }],
+    ["gmail_provider_scan_incomplete", review => { review.packets[0].gmail.coverage.providerScanComplete = false; }],
+    ["quo_not_reviewed", review => { review.packets[0].quo.status = "error"; }],
+    ["quo_provider_scan_incomplete", review => { review.packets[0].quo.completeness.complete = false; }],
+    ["quo_transcripts_not_requested", review => { review.packets[0].quo.coverage.transcriptReviewRequested = false; }],
+    ["quo_timeline_preview_incomplete", review => { review.packets[0].quo.coverage.omittedTimelineItems = 1; }],
+    ["file_mismatch", review => { review.packets[0].file.number = "2760"; }]
+  ];
+  for (const [code, mutate] of cases) {
+    await t.test(code, async () => {
+      const h = harness();
+      mutate(h.state.claimCommunicationReview);
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), new RegExp(code));
+      assert.equal(claimPosts(h, "/ops/review-chance-files").length, 1);
+      assert.equal(claimPosts(h, "/claim-filing/configuration").length, 0);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
+});
+
+test("Retell new-claim planning stops on strong prior-filing communication evidence", async () => {
+  const h = harness();
+  h.state.claimCommunicationReview.packets[0].liveJobNimbus.recentActivities.push({
+    id: "activity-filed",
+    type: "Note",
+    note: "Claim was filed and the carrier assigned a desk adjuster."
+  });
+  await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), error => {
+    assert.match(error.message, /claim_already_filed/);
+    assert.match(error.message, /adjuster_already_assigned/);
+    assert.doesNotMatch(error.message, /Claim was filed/);
+    return true;
+  });
+  assert.equal(claimPosts(h, "/claim-filing/configuration").length, 0);
+  assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
+test("Retell new-claim stop signals recognize real attempts without treating negative or estimator language as filed claims", async (t) => {
+  const blocked = [
+    ["verb-first filed claim", "I filed a claim and then the adjuster called.", /claim_already_filed/],
+    ["failed carrier filing attempt", "Called to file a claim twice, but the carrier could not locate active coverage.", /prior_claim_filing_attempt/],
+    ["carrier inspection", "The carrier inspection is scheduled for Friday.", /claim_inspection_already_scheduled/],
+    ["real claim number", "Claim number: ABC-12345", /claim_number_present_in_evidence/]
+  ];
+  for (const [name, note, expected] of blocked) {
+    await t.test(name, async () => {
+      const h = harness();
+      h.state.claimCommunicationReview.packets[0].liveJobNimbus.recentActivities.push({
+        id: `activity-${name}`,
+        type: "Note",
+        note
+      });
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), expected);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+    });
+  }
+
+  const allowed = [
+    "Claim not filed.",
+    "No claim has been filed.",
+    "Estimate inspection scheduled.",
+    "Claim number missing.",
+    "Waiting for the homeowner to call back."
+  ];
+  for (const note of allowed) {
+    await t.test(note, async () => {
+      const h = harness();
+      h.state.claimCommunicationReview.packets[0].liveJobNimbus.recentActivities.push({
+        id: `activity-${note}`,
+        type: "Note",
+        note
+      });
+      const response = await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+      assert.equal(response.communicationPreflight.ready, true);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 1);
+    });
+  }
+});
+
+test("Retell existing-claim lookup may proceed after the same communication review", async () => {
+  const h = harness();
+  const input = { ...CLAIM_INPUT, goal: "find_existing_claim" };
+  h.state.claimCommunicationReview.packets[0].liveJobNimbus.recentActivities.push({
+    id: "activity-existing",
+    type: "Note",
+    note: "Carrier confirmed an existing claim but the number is not recorded."
+  });
+  h.state.mutateClaimPlan = response => {
+    response.packet.goal = "find_existing_claim";
+  };
+  const response = await h.coordinator.planClaimFilingCall(input);
+  assert.equal(response.communicationPreflight.ready, true);
+  assert.equal(response.packet.goal, "find_existing_claim");
 });
 
 test("Retell plan rejects excluded, nonnumeric, batched, unsupported, and control-bearing inputs before bridge access", async (t) => {
@@ -1365,6 +1565,41 @@ test("Retell execution fails closed before calling on bridge or live-agent drift
   });
 });
 
+test("Retell execution consumes approval when exact-file communication evidence changes", async () => {
+  const h = harness();
+  await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+  h.state.claimCommunicationReview.packets[0].gmail.messages.push({
+    id: "gmail-new-evidence",
+    threadId: "thread-new-evidence",
+    subject: "New file evidence",
+    snippet: "A new exact-file message arrived after approval."
+  });
+  await assert.rejects(
+    h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
+    /evidence changed after call approval.*Nothing was called.*approval was consumed/i
+  );
+  assert.equal(claimPosts(h, "/ops/review-chance-files").length, 2);
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
+test("Retell execution consumes approval when fresh communication review gains a stop signal", async () => {
+  const h = harness();
+  await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+  h.state.claimCommunicationReview.packets[0].gmail.messages.push({
+    id: "gmail-carrier-receipt",
+    threadId: "thread-carrier-receipt",
+    subject: "Claim receipt",
+    snippet: "We received the claim and a desk adjuster was assigned."
+  });
+  await assert.rejects(
+    h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
+    /carrier_claim_receipt|adjuster_already_assigned/i
+  );
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
 test("happy Retell execution posts the exact approved input and hidden challenge once", async () => {
   const h = harness();
   await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
@@ -1376,6 +1611,7 @@ test("happy Retell execution posts the exact approved input and hidden challenge
   assert.equal(response.mode, "executed");
   assert.equal(response.callId, "call-retell-2787");
   assert.equal(Object.hasOwn(response, "approvalChallenge"), false);
+  assert.equal(claimPosts(h, "/ops/review-chance-files").length, 2);
   const posts = claimPosts(h, "/claim-filing/call");
   assert.equal(posts.length, 1);
   assert.deepEqual(posts[0].body, {

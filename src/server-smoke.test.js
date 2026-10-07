@@ -4118,6 +4118,8 @@ test("Mac exact-file review unions complete primary and related resource pages w
 test("Codex operator communication reads stay bound to one exact Chance file", async (t) => {
   const bridgePort = 18893;
   const fakeApiPort = 18894;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-communications-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   await startOperatorJobNimbusFixture(t, fakeApiPort, {
     communicationScope: true,
     secondAssigned: true,
@@ -4142,6 +4144,8 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       BRIDGE_ALLOW_WRITES: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -4174,6 +4178,32 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   const gmailSearch = await gmailSearchResponse.json();
   assert.equal(gmailSearch.scope, "chance_assigned_file");
   assert.deepEqual(gmailSearch.messages.map((row) => row.id), ["claim-exact-message"]);
+
+  const claimPreflightResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      query: "2741",
+      limit: 1,
+      activeOnly: false,
+      includeGmail: true,
+      includeQuo: false,
+      communicationDays: 3650,
+      gmailLimit: 15,
+      gmailThreadLimit: 5
+    })
+  });
+  assert.equal(claimPreflightResponse.status, 200);
+  const claimPreflight = await claimPreflightResponse.json();
+  assert.equal(claimPreflight.packets[0].gmail.status, "fresh");
+  assert.equal(
+    claimPreflight.packets[0].gmail.coverage.providerScanComplete,
+    true,
+    JSON.stringify(claimPreflight.packets[0].gmail.coverage)
+  );
+  assert.equal(claimPreflight.packets[0].gmail.coverage.omittedThreadCount, 0);
+  assert.equal(claimPreflight.packets[0].gmail.coverage.search.windowDays, 3650);
+  assert.ok(claimPreflight.packets[0].gmail.coverage.limitationCodes.includes("bounded_history_window"));
 
   const unrelatedThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
     method: "POST",
