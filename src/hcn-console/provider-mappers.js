@@ -242,10 +242,15 @@ export function mapJobNimbusIndexEnvelope(input, options = {}) {
         'JobNimbus contact index contains an invalid record.',
       );
     }
-    if (!isEligibleContact(contact, assignedOwnerId)) continue;
+    if (options.approvedPortfolioFileIds !== undefined
+      ? !Array.isArray(options.approvedPortfolioFileIds)
+        || !options.approvedPortfolioFileIds.includes(normalizeProviderId(field(contact, CONTACT_FIELDS.id)))
+        || normalizedLabel(field(contact, CONTACT_FIELDS.recordType)) !== 'insurance' || !contactIsActive(contact)
+      : !isEligibleContact(contact, assignedOwnerId)) continue;
     const file = mapEligibleContact(contact, assignedOwnerId, {
       detail: false,
       legacyChanceField,
+      approvedPortfolioFileIds: options.approvedPortfolioFileIds,
     });
     if (seen.has(file.providerFileId)) {
       fail(
@@ -307,6 +312,7 @@ export function mapJobNimbusFileEnvelope(input, options = {}) {
   const file = mapEligibleContact(contact, assignedOwnerId, {
     detail: true,
     legacyChanceField,
+    approvedPortfolioFileIds: options.approvedPortfolioFileIds,
   });
   if (file.providerFileId !== expectedProviderFileId) {
     fail(
@@ -548,9 +554,20 @@ function mapScopedCommunicationEnvelope({ input, options, source, mapper }) {
 function mapEligibleContact(
   contact,
   assignedOwnerId,
-  { detail, legacyChanceField = false },
+  { detail, legacyChanceField = false, approvedPortfolioFileIds },
 ) {
-  if (!isEligibleContact(contact, assignedOwnerId)) {
+  const portfolio = approvedPortfolioFileIds !== undefined;
+  if (portfolio && (!Array.isArray(approvedPortfolioFileIds)
+    || approvedPortfolioFileIds.length < 1 || approvedPortfolioFileIds.length > 500
+    || new Set(approvedPortfolioFileIds).size !== approvedPortfolioFileIds.length
+    || approvedPortfolioFileIds.some(id => typeof id !== 'string' || !normalizeProviderId(id)))) {
+    fail('invalid_configuration', 'Reviewed source selection is invalid.');
+  }
+  const inPortfolio = portfolio
+    && approvedPortfolioFileIds.includes(normalizeProviderId(field(contact, CONTACT_FIELDS.id)))
+    && normalizedLabel(field(contact, CONTACT_FIELDS.recordType)) === 'insurance'
+    && contactIsActive(contact);
+  if (portfolio ? !inPortfolio : !isEligibleContact(contact, assignedOwnerId)) {
     fail(
       'file_not_eligible',
       'JobNimbus file is not an active file assigned to the authenticated employee.',
@@ -609,7 +626,8 @@ function mapEligibleContact(
     fileTypeCode: 'insurance',
     isInsuranceFile: true,
     isActive: true,
-    ...(legacyChanceField
+    ...(portfolio ? { authorizedByReviewedPortfolio: true }
+      : legacyChanceField
       ? { assignedToChance: true }
       : { assignedToCurrentUser: true }),
     updatedAt,
