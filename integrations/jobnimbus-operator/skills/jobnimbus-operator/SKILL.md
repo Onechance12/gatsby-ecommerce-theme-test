@@ -5,6 +5,15 @@ description: Use the Mac JobNimbus Operator for HCN/Wave evidence, exact-file Gm
 
 # JobNimbus Operator
 
+## Evidence repair — unreleased candidate
+
+The local communication/DOL repair does not update this installed plugin or
+authorize deployment, pin changes, a larger roster or client actions. After a
+separately approved coordinated release and full session attestation, use
+[evidence review and follow-through](references/evidence-review.md) for complete
+review flags, stable Gmail attachment selection, shared-phone Quo proof,
+read-only DOL research and the existing current-control task workflow.
+
 ## Reviewed local PDF upload — inactive candidate
 
 This source adds `pdf_upload_plan` and `pdf_upload_execute`, but they are exposed
