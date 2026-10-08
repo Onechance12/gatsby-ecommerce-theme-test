@@ -2351,8 +2351,12 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(retellCreateCount, 1);
   assert.equal(concurrent.some((response) => response.status === 200), true);
   assert.equal(concurrent.every((response) => [200, 409].includes(response.status)), true);
-  const successResponse = concurrent.find((response) => response.status === 200);
-  const success = await successResponse.json();
+  // The idempotent loser may also return HTTP 200 with duplicate_prevented.
+  // Request order cannot identify the one execution when both return 200.
+  const concurrentPayloads = await Promise.all(concurrent.map((response) => response.json()));
+  const executions = concurrentPayloads.filter((result) => result.mode === "executed");
+  assert.equal(executions.length, 1);
+  const success = executions[0];
   assert.equal(success.mode, "executed");
   assert.equal(success.callId, "call-1");
 
@@ -4640,6 +4644,143 @@ test("Gmail exact-file reads admit shared carrier routing and withhold conflicti
   assert.equal(longThread.messages[0].bodyTruncated, true);
   assert.equal(longThread.coverage.complete, false);
   assert.equal(longThread.coverage.truncatedMessages, 1);
+});
+
+test("Unfiled Gmail evidence uses a unique policy/property binding without accepting loose or mixed-file matches", async (t) => {
+  const bridgePort = 19290;
+  const fakeApiPort = 19291;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-unfiled-policy-property-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const message = (id, body) => ({
+    id, threadId: `thread-${id}`, snippet: body,
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "carrier@example.test" },
+        { name: "To", value: "operator@example.test" },
+        { name: "Subject", value: "File review" }
+      ],
+      body: { data: Buffer.from(body).toString("base64url") }
+    }
+  });
+  const messages = [
+    message("policy-property", "Policy HO 1234 567, property 123 Main St. Intake paperwork received."),
+    message("exact-file-link", "Review https://app.jobnimbus.com/contact/contact-chance?source=notification"),
+    message("policy-only", "Policy HO-1234567. No property or exact file reference."),
+    message("property-only", "Please review 123 Main St."),
+    message("policy-prefix", "Policy HO-12345670 for 123 Main St."),
+    message("policy-separator-suffix", "Policy HO-1234567-0 for 123 Main St."),
+    message("policy-separator-prefix", "Policy EXTRA-HO-1234567 for 123 Main St."),
+    message("wrong-host", "Review https://app.jobnimbus.com.evil.test/contact/contact-chance"),
+    message("mixed-policy", "Policy HO-1234567 at 123 Main St, plus policy OTHER-7654321."),
+    message("mixed-files", "https://app.jobnimbus.com/contact/contact-chance and https://app.jobnimbus.com/contact/contact-company-other"),
+    message("unknown-second-file", "https://app.jobnimbus.com/contact/contact-chance and https://app.jobnimbus.com/contact/contact-outside-index")
+  ];
+  const fixture = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true, companyOther: true,
+    chanceClaimNumber: "",
+    chanceOverrides: { email: "", address_line1: "123 Main St", cf_string_4: "HO-1234567" },
+    gmailMessages: messages,
+    gmailSearchMessages: messages.map(({ id, threadId }) => ({ id, threadId })),
+    gmailThreads: messages.map(row => ({ id: row.threadId, messages: [row] }))
+  });
+  fixture.getContact("contact-company-other").cf_string_4 = "OTHER-7654321";
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, NODE_ENV: "test", PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "", CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`, JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client", GOOGLE_CLIENT_SECRET: "fixture-secret", GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`, GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false", MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false", BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = { authorization: "Bearer fixture-codex-operator-token-1234567890", "content-type": "application/json" };
+  const read = (route, body) => fetch(`http://127.0.0.1:${bridgePort}${route}`, {
+    method: "POST", headers, body: JSON.stringify(body)
+  });
+  const searchResponse = await read("/gmail/search", { fileQuery: "2739", limit: 15 });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.deepEqual(search.messages.map(row => row.id), ["policy-property", "exact-file-link"]);
+  assert.equal(search.coverage.withheldMessages, 9);
+  assert.equal(search.coverage.complete, false);
+  assert.doesNotMatch(JSON.stringify(search.messages), /OTHER-7654321|contact-company-other|contact-outside-index|evil\.test/);
+
+  // Packet search and thread hydration share one internal scope; this also
+  // verifies that its immutable, private policy/property binding is reusable.
+  const reviewResponse = await read("/ops/review-chance-files", {
+    query: "2739", limit: 1, includeCompleteJobNimbusEvidence: true,
+    includeGmail: true, gmailLimit: 15, gmailThreadLimit: 5, includeQuo: false
+  });
+  assert.equal(reviewResponse.status, 200);
+  const review = await reviewResponse.json();
+  assert.equal(review.packets[0].gmail.status, "fresh");
+  assert.equal(review.packets[0].gmail.threads.length, 2);
+  assert.equal(review.packets[0].gmail.coverage.providerScanComplete, false);
+  assert.equal(review.complete, false);
+
+  // A newly shared policy invalidates fallback before any Gmail provider read.
+  fixture.getContact("contact-company-other").cf_string_4 = "HO-1234567";
+  const readsBeforeCollision = fixture.getGmailEvidenceReadCount();
+  const collision = await read("/gmail/search", { fileQuery: "2739" });
+  assert.equal(collision.status, 400);
+  assert.match((await collision.json()).error, /ambiguous and blocked/);
+  assert.equal(fixture.getGmailEvidenceReadCount(), readsBeforeCollision);
+});
+
+test("Quo diagnostics distinguish an unreviewable company inventory from an actual shared phone without bypassing either hold", async (t) => {
+  const bridgePort = 19292;
+  const fakeApiPort = 19293;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-quo-scope-diagnostics-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixture = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true, companyOther: true,
+    companyOtherMobilePhone: "not-recorded", quoCalls: [], quoMessages: []
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, NODE_ENV: "test", PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "", CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`, JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_REFRESH_TOKEN: "",
+      QUO_API_KEY: "fixture-quo-key", QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100", ALLOW_GOOGLE_USER_AUTH: "false",
+      MEMORY_ROOT: memoryRoot, REQUIRE_CHANCE_RUN_POLICY: "false", BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const read = () => fetch(`http://127.0.0.1:${bridgePort}/quo/history`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-codex-operator-token-1234567890", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739" })
+  });
+  const invalid = await read();
+  assert.equal(invalid.status, 400);
+  const invalidError = (await invalid.json()).error;
+  assert.match(invalidError, /unreviewable phone value/);
+  assert.match(invalidError, /does not establish a shared-phone collision/);
+  assert.doesNotMatch(invalidError, /not-recorded|contact-company-other/);
+  assert.equal(fixture.getQuoHistoryReadCount(), 0);
+
+  fixture.getContact("contact-company-other").mobile_phone = "2145559090";
+  const unique = await read();
+  assert.equal(unique.status, 200);
+  const readsBeforeCollision = fixture.getQuoHistoryReadCount();
+  assert.equal(readsBeforeCollision > 0, true);
+  fixture.getContact("contact-company-other").mobile_phone = "2145551212";
+  const shared = await read();
+  assert.equal(shared.status, 400);
+  assert.match((await shared.json()).error, /phone is shared across multiple company insurance files/);
+  assert.equal(fixture.getQuoHistoryReadCount(), readsBeforeCollision);
 });
 
 test("Quo exact-file reads fail closed on a company home-phone collision hidden by a different mobile phone", async (t) => {

@@ -506,6 +506,7 @@ const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
 const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
+const GMAIL_FILE_POLICY_PROPERTY = Symbol("gmailFilePolicyProperty");
 const GMAIL_FILE_COMPANY_CONTACTS = Symbol("gmailFileCompanyContacts");
 const GMAIL_MESSAGE_CORRELATION_CONTENT = Symbol("gmailMessageCorrelationContent");
 const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
@@ -8681,9 +8682,63 @@ async function operatorCommunicationFile(input, label) {
     file[GMAIL_FILE_EMAIL_UNIQUE] !== true
     && file[GMAIL_FILE_CLAIM_UNIQUE] !== true
   ) {
-    badRequest(`The resolved ${operatorFileDescription()} has neither a company-unique client email nor a company-unique claim number, so ${label} is ambiguous and blocked.`);
+    // An unfiled claim may legitimately have neither email nor claim number.
+    // Admit only a fresh, globally unique policy/property binding; the provider
+    // search remains file-derived and every returned message must prove scope.
+    const binding = file[GMAIL_FILE_POLICY_PROPERTY] || gmailUnfiledPolicyPropertyBinding(file);
+    if (!binding) {
+      badRequest(`The resolved ${operatorFileDescription()} has neither a company-unique client email nor a company-unique claim number, nor a verified unique policy/property binding for an unfiled claim, so ${label} is ambiguous and blocked.`);
+    }
+    if (file[GMAIL_FILE_POLICY_PROPERTY] === undefined) {
+      Object.defineProperty(file, GMAIL_FILE_POLICY_PROPERTY, {
+        value: binding,
+        enumerable: false
+      });
+    }
   }
   return file;
+}
+
+function gmailUnfiledPolicyPropertyBinding(file) {
+  if (String(file.email || "").trim() || String(file.claimNumber || "").trim()) return null;
+  const contacts = file[GMAIL_FILE_COMPANY_CONTACTS];
+  if (!Array.isArray(contacts)) return null;
+  const targets = contacts.filter((contact) => (
+    String(contact?.jnid || contact?.id || "") === String(file.id || "")
+  ));
+  if (targets.length !== 1 || !isInsuranceFile(targets[0])) return null;
+  const policy = hcnNormalizeCorrelationClaim(file.policyNumber);
+  const street = communicationWords(targets[0].address_line1);
+  if (policy.length < 6 || !/^\d+\s+[a-z0-9]/.test(street)) return null;
+  const correlation = hcnGlobalScalarCorrelation(
+    contacts.filter(isInsuranceFile), policy,
+    HCN_CONTACT_POLICY_KEYS, hcnNormalizeCorrelationClaim
+  );
+  if (!correlation.complete || correlation.matches.length !== 1
+    || String(correlation.matches[0]?.jnid || correlation.matches[0]?.id || "") !== String(file.id)) return null;
+  return { policy, street };
+}
+
+function communicationWords(value) {
+  if (typeof value !== "string") return "";
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function communicationIdentifierPresent(content, value) {
+  const normalized = hcnNormalizeCorrelationClaim(value);
+  if (normalized.length < 6) return false;
+  // normalizeCompare leaves only ASCII alphanumerics, so no regex metacharacter
+  // can enter this pattern. Formatting separators do not change the identifier.
+  const pattern = [...normalized].join("[\\s._/#-]*");
+  return new RegExp(`(?<![a-z0-9])(?<![a-z0-9][._/#-])${pattern}(?![a-z0-9]|[._/#-][a-z0-9])`, "i").test(content);
+}
+
+function communicationJobNimbusFileRefs(content) {
+  const ids = new Set();
+  for (const match of content.matchAll(/https?:\/\/app\.jobnimbus\.com\/contact\/([^\s<>"'?)#/]+)/gi)) {
+    try { ids.add(decodeURIComponent(match[1])); } catch { /* Invalid references prove nothing. */ }
+  }
+  return ids;
 }
 
 async function operatorGmailActionFile(input, label) {
@@ -8723,6 +8778,10 @@ function gmailMessageFileCorrelation(message, file) {
     (content.match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [])
       .map((value) => hcnNormalizeCorrelationClaim(value))
   );
+  const exactFileRefs = communicationJobNimbusFileRefs(content);
+  const policyProperty = file[GMAIL_FILE_POLICY_PROPERTY];
+  const propertyMatch = policyProperty
+    && ` ${communicationWords(content)} `.includes(` ${policyProperty.street} `);
   const targetMatch = Boolean(
     (
       file[GMAIL_FILE_EMAIL_UNIQUE] === true
@@ -8734,10 +8793,19 @@ function gmailMessageFileCorrelation(message, file) {
       && normalizeCompare(claimNumber).length >= 6
       && claimIdentifiers.has(hcnNormalizeCorrelationClaim(claimNumber))
     )
+    || (policyProperty && (
+      exactFileRefs.has(String(file.id))
+      || (propertyMatch && communicationIdentifierPresent(content, policyProperty.policy))
+    ))
   );
   const companyContacts = file[GMAIL_FILE_COMPANY_CONTACTS];
   if (!Array.isArray(companyContacts)) {
     return { complete: false, targetMatch: false, conflictingFileIds: [] };
+  }
+  // An explicit second file reference remains ambiguous even when that file
+  // is absent from the index. Do not disclose its unknown provider identifier.
+  if (policyProperty && [...exactFileRefs].some((id) => id !== String(file.id || ""))) {
+    return { complete: true, targetMatch: false, conflictingFileIds: [] };
   }
   const conflictingFileIds = [];
   for (const contact of companyContacts) {
@@ -8760,7 +8828,16 @@ function gmailMessageFileCorrelation(message, file) {
       .some((email) => headerAddresses.has(email));
     const claimMatch = [...claimInventory.values]
       .some((claim) => claim.length >= 6 && claimIdentifiers.has(claim));
-    if ((emailMatch || claimMatch) && contactId !== String(file.id || "")) {
+    const policyInventory = policyProperty && isInsuranceFile(contact)
+      ? hcnContactScalarInventory(contact, HCN_CONTACT_POLICY_KEYS, hcnNormalizeCorrelationClaim)
+      : null;
+    if (policyInventory && !policyInventory.complete) {
+      return { complete: false, targetMatch: false, conflictingFileIds: [] };
+    }
+    const policyMatch = policyInventory && [...policyInventory.values]
+      .some((policy) => communicationIdentifierPresent(content, policy));
+    const exactFileMatch = isInsuranceFile(contact) && exactFileRefs.has(contactId);
+    if ((emailMatch || claimMatch || policyMatch || exactFileMatch) && contactId !== String(file.id || "")) {
       conflictingFileIds.push(contactId);
     }
   }
@@ -9803,12 +9880,17 @@ async function assertUniqueChanceFilePhone(file, label) {
     index.rows.filter(isInsuranceFile),
     phone
   );
-  if (
-    !correlation.complete
-    || correlation.matches.length !== 1
-    || String(correlation.matches[0]?.jnid || correlation.matches[0]?.id || "") !== String(file.id)
-  ) {
+  if (!correlation.complete) {
+    badRequest(`The company insurance-file phone inventory contains an unreviewable phone value, so ${label} cannot verify unique file scope and is blocked. This does not establish a shared-phone collision.`);
+  }
+  if (!correlation.matches.length) {
+    badRequest(`The resolved phone is not present in the complete company insurance-file phone index, so ${label} cannot verify file scope and is blocked.`);
+  }
+  if (correlation.matches.length > 1) {
     badRequest(`The resolved phone is shared across multiple company insurance files, so ${label} is ambiguous and blocked.`);
+  }
+  if (String(correlation.matches[0]?.jnid || correlation.matches[0]?.id || "") !== String(file.id)) {
+    badRequest(`The resolved phone belongs to a different file in the complete company insurance-file index, so ${label} cannot verify file scope and is blocked.`);
   }
 }
 
@@ -15155,6 +15237,9 @@ const HCN_CONTACT_CLAIM_KEYS = new Set([
   "cfstring2",
   "claim",
   "claimnumber"
+]);
+const HCN_CONTACT_POLICY_KEYS = new Set([
+  "cfstring3", "cfstring4", "policy", "policynumber"
 ]);
 
 function hcnGlobalScalarCorrelation(
