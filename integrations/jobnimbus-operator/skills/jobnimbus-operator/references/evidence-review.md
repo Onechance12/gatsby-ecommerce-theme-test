@@ -41,6 +41,15 @@ filename or arbitrary old token is never a fallback. Attachment review neither
 uploads nor proves the document legally sufficient. Apply document/PDF review
 to the actual content before consequential use.
 
+If parser/OCR extraction is incomplete, the coordinated PDF fallback returns
+`nativeReviewRequired:true` and the same freshly verified original PDF within
+the existing native-review byte limit. The Mac wrapper materializes it as a
+private `localFiles` path; inspect the actual pages with the PDF skill. Keep
+the extraction error as a limitation until native review is complete. If no
+original is returned or `nativeReviewUnavailableReason` is present, do not
+report a complete document review. Never replace it by a filename guess or
+use this read-only fallback as approval for any upload, draft, send or update.
+
 ## Quo identity and transcript coverage
 
 Homeowner phones are distinct from carrier/adjuster routing fields. A malformed
@@ -68,6 +77,15 @@ and exact `callId` follow its [documented transcript payload](https://www.quo.co
 Explicit no-speech calls and verified voicemail text are distinguished from
 unreviewed recordings. Preserve `transcriptCoverage`, history pagination and
 per-record correlation warnings. A Quo draft is not a sent/delivered message.
+
+An unavailable history review reports only fixed diagnostic categories:
+`stage` identifies line inventory/messages/calls, and `reason` distinguishes
+`provider_read` from malformed inventory/response or rejected record scope.
+`bounded_read_status`, when present, is the bounded transport's status, not
+proof of an upstream HTTP failure: validation and transport errors can share
+that status. A rejected record still blocks the entire review and discloses no
+record contents. Older generic bridge 500s cannot establish the underlying
+cause; do not call them verified Quo outages or clear the hold by retrying.
 
 ## Read-only DOL research
 

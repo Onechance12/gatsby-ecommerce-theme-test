@@ -335,8 +335,10 @@ test("strict Quo history marks malformed pagination tokens and redacts fatal pro
         { phone: "+12145550199" }
       ),
       (error) => {
-        assert.equal(error.message, "Quo history provider request failed");
+        assert.equal(error.message, "Quo history evidence unavailable: stage=messages; reason=provider_read; bounded_read_status=500. No provider record content was disclosed.");
         assert.equal(error.code, "QUO_HISTORY_PROVIDER_FAILURE");
+        assert.equal(error.statusCode, 503);
+        assert.deepEqual(error.diagnostic, { stage: "messages", reason: "provider_read", boundedReadStatus: 500 });
         assert.equal(String(error).includes("SECRET-FATAL-PROVIDER-DETAIL"), false);
         return true;
       }
@@ -948,6 +950,50 @@ test("Quo live send resolves the configured number to its PN line id", async () 
   }
 });
 
+test("strict Quo failures distinguish bounded provider reads from rejected records without leaking data", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    { name: "line inventory HTTP failure", inventoryStatus: 401, inventory: { message: "SECRET provider detail" },
+      expected: { stage: "line_inventory", reason: "provider_read", boundedReadStatus: 401 } },
+    { name: "message HTTP failure", messagesStatus: 502, messages: { message: "SECRET provider detail" },
+      expected: { stage: "messages", reason: "provider_read", boundedReadStatus: 502 } },
+    { name: "invalid inventory", inventory: { data: "SECRET invalid inventory" },
+      expected: { stage: "line_inventory", reason: "invalid_line_inventory" } },
+    { name: "wrong-line message", messages: { data: [
+      scopedMessage("SECRET-wrong-line-id", "+19725550101", { id: "SECRET-record", content: "SECRET private body" })
+    ] }, expected: { stage: "messages", reason: "record_scope_mismatch" } },
+    { name: "group call participants", calls: { data: [
+      scopedCall("PN_one", { id: "SECRET-call", participants: ["+12145550199", "+19725550101", "+12145550222"] })
+    ] }, expected: { stage: "calls", reason: "invalid_participants" } }
+  ];
+  try {
+    for (const scenario of cases) {
+      await t.test(scenario.name, async () => {
+        globalThis.fetch = async (url) => {
+          const pathname = new URL(url).pathname;
+          if (pathname.endsWith("/phone-numbers")) return jsonResponse(scenario.inventoryStatus || 200, scenario.inventory || {
+            data: [{ id: "PN_one", name: "SECRET line name", number: "+19725550101" }]
+          });
+          if (pathname.endsWith("/messages")) return jsonResponse(scenario.messagesStatus || 200, scenario.messages || { data: [] });
+          return jsonResponse(200, scenario.calls || { data: [] });
+        };
+        await assert.rejects(readQuoHistoryStrict({
+          apiKey: "SECRET-key", baseUrl: "https://api.quo.test/v1"
+        }, { phone: "+12145550199" }), (error) => {
+          assert.equal(strictProviderFailure(error), true);
+          assert.deepEqual(error.diagnostic, scenario.expected);
+          assert.equal(Object.isFrozen(error.diagnostic), true);
+          assert.doesNotMatch(JSON.stringify({ message: error.message, diagnostic: error.diagnostic }),
+            /SECRET|\+1214|\+1972|PN_one|https:\/\//);
+          return true;
+        });
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function scopedMessage(phoneNumberId, lineNumber, values = {}) {
   return {
     phoneNumberId,
@@ -973,8 +1019,9 @@ function jsonResponse(status, body) {
 }
 
 function strictProviderFailure(error) {
-  assert.equal(error.message, "Quo history provider request failed");
+  assert.match(error.message, /^Quo history evidence unavailable: stage=(line_inventory|messages|calls); reason=[a-z_]+(?:; bounded_read_status=\d{3})?\. No provider record content was disclosed\.$/);
   assert.equal(error.code, "QUO_HISTORY_PROVIDER_FAILURE");
+  assert.equal(error.statusCode, 503);
   assert.doesNotMatch(String(error), /SECRET|provider detail/i);
   return true;
 }

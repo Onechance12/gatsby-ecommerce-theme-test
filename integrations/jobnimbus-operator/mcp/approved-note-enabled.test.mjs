@@ -17,9 +17,12 @@ test("activated candidate validates exact note intent, readback and notification
     .replace(/policySha256: "[a-f0-9]*"/, `policySha256: "${"a".repeat(64)}"`)
     .replace(/bridgeCommit: "[a-f0-9]*"/, `bridgeCommit: "${"b".repeat(40)}"`));
   await copyFile(new URL("./scope.mjs", import.meta.url), path.join(directory, "scope.mjs"));
-  for (const file of ["pdf-upload-release.mjs", "pdf-upload-contract.mjs"]) {
-    await copyFile(new URL(`./${file}`, import.meta.url), path.join(directory, file));
-  }
+  // This fixture deliberately tests the note-only candidate, regardless of
+  // whether the parent package is the later coordinated PDF release.
+  const pdfRelease = await readFile(new URL("./pdf-upload-release.mjs", import.meta.url), "utf8");
+  await writeFile(path.join(directory, "pdf-upload-release.mjs"), pdfRelease
+    .replace(/enabled: (?:false|true)/, "enabled: false"));
+  await copyFile(new URL("./pdf-upload-contract.mjs", import.meta.url), path.join(directory, "pdf-upload-contract.mjs"));
   const scope = await import(pathToFileURL(path.join(directory, "scope.mjs")));
   for (const note of ["Paused due to license.", "Check received. @RichardR Please review."]) {
   await t.test(note.includes("@") ? "canonical Richard mention request" : "plain note", () => {

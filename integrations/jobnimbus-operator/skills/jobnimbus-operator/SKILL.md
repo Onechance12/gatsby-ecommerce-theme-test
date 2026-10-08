@@ -127,6 +127,7 @@ in the filename. Keep the ordinary operational scope restrictions unchanged.
 - Ordinary operational company access is exact-file only. Never use that credential to enumerate, rank, or sweep every company file. The separately activated read-only research profile below does not change this rule.
 - Use `company_review_exact_file` as the normal company entrypoint. It gathers fresh JobNimbus, Gmail, and Quo evidence for only that resolved file.
 - Use `jobnimbus_document_review` first. If it returns `localFiles`, inspect the actual local file with native PDF/image tools.
+- For a freshly correlated Gmail PDF, an incomplete parser/OCR result can return `nativeReviewRequired:true` and the verified original in `localFiles`. Inspect that original with the PDF skill before using its contents. Missing `localFiles` or `nativeReviewUnavailableReason` leaves the review incomplete; this fallback never authorizes an upload, draft, send, or client update.
 - Treat bridge suggestions as evidence, not final judgment. Apply the HCN/Wave operational skills before recommending action.
 
 ## Approval Rules

@@ -22,13 +22,15 @@ const plan = (input = payload()) => {
       plan: { endpoint: "/files/v1/uploads/url", ...metadata, beforeIds: [], body: pdfProviderBody("contact-2739", metadata) } } }] };
 };
 
-test("upload candidate defaults closed and cannot be activated with unreviewed pins", async () => {
-  assert.equal(PDF_UPLOADS_ENABLED, false);
+test("PDF activation requires complete reviewed pins and the inactive candidate stays closed", async () => {
+  assert.equal(PDF_UPLOADS_ENABLED, validatePdfRelease(PDF_UPLOAD_RELEASE));
+  const inactive = { ...PDF_UPLOAD_RELEASE, enabled: false, policySha256: "", bridgeCommit: "" };
+  assert.equal(validatePdfRelease(inactive), false);
   for (const patch of [{ enabled: true }, { enabled: true, policySha256: "a".repeat(64) }, { enabled: true, policyId: "arbitrary" }]) {
-    assert.throws(() => validatePdfRelease({ ...PDF_UPLOAD_RELEASE, ...patch }));
+    assert.throws(() => validatePdfRelease({ ...inactive, ...patch }));
   }
   const coordinator = createOperatorCoordinator({ version: "fixture", bridgeRequest: () => { throw new Error("MUST NOT CONNECT"); } });
-  await assert.rejects(coordinator.planPdfUpload({}), /not activated/);
+  if (!PDF_UPLOADS_ENABLED) await assert.rejects(coordinator.planPdfUpload({}), /not activated/);
   await assert.rejects(coordinator.executePdfUpload("x"), /No current/);
 });
 
