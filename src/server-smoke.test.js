@@ -432,7 +432,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         ...(options.gmailNextPageToken ? { nextPageToken: options.gmailNextPageToken } : {}),
-        messages: [
+        messages: options.gmailSearchMessages ?? [
           ...[...gmailMessages.values()].map((message) => ({
             id: message.id,
             threadId: message.threadId || ""
@@ -4118,6 +4118,8 @@ test("Mac exact-file review unions complete primary and related resource pages w
 test("Codex operator communication reads stay bound to one exact Chance file", async (t) => {
   const bridgePort = 18893;
   const fakeApiPort = 18894;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-operator-communications-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
   await startOperatorJobNimbusFixture(t, fakeApiPort, {
     communicationScope: true,
     secondAssigned: true,
@@ -4142,6 +4144,8 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
       QUO_API_KEY: "fixture-quo-key",
       QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "+19725550100",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
       BRIDGE_ALLOW_WRITES: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -4175,6 +4179,35 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   assert.equal(gmailSearch.scope, "chance_assigned_file");
   assert.deepEqual(gmailSearch.messages.map((row) => row.id), ["claim-exact-message"]);
 
+  const claimPreflightResponse = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      query: "2741",
+      limit: 1,
+      activeOnly: false,
+      includeGmail: true,
+      includeQuo: false,
+      communicationDays: 3650,
+      gmailLimit: 15,
+      gmailThreadLimit: 5
+    })
+  });
+  assert.equal(claimPreflightResponse.status, 200);
+  const claimPreflight = await claimPreflightResponse.json();
+  assert.equal(claimPreflight.complete, false);
+  assert.equal(claimPreflight.packets[0].gmail.status, "fresh");
+  assert.equal(
+    claimPreflight.packets[0].gmail.coverage.providerScanComplete,
+    false,
+    JSON.stringify(claimPreflight.packets[0].gmail.coverage)
+  );
+  assert.equal(claimPreflight.packets[0].gmail.coverage.search.hasMore, false);
+  assert.equal(claimPreflight.packets[0].gmail.coverage.search.withheldMessages, 6);
+  assert.equal(claimPreflight.packets[0].gmail.coverage.omittedThreadCount, 0);
+  assert.equal(claimPreflight.packets[0].gmail.coverage.search.windowDays, 3650);
+  assert.ok(claimPreflight.packets[0].gmail.coverage.limitationCodes.includes("bounded_history_window"));
+
   const unrelatedThreadResponse = await fetch(`http://127.0.0.1:${bridgePort}/gmail/thread`, {
     method: "POST",
     headers,
@@ -4200,6 +4233,247 @@ test("Codex operator communication reads stay bound to one exact Chance file", a
   });
   assert.equal(unrelatedTranscriptResponse.status, 403);
   assert.match((await unrelatedTranscriptResponse.json()).error, /not present in the current history/i);
+});
+
+test("Codex claim evidence keeps the full exact-file JobNimbus history separate from ordinary previews", async (t) => {
+  const bridgePort = 19260;
+  const fakeApiPort = 19261;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-full-claim-evidence-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const reviewActivities = Array.from({ length: 31 }, (_, index) => ({
+    jnid: `history-${index}`,
+    primary: { id: "contact-chance" },
+    date_created: 1800000000 - index,
+    record_type_name: "Note",
+    note: index === 30 ? "Claim was filed. Claim number: ABC-12345" : "Routine work."
+  }));
+  const currentTasks = Array.from({ length: 32 }, (_, index) => ({
+    jnid: `open-task-${index}`,
+    primary: { id: "contact-chance" },
+    title: "Routine task",
+    is_completed: false
+  }));
+  const reviewDocuments = Array.from({ length: 61 }, (_, index) => ({
+    jnid: `document-${index}`,
+    primary: { id: "contact-chance" },
+    name: `Policy document ${index}.pdf`
+  }));
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    reviewActivities,
+    currentTasks,
+    reviewDocuments,
+    relatedPageCap: 7,
+    taskPageCap: 7
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const read = (input = {}) => fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ query: "#2739", limit: 1, includeGmail: false, includeQuo: false, ...input })
+  });
+  const previewResponse = await read();
+  assert.equal(previewResponse.status, 200);
+  const previewReview = await previewResponse.json();
+  assert.equal(previewReview.complete, false);
+  const preview = previewReview.packets[0].liveJobNimbus;
+  assert.equal(preview.recentActivities.length, 30);
+  assert.equal(preview.openTasks.length, 30);
+  assert.equal(preview.operationalDocuments.length, 60);
+  assert.equal(preview.coverage.mode, "preview");
+  assert.equal(preview.coverage.complete, false);
+  assert.equal(preview.coverage.activities.omittedCount, 1);
+  assert.equal(preview.coverage.openTasks.omittedCount, 2);
+  assert.equal(preview.coverage.operationalDocuments.omittedCount, 1);
+
+  const fullResponse = await read({ includeCompleteJobNimbusEvidence: true });
+  assert.equal(fullResponse.status, 200);
+  const fullReview = await fullResponse.json();
+  assert.equal(fullReview.complete, true);
+  const full = fullReview.packets[0].liveJobNimbus;
+  assert.equal(full.recentActivities.length, 31);
+  assert.match(full.recentActivities[30].note, /Claim was filed/);
+  assert.equal(full.openTasks.length, 32);
+  assert.equal(full.operationalDocuments.length, 61);
+  assert.equal(full.coverage.schemaVersion, 1);
+  assert.equal(full.coverage.mode, "complete");
+  assert.equal(full.coverage.providerScanComplete, true);
+  assert.equal(full.coverage.complete, true);
+  for (const [key, count] of [["activities", 31], ["openTasks", 32], ["operationalDocuments", 61]]) {
+    assert.deepEqual(full.coverage[key], { availableCount: count, returnedCount: count, omittedCount: 0 });
+  }
+  for (const input of [
+    { query: "", indexOnly: true },
+    { indexOnly: true },
+    { limit: 2 }
+  ]) {
+    const invalidResponse = await read({ includeCompleteJobNimbusEvidence: true, ...input });
+    assert.equal(invalidResponse.status, 400);
+    assert.match((await invalidResponse.json()).error, /one exact operator file review/);
+  }
+});
+
+test("Codex exact-file history cannot silently truncate a disjoint related/primary union", async (t) => {
+  const bridgePort = 19262;
+  const fakeApiPort = 19263;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-claim-evidence-bound-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    reviewActivities: Array.from({ length: 5001 }, (_, index) => ({
+      jnid: `union-activity-${index}`,
+      ...(index < 2500 ? { primary: { id: "contact-chance" } } : { related: [{ id: "contact-chance" }] }),
+      record_type_name: "Note",
+      note: "Routine work."
+    }))
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      JOBNIMBUS_API_KEY: "fixture-key",
+      MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false",
+      BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer fixture-codex-operator-token-1234567890",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      query: "#2739", limit: 1, includeGmail: false, includeQuo: false,
+      includeCompleteJobNimbusEvidence: true
+    })
+  });
+  assert.equal(response.status, 500);
+  assert.match((await response.json()).error, /JobNimbus.*(?:incomplete|bound)/);
+});
+
+test("Codex Gmail claim coverage distinguishes bounded complete searches from withheld, paginated or preview-omitted evidence", async (t) => {
+  const exactMessage = (index = 0, body = "Claim ABC-123: routine file correspondence.") => ({
+    id: `coverage-message-${index}`,
+    threadId: `coverage-thread-${index}`,
+    snippet: body.slice(0, 100),
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "carrier@example.test" },
+        { name: "To", value: "client@example.test" },
+        { name: "Subject", value: "Claim ABC-123" }
+      ],
+      body: { data: Buffer.from(body).toString("base64url") }
+    }
+  });
+  const unrelated = {
+    ...exactMessage(99, "A different file."),
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "other@example.test" },
+        { name: "Subject", value: "Unrelated correspondence" }
+      ],
+      body: { data: Buffer.from("A different file.").toString("base64url") }
+    }
+  };
+  const cases = [
+    { name: "known empty search", messages: [], ready: true },
+    { name: "fully reviewed bounded search", messages: [exactMessage()], ready: true },
+    { name: "withheld search result", messages: [exactMessage(), unrelated], ready: false },
+    { name: "withheld thread message", messages: [exactMessage()], extraThreadMessage: unrelated, ready: false },
+    { name: "provider pagination remaining", messages: [exactMessage()], nextPageToken: "fixture-next-page", ready: false },
+    { name: "unreviewed sixth thread", messages: Array.from({ length: 6 }, (_, i) => exactMessage(i)), ready: false },
+    { name: "truncated thread display", messages: [exactMessage(0, `Claim ABC-123: ${"x".repeat(2000)}`)], ready: false }
+  ];
+  for (const [index, scenario] of cases.entries()) {
+    await t.test(scenario.name, async (caseTest) => {
+      const bridgePort = 19264 + index * 2;
+      const fakeApiPort = bridgePort + 1;
+      const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-gmail-claim-coverage-"));
+      caseTest.after(() => rm(memoryRoot, { recursive: true, force: true }));
+      await startOperatorJobNimbusFixture(caseTest, fakeApiPort, {
+        communicationScope: true,
+        gmailMessages: scenario.messages,
+        gmailSearchMessages: scenario.messages.map(message => ({ id: message.id, threadId: message.threadId })),
+        gmailThreads: scenario.messages.map(message => ({
+          id: message.threadId,
+          messages: [message, ...(scenario.extraThreadMessage ? [scenario.extraThreadMessage] : [])]
+        })),
+        gmailNextPageToken: scenario.nextPageToken
+      });
+      const child = spawn(process.execPath, ["src/server.js"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PORT: String(bridgePort),
+          JOBNIMBUS_BRIDGE_TOKEN: "",
+          CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+          JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+          JOBNIMBUS_API_KEY: "fixture-key",
+          GOOGLE_CLIENT_ID: "fixture-client",
+          GOOGLE_CLIENT_SECRET: "fixture-secret",
+          GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+          NODE_ENV: "test",
+          GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`,
+          GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+          ALLOW_GOOGLE_USER_AUTH: "false",
+          MEMORY_ROOT: memoryRoot,
+          REQUIRE_CHANCE_RUN_POLICY: "false",
+          BRIDGE_ALLOW_WRITES: "false"
+        },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      caseTest.after(() => child.kill("SIGTERM"));
+      await waitForServer(child, bridgePort);
+      const response = await fetch(`http://127.0.0.1:${bridgePort}/ops/review-chance-files`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer fixture-codex-operator-token-1234567890",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          query: "#2739", limit: 1, includeGmail: true, includeQuo: false,
+          communicationDays: 3650, gmailLimit: 15, gmailThreadLimit: 5
+        })
+      });
+      assert.equal(response.status, 200);
+      const gmail = (await response.json()).packets[0].gmail;
+      assert.equal(gmail.status, "fresh");
+      assert.equal(gmail.coverage.providerScanComplete, scenario.ready, JSON.stringify(gmail.coverage));
+      assert.equal(gmail.coverage.search.windowDays, 3650);
+      assert.ok(gmail.coverage.limitationCodes.includes("bounded_history_window"));
+      if (scenario.name === "withheld search result") assert.equal(gmail.coverage.search.withheldMessages, 1);
+      if (scenario.name === "withheld thread message") assert.equal(gmail.threads[0].coverage.withheldMessages, 1);
+      if (scenario.name === "unreviewed sixth thread") assert.equal(gmail.coverage.omittedThreadCount, 1);
+      if (scenario.name === "truncated thread display") assert.equal(gmail.threads[0].coverage.previewTruncatedMessages, 1);
+    });
+  }
 });
 
 test("Gmail exact-file reads admit shared carrier routing and withhold conflicting or identifierless thread messages", async (t) => {

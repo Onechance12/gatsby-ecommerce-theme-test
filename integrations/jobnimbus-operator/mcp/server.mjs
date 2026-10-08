@@ -392,6 +392,7 @@ register(
     includeGmail: z.boolean().optional(),
     includeQuo: z.boolean().optional(),
     includeQuoTranscripts: z.boolean().optional(),
+    includeCompleteJobNimbusEvidence: z.boolean().optional(),
     includeBrainAdvisory: z.boolean().optional(),
     communicationDays: z.number().int().min(1).max(3650).optional(),
     gmailLimit: z.number().int().min(1).max(15).optional(),
@@ -681,14 +682,14 @@ register(
 
 register(
   "retell_claim_call_plan",
-  "Prepare one exact Chance-manifest claim-filing call from fresh JobNimbus evidence. The wrapper forces includeCarrierBatch:false, allows only file_new_claim or find_existing_claim, rejects #2628, freshly attests the bridge and live Retell configuration, and retains the short-lived one-use challenge locally. This never places a call. Show the complete returned packet, readiness, destination, planDigest, approvalId, and approvedInput to Chance for exact approval.",
+  "Prepare one exact Chance-manifest claim-filing call only after a fresh exact-file JobNimbus, Gmail, and Quo review finds no new-claim stop signal. The wrapper forces includeCarrierBatch:false, allows only file_new_claim or find_existing_claim, rejects #2628, freshly attests the bridge and live Retell configuration, and retains the communication digest plus short-lived one-use challenge locally. This never places a call. Show the complete returned packet, communicationPreflight, readiness, destination, planDigest, approvalId, and approvedInput to Chance for exact approval.",
   claimFilingInputShape,
   (input) => OPERATOR.planClaimFilingCall(input)
 );
 
 register(
   "retell_claim_call_execute",
-  "Place exactly one Retell carrier claim-filing call only after Chance explicitly approves the immediately preceding complete plan. Requires that plan's local approvalId, planDigest, and every unchanged input field. The hidden bridge challenge is consumed once; the wrapper re-attests the bridge and unchanged live Retell configuration immediately before calling. This does not update JobNimbus, create a note or task, send an email/text, or expose claim-result writeback.",
+  "Place exactly one Retell carrier claim-filing call only after Chance explicitly approves the immediately preceding complete plan. Requires that plan's local approvalId, planDigest, and every unchanged input field. The hidden bridge challenge is consumed once; immediately before calling, the wrapper re-attests the bridge, reruns the exact-file JobNimbus/Gmail/Quo review, requires its evidence digest to remain unchanged, and rechecks the live Retell configuration. This does not update JobNimbus, create a note or task, send an email/text, or expose claim-result writeback.",
   {
     approvalId: z.string().uuid(),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/),

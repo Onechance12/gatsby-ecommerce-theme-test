@@ -145,6 +145,17 @@ test("approved damage preserves qualifiers and alone can satisfy damage readines
   assert.equal(readiness(openingOnly).ready, true);
 });
 
+test("approved plural gutter damage is preserved throughout the filing packet", () => {
+  const detail = "Gutters wrap the entire first- and second-story roofline.";
+  const packet = buildClaimCallPacket(input({ damageDetails: detail }));
+
+  assert.deepEqual(packet.damageDetails, [detail]);
+  assert.deepEqual(packet.damageSummary, [detail]);
+  assert.equal(packet.damageOpening, detail);
+  assert.equal(packet.damageEvidenceSource, "approved_override");
+  assert.equal(readiness(packet).ready, true);
+});
+
 test("generic or unrelated damage language cannot authorize a filing", () => {
   for (const detail of [
     "Damage occurred",

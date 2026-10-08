@@ -109,9 +109,9 @@ Local Codex operator for the production HCN/Wave bridge.
 The operator exposes two narrow approval lanes:
 
 1. JobNimbus/Gmail actions use the existing exact dry-run digest and hidden single-use challenge action batch. Contact corrections, forward stage moves, and marked current-control tasks may group up to five exact Chance files in contact → status → task order. Gmail draft creation is a sole-operation batch and is not a send. A bridge-created draft may be delivered only through a later sole-operation `gmail.send_existing_draft` plan using its exact returned `draftId`, fresh immutable snapshot, and a new Chance approval. The bridge verifies the Gmail `SENT` message and retained unchanged source draft.
-2. Retell claim filing uses a separate single-file plan and execution pair. It supports only `file_new_claim` and `find_existing_claim`, always forces `includeCarrierBatch:false`, freshly reads the exact manifest file, and places no call until Chance explicitly approves the complete current packet, destination, `planDigest`, local `approvalId`, and unchanged input. New claims bind an explicit coverage disposition and practical file-specific damage facts; a prior/unverified policy is a lookup reference only. The bridge challenge stays hidden and is consumed once.
+2. Retell claim filing uses a separate single-file plan and execution pair. It supports only `file_new_claim` and `find_existing_claim`, always forces `includeCarrierBatch:false`, freshly reads the exact manifest file, and places no call until Chance explicitly approves the complete current packet, destination, communication preflight, `planDigest`, local `approvalId`, and unchanged input. Planning first runs a fresh exact-file JobNimbus, Gmail, and transcript-requested Quo review; unavailable, ambiguous, provider-incomplete, paginated, or partially reviewed evidence fails closed, and strong existing-claim, prior-filing, carrier-receipt, carrier-inspection, or callback signals stop a new-claim plan. New claims bind an explicit coverage disposition and practical file-specific damage facts; a prior/unverified policy is a lookup reference only. The bridge challenge stays hidden and is consumed once.
 
-Before a Retell plan and again immediately before an approved call, the wrapper freshly re-attests the exact boot, provider build, run policy, historical isolation, runtime, identity, access, and capability boundary. It also compares the exact published Retell agent/LLM versions and configuration digest, prompt, DTMF and guarded-end-call tools, extraction schema, timezone, signed callback restoration, no-default-inbound-agent route, full approved callback-packet digest, distinct isolated guarded-end and inbound-webhook credentials, and no-automatic-writeback contract. Any boundary, configuration, packet, digest, or input change consumes the local approval and fails closed before the call POST.
+Before a Retell plan and again immediately before an approved call, the wrapper freshly re-attests the exact boot, provider build, run policy, historical isolation, runtime, identity, access, and capability boundary. It also reruns the exact-file JobNimbus/Gmail/Quo review and requires the approval-bound communication evidence digest to remain unchanged, then compares the exact published Retell agent/LLM versions and configuration digest, prompt, DTMF and guarded-end-call tools, extraction schema, timezone, signed callback restoration, no-default-inbound-agent route, full approved callback-packet digest, distinct isolated guarded-end and inbound-webhook credentials, and no-automatic-writeback contract. Any boundary, evidence, configuration, packet, digest, or input change consumes the local approval and fails closed before the call POST.
 
 Claim-call results and pending carrier callbacks are read-only. Completed results require a transcript-bound guarded-completion receipt with the exact carrier-issued claim/reference number. A policy correction volunteered by the carrier may be retained as optional evidence, but Retell does not proactively investigate active coverage or policy terms. Conditional/unattributed callbacks and different-ANI recovery fail closed. The plugin does not expose `/claim-filing/writeback`; a call never automatically updates JobNimbus, creates a note or task, schedules an event, or sends an email/text. Any verified post-call JobNimbus change requires fresh evidence and a separate supported action-batch plan and approval.
 
@@ -132,6 +132,36 @@ If `ready:false` is caused only by enumerated unresolved action receipts, the re
 Calling `bridge_restart_verify`, starting any newer action-batch plan, or starting any newer Retell call plan clears every pending local approval across both lanes. Approval challenges live only in the current MCP process; a restart or new chat always requires a fresh plan and approval.
 
 The credential is intentionally absent from files and environment configuration.
+
+## Retell preflight evidence contract (release candidate)
+
+Ordinary evidence cards keep their 30-activity, 30-open-task and 60-document
+display previews. Retell planning and its immediate execution recheck request
+`includeCompleteJobNimbusEvidence:true` through the existing exact-file review
+route. This returns every activity, open task and operational document metadata
+record within the strict 5000-record source/related-primary-union bound. It does
+not expand the manifest or review other clients. Pagination failure or a larger
+union fails closed; it is never silently sliced into a supposedly complete scan.
+
+Admission requires versioned `liveJobNimbus.coverage` in `complete` mode,
+provider completion and consistent available/returned/omitted counts. The full
+record set and coverage bind the one-use approval digest. Prior-filing signals
+in older activities or open-task text stop a new-claim plan; these are review
+holds, not proof that a particular claim was filed. Document metadata remains
+metadata, not verified document contents.
+
+Gmail's 3650-day search window is an explicitly disclosed bound, not an unknown
+provider omission. The 15-result/five-thread search and five-message/1800-character
+thread previews remain bounded: remaining pages, withheld search **or** thread
+messages, omitted threads/messages, body/preview truncation or missing/inconsistent
+coverage prevent call admission. The Operator independently validates those
+counts rather than trusting only `providerScanComplete`. A clean bounded search
+may proceed; a partial review must not be labelled complete.
+
+Release requires the reviewed bridge deployment and a matching versioned Operator
+build pin in a fresh process. This candidate does not alter the installed plugin,
+policy, roster, credentials or live Retell configuration. Development approval
+does not deploy or activate it, and activation never authorizes a carrier call.
 
 ## Read-only 3x10 gap reports
 

@@ -10280,6 +10280,14 @@ async function reviewChanceFiles(input = {}) {
   const companyScope = operatorCompanyScopeActive();
   const page = clamp(Number(input.page || 1), 1, 1000);
   const limit = clamp(Number(input.limit || (input.query ? 1 : 5)), 1, 10);
+  if (
+    input.includeCompleteJobNimbusEvidence === true
+    && (!operatorRequest || !String(input.query || "").trim() || limit !== 1 || input.indexOnly === true)
+  ) {
+    const error = new Error("Complete JobNimbus claim evidence requires one exact operator file review with limit:1, not an index or sweep.");
+    error.statusCode = 400;
+    throw error;
+  }
   let contacts;
   if (input.query) {
     contacts = [(await findChanceContact(input.query)).contact];
@@ -10661,11 +10669,12 @@ function compactChanceIndexContact(contact) {
 
 async function buildChanceEvidencePacket(contact, input) {
   const operatorRequest = isCodexOperatorRequest();
+  const completeJobNimbusEvidence = operatorRequest && input.includeCompleteJobNimbusEvidence === true;
   const file = compactContact(contact);
   const [activities, tasks, documents] = await Promise.all([
-    listRelated("/activities", contact.jnid, operatorRequest ? 5000 : 60),
-    listRelated("/tasks", contact.jnid, operatorRequest ? 5000 : 60),
-    listRelated("/files", contact.jnid, operatorRequest ? 5000 : 1000)
+    listRelated("/activities", contact.jnid, operatorRequest ? 5000 : 60, { requireComplete: operatorRequest }),
+    listRelated("/tasks", contact.jnid, operatorRequest ? 5000 : 60, { requireComplete: operatorRequest }),
+    listRelated("/files", contact.jnid, operatorRequest ? 5000 : 1000, { requireComplete: operatorRequest })
   ]);
   const operationalDocuments = documents.filter(isOperationalDocumentMetadata);
   const sourceStatus = { jobNimbus: { status: "fresh", at: new Date().toISOString() } };
@@ -10681,6 +10690,7 @@ async function buildChanceEvidencePacket(contact, input) {
         const search = await gmailSearch({
           query,
           limit: clamp(Number(input.gmailLimit || 8), 1, 15),
+          communicationDays: input.communicationDays,
           [INTERNAL_COMMUNICATION_SCOPE]: communicationScope
         });
         const threads = [];
@@ -10691,7 +10701,42 @@ async function buildChanceEvidencePacket(contact, input) {
           });
           threads.push(compactGmailEvidenceThread(thread));
         }
-        gmail = { status: "fresh", query, messages: search.messages, threads };
+        const omittedThreadCount = Math.max(0, search.threads.length - threads.length);
+        const threadLimitationCodes = threads.flatMap((thread) => thread.coverage?.limitationCodes || []);
+        const searchCoverage = search.coverage;
+        const providerScanComplete = searchCoverage?.hasMore === false
+          && searchCoverage?.withheldMessages === 0
+          && searchCoverage?.scannedMessages === search.messages.length
+          && searchCoverage?.returnedMessages === search.messages.length
+          && (searchCoverage.truncatedMessages === undefined || searchCoverage.truncatedMessages === 0)
+          && omittedThreadCount === 0
+          && threads.every((thread) => (
+            thread.coverage?.hasMore === false
+            && thread.coverage?.scannedMessages === thread.messages.length
+            && thread.coverage?.returnedMessages === thread.messages.length
+            && thread.coverage?.omittedMessages === 0
+            && (thread.coverage.truncatedMessages === undefined || thread.coverage.truncatedMessages === 0)
+            && thread.coverage?.previewTruncatedMessages === 0
+            && thread.coverage?.withheldMessages === 0
+          ));
+        gmail = {
+          status: "fresh",
+          query,
+          messages: search.messages,
+          threads,
+          coverage: {
+            providerScanComplete,
+            search: search.coverage || null,
+            returnedThreadCount: search.threads.length,
+            reviewedThreadCount: threads.length,
+            omittedThreadCount,
+            limitationCodes: [...new Set([
+              ...(search.coverage?.limitationCodes || []),
+              ...threadLimitationCodes,
+              ...(omittedThreadCount ? ["unreviewed_exact_file_threads"] : [])
+            ])].sort()
+          }
+        };
       } catch (error) {
         gmail = { status: "error", error: redactSensitiveText(error.message), messages: [], threads: [] };
       }
@@ -10718,16 +10763,17 @@ async function buildChanceEvidencePacket(contact, input) {
               maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
               includeTranscripts: input.includeQuoTranscripts === true
             });
+        const timelineLimit = operatorRequest ? 50 : 30;
         quo = {
           ...history,
           status: "partial",
-          timeline: history.timeline.slice(-30).reverse(),
+          timeline: history.timeline.slice(-timelineLimit).reverse(),
           coverage: {
             searchScope: "homeowner_phone_only",
             carrierConversationsSearched: false,
             transcriptReviewRequested: input.includeQuoTranscripts === true,
             returnedTranscriptCount: Array.isArray(history.transcripts) ? history.transcripts.length : 0,
-            omittedTimelineItems: Math.max(0, history.timeline.length - 30),
+            omittedTimelineItems: Math.max(0, history.timeline.length - timelineLimit),
             complete: false
           }
         };
@@ -10747,16 +10793,43 @@ async function buildChanceEvidencePacket(contact, input) {
       (a, b) => providerTimeMs(a.date_start || a.date_end)
         - providerTimeMs(b.date_start || b.date_end)
     );
+  // Compact previews are for people; claim admission must see every returned
+  // exact-file record. listRelated fails closed if its provider/union bound is hit.
+  const reviewedActivities = (completeJobNimbusEvidence ? sortedActivities : sortedActivities.slice(0, 30)).map(compactActivity);
+  const reviewedTasks = (completeJobNimbusEvidence ? openTasks : openTasks.slice(0, 30)).map(compactTask);
+  const reviewedDocuments = (completeJobNimbusEvidence ? operationalDocuments : operationalDocuments.slice(0, 60)).map(compactDocument);
+  const rowCoverage = (availableCount, returnedCount) => ({
+    availableCount,
+    returnedCount,
+    omittedCount: availableCount - returnedCount
+  });
+  const jobNimbusCoverage = {
+    schemaVersion: 1,
+    mode: completeJobNimbusEvidence ? "complete" : "preview",
+    providerScanComplete: operatorRequest,
+    complete: operatorRequest
+      && reviewedActivities.length === activities.length
+      && reviewedTasks.length === openTasks.length
+      && reviewedDocuments.length === operationalDocuments.length,
+    readLimit: operatorRequest ? 5000 : null,
+    activities: rowCoverage(activities.length, reviewedActivities.length),
+    openTasks: rowCoverage(openTasks.length, reviewedTasks.length),
+    operationalDocuments: rowCoverage(operationalDocuments.length, reviewedDocuments.length)
+  };
   const requestedSourcesComplete = [gmail.status, quo.status]
     .every((status) => !["unavailable", "error", "partial", "no_file_phone"].includes(status));
   const packet = {
-    complete: requestedSourcesComplete,
+    complete: requestedSourcesComplete && (!operatorRequest || (
+      jobNimbusCoverage.complete
+      && (gmail.status !== "fresh" || gmail.coverage?.providerScanComplete === true)
+    )),
     file,
     liveJobNimbus: {
       rawContact: contact,
-      recentActivities: sortedActivities.slice(0, 30).map(compactActivity),
-      openTasks: openTasks.slice(0, 30).map(compactTask),
-      operationalDocuments: operationalDocuments.slice(0, 60).map(compactDocument),
+      recentActivities: reviewedActivities,
+      openTasks: reviewedTasks,
+      operationalDocuments: reviewedDocuments,
+      coverage: jobNimbusCoverage,
       excludedPhotoLikeDocumentCount: documents.length - operationalDocuments.length,
       assistantRead: buildAssistantRead(contact, activities, tasks, operationalDocuments)
     },
@@ -12857,7 +12930,7 @@ async function listResourcePages(endpoint, maxPages = 10, options = {}) {
   return rows;
 }
 
-async function listRelated(endpoint, contactId, limit) {
+async function listRelated(endpoint, contactId, limit, options = {}) {
   const exactContactId = String(contactId || "").trim();
   const resultLimit = Number(limit);
   if (!exactContactId || !Number.isSafeInteger(resultLimit) || resultLimit < 1 || resultLimit > 5000) {
@@ -12881,6 +12954,9 @@ async function listRelated(endpoint, contactId, limit) {
       throw new Error("JobNimbus exact-file pagination returned a record without an id.");
     }
     if (!records.has(id)) records.set(id, item);
+  }
+  if (options.requireComplete === true && records.size > resultLimit) {
+    throw new Error("JobNimbus exact-file related/primary union is incomplete at the reviewed bound.");
   }
   return [...records.values()].slice(0, resultLimit);
 }
@@ -15481,15 +15557,20 @@ function buildFileGmailQuery(file, requestedDays) {
 }
 
 function compactGmailEvidenceThread(thread) {
-  const messages = (Array.isArray(thread.messages) ? thread.messages : []).slice(-5).map((message) => ({
-    id: message.id,
-    date: message.date,
-    from: message.from,
-    to: message.to,
-    subject: message.subject,
-    text: String(message.plainText || message.htmlText || message.snippet || "").slice(0, 1800),
-    attachments: message.attachments
-  }));
+  let previewTruncatedMessages = 0;
+  const messages = (Array.isArray(thread.messages) ? thread.messages : []).slice(-5).map((message) => {
+    const text = String(message.plainText || message.htmlText || message.snippet || "");
+    if (text.length > 1800) previewTruncatedMessages += 1;
+    return {
+      id: message.id,
+      date: message.date,
+      from: message.from,
+      to: message.to,
+      subject: message.subject,
+      text: text.slice(0, 1800),
+      attachments: message.attachments
+    };
+  });
   return {
     id: thread.id,
     messageCount: thread.messageCount,
@@ -15498,9 +15579,14 @@ function compactGmailEvidenceThread(thread) {
       complete: false,
       returnedMessages: messages.length,
       omittedMessages: Math.max(0, thread.messageCount - messages.length),
+      previewTruncatedMessages,
       previewMessageLimit: 5,
       previewCharactersPerMessage: 1800,
-      limitationCodes: [...(thread.coverage?.limitationCodes || []), "bounded_thread_preview"]
+      limitationCodes: [
+        ...(thread.coverage?.limitationCodes || []),
+        ...(previewTruncatedMessages ? ["message_text_preview_truncated"] : []),
+        "bounded_thread_preview"
+      ]
     },
     messages,
     assistantRead: thread.assistantRead
@@ -18344,6 +18430,7 @@ const OPENAPI = {
           includeGmail: { type: "boolean", default: true },
           includeQuo: { type: "boolean", default: true, description: "When true, reads matching homeowner/adjuster communications across every Quo team line, including other employees' lines, as evidence only." },
           includeQuoTranscripts: { type: "boolean", default: false },
+          includeCompleteJobNimbusEvidence: { type: "boolean", default: false, description: "Operator-only exact query with limit 1. Returns all activities, open tasks and operational document metadata within the fail-closed 5000-record source bound instead of display previews; never expands file access or authorizes a call." },
           includeBrainAdvisory: { type: "boolean", default: false, description: "Requests one bounded no-tools model advisory over evidence-backed open loops. The result is a candidate and cannot execute or approve anything." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },
