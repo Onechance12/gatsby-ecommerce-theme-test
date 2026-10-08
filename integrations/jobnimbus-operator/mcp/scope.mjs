@@ -77,7 +77,8 @@ export const EXPECTED_OPERATOR_CAPABILITIES = Object.freeze([
   "quo.history.read",
   "quo.lines.read",
   "quo.transcripts.read",
-  "scheduling.availability.review"
+  "scheduling.availability.review",
+  "weather.date_of_loss.research"
 ]);
 
 export const CHANCE_LEGACY_ISOLATION = Object.freeze({

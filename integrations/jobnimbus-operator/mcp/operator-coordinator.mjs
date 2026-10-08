@@ -142,6 +142,7 @@ const CLAIM_COMMUNICATION_REVIEW_INPUT = Object.freeze({
   includeQuo: true,
   includeQuoTranscripts: true,
   includeCompleteJobNimbusEvidence: true,
+  includeCompleteCommunicationEvidence: true,
   communicationDays: 3650,
   gmailLimit: 15,
   gmailThreadLimit: 5,
@@ -192,6 +193,23 @@ function evidenceFingerprints(rows) {
   return rows.map((row) => sha256(canonical(row))).sort();
 }
 
+function gmailEvidenceFingerprints(rows) {
+  if (!Array.isArray(rows)) return null;
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+      key,
+      key === "attachments" && Array.isArray(child)
+        ? child.map(({ attachmentId, attachmentRef, ...metadata }) => stable(metadata))
+        : stable(child)
+    ]));
+  };
+  // Download IDs and boot-local read references are transport material, not
+  // evidence changes. Keep MIME location, filename, type, size and all content.
+  return evidenceFingerprints(rows.map(stable));
+}
+
 function claimCommunicationReviewRequest(input) {
   return {
     query: input.query,
@@ -226,8 +244,8 @@ function claimCommunicationSnapshot(review, packet) {
     gmail: {
       status: String(gmail.status || ""),
       query: String(gmail.query || ""),
-      messages: evidenceFingerprints(gmail.messages),
-      threads: evidenceFingerprints(gmail.threads),
+      messages: gmailEvidenceFingerprints(gmail.messages),
+      threads: gmailEvidenceFingerprints(gmail.threads),
       coverage: gmail.coverage || null
     },
     quo: {
@@ -236,6 +254,8 @@ function claimCommunicationSnapshot(review, packet) {
       timeline: evidenceFingerprints(quo.timeline),
       transcripts: evidenceFingerprints(quo.transcripts),
       completeness: quo.completeness || null,
+      transcriptCoverage: quo.transcriptCoverage || null,
+      fileCorrelation: quo.fileCorrelation || null,
       coverage: quo.coverage || null
     }
   };
@@ -319,10 +339,17 @@ function completeClaimGmailReview(gmail) {
   const coverage = gmail?.coverage;
   const search = coverage?.search;
   if (!Array.isArray(gmail?.messages) || !Array.isArray(gmail?.threads)) return false;
+  const excluded = search?.excludedOtherFileMessages ?? 0;
+  const verifiedExclusions = Number.isSafeInteger(excluded) && excluded >= 0
+    && (excluded === 0 || (search?.schemaVersion === 2
+      && search.mode === "complete_bounded_review"
+      && search.paginationValid === true && search.scopeVerificationComplete === true));
   return coverage?.providerScanComplete === true
     && search?.hasMore === false
     && search.withheldMessages === 0
-    && search.scannedMessages === gmail.messages.length
+    && verifiedExclusions
+    && (search.schemaVersion !== 2 || (search.paginationValid === true && search.scopeVerificationComplete === true))
+    && search.scannedMessages === gmail.messages.length + excluded
     && search.returnedMessages === gmail.messages.length
     && (search.truncatedMessages === undefined || search.truncatedMessages === 0)
     && coverage.returnedThreadCount === gmail.threads.length
@@ -338,6 +365,31 @@ function completeClaimGmailReview(gmail) {
       && thread.coverage.previewTruncatedMessages === 0
       && (thread.coverage.truncatedMessages === undefined || thread.coverage.truncatedMessages === 0)
     ));
+}
+
+function completeClaimQuoTranscriptReview(quo) {
+  const coverage = quo?.transcriptCoverage;
+  if (!Array.isArray(quo?.timeline) || !Array.isArray(quo?.transcripts)) return false;
+  const calls = quo.timeline.filter((row) => row?.type === "call");
+  if (coverage?.mode !== "complete_bounded_review" || coverage.complete !== true
+    || coverage.callCount !== calls.length || coverage.reviewedCallCount !== calls.length
+    || coverage.omittedCallCount !== 0 || coverage.missingSpeechTranscripts !== 0
+    || coverage.returnedTranscriptCount !== quo.transcripts.length) return false;
+  const byCall = new Map();
+  for (const transcript of quo.transcripts) {
+    if (!transcript?.callId || byCall.has(transcript.callId) || !calls.some((call) => call.id === transcript.callId)) return false;
+    byCall.set(transcript.callId, transcript);
+  }
+  return calls.every((call) => {
+    if (!call?.id) return false;
+    const noSpeech = Number(call.durationSec || 0) === 0
+      && ["missed", "no-answer", "busy", "failed", "canceled", "cancelled", "unanswered"].includes(String(call.status || "").toLowerCase());
+    if (noSpeech || String(call.voicemail || "").trim()) return true;
+    const transcript = byCall.get(call.id);
+    return transcript?.truncated !== true && String(transcript?.status || "").toLowerCase() === "completed"
+      && Array.isArray(transcript.dialogue)
+      && transcript.dialogue.some((segment) => String(segment?.text || "").trim());
+  });
 }
 
 function assertClaimCommunicationReview(review, input) {
@@ -358,6 +410,7 @@ function assertClaimCommunicationReview(review, input) {
     [!["fresh", "partial"].includes(String(quo.status || "")), "quo_not_reviewed"],
     [quo?.completeness?.complete !== true, "quo_provider_scan_incomplete"],
     [quo?.coverage?.transcriptReviewRequested !== true, "quo_transcripts_not_requested"],
+    [!completeClaimQuoTranscriptReview(quo), "quo_transcript_review_incomplete"],
     [Number(quo?.coverage?.omittedTimelineItems || 0) > 0, "quo_timeline_preview_incomplete"],
     [!Array.isArray(quo.timeline) || !Array.isArray(quo.transcripts), "quo_evidence_incomplete"],
     [!Array.isArray(packet?.liveJobNimbus?.recentActivities), "jobnimbus_activity_incomplete"],

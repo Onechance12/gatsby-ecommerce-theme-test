@@ -280,6 +280,10 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   let thresherEvidenceReadCount = 0;
   let quoHistoryReadCount = 0;
   let gmailEvidenceReadCount = 0;
+  const gmailAttachmentRequests = [];
+  const gmailSearchPageRequests = [];
+  const quoTranscriptRequests = [];
+  const weatherRequests = [];
   const taskQueryFields = [];
   const taskPageRequests = [];
   const activityPageRequests = [];
@@ -429,6 +433,17 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       return;
     }
     if (options.communicationScope && url.pathname === "/gmail/v1/users/me/messages" && req.method === "GET") {
+      gmailSearchPageRequests.push(url.searchParams.get("pageToken") || "");
+      if (Array.isArray(options.gmailSearchPages)) {
+        const index = Number(url.searchParams.get("pageToken") || "0");
+        const page = options.gmailSearchPages[index] || [];
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          messages: page,
+          ...(index + 1 < options.gmailSearchPages.length ? { nextPageToken: String(index + 1) } : {})
+        }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         ...(options.gmailNextPageToken ? { nextPageToken: options.gmailNextPageToken } : {}),
@@ -448,6 +463,17 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
           { id: "unrelated-message", threadId: "unrelated-thread" }
         ]
       }));
+      return;
+    }
+    const gmailAttachmentMatch = options.communicationScope
+      ? url.pathname.match(/^\/gmail\/v1\/users\/me\/messages\/([^/]+)\/attachments\/([^/]+)$/)
+      : null;
+    if (gmailAttachmentMatch && req.method === "GET") {
+      const id = decodeURIComponent(gmailAttachmentMatch[2]);
+      gmailAttachmentRequests.push(id);
+      const bytes = options.gmailAttachmentBytes?.[id];
+      res.writeHead(bytes ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(bytes ? { data: bytes.toString("base64url"), size: bytes.length } : { error: "fixture attachment unavailable" }));
       return;
     }
     const gmailMessageMatch = options.communicationScope
@@ -670,6 +696,26 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
               duration: 60
             }]
       }));
+      return;
+    }
+    const transcriptMatch = options.communicationScope ? url.pathname.match(/^\/call-transcripts\/([^/]+)$/) : null;
+    if (transcriptMatch && req.method === "GET") {
+      const id = decodeURIComponent(transcriptMatch[1]);
+      quoTranscriptRequests.push(id);
+      const transcript = options.quoTranscripts?.[id];
+      res.writeHead(transcript ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(transcript ? { data: { callId: id, ...transcript } } : { error: "fixture transcript unavailable" }));
+      return;
+    }
+    if (options.weather && url.pathname === "/geocoder") {
+      weatherRequests.push(url.searchParams.get("address"));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ result: { addressMatches: [{ matchedAddress: "100 TEST ST, DALLAS, TX, 75201", coordinates: { x: -96.797, y: 32.777 } }] } }));
+      return;
+    }
+    if (options.weather && url.pathname === "/lsr") {
+      res.writeHead(200, { "content-type": "text/csv" });
+      res.end("VALID,LAT,LON,MAG,CITY,COUNTY,STATE,SOURCE,REMARK\n202604252130,32.779,-96.795,1.75,Dallas,Dallas,TX,Public,Fixture observation");
       return;
     }
     const exactContact = [
@@ -969,6 +1015,11 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
     getThresherEvidenceReadCount: () => thresherEvidenceReadCount,
     getQuoHistoryReadCount: () => quoHistoryReadCount,
     getGmailEvidenceReadCount: () => gmailEvidenceReadCount,
+    getGmailAttachmentRequests: () => [...gmailAttachmentRequests],
+    getGmailSearchPageRequests: () => [...gmailSearchPageRequests],
+    getQuoTranscriptRequests: () => [...quoTranscriptRequests],
+    getWeatherRequests: () => [...weatherRequests],
+    getGmailMessage: (id) => gmailMessages.get(id),
     getContactPageRequests: () => structuredClone(contactPageRequests),
     getGmailDraftCreateCount: () => gmailDraftCreateCount,
     getGmailSendCount: () => gmailSendCount,
@@ -985,6 +1036,288 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       .find((contact) => contact.jnid === id)
   };
 }
+
+async function startCommunicationRepairBridge(t, port, apiPort, options = {}) {
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "hcn-communication-repair-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixture = await startOperatorJobNimbusFixture(t, apiPort, {
+    communicationScope: true, quoCalls: [], quoMessages: [], ...options
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, NODE_ENV: "test", PORT: String(port),
+      JOBNIMBUS_BRIDGE_TOKEN: "",
+      CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${apiPort}`, JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client", GOOGLE_CLIENT_SECRET: "fixture-secret", GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${apiPort}/oauth-token`, GMAIL_API_BASE_URL: `http://127.0.0.1:${apiPort}`,
+      CENSUS_GEOCODER_URL: `http://127.0.0.1:${apiPort}/geocoder`, HAIL_REPORTS_URL: `http://127.0.0.1:${apiPort}/lsr`,
+      QUO_API_KEY: "fixture-quo-key", QUO_API_BASE_URL: `http://127.0.0.1:${apiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100", ALLOW_GOOGLE_USER_AUTH: "false",
+      MEMORY_ROOT: memoryRoot, REQUIRE_CHANCE_RUN_POLICY: "false", BRIDGE_ALLOW_WRITES: "false",
+      ALLOW_QUO_SEND: "false", ALLOW_RETELL_CALLS: "false", ALLOW_RETELL_CLAIM_CALLS: "false",
+      ALLOW_CARRIER_FOLLOWUP_CALLS: "false", ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, port);
+  return {
+    fixture,
+    post: (pathname, body, token = "fixture-codex-mac-operator-token-1234567890") => fetch(`http://127.0.0.1:${port}${pathname}`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body)
+    })
+  };
+}
+
+function communicationRepairMessage(index, body = "Routine update for claim ABC-123.", threadId = `repair-thread-${index}`) {
+  return {
+    id: `repair-message-${index}`, threadId, snippet: body.slice(0, 100), labelIds: ["INBOX"],
+    payload: { mimeType: "text/plain", headers: [
+      { name: "From", value: "carrier@example.test" }, { name: "To", value: "client@example.test" },
+      { name: "Subject", value: "Claim ABC-123" }
+    ], body: { data: Buffer.from(body).toString("base64url") } }
+  };
+}
+
+test("communication repair binds a Gmail MIME part across token rotation and never falls back to a guessed filename", async (t) => {
+  const pdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+  const message = communicationRepairMessage(0);
+  message.payload = { ...message.payload, mimeType: "multipart/mixed", parts: [
+    { partId: "0", mimeType: "text/plain", body: message.payload.body },
+    { partId: "1", filename: "coverage.pdf", mimeType: "application/pdf", body: { size: pdf.length, attachmentId: "old-token" } }
+  ] };
+  const h = await startCommunicationRepairBridge(t, 19310, 19311, {
+    companyOther: true, gmailMessages: [message], gmailThreads: [{ id: message.threadId, messages: [message] }],
+    gmailAttachmentBytes: { "old-token": pdf, "new-token": pdf }
+  });
+  const threadResponse = await h.post("/gmail/thread", { fileQuery: "#2739", threadId: message.threadId });
+  assert.equal(threadResponse.status, 200);
+  const selected = (await threadResponse.json()).messages[0].attachments[0];
+  assert.equal(selected.partId, "1");
+  assert.equal(selected.partPath, "0.1");
+  assert.equal(typeof selected.attachmentRef, "string");
+  const fresh = h.fixture.getGmailMessage(message.id);
+  fresh.payload.parts[1].body.attachmentId = "new-token";
+  const input = { fileQuery: "#2739", messageId: message.id, attachmentId: selected.attachmentId,
+    attachmentRef: selected.attachmentRef, filename: selected.filename, contentType: selected.mimeType };
+  const response = await h.post("/gmail/attachment-review", input);
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.equal((await response.json()).attachmentId, "new-token");
+  assert.deepEqual(h.fixture.getGmailAttachmentRequests(), ["new-token"]);
+  for (const bad of [
+    { ...input, attachmentRef: undefined },
+    { ...input, attachmentRef: undefined, attachmentId: undefined },
+    { ...input, attachmentRef: `${input.attachmentRef}x` },
+    { ...input, filename: "different.pdf" },
+    { ...input, contentType: "image/png" },
+    { ...input, fileQuery: "#3901", operatorScope: "company" }
+  ]) {
+    const denied = await h.post("/gmail/attachment-review", bad);
+    assert.ok([400, 403].includes(denied.status));
+  }
+  fresh.payload.parts[1].body.size += 1;
+  assert.equal((await h.post("/gmail/attachment-review", input)).status, 403);
+  assert.deepEqual(h.fixture.getGmailAttachmentRequests(), ["new-token"]);
+  assert.equal(h.fixture.getContactUpdateCount(), 0);
+});
+
+test("communication repair follows Gmail pages and retains older long messages beyond the five-message preview", async (t) => {
+  const messages = Array.from({ length: 31 }, (_, index) => communicationRepairMessage(index,
+    index === 0 ? `Claim ABC-123 ${"x ".repeat(8000)}Older carrier callback is pending.` : undefined,
+    index < 25 ? "repair-thread-0" : `repair-thread-${index}`));
+  const other = communicationRepairMessage("other", "Private update for claim COMP-321.", "other-thread");
+  other.payload.headers = [{ name: "To", value: "company-client@example.test" }, { name: "Subject", value: "Claim COMP-321" }];
+  const all = [...messages, other];
+  const byThread = Map.groupBy(messages, (row) => row.threadId);
+  const h = await startCommunicationRepairBridge(t, 19312, 19313, {
+    companyOther: true, gmailMessages: all,
+    gmailSearchPages: [all.slice(0, 25), all.slice(25)].map((page) => page.map(({ id, threadId }) => ({ id, threadId }))),
+    gmailThreads: [...byThread].map(([id, rows]) => ({ id, messages: rows }))
+  });
+  const response = await h.post("/ops/review-chance-files", {
+    query: "#2739", limit: 1, includeGmail: true, includeQuo: false,
+    includeCompleteCommunicationEvidence: true, communicationDays: 3650
+  });
+  assert.equal(response.status, 200);
+  const gmail = (await response.json()).packets[0].gmail;
+  assert.equal(gmail.status, "fresh", gmail.error);
+  assert.equal(gmail.coverage.providerScanComplete, true, JSON.stringify(gmail.coverage));
+  assert.equal(gmail.messages.length, 31);
+  assert.equal(gmail.coverage.search.scannedMessages, 32);
+  assert.equal(gmail.coverage.search.excludedOtherFileMessages, 1);
+  assert.equal(gmail.coverage.search.withheldMessages, 0);
+  assert.equal(gmail.coverage.search.pagesRead, 2);
+  assert.equal(gmail.threads.length, 7);
+  assert.equal(gmail.threads[0].messages.length, 25);
+  assert.match(gmail.threads[0].messages[0].text, /Older carrier callback is pending/);
+  assert.equal(gmail.threads[0].coverage.previewTruncatedMessages, 0);
+  assert.doesNotMatch(JSON.stringify(gmail), /Private update|COMP-321|company-client/);
+  assert.deepEqual(h.fixture.getGmailSearchPageRequests(), ["", "1"]);
+  for (const input of [{ query: "", indexOnly: true }, { query: "#2739", limit: 2 }]) {
+    assert.equal((await h.post("/ops/review-chance-files", { ...input, includeCompleteCommunicationEvidence: true })).status, 400);
+  }
+});
+
+test("communication repair keeps unknown, mixed and oversized Gmail evidence incomplete", async (t) => {
+  const own = communicationRepairMessage(0, `Claim ABC-123 ${"x".repeat(65000)}`);
+  const unknown = communicationRepairMessage("unknown", "PRIVATE-UNKNOWN correspondence");
+  unknown.payload.headers = [{ name: "From", value: "unscoped@example.test" }];
+  const mixed = communicationRepairMessage("mixed", "Claim ABC-123 and COMP-321 PRIVATE-MIXED");
+  const h = await startCommunicationRepairBridge(t, 19314, 19315, {
+    companyOther: true, gmailMessages: [own, unknown, mixed],
+    gmailSearchMessages: [own, unknown, mixed].map(({ id, threadId }) => ({ id, threadId })),
+    gmailThreads: [{ id: own.threadId, messages: [own] }]
+  });
+  const response = await h.post("/ops/review-chance-files", {
+    query: "#2739", limit: 1, includeGmail: true, includeQuo: false, includeCompleteCommunicationEvidence: true
+  });
+  assert.equal(response.status, 200);
+  const gmail = (await response.json()).packets[0].gmail;
+  assert.equal(gmail.coverage.providerScanComplete, false);
+  assert.equal(gmail.coverage.search.withheldMessages, 2);
+  assert.equal(gmail.coverage.search.excludedOtherFileMessages, 0);
+  assert.equal(gmail.threads[0].coverage.truncatedMessages, 1);
+  assert.doesNotMatch(JSON.stringify(gmail), /PRIVATE-|COMP-321|unscoped@example/);
+});
+
+test("communication repair reports repeated Gmail pages as incomplete rather than looping or declaring success", async (t) => {
+  const message = communicationRepairMessage(0);
+  const h = await startCommunicationRepairBridge(t, 19316, 19317, {
+    gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }],
+    gmailNextPageToken: "repeated-token", gmailThreads: [{ id: message.threadId, messages: [message] }]
+  });
+  const response = await h.post("/gmail/search", { fileQuery: "#2739", limit: 25, completeReview: true });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.coverage.paginationValid, false);
+  assert.equal(result.coverage.scopeVerificationComplete, false);
+  assert.equal(result.coverage.hasMore, true);
+  assert.ok(result.coverage.limitationCodes.includes("provider_pagination_invalid"));
+  assert.equal(h.fixture.getGmailSearchPageRequests().length, 2);
+});
+
+test("communication repair marks the Gmail search budget rather than silently dropping page eleven", async (t) => {
+  const messages = Array.from({ length: 251 }, (_, index) => communicationRepairMessage(index, undefined, "one-thread"));
+  const pages = Array.from({ length: 11 }, (_, index) => messages.slice(index * 25, (index + 1) * 25)
+    .map(({ id, threadId }) => ({ id, threadId })));
+  const h = await startCommunicationRepairBridge(t, 19326, 19327, { gmailMessages: messages, gmailSearchPages: pages });
+  const response = await h.post("/gmail/search", { fileQuery: "#2739", limit: 25, completeReview: true });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.count, 250);
+  assert.equal(result.coverage.scannedMessages, 250);
+  assert.equal(result.coverage.pagesRead, 10);
+  assert.equal(result.coverage.readLimit, 250);
+  assert.equal(result.coverage.hasMore, true);
+  assert.equal(result.coverage.complete, false);
+  assert.ok(result.coverage.limitationCodes.includes("provider_pagination_remaining"));
+  assert.equal(h.fixture.getGmailSearchPageRequests().length, 10);
+});
+
+test("communication repair ignores malformed carrier-routing values but still holds real cross-role phone collisions", async (t) => {
+  const h = await startCommunicationRepairBridge(t, 19318, 19319, {
+    companyOther: true, companyOtherAdjusterPhone: "Call the desk adjuster; no phone provided"
+  });
+  assert.equal((await h.post("/quo/history", { query: "#2739" })).status, 200);
+  const before = h.fixture.getQuoHistoryReadCount();
+  h.fixture.getContact("contact-company-other").cf_string_8 = "2145551212";
+  const held = await h.post("/quo/history", { query: "#2739" });
+  assert.equal(held.status, 400);
+  assert.match((await held.json()).error, /carrier\/adjuster routing/);
+  assert.equal(h.fixture.getQuoHistoryReadCount(), before);
+});
+
+test("communication repair scopes shared-phone texts and call transcripts per record without disclosing other files", async (t) => {
+  const text = (id, content) => ({ id, phoneNumberId: "line-1", from: "+12145551212", to: ["+19725550100"],
+    direction: "incoming", status: "received", createdAt: "2026-10-01T12:00:00Z", text: content });
+  const call = (id) => ({ id, phoneNumberId: "line-1", participants: ["+12145551212"],
+    direction: "incoming", status: "completed", duration: 60, createdAt: "2026-10-02T12:00:00Z" });
+  const transcript = (content) => ({ status: "completed", dialogue: [{ identifier: "caller", content }] });
+  const h = await startCommunicationRepairBridge(t, 19320, 19321, {
+    companyOther: true, companyOtherMobilePhone: "2145551212",
+    quoMessages: [text("own-text", "Claim ABC-123: access confirmed."), text("foreign-text", "COMP-321 PRIVATE-OTHER"),
+      text("mixed-text", "ABC-123 COMP-321 PRIVATE-MIXED"), text("unknown-text", "PRIVATE-UNKNOWN: call tomorrow."),
+      text("unknown-claim", "Claim ABC-123 and claim number UNLISTED-999 PRIVATE-UNLISTED"),
+      text("foreign-reference", "ABC-123 https://app.jobnimbus.com/contact/unknown-file PRIVATE-REF")],
+    quoCalls: [call("own-call"), call("foreign-call")],
+    quoTranscripts: { "own-call": transcript("Claim number ABC-123: access confirmed."), "foreign-call": transcript("COMP-321 PRIVATE-TRANSCRIPT") }
+  });
+  assert.equal((await h.post("/quo/history", { query: "#2739" })).status, 400);
+  assert.equal(h.fixture.getQuoHistoryReadCount(), 0);
+  const response = await h.post("/quo/history", {
+    query: "#2739", maxResults: 50, includeTranscripts: true, completeReview: true, allowSharedPhoneEvidence: true
+  });
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const result = await response.json();
+  assert.deepEqual(result.timeline.map((row) => row.id), ["own-text", "own-call"]);
+  assert.deepEqual(result.transcripts.map((row) => row.callId), ["own-call"]);
+  assert.equal(result.fileCorrelation.withheldTimelineItems, 6);
+  assert.equal(result.completeness.complete, false);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-|COMP-321|foreign-call|unknown-file|UNLISTED-999/);
+  const denied = await h.post("/quo/transcript", { query: "#2739", callId: "foreign-call", allowSharedPhoneEvidence: true });
+  assert.equal(denied.status, 403);
+  assert.doesNotMatch(await denied.text(), /PRIVATE-TRANSCRIPT|COMP-321/);
+  assert.equal(h.fixture.getContactUpdateCount(), 0);
+});
+
+test("communication repair reads older Quo call transcripts and reports unavailable speech evidence", async (t) => {
+  const calls = Array.from({ length: 6 }, (_, index) => ({
+    id: `repair-call-${index}`, phoneNumberId: "line-1", participants: ["+12145551212"],
+    createdAt: `2026-10-01T12:0${index}:00Z`, direction: "incoming", status: "completed", duration: 60
+  }));
+  const transcripts = Object.fromEntries(calls.map((row, index) => [row.id, {
+    status: "completed", dialogue: [{ content: index === 0 ? "We already filed a claim. OLDER-STOP-SIGNAL" : "Routine update." }]
+  }]));
+  const h = await startCommunicationRepairBridge(t, 19322, 19323, { quoCalls: calls, quoTranscripts: transcripts });
+  const input = { query: "#2739", maxResults: 50, includeTranscripts: true, completeReview: true };
+  const response = await h.post("/quo/history", input);
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.transcriptCoverage.complete, true);
+  assert.equal(result.transcriptCoverage.reviewedCallCount, 6);
+  assert.match(JSON.stringify(result.transcripts), /OLDER-STOP-SIGNAL/);
+  transcripts["repair-call-0"].dialogue[0].content = "x".repeat(65000);
+  const oversized = await h.post("/quo/history", input);
+  assert.equal(oversized.status, 200);
+  const oversizedResult = await oversized.json();
+  assert.equal(oversizedResult.transcriptCoverage.complete, false);
+  assert.equal(oversizedResult.transcripts.find((row) => row.callId === "repair-call-0").truncated, true);
+  delete transcripts["repair-call-0"];
+  const missing = await h.post("/quo/history", input);
+  assert.equal(missing.status, 200);
+  const missingResult = await missing.json();
+  assert.equal(missingResult.transcriptCoverage.complete, false);
+  assert.equal(missingResult.transcriptCoverage.missingSpeechTranscripts, 1);
+});
+
+test("communication repair exposes existing DOL research only to exact assigned Mac files without writes", async (t) => {
+  const h = await startCommunicationRepairBridge(t, 19324, 19325, {
+    companyOther: true, weather: true,
+    chanceOverrides: { address_line1: "100 Test St", city: "Dallas", state_text: "TX", zip: "75201", cf_date_1: "2026-04-25" }
+  });
+  const input = { query: "#2739", startDate: "2025-01-01", endDate: "2026-10-08" };
+  const response = await h.post("/weather/dol-research", input);
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.mode, "read_only_weather_research");
+  assert.equal(result.file.id, "contact-chance");
+  assert.equal(result.recommendedCarrierIntake.stormTime, "Approximately 4:30 PM CDT based on a nearby reported hail event");
+  assert.match(result.instruction, /Never file a claim or update JobNimbus/);
+  const expectedRequests = ["100 Test St, Dallas, TX, 75201"];
+  assert.deepEqual(h.fixture.getWeatherRequests(), expectedRequests);
+  assert.equal((await h.post("/weather/dol-research", input, "fixture-codex-operator-token-1234567890")).status, 403);
+  for (const bad of [
+    { ...input, query: "#3901" }, { ...input, execute: true }, { ...input, address: "Other property" },
+    { ...input, startDate: "2020-01-01" }
+  ]) assert.equal((await h.post("/weather/dol-research", bad)).status, 400);
+  h.fixture.getContact("contact-chance").address_line1 = "";
+  assert.equal((await h.post("/weather/dol-research", input)).status, 400);
+  assert.deepEqual(h.fixture.getWeatherRequests(), expectedRequests);
+  assert.equal(h.fixture.getContactUpdateCount(), 0);
+});
 
 test("server redacts anonymous health and requires authentication for diagnostics and claim schemas", async (t) => {
   const port = 18879;
@@ -2351,8 +2684,12 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(retellCreateCount, 1);
   assert.equal(concurrent.some((response) => response.status === 200), true);
   assert.equal(concurrent.every((response) => [200, 409].includes(response.status)), true);
-  const successResponse = concurrent.find((response) => response.status === 200);
-  const success = await successResponse.json();
+  // The idempotent loser may also return HTTP 200 with duplicate_prevented.
+  // Request order cannot identify the one execution when both return 200.
+  const concurrentPayloads = await Promise.all(concurrent.map((response) => response.json()));
+  const executions = concurrentPayloads.filter((result) => result.mode === "executed");
+  assert.equal(executions.length, 1);
+  const success = executions[0];
   assert.equal(success.mode, "executed");
   assert.equal(success.callId, "call-1");
 
@@ -4640,6 +4977,143 @@ test("Gmail exact-file reads admit shared carrier routing and withhold conflicti
   assert.equal(longThread.messages[0].bodyTruncated, true);
   assert.equal(longThread.coverage.complete, false);
   assert.equal(longThread.coverage.truncatedMessages, 1);
+});
+
+test("Unfiled Gmail evidence uses a unique policy/property binding without accepting loose or mixed-file matches", async (t) => {
+  const bridgePort = 19290;
+  const fakeApiPort = 19291;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-unfiled-policy-property-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const message = (id, body) => ({
+    id, threadId: `thread-${id}`, snippet: body,
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "carrier@example.test" },
+        { name: "To", value: "operator@example.test" },
+        { name: "Subject", value: "File review" }
+      ],
+      body: { data: Buffer.from(body).toString("base64url") }
+    }
+  });
+  const messages = [
+    message("policy-property", "Policy HO 1234 567, property 123 Main St. Intake paperwork received."),
+    message("exact-file-link", "Review https://app.jobnimbus.com/contact/contact-chance?source=notification"),
+    message("policy-only", "Policy HO-1234567. No property or exact file reference."),
+    message("property-only", "Please review 123 Main St."),
+    message("policy-prefix", "Policy HO-12345670 for 123 Main St."),
+    message("policy-separator-suffix", "Policy HO-1234567-0 for 123 Main St."),
+    message("policy-separator-prefix", "Policy EXTRA-HO-1234567 for 123 Main St."),
+    message("wrong-host", "Review https://app.jobnimbus.com.evil.test/contact/contact-chance"),
+    message("mixed-policy", "Policy HO-1234567 at 123 Main St, plus policy OTHER-7654321."),
+    message("mixed-files", "https://app.jobnimbus.com/contact/contact-chance and https://app.jobnimbus.com/contact/contact-company-other"),
+    message("unknown-second-file", "https://app.jobnimbus.com/contact/contact-chance and https://app.jobnimbus.com/contact/contact-outside-index")
+  ];
+  const fixture = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true, companyOther: true,
+    chanceClaimNumber: "",
+    chanceOverrides: { email: "", address_line1: "123 Main St", cf_string_4: "HO-1234567" },
+    gmailMessages: messages,
+    gmailSearchMessages: messages.map(({ id, threadId }) => ({ id, threadId })),
+    gmailThreads: messages.map(row => ({ id: row.threadId, messages: [row] }))
+  });
+  fixture.getContact("contact-company-other").cf_string_4 = "OTHER-7654321";
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, NODE_ENV: "test", PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "", CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`, JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client", GOOGLE_CLIENT_SECRET: "fixture-secret", GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`, GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false", MEMORY_ROOT: memoryRoot,
+      REQUIRE_CHANCE_RUN_POLICY: "false", BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = { authorization: "Bearer fixture-codex-operator-token-1234567890", "content-type": "application/json" };
+  const read = (route, body) => fetch(`http://127.0.0.1:${bridgePort}${route}`, {
+    method: "POST", headers, body: JSON.stringify(body)
+  });
+  const searchResponse = await read("/gmail/search", { fileQuery: "2739", limit: 15 });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.deepEqual(search.messages.map(row => row.id), ["policy-property", "exact-file-link"]);
+  assert.equal(search.coverage.withheldMessages, 9);
+  assert.equal(search.coverage.complete, false);
+  assert.doesNotMatch(JSON.stringify(search.messages), /OTHER-7654321|contact-company-other|contact-outside-index|evil\.test/);
+
+  // Packet search and thread hydration share one internal scope; this also
+  // verifies that its immutable, private policy/property binding is reusable.
+  const reviewResponse = await read("/ops/review-chance-files", {
+    query: "2739", limit: 1, includeCompleteJobNimbusEvidence: true,
+    includeGmail: true, gmailLimit: 15, gmailThreadLimit: 5, includeQuo: false
+  });
+  assert.equal(reviewResponse.status, 200);
+  const review = await reviewResponse.json();
+  assert.equal(review.packets[0].gmail.status, "fresh");
+  assert.equal(review.packets[0].gmail.threads.length, 2);
+  assert.equal(review.packets[0].gmail.coverage.providerScanComplete, false);
+  assert.equal(review.complete, false);
+
+  // A newly shared policy invalidates fallback before any Gmail provider read.
+  fixture.getContact("contact-company-other").cf_string_4 = "HO-1234567";
+  const readsBeforeCollision = fixture.getGmailEvidenceReadCount();
+  const collision = await read("/gmail/search", { fileQuery: "2739" });
+  assert.equal(collision.status, 400);
+  assert.match((await collision.json()).error, /ambiguous and blocked/);
+  assert.equal(fixture.getGmailEvidenceReadCount(), readsBeforeCollision);
+});
+
+test("Quo diagnostics distinguish an unreviewable company inventory from an actual shared phone without bypassing either hold", async (t) => {
+  const bridgePort = 19292;
+  const fakeApiPort = 19293;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-quo-scope-diagnostics-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const fixture = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true, companyOther: true,
+    companyOtherMobilePhone: "not-recorded", quoCalls: [], quoMessages: []
+  });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, NODE_ENV: "test", PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "", CODEX_OPERATOR_TOKEN: "fixture-codex-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`, JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "", GOOGLE_REFRESH_TOKEN: "",
+      QUO_API_KEY: "fixture-quo-key", QUO_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      QUO_DEFAULT_FROM_NUMBER: "+19725550100", ALLOW_GOOGLE_USER_AUTH: "false",
+      MEMORY_ROOT: memoryRoot, REQUIRE_CHANCE_RUN_POLICY: "false", BRIDGE_ALLOW_WRITES: "false"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const read = () => fetch(`http://127.0.0.1:${bridgePort}/quo/history`, {
+    method: "POST",
+    headers: { authorization: "Bearer fixture-codex-operator-token-1234567890", "content-type": "application/json" },
+    body: JSON.stringify({ query: "2739" })
+  });
+  const invalid = await read();
+  assert.equal(invalid.status, 400);
+  const invalidError = (await invalid.json()).error;
+  assert.match(invalidError, /unreviewable phone value/);
+  assert.match(invalidError, /does not establish a shared-phone collision/);
+  assert.doesNotMatch(invalidError, /not-recorded|contact-company-other/);
+  assert.equal(fixture.getQuoHistoryReadCount(), 0);
+
+  fixture.getContact("contact-company-other").mobile_phone = "2145559090";
+  const unique = await read();
+  assert.equal(unique.status, 200);
+  const readsBeforeCollision = fixture.getQuoHistoryReadCount();
+  assert.equal(readsBeforeCollision > 0, true);
+  fixture.getContact("contact-company-other").mobile_phone = "2145551212";
+  const shared = await read();
+  assert.equal(shared.status, 400);
+  assert.match((await shared.json()).error, /phone is shared across multiple company insurance files/);
+  assert.equal(fixture.getQuoHistoryReadCount(), readsBeforeCollision);
 });
 
 test("Quo exact-file reads fail closed on a company home-phone collision hidden by a different mobile phone", async (t) => {

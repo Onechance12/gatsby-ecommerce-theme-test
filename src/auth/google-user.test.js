@@ -253,6 +253,7 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     "GET /ops/run-policy",
     "POST /ops/action-batch-receipts",
     "POST /ops/action-batch-reconcile",
+    "POST /weather/dol-research",
     "POST /claim-filing/configuration",
     "POST /claim-filing/prepare",
     "POST /claim-filing/call",
@@ -264,7 +265,7 @@ test("dedicated Codex operator is a fail-closed non-Google role", () => {
     assert.equal(routeAllowed(operator, method, pathname), false, route);
     assert.equal(routeAllowed(macOperator, method, pathname), true, route);
   }
-  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 25);
+  assert.equal(CODEX_OPERATOR_ALLOWED_ROUTES.size, 26);
 
   for (const identity of [
     { type: "google_oauth", role: "chance" },

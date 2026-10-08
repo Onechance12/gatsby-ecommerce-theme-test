@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   readQuoHistory,
   readQuoHistoryStrict,
+  readQuoTranscript,
   readQuoInbox,
   sendQuoText
 } from "./client.js";
@@ -119,6 +120,69 @@ test("strict Quo history completely paginates messages and calls across every te
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Quo transcripts use bounded exact-call reads and never expose malformed or provider-error content", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const config = { apiKey: "fixture", baseUrl: "https://api.quo.test/v1" };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let payload = { data: { callId: "call-exact", status: "completed", dialogue: [{ content: "Verified speech." }] } };
+  let status = 200;
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(options.redirect, "error");
+    assert.ok(options.signal instanceof AbortSignal);
+    return jsonResponse(status, payload);
+  };
+  const good = await readQuoTranscript(config, "call-exact", { requireCallId: true });
+  assert.equal(good.dialogue[0].text, "Verified speech.");
+  for (const bad of [
+    { data: { callId: "other-call", status: "completed", dialogue: [{ content: "PRIVATE-OTHER" }] } },
+    { data: { status: "completed", dialogue: [{ content: "PRIVATE-UNBOUND" }] } },
+    { data: { callId: "call-exact", dialogue: "PRIVATE-MALFORMED" } },
+    { data: { callId: "call-exact", dialogue: [null] } },
+    { data: { callId: "call-exact", status: ["completed"], dialogue: [{ content: "PRIVATE-MALFORMED-STATUS" }] } },
+    { data: { callId: "call-exact", status: "completed", dialogue: [{ content: { private: "PRIVATE-MALFORMED-SPEECH" } }] } },
+    { data: { callId: "call-exact", status: "completed", dialogue: [{ content: 123 }] } },
+    { data: { callId: "call-exact", status: "completed", dialogue: [{ content: "x".repeat(2 * 1024 * 1024) }] } }
+  ]) {
+    payload = bad;
+    await assert.rejects(readQuoTranscript(config, "call-exact", { requireCallId: true }), error => {
+      assert.match(error.message, /bounded exact-call verification/);
+      assert.doesNotMatch(error.message, /PRIVATE-/);
+      return true;
+    });
+  }
+  status = 403;
+  payload = { error: "PRIVATE-CREDENTIAL-PROVIDER-DETAIL" };
+  await assert.rejects(readQuoTranscript(config, "call-exact", { allowMissing: true }), /No transcript content was disclosed/);
+  for (const code of [404, 422]) {
+    status = code;
+    assert.equal(await readQuoTranscript(config, "call-exact", { allowMissing: true }), null);
+  }
+});
+
+test("strict Quo history preserves fresh voicemail text instead of hiding a callback behind a zero-duration call", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let voicemail = { transcript: "Awaiting carrier callback about this claim." };
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("/phone-numbers")) return jsonResponse(200, {
+      data: [{ id: "PN_one", name: "Line One", number: "+19725550101" }]
+    });
+    return jsonResponse(200, { data: parsed.pathname.endsWith("/calls") ? [scopedCall("PN_one", {
+      id: "voicemail-exact", status: "missed", duration: 0,
+      voicemail
+    })] : [] });
+  };
+  const result = await readQuoHistoryStrict({ apiKey: "fixture", baseUrl: "https://api.quo.test/v1" }, { phone: "+12145550199" });
+  assert.equal(result.completeness.complete, true);
+  assert.equal(result.timeline[0].voicemail, "Awaiting carrier callback about this claim.");
+  voicemail = { transcript: { private: "PRIVATE-MALFORMED-VOICEMAIL" } };
+  await assert.rejects(
+    readQuoHistoryStrict({ apiKey: "fixture", baseUrl: "https://api.quo.test/v1" }, { phone: "+12145550199" }),
+    strictProviderFailure
+  );
 });
 
 test("strict Quo history returns privacy-safe partial metadata for restricted line streams", async () => {

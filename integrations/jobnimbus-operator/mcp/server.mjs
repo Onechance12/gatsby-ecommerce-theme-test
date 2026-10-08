@@ -343,6 +343,8 @@ register(
     includeGmail: z.boolean().optional(),
     includeQuo: z.boolean().optional(),
     includeQuoTranscripts: z.boolean().optional(),
+    includeCompleteJobNimbusEvidence: z.boolean().optional(),
+    includeCompleteCommunicationEvidence: z.boolean().optional(),
     communicationDays: z.number().int().min(1).max(3650).optional(),
     gmailLimit: z.number().int().min(1).max(15).optional(),
     gmailThreadLimit: z.number().int().min(1).max(5).optional(),
@@ -393,6 +395,7 @@ register(
     includeQuo: z.boolean().optional(),
     includeQuoTranscripts: z.boolean().optional(),
     includeCompleteJobNimbusEvidence: z.boolean().optional(),
+    includeCompleteCommunicationEvidence: z.boolean().optional(),
     includeBrainAdvisory: z.boolean().optional(),
     communicationDays: z.number().int().min(1).max(3650).optional(),
     gmailLimit: z.number().int().min(1).max(15).optional(),
@@ -407,6 +410,20 @@ register(
   "Read Chance's unified JobNimbus and Google Calendar availability. This is read-only and fails closed when either source is unavailable.",
   {},
   () => bridgeRequest("POST", "/scheduling/availability", {})
+);
+
+register(
+  "weather_dol_research_exact_file",
+  "Research reported hail dates near one freshly resolved Chance-assigned property using the existing Census/NWS engine. Read-only; not proof of property damage, coverage or an approved date of loss. Never updates a file or calls a carrier.",
+  {
+    query: z.string().min(1),
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    radiusMiles: z.number().min(1).max(100).optional(),
+    minimumHailInches: z.number().min(0.25).max(6).optional(),
+    limit: z.number().int().min(1).max(20).optional()
+  },
+  (input) => bridgeRequest("POST", "/weather/dol-research", input)
 );
 
 register(
@@ -500,6 +517,7 @@ register(
   {
     fileQuery: z.string().min(1),
     communicationDays: z.number().int().min(1).max(3650).optional(),
+    completeReview: z.boolean().optional(),
     limit: z.number().int().min(1).max(25).optional()
   },
   (input) => bridgeRequest("POST", "/gmail/search", input)
@@ -510,18 +528,20 @@ register(
   "Read a Gmail thread only after the bridge verifies it belongs to one exact Chance-assigned file.",
   {
     fileQuery: z.string().min(1),
-    threadId: z.string().min(1)
+    threadId: z.string().min(1),
+    completeReview: z.boolean().optional()
   },
   (input) => bridgeRequest("POST", "/gmail/thread", input)
 );
 
 register(
   "gmail_review_attachment_exact_file",
-  "Extract or OCR a Gmail attachment only after exact-file correlation. This tool never uploads the attachment.",
+  "Extract or OCR a Gmail attachment only after exact-file correlation. Prefer the attachmentRef from a freshly verified thread; download tokens can rotate. This tool never uploads the attachment.",
   {
     fileQuery: z.string().min(1),
     messageId: z.string().min(1),
-    attachmentId: z.string().min(1),
+    attachmentId: z.string().min(1).optional(),
+    attachmentRef: z.string().min(1).max(4096).optional(),
     filename: z.string().min(1),
     contentType: z.string().optional(),
     maxChars: z.number().int().min(1000).max(50000).optional(),
@@ -541,7 +561,8 @@ register(
   "Read a Gmail thread only after the bridge correlates it to one explicitly named company JobNimbus file.",
   {
     fileQuery: z.string().min(1),
-    threadId: z.string().min(1)
+    threadId: z.string().min(1),
+    completeReview: z.boolean().optional()
   },
   (input) => bridgeRequest(
     "POST",
@@ -556,7 +577,8 @@ register(
   {
     fileQuery: z.string().min(1),
     messageId: z.string().min(1),
-    attachmentId: z.string().min(1),
+    attachmentId: z.string().min(1).optional(),
+    attachmentRef: z.string().min(1).max(4096).optional(),
     filename: z.string().min(1),
     contentType: z.string().optional(),
     maxChars: z.number().int().min(1000).max(50000).optional(),
@@ -588,6 +610,8 @@ register(
   {
     query: z.string().min(1),
     maxResults: z.number().int().min(1).max(50).optional(),
+    completeReview: z.boolean().optional(),
+    allowSharedPhoneEvidence: z.boolean().optional(),
     includeTranscripts: z.boolean().optional()
   },
   (input) => bridgeRequest("POST", "/quo/history", input)
@@ -598,7 +622,8 @@ register(
   "Read one Quo call transcript only after the bridge verifies call membership in an exact Chance-assigned file.",
   {
     query: z.string().min(1),
-    callId: z.string().min(1)
+    callId: z.string().min(1),
+    allowSharedPhoneEvidence: z.boolean().optional()
   },
   (input) => bridgeRequest("POST", "/quo/transcript", input)
 );
@@ -608,7 +633,8 @@ register(
   "Read one Quo call transcript only after the bridge verifies the call belongs to one explicitly named company file.",
   {
     query: z.string().min(1),
-    callId: z.string().min(1)
+    callId: z.string().min(1),
+    allowSharedPhoneEvidence: z.boolean().optional()
   },
   (input) => bridgeRequest(
     "POST",

@@ -182,8 +182,17 @@ export async function readQuoTranscript(config, callId, options = {}) {
   const id = String(callId || "").trim();
   if (!id) throw new Error("callId is required");
   try {
-    const payload = await request(config, "GET", `/call-transcripts/${encodeURIComponent(id)}`);
-    const row = payload.data || {};
+    const payload = await requestStrict(config, "GET", `/call-transcripts/${encodeURIComponent(id)}`);
+    const row = payload?.data;
+    if (!row || typeof row !== "object" || Array.isArray(row)
+      || (row.callId !== undefined && String(row.callId) !== id)
+      || (options.requireCallId === true && String(row.callId || "") !== id)
+      || (row.status !== undefined && typeof row.status !== "string")
+      || (row.dialogue !== undefined && !Array.isArray(row.dialogue))
+      || (Array.isArray(row.dialogue) && row.dialogue.some((segment) => !segment || typeof segment !== "object" || Array.isArray(segment)
+        || (segment.content !== undefined && typeof segment.content !== "string")))) {
+      throw new Error("Invalid transcript response.");
+    }
     return {
       callId: id,
       status: row.status || "",
@@ -195,8 +204,10 @@ export async function readQuoTranscript(config, callId, options = {}) {
       }))
     };
   } catch (error) {
-    if (options.allowMissing && /Quo API (404|422)/.test(error.message)) return null;
-    throw error;
+    if (options.allowMissing && [404, 422].includes(Number(error?.statusCode))) return null;
+    const failure = new Error("Quo transcript evidence is unavailable or failed its bounded exact-call verification. No transcript content was disclosed.");
+    failure.statusCode = 503;
+    throw failure;
   }
 }
 
@@ -440,6 +451,10 @@ function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
       text: String(row.text || row.content || "").replace(/\s+/g, " ").trim()
     };
   }
+  const voicemailFields = [row.voicemail?.transcript, row.voicemailTranscript];
+  if (voicemailFields.some((value) => value !== undefined && value !== null && typeof value !== "string")) {
+    throw quoHistoryProviderFailure();
+  }
   return {
     id,
     type: "call",
@@ -449,7 +464,8 @@ function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
     direction: row.direction || "",
     status: row.status || "",
     durationSec: row.duration || 0,
-    aiHandled: Boolean(row.aiHandled)
+    aiHandled: Boolean(row.aiHandled),
+    ...(voicemailText(row) ? { voicemail: voicemailText(row) } : {})
   };
 }
 

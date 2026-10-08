@@ -81,6 +81,7 @@ import {
   busyIntervalsFromJobNimbusTasks
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
+import { createGmailAttachmentReferences } from "./gmail/attachment-reference.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import {
   approvedNoteCreatedId,
@@ -503,11 +504,14 @@ const REQUEST_CONTEXT = new AsyncLocalStorage();
 const HTTP_RESPONSE = Symbol("httpResponse");
 const INTERNAL_COMMUNICATION_SCOPE = Symbol("internalCommunicationScope");
 const INTERNAL_GMAIL_ACTION_SCOPE = Symbol("internalGmailActionScope");
+const INTERNAL_QUO_SHARED_SCOPE = Symbol("internalQuoSharedScope");
 const GMAIL_DRAFT_MIME_BYTES = Symbol("gmailDraftMimeBytes");
 const GMAIL_FILE_EMAIL_UNIQUE = Symbol("gmailFileEmailUnique");
 const GMAIL_FILE_CLAIM_UNIQUE = Symbol("gmailFileClaimUnique");
+const GMAIL_FILE_POLICY_PROPERTY = Symbol("gmailFilePolicyProperty");
 const GMAIL_FILE_COMPANY_CONTACTS = Symbol("gmailFileCompanyContacts");
 const GMAIL_MESSAGE_CORRELATION_CONTENT = Symbol("gmailMessageCorrelationContent");
+const GMAIL_ATTACHMENT_REFERENCES = createGmailAttachmentReferences();
 const HCN_FRESH_PROVIDER_CACHE = Symbol("hcnFreshProviderCache");
 const GOOGLE_IDENTITY_CACHE = new Map();
 const JOBNIMBUS_USER_CACHE = new Map();
@@ -7675,8 +7679,14 @@ async function photoReview(input) {
 }
 
 async function dateOfLossResearch(input) {
+  if (isCodexOperatorRequest()) {
+    const allowed = new Set(["query", "startDate", "endDate", "radiusMiles", "minimumHailInches", "limit"]);
+    if (Object.keys(input).some((key) => !allowed.has(key))) badRequest("Exact-file DOL research accepts only a query and bounded weather-search options; caller-supplied addresses, dates to save, or execution fields are not allowed.");
+  }
   const query = required(input.query, "query");
-  const { contact, readScope } = await findDocumentReadContact(query);
+  const { contact, readScope } = isCodexOperatorRequest()
+    ? { ...(await findChanceContact(query)), readScope: "chance_assigned" }
+    : await findDocumentReadContact(query);
   const file = compactContact(contact);
   const address = [contact.address_line1, contact.city, contact.state_text, contact.zip]
     .filter(Boolean)
@@ -8488,17 +8498,72 @@ async function gmailSearch(input) {
     ? buildFileGmailQuery(operatorFile, input.communicationDays)
     : required(input.query, "query");
   const limit = clamp(Number(input.limit || 10), 1, 25);
-  const messages = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`);
-  const rows = Array.isArray(messages.messages) ? messages.messages : [];
+  const completeReview = Boolean(operatorFile && input.completeReview === true);
+  const readLimit = completeReview ? 250 : limit;
   const hydrated = [];
-  for (const row of rows) {
-    const message = await gmailApi(
-      operatorFile
-        ? `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=full`
-        : `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`
-    );
-    if (operatorFile && !gmailMessageMatchesFile(compactGmailFullMessage(message), operatorFile)) continue;
-    hydrated.push(compactGmailMessage(message));
+  const seenMessages = new Set();
+  const seenTokens = new Set();
+  let scanned = 0;
+  let excludedOtherFileMessages = 0;
+  let pageToken = "";
+  let pagesRead = 0;
+  let hasMore = false;
+  let paginationInvalid = false;
+  do {
+    if (seenTokens.has(pageToken)) { paginationInvalid = true; break; }
+    seenTokens.add(pageToken);
+    const pageSize = Math.min(limit, readLimit - scanned);
+    const page = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages?q=${encodeURIComponent(query)}&maxResults=${pageSize}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`);
+    const rows = Array.isArray(page.messages) ? page.messages : [];
+    if (completeReview && (rows.length > pageSize || (page.messages !== undefined && !Array.isArray(page.messages)))) {
+      throw new Error("Gmail returned an invalid bounded search page; complete review is unavailable.");
+    }
+    pagesRead += 1;
+    for (const row of rows) {
+      if (completeReview && (!row?.id || seenMessages.has(String(row.id)))) {
+        paginationInvalid = true;
+        continue;
+      }
+      seenMessages.add(String(row.id));
+      const message = await gmailApi(
+        operatorFile
+          ? `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=full`
+          : `/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(row.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`
+      );
+      scanned += 1;
+      if (operatorFile) {
+        if (String(message?.id || "") !== String(row.id)) throw new Error("Gmail returned a different message than the exact search result.");
+        if (completeReview && !String(message?.threadId || "").trim()) throw new Error("Gmail did not return a thread binding for a complete exact-file message review.");
+        const compact = compactGmailFullMessage(message);
+        if (!gmailMessageMatchesFile(compact, operatorFile)) {
+          if (completeReview && gmailMessageProvesOtherFile(compact, operatorFile)) excludedOtherFileMessages += 1;
+          continue;
+        }
+      }
+      hydrated.push(compactGmailMessage(message));
+    }
+    pageToken = String(page.nextPageToken || "");
+    hasMore = Boolean(pageToken);
+    if (!completeReview || paginationInvalid) break;
+  } while (hasMore && scanned < readLimit && pagesRead < 20);
+  const coverage = gmailReadCoverage({
+    scanned, returned: hydrated.length, limit: readLimit, hasMore,
+    excludedOtherFileMessages,
+    windowDays: operatorFile ? clamp(Number(input.communicationDays || 365), 1, 3650) : null
+  });
+  if (completeReview) {
+    Object.assign(coverage, {
+      schemaVersion: 2,
+      mode: "complete_bounded_review",
+      pagesRead,
+      paginationValid: !paginationInvalid,
+      scopeVerificationComplete: !paginationInvalid && coverage.withheldMessages === 0,
+      excludedOtherFileMessages
+    });
+    if (paginationInvalid) {
+      coverage.complete = false;
+      coverage.limitationCodes.push("provider_pagination_invalid");
+    }
   }
   return {
     query,
@@ -8506,13 +8571,7 @@ async function gmailSearch(input) {
     count: hydrated.length,
     messages: hydrated,
     threads: groupGmailMessagesByThread(hydrated),
-    coverage: gmailReadCoverage({
-      scanned: rows.length,
-      returned: hydrated.length,
-      limit,
-      hasMore: Boolean(messages.nextPageToken),
-      windowDays: operatorFile ? clamp(Number(input.communicationDays || 365), 1, 3650) : null
-    })
+    coverage
   };
 }
 
@@ -8520,23 +8579,39 @@ async function gmailThread(input) {
   const operatorFile = await operatorCommunicationFile(input, "Gmail thread");
   const threadId = required(input.threadId, "threadId");
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
-  const candidates = Array.isArray(thread.messages) ? thread.messages.map(compactGmailFullMessage) : [];
-  const messages = operatorFile
+  if (operatorFile && String(thread.id || "") !== threadId) operatorScopeError("Gmail returned a different thread than the requested exact thread.");
+  const completeReview = Boolean(operatorFile && input.completeReview === true);
+  const candidates = Array.isArray(thread.messages) ? thread.messages.map((message) => compactGmailFullMessage(message, completeReview)) : [];
+  const matched = operatorFile
     ? candidates.filter((message) => gmailMessageMatchesFile(message, operatorFile))
     : candidates;
-  if (operatorFile && !messages.length) {
+  if (operatorFile && !matched.length) {
     operatorScopeError(`That Gmail thread is not exclusively correlated to the resolved ${operatorFileDescription()}.`);
   }
+  const messages = completeReview ? matched.slice(0, 100) : matched;
+  if (completeReview) {
+    let remaining = 256 * 1024;
+    for (const message of messages) {
+      for (const key of ["plainText", "htmlText"]) {
+        const text = message[key];
+        message[key] = text.slice(0, remaining);
+        remaining -= message[key].length;
+        if (message[key].length < text.length) message.bodyTruncated = true;
+      }
+    }
+  }
+  if (operatorFile) for (const message of messages) bindGmailAttachmentReferences(message, operatorFile);
   return {
     id: thread.id || threadId,
     ...(operatorFile ? { file: operatorFile, scope: operatorFileScopeLabel() } : {}),
     historyId: thread.historyId || "",
-    messageCount: messages.length,
+    messageCount: matched.length,
     messages,
     assistantRead: buildGmailAssistantRead(messages),
     coverage: gmailReadCoverage({
       scanned: candidates.length,
       returned: messages.length,
+      omitted: matched.length - messages.length,
       truncated: messages.filter((message) => message.bodyTruncated).length
     })
   };
@@ -8545,18 +8620,23 @@ async function gmailThread(input) {
 async function gmailAttachmentReview(input) {
   const operatorFile = await operatorCommunicationFile(input, "Gmail attachment review");
   const messageId = required(input.messageId, "messageId");
-  const attachmentId = required(input.attachmentId, "attachmentId");
+  let attachmentId = String(input.attachmentId || "").trim();
+  if (!attachmentId && !(operatorFile && input.attachmentRef)) badRequest("attachmentId or a verified attachmentRef is required");
   let filename = safeMimeFilename(required(input.filename, "filename"));
   let contentType = String(input.contentType || "application/octet-stream").trim();
+  let verifiedSize = null;
   if (operatorFile) {
     const message = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageId)}?format=full`);
     const compact = compactGmailFullMessage(message);
-    if (!gmailMessageMatchesFile(compact, operatorFile)) {
+    if (compact.id !== messageId || !gmailMessageMatchesFile(compact, operatorFile)) {
       operatorScopeError(`That Gmail message is not strongly correlated to the resolved ${operatorFileDescription()}.`);
     }
-    const verifiedAttachment = compact.attachments.find((row) => String(row.attachmentId || "") === attachmentId);
+    const idMatches = compact.attachments.filter((row) => String(row.attachmentId || "") === attachmentId);
+    const verifiedAttachment = input.attachmentRef
+      ? GMAIL_ATTACHMENT_REFERENCES.resolve(input.attachmentRef, gmailAttachmentBinding(operatorFile, messageId), compact.attachments)
+      : idMatches.length === 1 ? idMatches[0] : null;
     if (!verifiedAttachment) {
-      operatorScopeError("That attachment id is not present on the verified client-scoped Gmail message.");
+      operatorScopeError("That attachment id is not uniquely present on the verified client-scoped Gmail message. Refresh the thread and use its attachmentRef; never select an attachment by filename alone.");
     }
     if (normalizeCompare(verifiedAttachment.filename) !== normalizeCompare(filename)) {
       badRequest("The requested filename does not match the verified Gmail attachment metadata.");
@@ -8566,9 +8646,14 @@ async function gmailAttachmentReview(input) {
     }
     filename = safeMimeFilename(verifiedAttachment.filename);
     contentType = String(verifiedAttachment.mimeType || contentType || "application/octet-stream").trim();
+    attachmentId = String(verifiedAttachment.attachmentId);
+    verifiedSize = verifiedAttachment.size;
   }
   const payload = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`);
   const bytes = base64UrlToBuffer(payload?.data || "");
+  if (Number.isSafeInteger(verifiedSize) && verifiedSize > 0 && bytes.length !== verifiedSize) {
+    badRequest("The Gmail attachment bytes do not match the freshly verified MIME size.");
+  }
   const attachment = validateEmailAttachment({ filename, contentType, bytes });
   const document = { filename: attachment.filename, content_type: attachment.contentType };
   const extracted = await extractDocumentText(
@@ -8617,7 +8702,7 @@ async function gmailAttachmentReview(input) {
   };
 }
 
-async function operatorCommunicationFile(input, label) {
+async function operatorCommunicationFile(input, label, { allowExactReferenceOnly = false } = {}) {
   if (currentRequestIdentity()?.type !== "codex_operator_token") return null;
   const internalFile = input?.[INTERNAL_COMMUNICATION_SCOPE]?.file;
   const file = internalFile?.id
@@ -8681,9 +8766,67 @@ async function operatorCommunicationFile(input, label) {
     file[GMAIL_FILE_EMAIL_UNIQUE] !== true
     && file[GMAIL_FILE_CLAIM_UNIQUE] !== true
   ) {
-    badRequest(`The resolved ${operatorFileDescription()} has neither a company-unique client email nor a company-unique claim number, so ${label} is ambiguous and blocked.`);
+    // An unfiled claim may legitimately have neither email nor claim number.
+    // Admit only a fresh, globally unique policy/property binding; the provider
+    // search remains file-derived and every returned message must prove scope.
+    const binding = file[GMAIL_FILE_POLICY_PROPERTY] || gmailUnfiledPolicyPropertyBinding(file);
+    if (!binding && !allowExactReferenceOnly) {
+      badRequest(`The resolved ${operatorFileDescription()} has neither a company-unique client email nor a company-unique claim number, nor a verified unique policy/property binding for an unfiled claim, so ${label} is ambiguous and blocked.`);
+    }
+    if (binding && file[GMAIL_FILE_POLICY_PROPERTY] === undefined) {
+      Object.defineProperty(file, GMAIL_FILE_POLICY_PROPERTY, {
+        value: binding,
+        enumerable: false
+      });
+    }
   }
   return file;
+}
+
+function gmailUnfiledPolicyPropertyBinding(file) {
+  return communicationPolicyPropertyBinding(file, { unfiledOnly: true });
+}
+
+function communicationPolicyPropertyBinding(file, { unfiledOnly }) {
+  if (unfiledOnly && (String(file.email || "").trim() || String(file.claimNumber || "").trim())) return null;
+  const contacts = file[GMAIL_FILE_COMPANY_CONTACTS];
+  if (!Array.isArray(contacts)) return null;
+  const targets = contacts.filter((contact) => (
+    String(contact?.jnid || contact?.id || "") === String(file.id || "")
+  ));
+  if (targets.length !== 1 || !isInsuranceFile(targets[0])) return null;
+  const policy = hcnNormalizeCorrelationClaim(file.policyNumber);
+  const street = communicationWords(targets[0].address_line1);
+  if (policy.length < 6 || !/^\d+\s+[a-z0-9]/.test(street)) return null;
+  const correlation = hcnGlobalScalarCorrelation(
+    contacts.filter(isInsuranceFile), policy,
+    HCN_CONTACT_POLICY_KEYS, hcnNormalizeCorrelationClaim
+  );
+  if (!correlation.complete || correlation.matches.length !== 1
+    || String(correlation.matches[0]?.jnid || correlation.matches[0]?.id || "") !== String(file.id)) return null;
+  return { policy, street };
+}
+
+function communicationWords(value) {
+  if (typeof value !== "string") return "";
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function communicationIdentifierPresent(content, value) {
+  const normalized = hcnNormalizeCorrelationClaim(value);
+  if (normalized.length < 6) return false;
+  // normalizeCompare leaves only ASCII alphanumerics, so no regex metacharacter
+  // can enter this pattern. Formatting separators do not change the identifier.
+  const pattern = [...normalized].join("[\\s._/#-]*");
+  return new RegExp(`(?<![a-z0-9])(?<![a-z0-9][._/#-])${pattern}(?![a-z0-9]|[._/#-][a-z0-9])`, "i").test(content);
+}
+
+function communicationJobNimbusFileRefs(content) {
+  const ids = new Set();
+  for (const match of content.matchAll(/https?:\/\/app\.jobnimbus\.com\/contact\/([^\s<>"'?)#/]+)/gi)) {
+    try { ids.add(decodeURIComponent(match[1])); } catch { /* Invalid references prove nothing. */ }
+  }
+  return ids;
 }
 
 async function operatorGmailActionFile(input, label) {
@@ -8723,6 +8866,10 @@ function gmailMessageFileCorrelation(message, file) {
     (content.match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [])
       .map((value) => hcnNormalizeCorrelationClaim(value))
   );
+  const exactFileRefs = communicationJobNimbusFileRefs(content);
+  const policyProperty = file[GMAIL_FILE_POLICY_PROPERTY];
+  const propertyMatch = policyProperty
+    && ` ${communicationWords(content)} `.includes(` ${policyProperty.street} `);
   const targetMatch = Boolean(
     (
       file[GMAIL_FILE_EMAIL_UNIQUE] === true
@@ -8734,10 +8881,19 @@ function gmailMessageFileCorrelation(message, file) {
       && normalizeCompare(claimNumber).length >= 6
       && claimIdentifiers.has(hcnNormalizeCorrelationClaim(claimNumber))
     )
+    || (policyProperty && (
+      exactFileRefs.has(String(file.id))
+      || (propertyMatch && communicationIdentifierPresent(content, policyProperty.policy))
+    ))
   );
   const companyContacts = file[GMAIL_FILE_COMPANY_CONTACTS];
   if (!Array.isArray(companyContacts)) {
     return { complete: false, targetMatch: false, conflictingFileIds: [] };
+  }
+  // An explicit second file reference remains ambiguous even when that file
+  // is absent from the index. Do not disclose its unknown provider identifier.
+  if (policyProperty && [...exactFileRefs].some((id) => id !== String(file.id || ""))) {
+    return { complete: true, targetMatch: false, conflictingFileIds: [] };
   }
   const conflictingFileIds = [];
   for (const contact of companyContacts) {
@@ -8760,7 +8916,16 @@ function gmailMessageFileCorrelation(message, file) {
       .some((email) => headerAddresses.has(email));
     const claimMatch = [...claimInventory.values]
       .some((claim) => claim.length >= 6 && claimIdentifiers.has(claim));
-    if ((emailMatch || claimMatch) && contactId !== String(file.id || "")) {
+    const policyInventory = policyProperty && isInsuranceFile(contact)
+      ? hcnContactScalarInventory(contact, HCN_CONTACT_POLICY_KEYS, hcnNormalizeCorrelationClaim)
+      : null;
+    if (policyInventory && !policyInventory.complete) {
+      return { complete: false, targetMatch: false, conflictingFileIds: [] };
+    }
+    const policyMatch = policyInventory && [...policyInventory.values]
+      .some((policy) => communicationIdentifierPresent(content, policy));
+    const exactFileMatch = isInsuranceFile(contact) && exactFileRefs.has(contactId);
+    if ((emailMatch || claimMatch || policyMatch || exactFileMatch) && contactId !== String(file.id || "")) {
       conflictingFileIds.push(contactId);
     }
   }
@@ -8778,13 +8943,35 @@ function gmailMessageMatchesFile(message, file) {
     && correlation.conflictingFileIds.length === 0;
 }
 
-function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, windowDays = null, truncated = 0 }) {
-  const withheldMessages = Math.max(0, scanned - returned);
+function gmailMessageProvesOtherFile(message, file) {
+  const correlation = gmailMessageFileCorrelation(message, file);
+  if (!correlation.complete || correlation.targetMatch || !correlation.conflictingFileIds.length) return false;
+  const content = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.content || "";
+  const words = ` ${communicationWords(content)} `;
+  const street = communicationWords(String(file.address || "").split(",")[0]);
+  const name = communicationWords(file.name);
+  const contentEmails = new Set([...content.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)]
+    .map((match) => match[0].toLowerCase()));
+  // A known other-file hit is excludable only when there is no target-file
+  // indicator, even a weaker property/policy/name indicator. Mixed or unknown
+  // messages remain withheld and block claim admission, never silently dropped.
+  if (communicationIdentifierPresent(content, file.claimNumber)
+    || communicationIdentifierPresent(content, file.policyNumber)
+    || (file.email && contentEmails.has(String(file.email).toLowerCase()))
+    || (street && words.includes(` ${street} `)) || (name && words.includes(` ${name} `))) return false;
+  const refs = communicationJobNimbusFileRefs(content);
+  const knownIds = new Set(file[GMAIL_FILE_COMPANY_CONTACTS].map((row) => String(row.jnid || row.id || "")));
+  return !refs.has(String(file.id)) && [...refs].every((id) => knownIds.has(id));
+}
+
+function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, windowDays = null, truncated = 0, omitted = 0, excludedOtherFileMessages = 0 }) {
+  const withheldMessages = Math.max(0, scanned - returned - omitted - excludedOtherFileMessages);
   return {
-    complete: !hasMore && !withheldMessages && !windowDays && !truncated,
+    complete: !hasMore && !withheldMessages && !windowDays && !truncated && !omitted,
     scannedMessages: scanned,
     returnedMessages: returned,
     withheldMessages,
+    ...(omitted ? { omittedMessages: omitted } : {}),
     readLimit: limit,
     hasMore,
     windowDays,
@@ -8793,6 +8980,7 @@ function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, w
       ...(windowDays ? ["bounded_history_window"] : []),
       ...(hasMore ? ["provider_pagination_remaining"] : []),
       ...(withheldMessages ? ["unverified_messages_withheld"] : []),
+      ...(omitted ? ["thread_message_budget_exceeded"] : []),
       ...(truncated ? ["message_body_preview_truncated"] : [])
     ]
   };
@@ -9792,7 +9980,7 @@ async function quoNumbers() {
   return { count: numbers.length, numbers };
 }
 
-async function assertUniqueChanceFilePhone(file, label) {
+async function assertUniqueChanceFilePhone(file, label, { allowSharedPhoneEvidence = false } = {}) {
   const phone = normalizePhone(file?.phone);
   if (!phone) badRequest(`The resolved ${operatorFileDescription()} has no phone number for ${label}.`);
   const index = await hcnCachedContactIndex({ maxRecords: 5000 });
@@ -9803,46 +9991,112 @@ async function assertUniqueChanceFilePhone(file, label) {
     index.rows.filter(isInsuranceFile),
     phone
   );
-  if (
-    !correlation.complete
-    || correlation.matches.length !== 1
-    || String(correlation.matches[0]?.jnid || correlation.matches[0]?.id || "") !== String(file.id)
-  ) {
-    badRequest(`The resolved phone is shared across multiple company insurance files, so ${label} is ambiguous and blocked.`);
+  if (!correlation.complete) {
+    badRequest(`The company insurance-file phone inventory contains an unreviewable phone value, so ${label} cannot verify unique file scope and is blocked. This does not establish a shared-phone collision.`);
   }
+  if (!correlation.matches.length) {
+    badRequest(`The resolved phone is not present in the complete company insurance-file phone index, so ${label} cannot verify file scope and is blocked.`);
+  }
+  if (!correlation.matches.some((row) => String(row.jnid || row.id || "") === String(file.id))) {
+    badRequest(`The resolved phone belongs to a different file in the complete company insurance-file index, so ${label} cannot verify file scope and is blocked.`);
+  }
+  const routingCollision = index.rows.filter(isInsuranceFile).some((row) => (
+    String(row.jnid || row.id || "") !== String(file.id)
+    && hcnContactRoutingPhones(row).has(phone)
+  ));
+  const shared = correlation.matches.length > 1 || routingCollision;
+  if (shared && !allowSharedPhoneEvidence) {
+    badRequest(`The resolved phone is shared across multiple company insurance files or another file's carrier/adjuster routing, so ${label} is ambiguous and blocked. An explicit read-only shared-phone review requires claim/property proof on each record; sending remains blocked.`);
+  }
+  if (!shared) return null;
+  const proofFile = await operatorCommunicationFile({ [INTERNAL_COMMUNICATION_SCOPE]: { file } }, "Shared-phone Quo review", { allowExactReferenceOnly: true });
+  const policyProperty = communicationPolicyPropertyBinding(proofFile, { unfiledOnly: false });
+  if (policyProperty && proofFile[GMAIL_FILE_POLICY_PROPERTY] === undefined) {
+    Object.defineProperty(proofFile, GMAIL_FILE_POLICY_PROPERTY, { value: policyProperty });
+  }
+  return proofFile;
 }
 
 async function readExactOperatorQuoHistory(file, input = {}) {
+  const sharedScope = input[INTERNAL_QUO_SHARED_SCOPE];
   const history = await readQuoHistoryStrict(quoConfig(), {
     phone: file.phone,
     maxResults: clamp(Number(input.maxResults || 25), 1, 50),
     maxPages: clamp(Number(input.maxPages || 10), 1, 10)
   });
   const transcripts = [];
-  if (input.includeTranscripts === true) {
-    const recentCalls = history.timeline
-      .filter((item) => item.type === "call")
-      .sort((left, right) => String(right.atUtc).localeCompare(String(left.atUtc)))
-      .slice(0, 3);
+  const calls = history.timeline.filter((item) => item.type === "call")
+    .sort((left, right) => String(right.atUtc).localeCompare(String(left.atUtc)));
+  const transcriptLimit = input.completeReview === true || sharedScope ? 50 : 3;
+  let callsReviewed = 0;
+  let missingSpeechTranscripts = 0;
+  let remainingTranscriptText = 2 * 1024 * 1024;
+  if (input.includeTranscripts === true || sharedScope) {
+    const recentCalls = calls.slice(0, transcriptLimit);
     for (const call of recentCalls) {
-      const transcript = await readQuoTranscript(quoConfig(), call.id, {
-        allowMissing: true
-      });
-      if (transcript) transcripts.push(transcript);
+      const noSpeech = Number(call.durationSec || 0) === 0
+        && ["missed", "no-answer", "busy", "failed", "canceled", "cancelled", "unanswered"].includes(String(call.status || "").toLowerCase());
+      if (noSpeech && !call.voicemail) { callsReviewed += 1; continue; }
+      const rawTranscript = await readQuoTranscript(quoConfig(), call.id, { allowMissing: true, requireCallId: true });
+      const transcript = rawTranscript ? boundedOperatorQuoTranscript(rawTranscript, Math.min(64000, remainingTranscriptText)) : null;
+      callsReviewed += 1;
+      if (transcript) {
+        transcripts.push(transcript);
+        remainingTranscriptText -= transcript.dialogue.reduce((sum, segment) => sum + segment.text.length, 0);
+      }
+      const usableTranscript = transcript && !transcript.truncated
+        && String(transcript.status || "").toLowerCase() === "completed"
+        && transcript.dialogue.some((segment) => String(segment.text || "").trim());
+      if (transcript?.truncated || (!usableTranscript && !call.voicemail)) missingSpeechTranscripts += 1;
     }
   }
-  return { ...history, transcripts };
+  const allTranscripts = new Map(transcripts.map((row) => [row.callId, row]));
+  const timeline = sharedScope ? history.timeline.filter((row) => quoSharedRecordMatchesFile(row, allTranscripts.get(row.id), sharedScope)) : history.timeline;
+  const allowedCallIds = new Set(timeline.filter((row) => row.type === "call").map((row) => row.id));
+  const returnedTranscripts = sharedScope ? transcripts.filter((row) => allowedCallIds.has(row.callId)) : transcripts;
+  const withheldTimelineItems = history.timeline.length - timeline.length;
+  return {
+    ...history,
+    timeline,
+    messageCount: timeline.filter((row) => row.type === "text").length,
+    callCount: allowedCallIds.size,
+    transcripts: returnedTranscripts,
+    ...(sharedScope ? {
+      fileCorrelation: {
+        mode: "shared_phone_per_record_proof", complete: withheldTimelineItems === 0,
+        scannedTimelineItems: history.timeline.length, returnedTimelineItems: timeline.length, withheldTimelineItems
+      },
+      completeness: {
+        ...history.completeness,
+        complete: history.completeness.complete && withheldTimelineItems === 0,
+        reasons: [...history.completeness.reasons, ...(withheldTimelineItems ? ["unverified_shared_phone_records_withheld"] : [])],
+        returnedCount: timeline.length
+      }
+    } : {}),
+    ...(input.includeTranscripts === true ? {
+      transcriptCoverage: {
+        mode: input.completeReview === true || sharedScope ? "complete_bounded_review" : "preview",
+        complete: callsReviewed === calls.length && missingSpeechTranscripts === 0,
+        callCount: calls.length,
+        reviewedCallCount: callsReviewed,
+        omittedCallCount: calls.length - callsReviewed,
+        missingSpeechTranscripts,
+        returnedTranscriptCount: returnedTranscripts.length
+      }
+    } : {})
+  };
 }
 
 async function quoHistory(input = {}) {
   let file = null;
+  let sharedScope = null;
   let phone = String(input.phone || "").trim();
   if (currentRequestIdentity()?.type === "codex_operator_token") {
     if (phone) badRequest("The Codex operator cannot query arbitrary Quo phone numbers.");
     const query = required(input.query, "query");
     file = compactContact((await findChanceContact(query)).contact);
     phone = file.phone;
-    await assertUniqueChanceFilePhone(file, "Quo history");
+    sharedScope = await assertUniqueChanceFilePhone(file, "Quo history", { allowSharedPhoneEvidence: input.allowSharedPhoneEvidence === true });
   }
   if (input.query) {
     file ||= compactContact((await findChanceContact(input.query)).contact);
@@ -9850,7 +10104,7 @@ async function quoHistory(input = {}) {
   }
   if (!phone) badRequest("phone or a Chance file query with a phone number is required");
   const history = isCodexOperatorRequest()
-    ? await readExactOperatorQuoHistory(file, input)
+    ? await readExactOperatorQuoHistory(file, { ...input, [INTERNAL_QUO_SHARED_SCOPE]: sharedScope })
     : await readQuoHistory(quoConfig(), {
         phone,
         maxResults: input.maxResults,
@@ -9871,10 +10125,12 @@ async function quoTranscript(input = {}) {
   }
   const query = required(input.query, "query");
   const file = compactContact((await findChanceContact(query)).contact);
-  await assertUniqueChanceFilePhone(file, "Quo transcript verification");
+  const sharedScope = await assertUniqueChanceFilePhone(file, "Quo transcript verification", { allowSharedPhoneEvidence: input.allowSharedPhoneEvidence === true });
   const history = await readExactOperatorQuoHistory(file, {
     maxResults: 50,
-    includeTranscripts: false
+    includeTranscripts: Boolean(sharedScope),
+    completeReview: Boolean(sharedScope),
+    [INTERNAL_QUO_SHARED_SCOPE]: sharedScope
   });
   const call = history.timeline.find((row) => row.type === "call" && String(row.id || "") === callId);
   if (!call) {
@@ -9883,7 +10139,7 @@ async function quoTranscript(input = {}) {
   return {
     file,
     call,
-    transcript: await readQuoTranscript(quoConfig(), callId),
+    transcript: sharedScope ? history.transcripts.find((row) => row.callId === callId) : boundedOperatorQuoTranscript(await readQuoTranscript(quoConfig(), callId, { requireCallId: true }), 64000),
     scope: operatorFileScopeLabel()
   };
 }
@@ -10281,10 +10537,10 @@ async function reviewChanceFiles(input = {}) {
   const page = clamp(Number(input.page || 1), 1, 1000);
   const limit = clamp(Number(input.limit || (input.query ? 1 : 5)), 1, 10);
   if (
-    input.includeCompleteJobNimbusEvidence === true
+    (input.includeCompleteJobNimbusEvidence === true || input.includeCompleteCommunicationEvidence === true)
     && (!operatorRequest || !String(input.query || "").trim() || limit !== 1 || input.indexOnly === true)
   ) {
-    const error = new Error("Complete JobNimbus claim evidence requires one exact operator file review with limit:1, not an index or sweep.");
+    const error = new Error("Complete JobNimbus/communication claim evidence requires one exact operator file review with limit:1, not an index or sweep.");
     error.statusCode = 400;
     throw error;
   }
@@ -10670,6 +10926,7 @@ function compactChanceIndexContact(contact) {
 async function buildChanceEvidencePacket(contact, input) {
   const operatorRequest = isCodexOperatorRequest();
   const completeJobNimbusEvidence = operatorRequest && input.includeCompleteJobNimbusEvidence === true;
+  const completeCommunicationEvidence = operatorRequest && input.includeCompleteCommunicationEvidence === true;
   const file = compactContact(contact);
   const [activities, tasks, documents] = await Promise.all([
     listRelated("/activities", contact.jnid, operatorRequest ? 5000 : 60, { requireComplete: operatorRequest }),
@@ -10689,24 +10946,28 @@ async function buildChanceEvidencePacket(contact, input) {
         const communicationScope = { file };
         const search = await gmailSearch({
           query,
-          limit: clamp(Number(input.gmailLimit || 8), 1, 15),
+          limit: completeCommunicationEvidence ? 25 : clamp(Number(input.gmailLimit || 8), 1, 15),
+          completeReview: completeCommunicationEvidence,
           communicationDays: input.communicationDays,
           [INTERNAL_COMMUNICATION_SCOPE]: communicationScope
         });
         const threads = [];
-        for (const row of search.threads.slice(0, clamp(Number(input.gmailThreadLimit || 3), 1, 5))) {
+        const textBudget = { remaining: 2 * 1024 * 1024 };
+        for (const row of search.threads.slice(0, completeCommunicationEvidence ? 25 : clamp(Number(input.gmailThreadLimit || 3), 1, 5))) {
           const thread = await gmailThread({
             threadId: row.threadId,
+            completeReview: completeCommunicationEvidence,
             [INTERNAL_COMMUNICATION_SCOPE]: communicationScope
           });
-          threads.push(compactGmailEvidenceThread(thread));
+          threads.push(compactGmailEvidenceThread(thread, { completeReview: completeCommunicationEvidence, textBudget }));
         }
         const omittedThreadCount = Math.max(0, search.threads.length - threads.length);
         const threadLimitationCodes = threads.flatMap((thread) => thread.coverage?.limitationCodes || []);
         const searchCoverage = search.coverage;
         const providerScanComplete = searchCoverage?.hasMore === false
           && searchCoverage?.withheldMessages === 0
-          && searchCoverage?.scannedMessages === search.messages.length
+          && searchCoverage?.scannedMessages === search.messages.length + Number(searchCoverage.excludedOtherFileMessages || 0)
+          && (searchCoverage.schemaVersion !== 2 || (searchCoverage.paginationValid === true && searchCoverage.scopeVerificationComplete === true))
           && searchCoverage?.returnedMessages === search.messages.length
           && (searchCoverage.truncatedMessages === undefined || searchCoverage.truncatedMessages === 0)
           && omittedThreadCount === 0
@@ -10752,10 +11013,14 @@ async function buildChanceEvidencePacket(contact, input) {
       quo = { status: "no_file_phone", timeline: [], transcripts: [] };
     } else {
       try {
-        if (operatorRequest) await assertUniqueChanceFilePhone(file, "Quo evidence review");
+        const sharedScope = operatorRequest
+          ? await assertUniqueChanceFilePhone(file, "Quo evidence review", { allowSharedPhoneEvidence: completeCommunicationEvidence })
+          : null;
         const history = operatorRequest
           ? await readExactOperatorQuoHistory(file, {
               maxResults: clamp(Number(input.quoLimit || 25), 1, 50),
+              completeReview: completeCommunicationEvidence,
+              [INTERNAL_QUO_SHARED_SCOPE]: sharedScope,
               includeTranscripts: input.includeQuoTranscripts === true
             })
           : await readQuoHistory(quoConfig(), {
@@ -12516,8 +12781,12 @@ async function buildHcnExactCommunicationScope(providerFileId) {
     index.rows,
     phone
   );
+  const routingCollision = index.rows.filter(isInsuranceFile).some((row) => (
+    String(row.jnid || row.id || "") !== providerFileId && hcnContactRoutingPhones(row).has(phone)
+  ));
   if (
     !phone
+    || routingCollision
     || !phoneCorrelation.complete
     || (
       phoneCorrelation.matches.length !== 1
@@ -14479,6 +14748,12 @@ async function gmailApi(endpoint, options = {}) {
     badRequest("Gmail is not configured for the signed-in employee or the legacy Chance connection.");
   }
   const token = await getGoogleAccessToken();
+  if (isCodexOperatorRequest() && String(options.method || "GET").toUpperCase() === "GET") {
+    return fetchBoundedJson(fetch, `${GMAIL_API_BASE_URL}${endpoint}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, accept: "application/json", "content-type": "application/json" }
+    }, { timeoutMs: 30000, maxBytes: 32 * 1024 * 1024, errorCode: "GMAIL_EVIDENCE_READ_FAILED" });
+  }
   const response = await fetch(`${GMAIL_API_BASE_URL}${endpoint}`, {
     method: options.method || "GET",
     headers: {
@@ -14549,15 +14824,15 @@ function compactGmailMessage(message) {
   };
 }
 
-function compactGmailFullMessage(message) {
+function compactGmailFullMessage(message, completeReview = false) {
   const plainText = extractGmailBody(message.payload, "text/plain");
   const htmlText = stripHtml(extractGmailBody(message.payload, "text/html"));
   const headers = gmailHeaders(message);
   const compact = {
     ...compactGmailMessage(message),
-    plainText: plainText.slice(0, 12000),
-    htmlText: htmlText.slice(0, 6000),
-    bodyTruncated: plainText.length > 12000 || htmlText.length > 6000,
+    plainText: plainText.slice(0, completeReview ? 64000 : 12000),
+    htmlText: htmlText.slice(0, completeReview ? 64000 : 6000),
+    bodyTruncated: plainText.length > (completeReview ? 64000 : 12000) || htmlText.length > (completeReview ? 64000 : 6000),
     attachments: listGmailAttachments(message.payload)
   };
   // Attribution must inspect full content, including Bcc and late conflicts.
@@ -14665,22 +14940,39 @@ function extractGmailBody(part, mimeType) {
 
 function listGmailAttachments(part) {
   const attachments = [];
-  walkGmailParts(part, (item) => {
+  walkGmailParts(part, (item, partPath) => {
     if (item.filename && item.body?.attachmentId) {
       attachments.push({
+        partId: String(item.partId ?? ""),
+        partPath,
         filename: item.filename,
         mimeType: item.mimeType || "",
         attachmentId: item.body.attachmentId,
-        size: item.body.size || 0
+        size: Number.isSafeInteger(item.body.size) && item.body.size >= 0 ? item.body.size : null
       });
     }
   });
   return attachments;
 }
 
-function walkGmailParts(part, visitor) {
-  visitor(part);
-  for (const child of Array.isArray(part.parts) ? part.parts : []) walkGmailParts(child, visitor);
+function walkGmailParts(part, visitor, partPath = "0") {
+  if (!part || typeof part !== "object") return;
+  visitor(part, partPath);
+  for (const [index, child] of (Array.isArray(part.parts) ? part.parts : []).entries()) {
+    walkGmailParts(child, visitor, `${partPath}.${index}`);
+  }
+}
+
+function gmailAttachmentBinding(file, messageId) {
+  return { subject: String(currentRequestIdentity()?.subject || ""), fileId: String(file.id), messageId: String(messageId) };
+}
+
+function bindGmailAttachmentReferences(message, file) {
+  message.attachments = message.attachments.map((attachment) => ({
+    ...attachment,
+    attachmentRef: GMAIL_ATTACHMENT_REFERENCES.create(gmailAttachmentBinding(file, message.id), attachment)
+  }));
+  return message;
 }
 
 async function loadEmailAttachments(input = {}) {
@@ -15130,10 +15422,9 @@ function chanceOperatorContactAllowed(contact) {
 }
 
 const HCN_CONTACT_PHONE_KEYS = new Set([
-  "adjusterphone",
-  "carrierdacontact",
+  // Homeowner identity only. Carrier/adjuster routing phones can be shared by
+  // hundreds of files and cannot establish a client-phone collision.
   "cellphone",
-  "cfstring8",
   "homephone",
   "mobilephone",
   "phone",
@@ -15155,6 +15446,9 @@ const HCN_CONTACT_CLAIM_KEYS = new Set([
   "cfstring2",
   "claim",
   "claimnumber"
+]);
+const HCN_CONTACT_POLICY_KEYS = new Set([
+  "cfstring3", "cfstring4", "policy", "policynumber"
 ]);
 
 function hcnGlobalScalarCorrelation(
@@ -15293,6 +15587,56 @@ function hcnContactPhoneInventory(contact) {
     }
   }
   return { complete: true, phones };
+}
+
+function hcnContactRoutingPhones(contact) {
+  const phones = new Set();
+  const routingKeys = new Set(["adjusterphone", "carrierdacontact", "cfstring8"]);
+  for (const [key, value] of Object.entries(contact || {})) {
+    if (!routingKeys.has(hcnCorrelationKey(key))) continue;
+    for (const raw of Array.isArray(value) ? value : [value]) {
+      if (typeof raw !== "string" && typeof raw !== "number") continue;
+      const phone = normalizePhone(raw);
+      if (/^\+[1-9]\d{7,14}$/.test(phone)) phones.add(phone);
+    }
+  }
+  return phones;
+}
+
+function quoSharedRecordMatchesFile(row, transcript, file) {
+  if (transcript?.truncated) return false;
+  const content = [row.text, row.voicemail, ...(transcript?.dialogue || []).map((segment) => segment.text)]
+    .filter(Boolean).join("\n");
+  if (!content) return false;
+  const refs = communicationJobNimbusFileRefs(content);
+  if ([...refs].some((id) => id !== String(file.id))) return false;
+  const claimed = [...content.matchAll(/\bclaim\s*(?:number|no\.?|#|:)\s*(?::|#|-|is\b)?\s*([a-z0-9][a-z0-9._/#-]{4,})/gi)]
+    .map((match) => hcnNormalizeCorrelationClaim(match[1]));
+  if (claimed.some((value) => value !== hcnNormalizeCorrelationClaim(file.claimNumber))) return false;
+  const words = ` ${communicationWords(content)} `;
+  for (const other of file[GMAIL_FILE_COMPANY_CONTACTS]) {
+    if (String(other.jnid || other.id || "") === String(file.id) || !isInsuranceFile(other)) continue;
+    const street = communicationWords(other.address_line1);
+    if (/^\d+\s+[a-z0-9]/.test(street) && words.includes(` ${street} `)) return false;
+  }
+  const correlation = gmailMessageFileCorrelation({ plainText: content }, file);
+  return correlation.complete && correlation.conflictingFileIds.length === 0
+    && (correlation.targetMatch || refs.has(String(file.id)));
+}
+
+function boundedOperatorQuoTranscript(transcript, maxChars) {
+  let remaining = Math.max(0, maxChars);
+  const availableChars = transcript.dialogue.reduce((sum, segment) => sum + segment.text.length, 0);
+  const dialogue = transcript.dialogue.slice(0, 1000).map((segment) => {
+    const text = segment.text.slice(0, remaining);
+    remaining -= text.length;
+    return { ...segment, text };
+  });
+  const returnedChars = dialogue.reduce((sum, segment) => sum + segment.text.length, 0);
+  const truncated = returnedChars < availableChars || dialogue.length < transcript.dialogue.length;
+  return { ...transcript, dialogue, ...(truncated ? {
+    truncated: true, textCoverage: { availableChars, returnedChars, omittedChars: availableChars - returnedChars }
+  } : {}) };
 }
 
 function compactActivity(activity) {
@@ -15556,18 +15900,25 @@ function buildFileGmailQuery(file, requestedDays) {
   return `{${group}} newer_than:${days}d`;
 }
 
-function compactGmailEvidenceThread(thread) {
+function compactGmailEvidenceThread(thread, { completeReview = false, textBudget = { remaining: 2 * 1024 * 1024 } } = {}) {
   let previewTruncatedMessages = 0;
-  const messages = (Array.isArray(thread.messages) ? thread.messages : []).slice(-5).map((message) => {
-    const text = String(message.plainText || message.htmlText || message.snippet || "");
-    if (text.length > 1800) previewTruncatedMessages += 1;
+  const sourceMessages = Array.isArray(thread.messages) ? thread.messages : [];
+  const messages = (completeReview ? sourceMessages : sourceMessages.slice(-5)).map((message) => {
+    const text = completeReview
+      ? [...new Set([message.plainText, message.htmlText].filter(Boolean))].join("\n\n") || String(message.snippet || "")
+      : String(message.plainText || message.htmlText || message.snippet || "");
+    const limit = completeReview ? Math.max(0, textBudget.remaining) : 1800;
+    if (text.length > limit) previewTruncatedMessages += 1;
+    const reviewedText = text.slice(0, limit);
+    if (completeReview) textBudget.remaining -= reviewedText.length;
     return {
       id: message.id,
       date: message.date,
       from: message.from,
       to: message.to,
       subject: message.subject,
-      text: text.slice(0, 1800),
+      text: reviewedText,
+      ...(completeReview ? { labelIds: message.labelIds, cc: message.cc } : {}),
       attachments: message.attachments
     };
   });
@@ -15576,16 +15927,17 @@ function compactGmailEvidenceThread(thread) {
     messageCount: thread.messageCount,
     coverage: {
       ...thread.coverage,
-      complete: false,
+      complete: completeReview && thread.coverage?.complete === true && previewTruncatedMessages === 0,
+      mode: completeReview ? "complete_bounded_review" : "preview",
       returnedMessages: messages.length,
       omittedMessages: Math.max(0, thread.messageCount - messages.length),
       previewTruncatedMessages,
-      previewMessageLimit: 5,
-      previewCharactersPerMessage: 1800,
+      previewMessageLimit: completeReview ? 100 : 5,
+      previewCharactersPerMessage: completeReview ? 128000 : 1800,
       limitationCodes: [
         ...(thread.coverage?.limitationCodes || []),
         ...(previewTruncatedMessages ? ["message_text_preview_truncated"] : []),
-        "bounded_thread_preview"
+        ...(completeReview ? [] : ["bounded_thread_preview"])
       ]
     },
     messages,
@@ -18274,6 +18626,7 @@ const OPENAPI = {
           fileQuery: { type: "string", description: "Exact Chance-assigned JobNimbus file identifier. Required for the Codex operator; its Gmail search is built server-side from current file facts." },
           operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires fileQuery and exact-file correlation." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
+          completeReview: { type: "boolean", default: false, description: "Exact operator file only. Follows up to 20 provider pages/250 messages; unknown or mixed messages remain withheld and incomplete." },
           limit: { type: "integer", minimum: 1, maximum: 25, default: 10 }
         },
         anyOf: [
@@ -18286,6 +18639,7 @@ const OPENAPI = {
         properties: {
           threadId: { type: "string", description: "Gmail thread id returned by searchGmail." },
           fileQuery: { type: "string", description: "Exact JobNimbus file identifier. Required for the Codex operator so the thread is strongly correlated before disclosure." },
+          completeReview: { type: "boolean", default: false, description: "Exact operator file only. Reviews up to 100 verified messages, 64000 characters per body representation and a 256 KiB thread text budget; truncation remains explicit." },
           operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires exact-file correlation." }
         },
         required: ["threadId"]
@@ -18295,6 +18649,7 @@ const OPENAPI = {
         properties: {
           messageId: { type: "string", description: "Gmail message id containing the attachment." },
           attachmentId: { type: "string", description: "Gmail attachment id returned by readGmailThread." },
+          attachmentRef: { type: "string", maxLength: 4096, description: "Short-lived exact-file/message/MIME reference from a verified thread. Preferred for operator reads because Gmail download IDs can rotate; never guessed or reused after expiry/restart." },
           filename: { type: "string" },
           contentType: { type: "string" },
           maxChars: { type: "integer", minimum: 1000, maximum: 50000, default: 20000 },
@@ -18309,7 +18664,8 @@ const OPENAPI = {
           isPrivate: { type: "boolean", default: false },
           execute: { type: "boolean", default: false, description: "Only affects the optional JobNimbus upload. Attachment review itself is read-only." }
         },
-        required: ["messageId", "attachmentId", "filename"]
+        required: ["messageId", "filename"],
+        anyOf: [{ required: ["attachmentId"] }, { required: ["attachmentRef", "fileQuery"] }]
       },
       GmailAttachmentSpec: {
         type: "object",
@@ -18360,6 +18716,8 @@ const OPENAPI = {
           operatorScope: { type: "string", enum: ["assigned", "company"], description: "Dedicated Mac operator only. Company requires an exact file query; arbitrary phone lookup remains blocked." },
           phone: { type: "string", description: "US phone number. Used when query is omitted or as an explicit override." },
           maxResults: { type: "integer", minimum: 1, maximum: 50, default: 25 },
+          completeReview: { type: "boolean", default: false, description: "Exact operator file only. When transcripts are requested, review all returned recorded calls rather than the three-call display preview. Missing speech transcripts remain explicit." },
+          allowSharedPhoneEvidence: { type: "boolean", default: false, description: "Exact operator read only. On a shared homeowner/routing phone, return only records proving this exact claim/property/file. Unknown or mixed records remain withheld and block claim admission; never authorizes texting." },
           includeTranscripts: { type: "boolean", default: false, description: "Try to include transcripts for up to the three most recent recorded calls." }
         }
       },
@@ -18431,6 +18789,7 @@ const OPENAPI = {
           includeQuo: { type: "boolean", default: true, description: "When true, reads matching homeowner/adjuster communications across every Quo team line, including other employees' lines, as evidence only." },
           includeQuoTranscripts: { type: "boolean", default: false },
           includeCompleteJobNimbusEvidence: { type: "boolean", default: false, description: "Operator-only exact query with limit 1. Returns all activities, open tasks and operational document metadata within the fail-closed 5000-record source bound instead of display previews; never expands file access or authorizes a call." },
+          includeCompleteCommunicationEvidence: { type: "boolean", default: false, description: "Operator-only exact query with limit 1. Follows bounded Gmail pages, reviews up to 25 threads without five-message/1800-character previews, and requests all returned Quo call transcripts. Budgets, ambiguity and missing transcripts still block claim admission." },
           includeBrainAdvisory: { type: "boolean", default: false, description: "Requests one bounded no-tools model advisory over evidence-backed open loops. The result is a candidate and cannot execute or approve anything." },
           communicationDays: { type: "integer", minimum: 1, maximum: 3650, default: 365 },
           gmailLimit: { type: "integer", minimum: 1, maximum: 15, default: 8 },

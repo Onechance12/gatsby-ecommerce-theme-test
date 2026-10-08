@@ -326,6 +326,10 @@ function claimCommunicationReviewFixture() {
         callCount: 0,
         timeline: [],
         transcripts: [],
+        transcriptCoverage: {
+          mode: "complete_bounded_review", complete: true, callCount: 0, reviewedCallCount: 0,
+          omittedCallCount: 0, missingSpeechTranscripts: 0, returnedTranscriptCount: 0
+        },
         completeness: {
           complete: true,
           reasons: [],
@@ -1330,6 +1334,7 @@ test("Retell plan is one-file, freshly attested, configuration-pinned, and chall
     includeQuo: true,
     includeQuoTranscripts: true,
     includeCompleteJobNimbusEvidence: true,
+    includeCompleteCommunicationEvidence: true,
     communicationDays: 3650,
     gmailLimit: 15,
     gmailThreadLimit: 5,
@@ -1809,6 +1814,90 @@ test("Retell execution binds older full-history records and rechecks them before
   );
   assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
   assert.equal(h.approvals.size, 0);
+});
+
+test("Retell evidence approval tolerates Gmail transport-token rotation but rejects material attachment changes", async (t) => {
+  const cases = [
+    ["download tokens only", { attachmentId: "new-token", attachmentRef: "new-read-reference" }, true],
+    ["filename", { filename: "different.pdf" }, false],
+    ["MIME type", { mimeType: "image/png" }, false],
+    ["byte size", { size: 501 }, false],
+    ["MIME path", { partPath: "0.2" }, false]
+  ];
+  for (const [name, mutation, ready] of cases) await t.test(name, async () => {
+    const h = harness();
+    const gmail = h.state.claimCommunicationReview.packets[0].gmail;
+    const attachment = { attachmentId: "old-token", attachmentRef: "old-read-reference", filename: "review.pdf",
+      mimeType: "application/pdf", size: 500, partId: "1", partPath: "0.1" };
+    const message = { id: "stable-message", threadId: "stable-thread", subject: "Routine update", text: "Routine update", attachments: [attachment] };
+    gmail.messages = [message];
+    gmail.threads = [{ id: "stable-thread", messages: [message], coverage: {
+      hasMore: false, scannedMessages: 1, returnedMessages: 1, withheldMessages: 0,
+      omittedMessages: 0, previewTruncatedMessages: 0
+    } }];
+    syncClaimGmailSearchCounts(h.state.claimCommunicationReview);
+    gmail.coverage.returnedThreadCount = 1;
+    gmail.coverage.reviewedThreadCount = 1;
+    await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+    Object.assign(attachment, mutation);
+    const execute = () => h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT);
+    if (ready) {
+      assert.equal((await execute()).mode, "executed");
+      assert.equal(claimPosts(h, "/claim-filing/call").length, 1);
+    } else {
+      await assert.rejects(execute, /evidence changed after call approval/i);
+      assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+    }
+    assert.equal(h.approvals.size, 0);
+  });
+});
+
+test("Retell admission accepts only attested, count-consistent other-file Gmail exclusions", async (t) => {
+  const mutations = [
+    ["proved other file", () => {}, true],
+    ["missing classification version", coverage => { delete coverage.schemaVersion; }, false],
+    ["unverified exclusions", coverage => { coverage.scopeVerificationComplete = false; }, false],
+    ["invalid pagination", coverage => { coverage.paginationValid = false; }, false],
+    ["coerced exclusion count", coverage => { coverage.excludedOtherFileMessages = "1"; }, false],
+    ["count mismatch", coverage => { coverage.scannedMessages = 2; }, false]
+  ];
+  for (const [name, mutate, ready] of mutations) await t.test(name, async () => {
+    const h = harness();
+    const coverage = h.state.claimCommunicationReview.packets[0].gmail.coverage.search;
+    Object.assign(coverage, { schemaVersion: 2, mode: "complete_bounded_review", paginationValid: true,
+      scopeVerificationComplete: true, scannedMessages: 1, excludedOtherFileMessages: 1 });
+    mutate(coverage);
+    if (ready) assert.equal((await h.coordinator.planClaimFilingCall(CLAIM_INPUT)).communicationPreflight.ready, true);
+    else {
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /gmail_provider_scan_incomplete/);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(h.approvals.size, 0);
+    }
+  });
+});
+
+test("Retell admission does not trust a transcript completeness flag without complete call evidence", async (t) => {
+  const mutations = [
+    ["missing coverage", quo => { delete quo.transcriptCoverage; }],
+    ["preview mode", quo => { quo.transcriptCoverage.mode = "preview"; }],
+    ["omitted older call", quo => { quo.transcriptCoverage.omittedCallCount = 1; }],
+    ["missing speech transcript", quo => { quo.transcriptCoverage.missingSpeechTranscripts = 1; }],
+    ["unreviewed recording", quo => {
+      quo.timeline.push({ id: "old-recording", type: "call", status: "completed", durationSec: 60 });
+      Object.assign(quo.transcriptCoverage, { callCount: 1, reviewedCallCount: 1 });
+    }],
+    ["nonmember transcript", quo => {
+      quo.transcripts.push({ callId: "other-call", status: "completed", dialogue: [{ text: "Unrelated" }] });
+      quo.transcriptCoverage.returnedTranscriptCount = 1;
+    }]
+  ];
+  for (const [name, mutate] of mutations) await t.test(name, async () => {
+    const h = harness();
+    mutate(h.state.claimCommunicationReview.packets[0].quo);
+    await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /quo_transcript_review_incomplete/);
+    assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+    assert.equal(h.approvals.size, 0);
+  });
 });
 
 test("happy Retell execution posts the exact approved input and hidden challenge once", async () => {

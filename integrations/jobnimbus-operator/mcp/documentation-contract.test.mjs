@@ -7,6 +7,25 @@ const serverUrl = new URL("./server.mjs", import.meta.url);
 const coordinatorUrl = new URL("./operator-coordinator.mjs", import.meta.url);
 const scopeUrl = new URL("./scope.mjs", import.meta.url);
 
+test("evidence repair guidance distinguishes proof-scoped reads, existing tasks and the unreleased boundary", async () => {
+  const [skill, workflow, readme, server] = await Promise.all([
+    readFile(skillUrl, "utf8"),
+    readFile(new URL("../skills/jobnimbus-operator/references/evidence-review.md", import.meta.url), "utf8"),
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(serverUrl, "utf8")
+  ]);
+  assert.match(skill, /references\/evidence-review\.md/);
+  for (const value of ["includeCompleteCommunicationEvidence:true", "attachmentRef", "allowSharedPhoneEvidence:true",
+    "weather_dol_research_exact_file", "jobnimbus.ensure_current_task"]) assert.ok(workflow.includes(value));
+  assert.match(workflow, /checkpoint is an as-of finding, not current facts or execution authority/);
+  assert.match(workflow, /source retention\/no-store restrictions/);
+  assert.match(workflow, /does not reassign the JobNimbus task or notify/);
+  assert.match(readme, /Quo texting, carrier follow-up calls, calendar writes and task\s+completion remain unavailable/);
+  assert.match(readme, /Development approval does not deploy or activate/);
+  assert.match(server, /"weather_dol_research_exact_file"/);
+  assert.doesNotMatch(server, /register\(\s*"(?:quo_send|retell_carrier_followup|calendar_create|task_complete)/);
+});
+
 test("status payload documentation uses reference-level provider evidence", async () => {
   const skill = await readFile(skillUrl, "utf8");
   const statusSection = skill.match(

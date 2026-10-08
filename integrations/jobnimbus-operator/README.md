@@ -1,5 +1,57 @@
 # JobNimbus Operator for Mac
 
+## Unreleased communication-evidence repair (2026-10-08)
+
+This local candidate builds on the existing bridge and Mac Operator. It fixes
+Gmail attachment-token rotation with an exact signed MIME reference, adds a
+bounded complete Gmail review, separates homeowner identity from Quo routing
+fields, enables explicitly proof-scoped shared-phone **reads**, reviews all
+returned Quo call transcripts, and exposes the existing read-only DOL engine.
+The native Retell preflight uses the complete review and still blocks unknown,
+mixed, omitted, truncated or unavailable evidence. Transport-token changes alone
+do not change an evidence digest; material MIME metadata and content still do.
+
+Follow-through uses the existing `jobnimbus.ensure_current_task` approval lane
+and one authorized private checkpoint, as documented in the packaged evidence
+reference. No new CRM, Brain persistence, autonomous worker or client write was
+activated. Quo texting, carrier follow-up calls, calendar writes and task
+completion remain unavailable in this candidate's Mac effect boundary.
+
+Development approval does not deploy or activate this candidate. The installed
+plugin cache, version, bridge build pin, 58-file policy/hash/expiry, six historical
+receipt fingerprints and production environment are unchanged. The local
+expected capability set adds only `weather.date_of_loss.research` (Mac-only,
+assigned exact-file read); release must explicitly approve and attest that
+addition. No company sweep or new effect capability is added.
+
+Coordinated release gate:
+
+1. Review the exact source commit and synthetic regression results, including
+   expired/forged/wrong-file attachment refs; token rotation versus changed MIME
+   metadata; Gmail pagination/full-body/unknown/mixed/budget cases; Quo routing,
+   shared-phone privacy, old transcripts/voicemails and transcript failures;
+   immutable Retell evidence approval; and existing note/PDF/receipt protections.
+2. Obtain separate approval for push/merge/deployment and the versioned native
+   Operator release. Do not edit a running cached plugin. Pin the deployed
+   provider-attested bridge SHA and review the exact read-only weather capability
+   change. Keep the approved PDF/note release configuration, manifest roster,
+   action set, expiry, #2628 exclusion and six-receipt isolation unchanged.
+   Recheck the independent management/research/Fred launcher build pins without
+   widening those profiles. Policy expiry renewal is a separate reviewed change.
+3. Start a fresh session; require the full build/identity/capability/runtime/
+   policy/receipt attestation and zero unresolved or hard-blocked receipts.
+4. Run a read-only pilot on the previously selected unfiled-policy/property,
+   cancellation-PDF, old-appraisal-draft, prior-filing-attempt and shared-number
+   cases. Record source freshness and exact remaining holds. No draft, send,
+   call, upload, task or CRM change is authorized by this pilot.
+5. Obtain separate exact-file approvals for any subsequent supported action.
+   Quo send/carrier-follow-up activation needs its own reviewed immutable plan,
+   single-use approval, configured line/recipient proof, uncertain-outcome
+   reconciliation, provider readback and restart/build-drift tests. Existing
+   backend routes alone do not activate those lanes.
+
+See [the packaged evidence workflow](skills/jobnimbus-operator/references/evidence-review.md).
+
 ## Inactive PDF upload candidate
 
 `mcp/pdf-upload-release.mjs` defaults **disabled**. This source introduces
