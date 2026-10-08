@@ -536,7 +536,7 @@ register(
 
 register(
   "gmail_review_attachment_exact_file",
-  "Extract or OCR a Gmail attachment only after exact-file correlation. Prefer the attachmentRef from a freshly verified thread; download tokens can rotate. This tool never uploads the attachment.",
+  "Review a Gmail attachment only after exact-file correlation. Prefer the attachmentRef from a freshly verified thread; download tokens can rotate. Incomplete PDF extraction returns the verified original as a private localFiles path for native review. This tool never uploads the attachment or approves an effect.",
   {
     fileQuery: z.string().min(1),
     messageId: z.string().min(1),
@@ -573,7 +573,7 @@ register(
 
 register(
   "company_gmail_review_attachment_exact_file",
-  "Extract or OCR a Gmail attachment only after correlation to one explicitly named company file. This never uploads it.",
+  "Review a Gmail attachment only after correlation to one explicitly named company file. Incomplete PDF extraction returns the verified original as a private localFiles path for native review. This never uploads it or approves an effect.",
   {
     fileQuery: z.string().min(1),
     messageId: z.string().min(1),

@@ -2,7 +2,7 @@
 // because a homeowner or adjuster may have communicated through any of them.
 // Sending remains approval-gated by both execute:true and ALLOW_QUO_SEND=true.
 
-import { fetchBoundedJson } from "../http/bounded-json.js";
+import { BoundedJsonProviderError, fetchBoundedJson } from "../http/bounded-json.js";
 
 const MIN_REQUEST_INTERVAL_MS = 140;
 let requestQueue = Promise.resolve();
@@ -59,8 +59,9 @@ export async function readQuoHistoryStrict(config, input = {}) {
     lineInventory = await listQuoNumbersStrict(config, {
       maxPages
     });
-  } catch {
-    throw quoHistoryProviderFailure();
+  } catch (error) {
+    if (error instanceof QuoHistoryEvidenceError) throw error;
+    throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "provider_read", cause: error });
   }
   const numbers = lineInventory.numbers;
 
@@ -96,16 +97,16 @@ export async function readQuoHistoryStrict(config, input = {}) {
             incompleteReasons.add("restricted_line");
             break;
           }
-          throw quoHistoryProviderFailure();
+          throw quoHistoryProviderFailure({ stage: kind, reason: "provider_read", cause: error });
         }
         pagesScanned += 1;
         if (!payload || typeof payload !== "object" || !Array.isArray(payload.data)) {
-          throw quoHistoryProviderFailure();
+          throw quoHistoryProviderFailure({ stage: kind, reason: "invalid_response" });
         }
 
         for (const row of payload.data) {
           if (!row || typeof row !== "object" || Array.isArray(row)) {
-            throw quoHistoryProviderFailure();
+            throw quoHistoryProviderFailure({ stage: kind, reason: "invalid_response" });
           }
           const item = strictTimelineItem(
             row,
@@ -453,7 +454,7 @@ function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
   }
   const voicemailFields = [row.voicemail?.transcript, row.voicemailTranscript];
   if (voicemailFields.some((value) => value !== undefined && value !== null && typeof value !== "string")) {
-    throw quoHistoryProviderFailure();
+    throw quoHistoryProviderFailure({ stage: "calls", reason: "invalid_voicemail" });
   }
   return {
     id,
@@ -472,7 +473,7 @@ function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
 function assertStrictTimelineScope(row, line, kind, expectedPhone) {
   const providerLineId = String(row.phoneNumberId || "");
   if (!providerLineId || providerLineId !== line.id) {
-    throw quoHistoryProviderFailure();
+    throw quoHistoryProviderFailure({ stage: kind, reason: "record_scope_mismatch" });
   }
 
   if (kind === "calls") {
@@ -486,12 +487,12 @@ function assertStrictTimelineScope(row, line, kind, expectedPhone) {
       || !row.participants.every(isE164)
       || new Set(row.participants).size !== row.participants.length
     ) {
-      throw quoHistoryProviderFailure();
+      throw quoHistoryProviderFailure({ stage: kind, reason: "invalid_participants" });
     }
     // Response participants may include this exact Quo line; the query does not.
     const external = row.participants.filter((phone) => phone !== line.number);
     if (external.length !== 1 || external[0] !== expectedPhone) {
-      throw quoHistoryProviderFailure();
+      throw quoHistoryProviderFailure({ stage: kind, reason: "record_scope_mismatch" });
     }
     return;
   }
@@ -507,7 +508,7 @@ function assertStrictTimelineScope(row, line, kind, expectedPhone) {
     || !to.length
     || to.some((value) => !value)
   ) {
-    throw quoHistoryProviderFailure();
+    throw quoHistoryProviderFailure({ stage: kind, reason: "invalid_message_addressing" });
   }
   const participants = new Set(
     [from, ...to].filter((value) => value !== providerLineNumber)
@@ -517,7 +518,7 @@ function assertStrictTimelineScope(row, line, kind, expectedPhone) {
     || participants.size !== 1
     || !participants.has(expectedPhone)
   ) {
-    throw quoHistoryProviderFailure();
+    throw quoHistoryProviderFailure({ stage: kind, reason: "record_scope_mismatch" });
   }
 }
 
@@ -536,9 +537,34 @@ function isRestrictedLineError(error) {
   return Number(error?.statusCode) === 403;
 }
 
-function quoHistoryProviderFailure() {
-  const error = new Error("Quo history provider request failed");
+class QuoHistoryEvidenceError extends Error {}
+
+function quoHistoryProviderFailure({ stage = "history", reason = "unknown", cause } = {}) {
+  // Only fixed classifications and the bounded transport's numeric status may
+  // leave this boundary. Never include URLs, line/call IDs, phones, bodies,
+  // provider messages, credentials, or arbitrary Error properties.
+  const safeStage = ["history", "line_inventory", "messages", "calls"].includes(stage)
+    ? stage : "history";
+  const safeReason = [
+    "unknown", "provider_read", "invalid_response", "record_scope_mismatch",
+    "invalid_participants", "invalid_message_addressing", "invalid_voicemail",
+    "invalid_line_inventory", "line_inventory_ceiling", "empty_line_inventory"
+  ].includes(reason) ? reason : "unknown";
+  const readStatus = cause instanceof BoundedJsonProviderError
+    && Number.isInteger(cause.statusCode) && cause.statusCode >= 400 && cause.statusCode <= 599
+    ? cause.statusCode : null;
+  const diagnostic = Object.freeze({
+    stage: safeStage, reason: safeReason,
+    ...(readStatus === null ? {} : { boundedReadStatus: readStatus })
+  });
+  const error = new QuoHistoryEvidenceError(
+    `Quo history evidence unavailable: stage=${safeStage}; reason=${safeReason}`
+    + (readStatus === null ? "." : `; bounded_read_status=${readStatus}.`)
+    + " No provider record content was disclosed."
+  );
   error.code = "QUO_HISTORY_PROVIDER_FAILURE";
+  error.statusCode = 503;
+  error.diagnostic = diagnostic;
   return error;
 }
 
@@ -573,11 +599,11 @@ async function listQuoNumbersStrict(
       || Array.isArray(payload)
       || !Array.isArray(payload.data)
     ) {
-      throw quoHistoryProviderFailure();
+      throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "invalid_line_inventory" });
     }
     for (const row of payload.data) {
       if (!row || typeof row !== "object" || Array.isArray(row)) {
-        throw quoHistoryProviderFailure();
+        throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "invalid_line_inventory" });
       }
       const id = String(row.id || "").trim();
       if (
@@ -586,7 +612,7 @@ async function listQuoNumbersStrict(
         || /[\s\x00-\x1f\x7f]/.test(id)
         || ids.has(id)
       ) {
-        throw quoHistoryProviderFailure();
+        throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "invalid_line_inventory" });
       }
       ids.add(id);
       numbers.push({
@@ -595,7 +621,7 @@ async function listQuoNumbersStrict(
         number: String(row.number || "").slice(0, 32)
       });
       if (numbers.length > boundedLines) {
-        throw quoHistoryProviderFailure();
+        throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "line_inventory_ceiling" });
       }
     }
 
@@ -617,7 +643,7 @@ async function listQuoNumbersStrict(
     pageToken = next.value;
   }
 
-  if (!numbers.length) throw quoHistoryProviderFailure();
+  if (!numbers.length) throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "empty_line_inventory" });
   return {
     numbers,
     pagesScanned,

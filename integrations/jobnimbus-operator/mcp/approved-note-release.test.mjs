@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { APPROVED_NOTE_RELEASE, APPROVED_NOTES_ENABLED, RICHARD_MENTION_RECIPIENT, approvedNoteMentionIntent, validateApprovedNoteRelease, validateApprovedNoteOperation } from "./approved-note-release.mjs";
+import { PDF_UPLOAD_RELEASE, PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import { CHANCE_RUN_ACTION_TYPES, CHANCE_RUN_POLICY, EXPECTED_BRIDGE_BUILD, scopedOperations } from "./scope.mjs";
 
 const operation = (payload = { query: "#2745", note: "Paused due to license." }) => [{ type: "jobnimbus.create_note", payload }];
 const release = { enabled: true, policyId: "chance-58-files-notes-v1", policySha256: "a".repeat(64), bridgeCommit: "b".repeat(40) };
+const EFFECTIVE_NOTES_ENABLED = APPROVED_NOTES_ENABLED || PDF_UPLOADS_ENABLED;
+const ACTIVE_RELEASE = PDF_UPLOADS_ENABLED ? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE;
 
 test("compiled release requires exact pins and keeps disabled releases closed", () => {
   assert.equal(Object.isFrozen(APPROVED_NOTE_RELEASE), true);
-  assert.equal(CHANCE_RUN_ACTION_TYPES.includes("jobnimbus.create_note"), APPROVED_NOTES_ENABLED);
-  if (APPROVED_NOTES_ENABLED) {
-    assert.equal(CHANCE_RUN_POLICY.id, "chance-58-files-notes-v1");
-    assert.equal(CHANCE_RUN_POLICY.sha256, APPROVED_NOTE_RELEASE.policySha256);
-    assert.equal(EXPECTED_BRIDGE_BUILD.sourceCommit, APPROVED_NOTE_RELEASE.bridgeCommit);
+  assert.equal(CHANCE_RUN_ACTION_TYPES.includes("jobnimbus.create_note"), EFFECTIVE_NOTES_ENABLED);
+  if (EFFECTIVE_NOTES_ENABLED) {
+    assert.equal(CHANCE_RUN_POLICY.id, ACTIVE_RELEASE.policyId);
+    assert.equal(CHANCE_RUN_POLICY.sha256, ACTIVE_RELEASE.policySha256);
+    assert.equal(EXPECTED_BRIDGE_BUILD.sourceCommit, ACTIVE_RELEASE.bridgeCommit);
     assert.match(CHANCE_RUN_POLICY.sha256, /^[a-f0-9]{64}$/);
     assert.match(EXPECTED_BRIDGE_BUILD.sourceCommit, /^[a-f0-9]{40}$/);
     assert.doesNotThrow(() => scopedOperations(operation(), "assigned"));

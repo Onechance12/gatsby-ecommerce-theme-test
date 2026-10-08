@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { APPROVED_NOTES_ENABLED } from "./approved-note-release.mjs";
+import { APPROVED_NOTES_ENABLED as LEGACY_NOTES_ENABLED } from "./approved-note-release.mjs";
+import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 
 import { createOperatorCoordinator } from "./operator-coordinator.mjs";
 import {
@@ -17,6 +18,7 @@ import {
 
 const FUTURE = "2099-09-23T05:00:00.000Z";
 const NOW = Date.parse("2090-01-01T00:00:00.000Z");
+const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_UPLOADS_ENABLED;
 const HISTORICAL_IDS = Object.freeze(
   CHANCE_LEGACY_ISOLATION_ENTRIES.map((entry) => entry.batchId)
 );
@@ -70,6 +72,12 @@ function runPolicy() {
     rawGmailSendAllowed: false,
     noteCreationAllowed: APPROVED_NOTES_ENABLED,
     ...(APPROVED_NOTES_ENABLED ? { noteMentionsAllowed: false, noteMentionRequestsAllowed: true, noteCreationSoleOperation: true } : {}),
+    ...(PDF_UPLOADS_ENABLED ? {
+      pdfUploadAllowed: true,
+      pdfUploadSoleOperation: true,
+      pdfUploadContentReadbackRequired: true,
+      pdfUploadMaxBytes: 8388608
+    } : {}),
     backwardStageMovesAllowed: false,
     stageEvidenceRequired: true
   };
@@ -762,6 +770,54 @@ test("verified session binds the exact build, Mac identity, policy, runtime, and
   assert.deepEqual(result.approvalBoundary.legacyIsolation, h.state.policy.legacyIsolation);
   assert.deepEqual(result.approvalBoundary.operatorIdentity, h.state.whoami.identity);
   assert.deepEqual(result.approvalBoundary.operatorAccess, h.state.whoami.operatorAccess);
+});
+
+test("policy fixture matches the active release's note and PDF safety flags", () => {
+  const policy = runPolicy();
+  assert.equal(policy.noteCreationAllowed, APPROVED_NOTES_ENABLED);
+  assert.equal(policy.allowedActionTypes.includes("jobnimbus.create_note"), APPROVED_NOTES_ENABLED);
+  assert.equal(policy.allowedActionTypes.includes("jobnimbus.upload_pdf"), PDF_UPLOADS_ENABLED);
+  if (APPROVED_NOTES_ENABLED) {
+    assert.equal(policy.noteMentionsAllowed, false);
+    assert.equal(policy.noteMentionRequestsAllowed, true);
+    assert.equal(policy.noteCreationSoleOperation, true);
+  }
+  if (PDF_UPLOADS_ENABLED) {
+    assert.equal(policy.pdfUploadAllowed, true);
+    assert.equal(policy.pdfUploadSoleOperation, true);
+    assert.equal(policy.pdfUploadContentReadbackRequired, true);
+    assert.equal(policy.pdfUploadMaxBytes, 8388608);
+  } else {
+    assert.notEqual(policy.pdfUploadAllowed, true);
+  }
+});
+
+test("plan rejects note and PDF safety-flag drift before any action POST", async (t) => {
+  const mutations = {
+    "note creation permission": (policy) => { policy.noteCreationAllowed = !APPROVED_NOTES_ENABLED; },
+    ...(APPROVED_NOTES_ENABLED ? {
+      "note mentions": (policy) => { policy.noteMentionsAllowed = true; },
+      "note mention requests": (policy) => { policy.noteMentionRequestsAllowed = false; },
+      "note sole operation": (policy) => { policy.noteCreationSoleOperation = false; }
+    } : {}),
+    ...(PDF_UPLOADS_ENABLED ? {
+      "PDF permission missing": (policy) => { delete policy.pdfUploadAllowed; },
+      "PDF sole operation": (policy) => { policy.pdfUploadSoleOperation = false; },
+      "PDF readback required": (policy) => { policy.pdfUploadContentReadbackRequired = false; },
+      "PDF byte limit": (policy) => { policy.pdfUploadMaxBytes += 1; }
+    } : {
+      "PDF permission unexpectedly enabled": (policy) => { policy.pdfUploadAllowed = true; }
+    })
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    await t.test(name, async () => {
+      const h = harness();
+      mutate(h.state.policy.runPolicy);
+      await assert.rejects(h.coordinator.planActionBatch(OPERATIONS), /safety flags/i);
+      assert.equal(actionPosts(h).length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
 });
 
 test("plan performs no action POST for missing, mismatched, or unattested bridge builds", async (t) => {

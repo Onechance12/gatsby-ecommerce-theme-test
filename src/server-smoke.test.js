@@ -1057,6 +1057,7 @@ async function startCommunicationRepairBridge(t, port, apiPort, options = {}) {
       QUO_API_KEY: "fixture-quo-key", QUO_API_BASE_URL: `http://127.0.0.1:${apiPort}`,
       QUO_DEFAULT_FROM_NUMBER: "+19725550100", ALLOW_GOOGLE_USER_AUTH: "false",
       MEMORY_ROOT: memoryRoot, REQUIRE_CHANCE_RUN_POLICY: "false", BRIDGE_ALLOW_WRITES: "false",
+      MAX_CHATGPT_FILE_BYTES: String(options.maxChatgptFileBytes || 8 * 1024 * 1024),
       ALLOW_QUO_SEND: "false", ALLOW_RETELL_CALLS: "false", ALLOW_RETELL_CLAIM_CALLS: "false",
       ALLOW_CARRIER_FOLLOWUP_CALLS: "false", ALLOW_LEGACY_CLIENT_MEMORY_WRITES: "false"
     },
@@ -1105,7 +1106,17 @@ test("communication repair binds a Gmail MIME part across token rotation and nev
     attachmentRef: selected.attachmentRef, filename: selected.filename, contentType: selected.mimeType };
   const response = await h.post("/gmail/attachment-review", input);
   assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
-  assert.equal((await response.json()).attachmentId, "new-token");
+  const review = await response.json();
+  assert.equal(review.attachmentId, "new-token");
+  assert.equal(review.extraction, "failed");
+  assert.equal(review.nativeReviewRequired, true);
+  assert.match(review.extractionError, /No usable text extracted/);
+  assert.match(review.reviewInstruction, /read-only fallback does not authorize/);
+  assert.equal(review.upload, null);
+  assert.deepEqual(review.openaiFileResponse, [{
+    name: "coverage.pdf", mime_type: "application/pdf", content: pdf.toString("base64")
+  }]);
+  assert.equal(review.attachment.sha256, createHash("sha256").update(pdf).digest("hex"));
   assert.deepEqual(h.fixture.getGmailAttachmentRequests(), ["new-token"]);
   for (const bad of [
     { ...input, attachmentRef: undefined },
@@ -1122,6 +1133,42 @@ test("communication repair binds a Gmail MIME part across token rotation and nev
   assert.equal((await h.post("/gmail/attachment-review", input)).status, 403);
   assert.deepEqual(h.fixture.getGmailAttachmentRequests(), ["new-token"]);
   assert.equal(h.fixture.getContactUpdateCount(), 0);
+  assert.equal(h.fixture.getGmailDraftCreateCount(), 0);
+  assert.equal(h.fixture.getGmailSendCount(), 0);
+});
+
+test("communication repair preserves the native PDF byte limit and rejects mislabeled bytes", async (t) => {
+  const pdf = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+  const notPdf = Buffer.from("<html>This is not a PDF.</html>");
+  const message = communicationRepairMessage("native-limit");
+  message.payload = { ...message.payload, mimeType: "multipart/mixed", parts: [
+    { partId: "0", mimeType: "text/plain", body: message.payload.body },
+    { partId: "1", filename: "coverage.pdf", mimeType: "application/pdf", body: { size: pdf.length, attachmentId: "bounded-pdf" } },
+    { partId: "2", filename: "pretend.pdf", mimeType: "application/pdf", body: { size: notPdf.length, attachmentId: "not-pdf" } }
+  ] };
+  const h = await startCommunicationRepairBridge(t, 19338, 19339, {
+    companyOther: true, gmailMessages: [message],
+    gmailThreads: [{ id: message.threadId, messages: [message] }],
+    gmailAttachmentBytes: { "bounded-pdf": pdf, "not-pdf": notPdf }, maxChatgptFileBytes: 64
+  });
+  const threadResponse = await h.post("/gmail/thread", { fileQuery: "#2739", threadId: message.threadId });
+  assert.equal(threadResponse.status, 200);
+  const attachments = (await threadResponse.json()).messages[0].attachments;
+  const input = (selected) => ({ fileQuery: "#2739", messageId: message.id,
+    attachmentRef: selected.attachmentRef, filename: selected.filename, contentType: selected.mimeType });
+  const response = await h.post("/gmail/attachment-review", input(attachments[0]));
+  assert.equal(response.status, 200);
+  const review = await response.json();
+  assert.equal(review.nativeReviewRequired, true);
+  assert.match(review.nativeReviewUnavailableReason, /exceeds the 64-byte/);
+  assert.equal(Object.hasOwn(review, "openaiFileResponse"), false);
+  assert.equal(review.upload, null);
+  const invalidResponse = await h.post("/gmail/attachment-review", input(attachments[1]));
+  assert.equal(invalidResponse.status, 400);
+  assert.match((await invalidResponse.json()).error, /no PDF header/);
+  assert.equal(h.fixture.getContactUpdateCount(), 0);
+  assert.equal(h.fixture.getGmailDraftCreateCount(), 0);
+  assert.equal(h.fixture.getGmailSendCount(), 0);
 });
 
 test("communication repair follows Gmail pages and retains older long messages beyond the five-message preview", async (t) => {

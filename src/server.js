@@ -8662,6 +8662,19 @@ async function gmailAttachmentReview(input) {
     clamp(Number(input.maxChars || 20000), 1000, 50000),
     { forceOcr: input.forceOcr === true, maxOcrPages: clamp(Number(input.maxOcrPages || 5), 1, 20) }
   );
+  // Keep the freshly correlated original available when the server parser/OCR
+  // cannot review it. The Mac Operator already materializes this response in
+  // its private cache; never reselect an attachment or bypass MIME/size checks.
+  const nativeReviewRequired = (
+    attachment.contentType === "application/pdf" || /\.pdf$/i.test(attachment.filename)
+  ) && shouldAttachForNativeReview(extracted);
+  const nativeAttachment = nativeReviewRequired && attachment.bytes.length <= MAX_CHATGPT_FILE_BYTES
+    ? prepareChatgptDocumentAttachment({
+      bytes: attachment.bytes,
+      filename: attachment.filename,
+      contentType: attachment.contentType
+    }, document)
+    : null;
 
   let upload = null;
   if (input.uploadToJobNimbus === true) {
@@ -8698,6 +8711,13 @@ async function gmailAttachmentReview(input) {
     truncated: Boolean(extracted.truncated),
     extractionError: extracted.error || "",
     textPreview: String(extracted.text || "").slice(0, clamp(Number(input.previewChars || 8000), 500, 12000)),
+    nativeReviewRequired,
+    ...(nativeAttachment ? {
+      reviewInstruction: "Server extraction of this exact verified Gmail PDF is incomplete or unreliable. Inspect the original PDF with native/local PDF tools before reporting facts. Parser failure is not evidence of an empty document, and this read-only fallback does not authorize an upload, draft, send, or client update.",
+      openaiFileResponse: nativeAttachment.openaiFileResponse
+    } : nativeReviewRequired ? {
+      nativeReviewUnavailableReason: `The original PDF exceeds the ${MAX_CHATGPT_FILE_BYTES}-byte native-review limit. No original bytes were returned; do not treat extraction as complete.`
+    } : {}),
     upload
   };
 }
@@ -19982,7 +20002,7 @@ const OPENAPI = {
         operationId: "reviewGmailAttachment",
         "x-openai-isConsequential": true,
         requestBody: jsonBody("GmailAttachmentReviewRequest"),
-        responses: { "200": { description: "Downloads and validates a Gmail attachment, extracts text/OCR when supported, and optionally dry-runs or executes an upload to an exact Chance JobNimbus file." } }
+        responses: { "200": { description: "Downloads and validates a Gmail attachment, extracts text/OCR when supported, and returns the verified original PDF within the bounded native-review limit when extraction is incomplete. Original-file review is read-only; optional JobNimbus uploads remain separately gated." } }
       }
     },
     "/gmail/draft": {

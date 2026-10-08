@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { APPROVED_NOTE_RELEASE, APPROVED_NOTES_ENABLED } from "./approved-note-release.mjs";
+import { APPROVED_NOTE_RELEASE, APPROVED_NOTES_ENABLED as LEGACY_NOTES_ENABLED } from "./approved-note-release.mjs";
+import { PDF_UPLOAD_RELEASE, PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import {
   CHANCE_RUN_ACTION_TYPES,
   CHANCE_RUN_ALLOWED_CONTACT_FIELDS,
@@ -20,11 +21,13 @@ import {
 } from "./scope.mjs";
 
 const RECOVERY_BATCH_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_UPLOADS_ENABLED;
+const ACTIVE_RELEASE = PDF_UPLOADS_ENABLED ? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE;
 
 test("operator pins one immutable manifest, exact release actions, and one claim-call lane", () => {
   assert.deepEqual(CHANCE_RUN_POLICY, {
-  id: APPROVED_NOTES_ENABLED ? "chance-58-files-notes-v1" : "chance-58-files-v1",
-  sha256: APPROVED_NOTES_ENABLED ? APPROVED_NOTE_RELEASE.policySha256 : "40c8a7d418d9349b0b3315b693ce70486040092dcef250043f3397dc10a1c458"
+    id: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.policyId : "chance-58-files-v1",
+    sha256: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.policySha256 : "40c8a7d418d9349b0b3315b693ce70486040092dcef250043f3397dc10a1c458"
   });
   assert.deepEqual(CHANCE_RUN_ACTION_TYPES, [
     "jobnimbus.update_contact",
@@ -32,7 +35,8 @@ test("operator pins one immutable manifest, exact release actions, and one claim
     "jobnimbus.ensure_current_task",
     "gmail.create_draft",
     "gmail.send_existing_draft",
-    ...(APPROVED_NOTES_ENABLED ? ["jobnimbus.create_note"] : [])
+    ...(APPROVED_NOTES_ENABLED ? ["jobnimbus.create_note"] : []),
+    ...(PDF_UPLOADS_ENABLED ? ["jobnimbus.upload_pdf"] : [])
   ]);
   assert.equal(CHANCE_RUN_ACTION_TYPES.includes("gmail.send"), false);
   assert.equal(CHANCE_RUN_ACTION_TYPES.includes("jobnimbus.update_task"), false);
@@ -53,7 +57,7 @@ test("operator pins one immutable manifest, exact release actions, and one claim
     service: "jobnimbus-chatgpt-bridge",
     apiVersion: "v1",
     schemaVersion: "0.1.0",
-    sourceCommit: APPROVED_NOTES_ENABLED ? APPROVED_NOTE_RELEASE.bridgeCommit : "49465dded1707d5be6c019fd99de0baa90393c10",
+    sourceCommit: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.bridgeCommit : "49465dded1707d5be6c019fd99de0baa90393c10",
     sourceCommitTrust: "provider_attested",
     attested: true
   });
@@ -155,6 +159,12 @@ function attestedResponse(overrides = {}) {
       rawGmailSendAllowed: false,
       noteCreationAllowed: APPROVED_NOTES_ENABLED,
       ...(APPROVED_NOTES_ENABLED ? { noteMentionsAllowed: false, noteMentionRequestsAllowed: true, noteCreationSoleOperation: true } : {}),
+      ...(PDF_UPLOADS_ENABLED ? {
+        pdfUploadAllowed: true,
+        pdfUploadSoleOperation: true,
+        pdfUploadContentReadbackRequired: true,
+        pdfUploadMaxBytes: 8388608
+      } : {}),
       backwardStageMovesAllowed: false,
       stageEvidenceRequired: true,
       ...overrides
