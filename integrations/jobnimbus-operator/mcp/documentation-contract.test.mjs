@@ -75,6 +75,21 @@ test("status evidence documentation pins exact provider-record eligibility", asy
   assert.match(statusSection, /Blank status, `queued`, `failed`, and `canceled` are blocked/i);
 });
 
+test("Retell candidate documents complete history separately from preview and access limits", async () => {
+  const [readme, coordinator, server] = await Promise.all([
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(coordinatorUrl, "utf8"),
+    readFile(serverUrl, "utf8")
+  ]);
+  assert.match(readme, /includeCompleteJobNimbusEvidence:true/);
+  assert.match(readme, /5000-record source\/related-primary-union bound/);
+  assert.match(readme, /withheld search \*\*or\*\* thread/);
+  assert.match(readme, /does\s+not expand the manifest/);
+  assert.match(readme, /Development approval\s+does not deploy or activate/);
+  assert.match(coordinator, /includeCompleteJobNimbusEvidence: true/);
+  assert.match(server, /includeCompleteJobNimbusEvidence: z\.boolean\(\)\.optional\(\)/);
+});
+
 test("manual reconciliation tool is exact-batch and never an automatic retry", async () => {
   const [skill, server, coordinator] = await Promise.all([
     readFile(skillUrl, "utf8"),

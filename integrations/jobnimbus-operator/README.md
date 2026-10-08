@@ -133,6 +133,36 @@ Calling `bridge_restart_verify`, starting any newer action-batch plan, or starti
 
 The credential is intentionally absent from files and environment configuration.
 
+## Retell preflight evidence contract (release candidate)
+
+Ordinary evidence cards keep their 30-activity, 30-open-task and 60-document
+display previews. Retell planning and its immediate execution recheck request
+`includeCompleteJobNimbusEvidence:true` through the existing exact-file review
+route. This returns every activity, open task and operational document metadata
+record within the strict 5000-record source/related-primary-union bound. It does
+not expand the manifest or review other clients. Pagination failure or a larger
+union fails closed; it is never silently sliced into a supposedly complete scan.
+
+Admission requires versioned `liveJobNimbus.coverage` in `complete` mode,
+provider completion and consistent available/returned/omitted counts. The full
+record set and coverage bind the one-use approval digest. Prior-filing signals
+in older activities or open-task text stop a new-claim plan; these are review
+holds, not proof that a particular claim was filed. Document metadata remains
+metadata, not verified document contents.
+
+Gmail's 3650-day search window is an explicitly disclosed bound, not an unknown
+provider omission. The 15-result/five-thread search and five-message/1800-character
+thread previews remain bounded: remaining pages, withheld search **or** thread
+messages, omitted threads/messages, body/preview truncation or missing/inconsistent
+coverage prevent call admission. The Operator independently validates those
+counts rather than trusting only `providerScanComplete`. A clean bounded search
+may proceed; a partial review must not be labelled complete.
+
+Release requires the reviewed bridge deployment and a matching versioned Operator
+build pin in a fresh process. This candidate does not alter the installed plugin,
+policy, roster, credentials or live Retell configuration. Development approval
+does not deploy or activate it, and activation never authorizes a carrier call.
+
 ## Read-only 3x10 gap reports
 
 `management_report_status` and `management_gap_report` use the existing HCN

@@ -392,6 +392,7 @@ register(
     includeGmail: z.boolean().optional(),
     includeQuo: z.boolean().optional(),
     includeQuoTranscripts: z.boolean().optional(),
+    includeCompleteJobNimbusEvidence: z.boolean().optional(),
     includeBrainAdvisory: z.boolean().optional(),
     communicationDays: z.number().int().min(1).max(3650).optional(),
     gmailLimit: z.number().int().min(1).max(15).optional(),

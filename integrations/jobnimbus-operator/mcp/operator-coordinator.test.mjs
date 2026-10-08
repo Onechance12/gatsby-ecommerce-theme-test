@@ -284,7 +284,17 @@ function claimCommunicationReviewFixture() {
       liveJobNimbus: {
         recentActivities: [],
         openTasks: [],
-        operationalDocuments: []
+        operationalDocuments: [],
+        coverage: {
+          schemaVersion: 1,
+          mode: "complete",
+          complete: true,
+          providerScanComplete: true,
+          readLimit: 5000,
+          activities: { availableCount: 0, returnedCount: 0, omittedCount: 0 },
+          openTasks: { availableCount: 0, returnedCount: 0, omittedCount: 0 },
+          operationalDocuments: { availableCount: 0, returnedCount: 0, omittedCount: 0 }
+        }
       },
       gmail: {
         status: "fresh",
@@ -449,6 +459,23 @@ function enterRecovery(h, batchId = RECOVERY_ID) {
     reconciliationEligibleCount: 1,
     reconciliationEligibleBatchIds: [batchId]
   };
+}
+
+function syncClaimJobNimbusCoverage(review) {
+  const live = review.packets[0].liveJobNimbus;
+  for (const [key, rows] of [
+    ["activities", live.recentActivities],
+    ["openTasks", live.openTasks],
+    ["operationalDocuments", live.operationalDocuments]
+  ]) {
+    live.coverage[key] = { availableCount: rows.length, returnedCount: rows.length, omittedCount: 0 };
+  }
+}
+
+function syncClaimGmailSearchCounts(review) {
+  const gmail = review.packets[0].gmail;
+  gmail.coverage.search.scannedMessages = gmail.messages.length;
+  gmail.coverage.search.returnedMessages = gmail.messages.length;
 }
 
 function harness() {
@@ -1302,6 +1329,7 @@ test("Retell plan is one-file, freshly attested, configuration-pinned, and chall
     includeGmail: true,
     includeQuo: true,
     includeQuoTranscripts: true,
+    includeCompleteJobNimbusEvidence: true,
     communicationDays: 3650,
     gmailLimit: 15,
     gmailThreadLimit: 5,
@@ -1346,6 +1374,140 @@ test("Retell planning fails closed when exact-file Gmail or Quo review is unavai
   }
 });
 
+test("Retell planning rejects incomplete or unproven JobNimbus history before any call plan", async (t) => {
+  const cases = [
+    ["missing coverage", live => { delete live.coverage; }],
+    ["unknown coverage version", live => { live.coverage.schemaVersion = 2; }],
+    ["ordinary preview", live => { live.coverage.mode = "preview"; }],
+    ["provider scan incomplete", live => { live.coverage.providerScanComplete = false; }],
+    ["packet incomplete", live => { live.coverage.complete = false; }],
+    ["unknown provider bound", live => { delete live.coverage.readLimit; }],
+    ["older activity omitted", live => {
+      live.recentActivities = Array.from({ length: 30 }, (_, i) => ({ id: `routine-${i}`, note: "Routine work." }));
+      live.coverage.activities = { availableCount: 31, returnedCount: 30, omittedCount: 1 };
+    }],
+    ["open task omitted", live => { live.coverage.openTasks.availableCount = 1; live.coverage.openTasks.omittedCount = 1; }],
+    ["document omitted", live => { live.coverage.operationalDocuments.availableCount = 1; live.coverage.operationalDocuments.omittedCount = 1; }],
+    ["missing count", live => { delete live.coverage.activities.availableCount; }],
+    ["negative count", live => { live.coverage.activities.omittedCount = -1; }],
+    ["coerced count", live => { live.coverage.activities.omittedCount = "0"; }],
+    ["returned count mismatch", live => { live.coverage.activities.returnedCount = 1; }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const h = harness();
+      mutate(h.state.claimCommunicationReview.packets[0].liveJobNimbus);
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /jobnimbus_.*incomplete/);
+      assert.equal(claimPosts(h, "/claim-filing/configuration").length, 0);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
+});
+
+test("Retell planning independently rejects withheld or unknown Gmail search coverage", async (t) => {
+  const cases = [
+    ["withheld search message despite no next page", gmail => {
+      gmail.coverage.search.scannedMessages = 1;
+      gmail.coverage.search.withheldMessages = 1;
+    }],
+    ["missing search coverage", gmail => { delete gmail.coverage.search; }],
+    ["missing withheld count", gmail => { delete gmail.coverage.search.withheldMessages; }],
+    ["coerced withheld count", gmail => { gmail.coverage.search.withheldMessages = "0"; }],
+    ["negative withheld count", gmail => { gmail.coverage.search.withheldMessages = -1; }],
+    ["provider has another page", gmail => { gmail.coverage.search.hasMore = true; }],
+    ["unknown pagination", gmail => { delete gmail.coverage.search.hasMore; }],
+    ["scanned count mismatch", gmail => { gmail.coverage.search.scannedMessages = 1; }],
+    ["returned count mismatch", gmail => { gmail.coverage.search.returnedMessages = 1; }],
+    ["search body truncated", gmail => { gmail.coverage.search.truncatedMessages = 1; }],
+    ["unknown body truncation", gmail => { gmail.coverage.search.truncatedMessages = null; }],
+    ["unreviewed thread", gmail => { gmail.coverage.returnedThreadCount = 1; gmail.coverage.omittedThreadCount = 1; }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const h = harness();
+      mutate(h.state.claimCommunicationReview.packets[0].gmail);
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /gmail_provider_scan_incomplete/);
+      assert.equal(claimPosts(h, "/claim-filing/configuration").length, 0);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
+});
+
+test("Retell checks older JobNimbus activities and open task text, not just a recent preview", async (t) => {
+  for (const source of ["older activity", "open task"]) {
+    await t.test(source, async () => {
+      const h = harness();
+      const live = h.state.claimCommunicationReview.packets[0].liveJobNimbus;
+      live.recentActivities = Array.from({ length: 30 }, (_, i) => ({ id: `routine-${i}`, note: "Routine work." }));
+      if (source === "older activity") {
+        live.recentActivities.push({ id: "old-claim", type: "Note", note: "Claim was filed. Claim number: ABC-12345" });
+      } else {
+        live.openTasks.push({ id: "carrier-task", title: "Carrier follow-up", description: "Claim was filed. Claim number: ABC-12345" });
+      }
+      syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /claim_already_filed|claim_number_present_in_evidence/);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
+});
+
+test("Retell validates Gmail thread coverage independently of the top-level scan flag", async (t) => {
+  const cases = [
+    ["fully reviewed thread", () => {}, true],
+    ["withheld thread message", thread => { thread.coverage.withheldMessages = 1; }, false],
+    ["missing thread coverage", thread => { delete thread.coverage; }, false],
+    ["missing withheld count", thread => { delete thread.coverage.withheldMessages; }, false],
+    ["omitted message", thread => { thread.coverage.omittedMessages = 1; }, false],
+    ["truncated provider body", thread => { thread.coverage.truncatedMessages = 1; }, false],
+    ["unknown provider truncation", thread => { thread.coverage.truncatedMessages = null; }, false],
+    ["truncated display preview", thread => { thread.coverage.previewTruncatedMessages = 1; }, false],
+    ["returned count mismatch", thread => { thread.coverage.returnedMessages = 0; }, false]
+  ];
+  for (const [name, mutate, ready] of cases) {
+    await t.test(name, async () => {
+      const h = harness();
+      const gmail = h.state.claimCommunicationReview.packets[0].gmail;
+      const message = { id: "message-1", threadId: "thread-1", text: "Routine homeowner message." };
+      gmail.messages.push(message);
+      syncClaimGmailSearchCounts(h.state.claimCommunicationReview);
+      gmail.coverage.returnedThreadCount = 1;
+      gmail.coverage.reviewedThreadCount = 1;
+      gmail.threads.push({
+        id: "thread-1",
+        messageCount: 1,
+        messages: [message],
+        coverage: {
+          hasMore: false, scannedMessages: 1, returnedMessages: 1, withheldMessages: 0,
+          omittedMessages: 0, previewTruncatedMessages: 0
+        }
+      });
+      mutate(gmail.threads[0]);
+      if (ready) {
+        const plan = await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+        assert.equal(plan.communicationPreflight.ready, true);
+      } else {
+        await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /gmail_provider_scan_incomplete/);
+        assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+        assert.equal(h.approvals.size, 0);
+      }
+    });
+  }
+});
+
+test("Retell existing-claim lookup does not bypass complete-history admission", async () => {
+  const h = harness();
+  delete h.state.claimCommunicationReview.packets[0].liveJobNimbus.coverage;
+  await assert.rejects(
+    h.coordinator.planClaimFilingCall({ ...CLAIM_INPUT, goal: "find_existing_claim" }),
+    /jobnimbus_provider_scan_incomplete/
+  );
+  assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
 test("Retell new-claim planning stops on strong prior-filing communication evidence", async () => {
   const h = harness();
   h.state.claimCommunicationReview.packets[0].liveJobNimbus.recentActivities.push({
@@ -1353,6 +1515,7 @@ test("Retell new-claim planning stops on strong prior-filing communication evide
     type: "Note",
     note: "Claim was filed and the carrier assigned a desk adjuster."
   });
+  syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
   await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), error => {
     assert.match(error.message, /claim_already_filed/);
     assert.match(error.message, /adjuster_already_assigned/);
@@ -1379,6 +1542,7 @@ test("Retell new-claim stop signals recognize real attempts without treating neg
         type: "Note",
         note
       });
+      syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
       await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), expected);
       assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
     });
@@ -1399,6 +1563,7 @@ test("Retell new-claim stop signals recognize real attempts without treating neg
         type: "Note",
         note
       });
+      syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
       const response = await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
       assert.equal(response.communicationPreflight.ready, true);
       assert.equal(claimPosts(h, "/claim-filing/prepare").length, 1);
@@ -1414,6 +1579,7 @@ test("Retell existing-claim lookup may proceed after the same communication revi
     type: "Note",
     note: "Carrier confirmed an existing claim but the number is not recorded."
   });
+  syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
   h.state.mutateClaimPlan = response => {
     response.packet.goal = "find_existing_claim";
   };
@@ -1574,6 +1740,7 @@ test("Retell execution consumes approval when exact-file communication evidence 
     subject: "New file evidence",
     snippet: "A new exact-file message arrived after approval."
   });
+  syncClaimGmailSearchCounts(h.state.claimCommunicationReview);
   await assert.rejects(
     h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
     /evidence changed after call approval.*Nothing was called.*approval was consumed/i
@@ -1592,9 +1759,53 @@ test("Retell execution consumes approval when fresh communication review gains a
     subject: "Claim receipt",
     snippet: "We received the claim and a desk adjuster was assigned."
   });
+  syncClaimGmailSearchCounts(h.state.claimCommunicationReview);
   await assert.rejects(
     h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
     /carrier_claim_receipt|adjuster_already_assigned/i
+  );
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
+test("Retell execution consumes approval if JobNimbus history or Gmail search becomes incomplete", async (t) => {
+  const cases = [
+    ["older activity withheld", review => {
+      review.packets[0].liveJobNimbus.coverage.activities = { availableCount: 1, returnedCount: 0, omittedCount: 1 };
+    }, /jobnimbus_.*incomplete/],
+    ["Gmail search withholds a message", review => {
+      review.packets[0].gmail.coverage.search.scannedMessages = 1;
+      review.packets[0].gmail.coverage.search.withheldMessages = 1;
+    }, /gmail_provider_scan_incomplete/]
+  ];
+  for (const [name, mutate, expected] of cases) {
+    await t.test(name, async () => {
+      const h = harness();
+      await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+      mutate(h.state.claimCommunicationReview);
+      await assert.rejects(
+        h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
+        expected
+      );
+      assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
+});
+
+test("Retell execution binds older full-history records and rechecks them before calling", async () => {
+  const h = harness();
+  const review = h.state.claimCommunicationReview;
+  review.packets[0].liveJobNimbus.recentActivities = Array.from({ length: 31 }, (_, i) => ({
+    id: `activity-${i}`, type: "Note", note: "Routine work."
+  }));
+  syncClaimJobNimbusCoverage(review);
+  const plan = await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+  assert.equal(plan.communicationPreflight.evidenceCounts.jobNimbusActivities, 31);
+  review.packets[0].liveJobNimbus.recentActivities[30].note = "An older exact-file note was corrected.";
+  await assert.rejects(
+    h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
+    /evidence changed after call approval.*Nothing was called.*approval was consumed/i
   );
   assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
   assert.equal(h.approvals.size, 0);

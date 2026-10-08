@@ -141,6 +141,7 @@ const CLAIM_COMMUNICATION_REVIEW_INPUT = Object.freeze({
   includeGmail: true,
   includeQuo: true,
   includeQuoTranscripts: true,
+  includeCompleteJobNimbusEvidence: true,
   communicationDays: 3650,
   gmailLimit: 15,
   gmailThreadLimit: 5,
@@ -219,7 +220,8 @@ function claimCommunicationSnapshot(review, packet) {
     jobNimbus: {
       recentActivities: evidenceFingerprints(live.recentActivities),
       openTasks: evidenceFingerprints(live.openTasks),
-      operationalDocuments: evidenceFingerprints(live.operationalDocuments)
+      operationalDocuments: evidenceFingerprints(live.operationalDocuments),
+      coverage: live.coverage || null
     },
     gmail: {
       status: String(gmail.status || ""),
@@ -247,6 +249,9 @@ function communicationTextEntries(packet) {
   };
   for (const row of packet?.liveJobNimbus?.recentActivities || []) {
     add("jobnimbus_activity", row.id, [row.type, row.note]);
+  }
+  for (const row of packet?.liveJobNimbus?.openTasks || []) {
+    add("jobnimbus_task", row.id, [row.title, row.description]);
   }
   for (const row of packet?.gmail?.messages || []) {
     add("gmail_message", row.id, [row.subject, row.snippet, row.text, row.plainText, row.htmlText]);
@@ -285,6 +290,56 @@ function claimCommunicationStopSignals(packet) {
   return [...found.values()].sort((left, right) => left.code.localeCompare(right.code));
 }
 
+function completeClaimJobNimbusReview(live) {
+  const coverage = live?.coverage;
+  if (
+    coverage?.schemaVersion !== 1
+    || coverage.mode !== "complete"
+    || coverage.complete !== true
+    || coverage.providerScanComplete !== true
+    || coverage.readLimit !== 5000
+  ) return false;
+  return [
+    ["activities", live.recentActivities],
+    ["openTasks", live.openTasks],
+    ["operationalDocuments", live.operationalDocuments]
+  ].every(([key, rows]) => {
+    const counts = coverage[key];
+    return Array.isArray(rows)
+      && Number.isSafeInteger(counts?.availableCount)
+      && counts.availableCount >= 0
+      && counts.availableCount <= coverage.readLimit
+      && counts.returnedCount === rows.length
+      && counts.availableCount === rows.length
+      && counts.omittedCount === 0;
+  });
+}
+
+function completeClaimGmailReview(gmail) {
+  const coverage = gmail?.coverage;
+  const search = coverage?.search;
+  if (!Array.isArray(gmail?.messages) || !Array.isArray(gmail?.threads)) return false;
+  return coverage?.providerScanComplete === true
+    && search?.hasMore === false
+    && search.withheldMessages === 0
+    && search.scannedMessages === gmail.messages.length
+    && search.returnedMessages === gmail.messages.length
+    && (search.truncatedMessages === undefined || search.truncatedMessages === 0)
+    && coverage.returnedThreadCount === gmail.threads.length
+    && coverage.reviewedThreadCount === gmail.threads.length
+    && coverage.omittedThreadCount === 0
+    && gmail.threads.every((thread) => (
+      Array.isArray(thread?.messages)
+      && thread?.coverage?.hasMore === false
+      && thread.coverage.scannedMessages === thread.messages.length
+      && thread.coverage.returnedMessages === thread.messages.length
+      && thread.coverage.withheldMessages === 0
+      && thread.coverage.omittedMessages === 0
+      && thread.coverage.previewTruncatedMessages === 0
+      && (thread.coverage.truncatedMessages === undefined || thread.coverage.truncatedMessages === 0)
+    ));
+}
+
 function assertClaimCommunicationReview(review, input) {
   const packets = Array.isArray(review?.packets) ? review.packets : [];
   const packet = packets.length === 1 ? packets[0] : null;
@@ -299,7 +354,7 @@ function assertClaimCommunicationReview(review, input) {
     [fileNumber !== requestedFileNumber, "file_mismatch"],
     [gmail.status !== "fresh", "gmail_not_fresh"],
     [!Array.isArray(gmail.messages) || !Array.isArray(gmail.threads), "gmail_evidence_incomplete"],
-    [gmail?.coverage?.providerScanComplete !== true, "gmail_provider_scan_incomplete"],
+    [!completeClaimGmailReview(gmail), "gmail_provider_scan_incomplete"],
     [!["fresh", "partial"].includes(String(quo.status || "")), "quo_not_reviewed"],
     [quo?.completeness?.complete !== true, "quo_provider_scan_incomplete"],
     [quo?.coverage?.transcriptReviewRequested !== true, "quo_transcripts_not_requested"],
@@ -307,11 +362,12 @@ function assertClaimCommunicationReview(review, input) {
     [!Array.isArray(quo.timeline) || !Array.isArray(quo.transcripts), "quo_evidence_incomplete"],
     [!Array.isArray(packet?.liveJobNimbus?.recentActivities), "jobnimbus_activity_incomplete"],
     [!Array.isArray(packet?.liveJobNimbus?.openTasks), "jobnimbus_tasks_incomplete"],
-    [!Array.isArray(packet?.liveJobNimbus?.operationalDocuments), "jobnimbus_documents_incomplete"]
+    [!Array.isArray(packet?.liveJobNimbus?.operationalDocuments), "jobnimbus_documents_incomplete"],
+    [!completeClaimJobNimbusReview(packet?.liveJobNimbus), "jobnimbus_provider_scan_incomplete"]
   ].filter(([failed]) => failed).map(([, code]) => code);
   if (failures.length) {
     throw new Error(
-      `The required exact-file Gmail/Quo claim-filing review is incomplete. Failed checks: ${failures.join(", ")}. No call plan or approval was created.`
+      `The required exact-file JobNimbus/Gmail/Quo claim-filing review is incomplete. Failed checks: ${failures.join(", ")}. No call plan or approval was created.`
     );
   }
 
@@ -344,6 +400,8 @@ function assertClaimCommunicationReview(review, input) {
     },
     evidenceCounts: {
       jobNimbusActivities: packet.liveJobNimbus.recentActivities.length,
+      jobNimbusOpenTasks: packet.liveJobNimbus.openTasks.length,
+      jobNimbusOperationalDocuments: packet.liveJobNimbus.operationalDocuments.length,
       gmailMessages: gmail.messages.length,
       gmailThreads: gmail.threads.length,
       quoTimelineItems: quo.timeline.length,
