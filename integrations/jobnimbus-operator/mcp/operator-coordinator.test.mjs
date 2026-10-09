@@ -492,11 +492,17 @@ function syncClaimGmailSearchCounts(review) {
 
 function harness() {
   const state = {
+    now: NOW,
     whoami: whoamiFixture(),
     session: sessionFixture(),
     policy: policyFixture(),
     claimConfiguration: claimConfigurationFixture(),
     claimCommunicationReview: claimCommunicationReviewFixture(),
+    claimCallbacks: {
+      mode: "read_only", pendingCallbackCount: 1, count: 1,
+      callbacks: [{ originalCallId: "call-retell-2787", fileNumber: "2787", contactId: "contact-2787",
+        carrier: "USAA", callbackPacketStatus: "matched" }]
+    },
     beforeClaimPrepare: null,
     mutateExecutionResponse: null,
     mutateClaimPlan: null,
@@ -606,13 +612,20 @@ function harness() {
           goal: body.goal,
           damageEvidenceSource: "approved_override",
           damageSummary: ["Roof hail damage"],
+          damageDetails: body.overrides?.damageDetails || ["Roof hail damage"],
+          damageOpening: body.overrides?.damageOpening || "Roof hail damage.",
           verifiedFileFacts: {
+            ...body.overrides,
+            ...(body.stormTime ? { stormTime: body.stormTime } : {}),
             coverageTermStatus: body.overrides?.coverageTermStatus || "carrier_lookup_required",
             priorPolicyLookupInstruction: "Give the available policy number only when asked. If the carrier cannot locate it, provide the insured name and property address as requested."
           }
         },
         callPlan: {
           dynamicVariables: {
+            ...body.overrides,
+            ...(body.stormTime ? { stormTime: body.stormTime } : {}),
+            damageOpening: body.overrides?.damageOpening || "Roof hail damage.",
             damageDetails: "Roof hail damage",
             coverageTermStatus: body.overrides?.coverageTermStatus || "carrier_lookup_required",
             priorPolicyLookupInstruction: "Give the available policy number only when asked. If the carrier cannot locate it, provide the insured name and property address as requested."
@@ -653,18 +666,7 @@ function harness() {
       };
     }
     if (method === "POST" && pathname === "/claim-filing/callbacks") {
-      return {
-        mode: "read_only",
-        callbackTtlHours: 72,
-        count: 1,
-        callbacks: [{
-          originalCallId: "call-retell-2787",
-          fileNumber: "2787",
-          contactId: "contact-2787",
-          carrier: "USAA",
-          callbackPacketStatus: "matched"
-        }]
-      };
+      return structuredClone(state.claimCallbacks);
     }
     if (method === "POST" && pathname === "/ops/action-batch-reconcile") {
       state.policy.receipts.unresolvedBatchIds =
@@ -730,7 +732,7 @@ function harness() {
       bridgeRequest,
       version: "test-plugin",
       approvals,
-      now: () => NOW,
+      now: () => state.now,
       newApprovalId: () => CLAIM_APPROVAL_ID
     })
   };
@@ -2031,4 +2033,195 @@ test("Retell configuration, result, and callbacks are attested read-only paths e
   assert.equal(claimPosts(h, "/claim-filing/callbacks").length, 1);
   assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
   assert.equal(h.requests.some((request) => request.pathname === "/claim-filing/writeback"), false);
+});
+
+function reviewedPacketInput() {
+  const input = structuredClone(CLAIM_INPUT);
+  input.reviewMode = "reviewed_packet";
+  input.overrides = {
+    ...input.overrides,
+    insuredName: "Ronald", propertyAddress: "100 Fixture Way, Dallas, TX 75001",
+    carrier: "USAA", policyNumber: "POL-2787", dateOfLoss: "2026-06-01", causeOfLoss: "Hail"
+  };
+  input.packetReview = {
+    fileId: "contact-2787", reviewedAt: "2090-01-01T00:00:00.000Z", knownStopSignals: [],
+    sources: [{ source: "user_provided", reference: "current-exact-file-conversation",
+      reviewMethod: "user_statement", fields: [...Object.keys(input.overrides), "stormTime"] }]
+  };
+  return input;
+}
+
+function reviewedPacketHarness() {
+  const h = harness();
+  h.state.claimCallbacks = { mode: "read_only", count: 0, callbacks: [] };
+  h.state.claimCommunicationReview.packets[0].gmail.status = "error";
+  h.state.claimCommunicationReview.packets[0].quo.status = "error";
+  return h;
+}
+
+test("reviewed packet plans and executes once without a Gmail/Quo scan, explicitly disclosing limitations", async () => {
+  const h = reviewedPacketHarness();
+  const plan = await h.coordinator.planClaimFilingCall(reviewedPacketInput());
+  assert.equal(plan.communicationPreflight.reviewMode, "reviewed_packet");
+  assert.equal(plan.communicationPreflight.communicationEvidenceComplete, false);
+  assert.equal(plan.communicationPreflight.humanReviewRequired, true);
+  assert.equal(plan.communicationPreflight.provenanceIndependentlyVerified, false);
+  assert.deepEqual(plan.communicationPreflight.sources, {
+    jobNimbus: "fresh_exact_file", gmail: "not_rechecked", quo: "not_rechecked"
+  });
+  assert.match(plan.communicationPreflight.approvalWarning, /ONE live.*not call approval/i);
+  assert.ok(plan.communicationPreflight.limitationCodes.includes("not_proof_claim_is_unfiled"));
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  const result = await h.coordinator.executeClaimFilingCall(plan.approvalId, plan.planDigest, plan.approvedInput);
+  assert.equal(result.automaticJobNimbusWriteback, false);
+  assert.equal(result.automaticChanceBrainWriteback, false);
+  const reviews = claimPosts(h, "/ops/review-chance-files");
+  assert.equal(reviews.length, 2);
+  for (const { body } of reviews) {
+    assert.equal(body.includeGmail, false);
+    assert.equal(body.includeQuo, false);
+    assert.equal(body.includeQuoTranscripts, false);
+    assert.equal(body.includeCompleteCommunicationEvidence, false);
+    assert.equal(body.includeCompleteJobNimbusEvidence, true);
+  }
+  assert.equal(claimPosts(h, "/claim-filing/callbacks").length, 2);
+  for (const { body } of [...claimPosts(h, "/claim-filing/prepare"), ...claimPosts(h, "/claim-filing/call")]) {
+    assert.equal(Object.hasOwn(body, "packetReview"), false);
+    assert.equal(Object.hasOwn(body, "reviewMode"), false);
+    assert.equal(body.includeCarrierBatch, false);
+  }
+  assert.equal(actionPosts(h).length, 0);
+  await assert.rejects(h.coordinator.executeClaimFilingCall(plan.approvalId, plan.planDigest, plan.approvedInput), /No unconsumed local/);
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 1);
+});
+
+test("the same unavailable communications still block the default autonomous full-evidence path", async () => {
+  const h = reviewedPacketHarness();
+  await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /gmail_not_fresh.*quo_not_reviewed/);
+  assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+});
+
+test("reviewed packet rejects missing, forged/control-bearing, stale and unsupported provenance", async t => {
+  const cases = [
+    ["missing review", input => { delete input.packetReview; }, /exact review-provenance/],
+    ["unknown mode", input => { input.reviewMode = "skip"; }, /no skip-review mode/],
+    ["implicit mode", input => { delete input.reviewMode; }, /only in explicitly/],
+    ["control field", input => { input.packetReview.approved = true; }, /control keys/],
+    ["missing stop disclosure", input => { delete input.packetReview.knownStopSignals; }, /explicitly list/],
+    ["known previous claim", input => { input.packetReview.knownStopSignals = ["claim_already_filed"]; }, /known claim/],
+    ["stale", input => { input.packetReview.reviewedAt = "2089-12-30T00:00:00.000Z"; }, /older than 24 hours/],
+    ["future", input => { input.packetReview.reviewedAt = "2090-01-01T00:00:01.000Z"; }, /future-dated/],
+    ["timezone missing", input => { input.packetReview.reviewedAt = "2090-01-01T00:00:00"; }, /timezone/],
+    ["missing insured", input => { delete input.overrides.insuredName; }, /requires explicit insured/],
+    ["missing DOL", input => { input.overrides.dateOfLoss = ""; }, /requires explicit insured/],
+    ["missing cause", input => { delete input.overrides.causeOfLoss; }, /requires explicit insured/],
+    ["missing coverage", input => { delete input.overrides.coverageTermStatus; }, /requires explicit insured/],
+    ["missing damage", input => { delete input.overrides.damageDetails; }, /practical damage facts/],
+    ["unreferenced fact", input => { input.packetReview.sources[0].fields.pop(); }, /Every supplied packet fact/],
+    ["metadata is not native review", input => { input.packetReview.sources[0].source = "jobnimbus_document"; }, /method does not match/],
+    ["non-manifest exclusion", input => { input.query = "#2628"; }, /excluded/]
+  ];
+  for (const [name, mutate, expected] of cases) await t.test(name, async () => {
+    const h = reviewedPacketHarness();
+    const input = reviewedPacketInput();
+    mutate(input);
+    await assert.rejects(h.coordinator.planClaimFilingCall(input), expected);
+    assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+    assert.equal(h.approvals.size, 0);
+  });
+});
+
+test("reviewed mode still requires complete exact-file JobNimbus identity, inventory and no known claim", async t => {
+  const cases = [
+    ["wrong ID", packet => { packet.file.id = "another-contact"; }, /different JobNimbus file ID/],
+    ["wrong number", packet => { packet.file.number = "2760"; }, /file_mismatch/],
+    ["incomplete feed", packet => { packet.liveJobNimbus.coverage.complete = false; }, /scan_incomplete/],
+    ["bad counts", packet => { packet.liveJobNimbus.coverage.activities.availableCount = 1; }, /scan_incomplete/],
+    ["existing claim", packet => { packet.file.claimNumber = "CLM-2787"; }, /already has a claim/],
+    ["named desk adjuster", packet => { packet.file.adjusterName = "Verified desk adjuster"; }, /adjuster_already_assigned/],
+    ["previous attempt", packet => { packet.liveJobNimbus.recentActivities.push({ id: "attempt", note: "Called to file a claim. Awaiting carrier callback." }); }, /prior_claim_filing_attempt/]
+  ];
+  for (const [name, mutate, expected] of cases) await t.test(name, async () => {
+    const h = reviewedPacketHarness();
+    mutate(h.state.claimCommunicationReview.packets[0]);
+    if (name === "previous attempt") syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
+    await assert.rejects(h.coordinator.planClaimFilingCall(reviewedPacketInput()), expected);
+    assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+  });
+});
+
+test("native/full-text source references must belong to this exact file and remain caller-reported", async () => {
+  const h = reviewedPacketHarness();
+  const input = reviewedPacketInput();
+  input.packetReview.sources[0] = { ...input.packetReview.sources[0], source: "jobnimbus_document", reference: "policy-doc", reviewMethod: "native_pages" };
+  await assert.rejects(h.coordinator.planClaimFilingCall(input), /not in this exact file/);
+  h.state.claimCommunicationReview.packets[0].liveJobNimbus.operationalDocuments.push({ id: "policy-doc", name: "Policy.pdf" });
+  syncClaimJobNimbusCoverage(h.state.claimCommunicationReview);
+  const plan = await h.coordinator.planClaimFilingCall(input);
+  assert.equal(plan.communicationPreflight.provenanceIndependentlyVerified, false);
+});
+
+test("a known exact-file Gmail stop cannot be erased by switching to reviewed mode", async () => {
+  const h = harness();
+  h.state.claimCommunicationReview.packets[0].gmail.messages.push({ id: "already-filed", text: "Claim number: CLM-2787." });
+  syncClaimGmailSearchCounts(h.state.claimCommunicationReview);
+  await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /claim_number_present/);
+  h.state.claimCommunicationReview.packets[0].gmail.messages = [];
+  h.state.claimCallbacks = { mode: "read_only", count: 0, callbacks: [] };
+  await assert.rejects(h.coordinator.planClaimFilingCall(reviewedPacketInput()), /Switching review modes cannot clear/);
+  assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+});
+
+test("reviewed packet detects changed remote facts, callback variables, damage and destination before issuing approval", async t => {
+  const cases = [
+    ["different file ID", response => { response.file.id = "other-id"; }, /changed the reviewed JobNimbus file ID/],
+    ["changed insured", response => { response.packet.verifiedFileFacts.insuredName = "Someone else"; }, /changed reviewed insuredName/],
+    ["changed callback DOL", response => { response.callPlan.dynamicVariables.dateOfLoss = "2026-06-02"; }, /did not bind reviewed dateOfLoss/],
+    ["invalid calendar date", response => { response.packet.verifiedFileFacts.dateOfLoss = "2026-02-31"; }, /changed reviewed dateOfLoss/],
+    ["changed details", response => { response.packet.damageDetails = ["Different damage"]; }, /changed reviewed damage details/],
+    ["changed callback details", response => { response.callPlan.dynamicVariables.damageDetails = "Different damage"; }, /did not bind reviewed damage details/],
+    ["changed callback opening", response => { response.callPlan.dynamicVariables.damageOpening = "Different opening"; }, /did not bind its reviewed damage opening/]
+  ];
+  for (const [name, mutate, expected] of cases) await t.test(name, async () => {
+    const h = reviewedPacketHarness();
+    h.state.mutateClaimPlan = mutate;
+    await assert.rejects(h.coordinator.planClaimFilingCall(reviewedPacketInput()), expected);
+    assert.equal(h.approvals.size, 0);
+    assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  });
+});
+
+test("reviewed packet consumes approval on changed file, packet provenance, callback, freshness or boundary", async t => {
+  const cases = [
+    ["new note", (h) => { h.state.claimCommunicationReview.packets[0].liveJobNimbus.recentActivities.push({ id: "new-work", note: "Policy reviewed again." }); syncClaimJobNimbusCoverage(h.state.claimCommunicationReview); }, /evidence or reviewed packet changed/],
+    ["changed homeowner phone", h => { h.state.claimCommunicationReview.packets[0].file.phone = "+12145550200"; }, /evidence or reviewed packet changed/],
+    ["changed insured", h => { h.state.claimCommunicationReview.packets[0].file.name = "Other insured"; }, /evidence or reviewed packet changed/],
+    ["new claim number", h => { h.state.claimCommunicationReview.packets[0].file.claimNumber = "NEW-CLAIM"; }, /already has a claim/],
+    ["new callback", h => { h.state.claimCallbacks = harness().state.claimCallbacks; }, /callback is pending/],
+    ["incomplete callback list", h => { h.state.claimCallbacks.count = 1; }, /incomplete.*callback list/],
+    ["expired review", h => { h.state.now += 25 * 60 * 60 * 1000; }, /older than 24 hours/],
+    ["changed provenance", (h, input) => { input.packetReview.sources[0].reference = "different-conversation"; }, /differs from the reviewed plan/],
+    ["changed review mode", (h, input) => { input.reviewMode = "full_evidence"; delete input.packetReview; }, /differs from the reviewed plan/],
+    ["changed bridge boot", h => { h.state.policy.bridgeBootId = "new-boot"; }, /boundary changed/],
+    ["changed Retell version", h => { h.state.claimConfiguration.agentVersion += 1; }, /configuration changed/]
+  ];
+  for (const [name, mutate, expected] of cases) await t.test(name, async () => {
+    const h = reviewedPacketHarness();
+    const plan = await h.coordinator.planClaimFilingCall(reviewedPacketInput());
+    const input = structuredClone(plan.approvedInput);
+    mutate(h, input);
+    await assert.rejects(h.coordinator.executeClaimFilingCall(plan.approvalId, plan.planDigest, input), expected);
+    assert.equal(h.approvals.size, 0);
+    assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  });
+});
+
+test("reviewed packet blocks an existing pending callback before preparing, but unrelated callbacks do not clear other checks", async () => {
+  const h = harness();
+  await assert.rejects(h.coordinator.planClaimFilingCall(reviewedPacketInput()), /callback is pending/);
+  assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+  h.state.claimCallbacks.callbacks[0].fileNumber = "2739";
+  h.state.claimCallbacks.callbacks[0].contactId = "contact-2739";
+  const plan = await h.coordinator.planClaimFilingCall(reviewedPacketInput());
+  assert.equal(plan.communicationPreflight.communicationEvidenceComplete, false);
 });

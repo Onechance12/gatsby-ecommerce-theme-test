@@ -10,7 +10,11 @@ For one selected file, request `ops_review_chance_files` with `limit:1`,
 `includeCompleteJobNimbusEvidence:true`,
 `includeCompleteCommunicationEvidence:true`, `includeGmail:true`,
 `includeQuo:true`, `includeQuoTranscripts:true` and the needed date window.
-The Retell coordinator requests this review again before planning and execution.
+The Retell coordinator requests this review again before planning and execution
+in the default `full_evidence` mode. After its separately approved release, the
+explicit [reviewed-packet mode](reviewed-claim-packet.md) accepts already reviewed
+facts with disclosed unrechecked Gmail/Quo history; it is not an automatic
+fallback for failed audits or known claim/callback stops.
 A quick preview is useful for orientation, not claim readiness.
 
 Complete review follows up to 20 Gmail search pages/250 candidate messages,

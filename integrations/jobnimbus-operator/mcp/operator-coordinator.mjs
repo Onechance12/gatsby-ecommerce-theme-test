@@ -3,6 +3,10 @@ import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
 import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import { readLocalPdf } from "./local-pdf.mjs";
+import {
+  normalizePacketReview, assertPacketReviewCurrent, assertPacketReviewFileSources,
+  assertReviewedPacketPlan
+} from "./reviewed-claim-packet.mjs";
 
 import {
   CHANCE_RUN_ACTION_TYPES,
@@ -133,6 +137,8 @@ const CLAIM_FILING_INPUT_KEYS = new Set([
   "goal",
   "includeCarrierBatch",
   "overrides",
+  "reviewMode",
+  "packetReview",
   ...CLAIM_FILING_OPTIONAL_STRING_KEYS
 ]);
 const CLAIM_COMMUNICATION_REVIEW_INPUT = Object.freeze({
@@ -213,8 +219,86 @@ function gmailEvidenceFingerprints(rows) {
 function claimCommunicationReviewRequest(input) {
   return {
     query: input.query,
-    ...CLAIM_COMMUNICATION_REVIEW_INPUT
+    ...CLAIM_COMMUNICATION_REVIEW_INPUT,
+    ...(input.reviewMode === "reviewed_packet" ? {
+      includeGmail: false,
+      includeQuo: false,
+      includeQuoTranscripts: false,
+      includeCompleteCommunicationEvidence: false
+    } : {})
   };
+}
+
+function claimBridgeInput({ reviewMode, packetReview, ...input }) {
+  // Review receipts stay local. Existing bridge plans/challenges and Retell
+  // packets are unchanged; no provenance/control data is sent to the carrier.
+  return input;
+}
+
+function assertReviewedClaimPacketReview(review, input) {
+  const packets = Array.isArray(review?.packets) ? review.packets : [];
+  const packet = packets.length === 1 ? packets[0] : null;
+  const failures = [
+    [review?.scope !== "chance_assigned_file", "scope_not_exact_chance_file"],
+    [packets.length !== 1, "packet_count_not_one"],
+    [!String(packet?.file?.id || "").trim(), "missing_file_id"],
+    [exactFileNumber(packet?.file?.number) !== exactFileNumber(input.query), "file_mismatch"],
+    [!completeClaimJobNimbusReview(packet?.liveJobNimbus), "jobnimbus_provider_scan_incomplete"]
+  ].filter(([failed]) => failed).map(([, code]) => code);
+  if (failures.length) {
+    throw new Error(`The reviewed packet needs fresh complete exact-file JobNimbus evidence. Failed checks: ${failures.join(", ")}.`);
+  }
+  assertPacketReviewFileSources(input, packet);
+  if (input.goal === "file_new_claim" && String(packet.file.claimNumber || "").trim()) {
+    throw new Error("The exact JobNimbus file already has a claim number. A reviewed packet cannot authorize a new filing.");
+  }
+  const stopSignals = input.goal === "file_new_claim" ? claimCommunicationStopSignals(packet) : [];
+  if (input.goal === "file_new_claim" && String(packet.file.adjusterName || "").trim()
+    && !/^(?:missing|unknown|unassigned|none)$/i.test(packet.file.adjusterName.trim())) {
+    stopSignals.push({ code: "adjuster_already_assigned", source: "jobnimbus_field", id: packet.file.id });
+  }
+  if (stopSignals.length) {
+    throw new Error(`Fresh exact-file JobNimbus evidence contains an existing claim, prior attempt or unresolved callback. Stop signals: ${stopSignals.map(signal => signal.code).join(", ")}.`);
+  }
+  const live = packet.liveJobNimbus;
+  const snapshot = {
+    mode: "reviewed_packet", input,
+    file: packet.file,
+    jobNimbus: {
+      recentActivities: evidenceFingerprints(live.recentActivities),
+      openTasks: evidenceFingerprints(live.openTasks),
+      operationalDocuments: evidenceFingerprints(live.operationalDocuments),
+      coverage: live.coverage
+    }
+  };
+  return {
+    ready: true,
+    reviewMode: "reviewed_packet",
+    digest: sha256(canonical(snapshot)),
+    fileId: packet.file.id,
+    fileNumber: exactFileNumber(packet.file.number),
+    reviewedAt: input.packetReview.reviewedAt,
+    checkedAt: String(review.generatedAt || ""),
+    humanReviewRequired: true,
+    communicationEvidenceComplete: false,
+    provenanceIndependentlyVerified: false,
+    packetReview: input.packetReview,
+    sources: { jobNimbus: "fresh_exact_file", gmail: "not_rechecked", quo: "not_rechecked" },
+    limitationCodes: ["gmail_history_not_rechecked", "quo_history_not_rechecked", "packet_source_review_caller_reported", "not_proof_claim_is_unfiled"],
+    stopSignals: [],
+    approvalWarning: "Approval accepts this exact reviewed packet and the disclosed Gmail/Quo history limitations for ONE live carrier call. This review receipt is not call approval or proof that no earlier claim exists."
+  };
+}
+
+function assertPendingClaimCallbacksResponse(response) {
+  const callbacks = Array.isArray(response?.callbacks) ? response.callbacks : null;
+  if (response?.mode !== "read_only" || callbacks === null || response?.count !== callbacks.length
+    || callbacks.some(callback => !/^\d+$/.test(exactFileNumber(callback?.fileNumber))
+      || CHANCE_RUN_EXCLUDED_FILE_NUMBERS.includes(exactFileNumber(callback.fileNumber))
+      || !String(callback?.contactId || "").trim() || !String(callback?.originalCallId || "").trim())) {
+    throw new Error("The bridge returned an incomplete or out-of-scope pending-callback list.");
+  }
+  return response;
 }
 
 function claimCommunicationSnapshot(review, packet) {
@@ -501,6 +585,17 @@ function normalizedClaimFilingInput(input = {}) {
     goal,
     includeCarrierBatch: false
   };
+  if (input.reviewMode !== undefined) {
+    if (!["full_evidence", "reviewed_packet"].includes(input.reviewMode)) {
+      throw new Error("reviewMode must be full_evidence or reviewed_packet; there is no skip-review mode.");
+    }
+    normalized.reviewMode = input.reviewMode;
+  }
+  if (input.reviewMode === "reviewed_packet") {
+    normalized.packetReview = normalizePacketReview(input.packetReview);
+  } else if (input.packetReview !== undefined) {
+    throw new Error("packetReview is allowed only in explicitly selected reviewed_packet mode.");
+  }
   for (const key of CLAIM_FILING_OPTIONAL_STRING_KEYS) {
     if (input[key] === undefined) continue;
     if (typeof input[key] !== "string") {
@@ -710,6 +805,37 @@ export function createOperatorCoordinator({
     throw new TypeError("createOperatorCoordinator requires an approval ID generator.");
   }
   let approvalGeneration = 0;
+  // Keep only derived exact-file stop codes/IDs, not mail or transcript bodies.
+  // Switching modes must not erase a known stop from a prior failed full review.
+  const knownClaimStops = new Map();
+
+  async function reviewClaimForPlan(input) {
+    const reviewedPacket = input.reviewMode === "reviewed_packet";
+    if (reviewedPacket) assertPacketReviewCurrent(input, now());
+    const review = await bridgeRequest("POST", "/ops/review-chance-files", claimCommunicationReviewRequest(input));
+    const packet = review?.packets?.length === 1 ? review.packets[0] : null;
+    if (review?.scope === "chance_assigned_file" && packet?.file?.id
+      && exactFileNumber(packet.file.number) === exactFileNumber(input.query)) {
+      const stops = claimCommunicationStopSignals(packet);
+      if (stops.length) knownClaimStops.set(packet.file.id, stops);
+    }
+    const preflight = reviewedPacket
+      ? assertReviewedClaimPacketReview(review, input)
+      : assertClaimCommunicationReview(review, input);
+    if (reviewedPacket && input.goal === "file_new_claim" && knownClaimStops.has(preflight.fileId)) {
+      throw new Error("A prior exact-file review found a claim or unresolved filing/callback signal. Switching review modes cannot clear that stop.");
+    }
+    if (reviewedPacket) {
+      const callbacks = assertPendingClaimCallbacksResponse(
+        await bridgeRequest("POST", "/claim-filing/callbacks", {})
+      );
+      if (callbacks.callbacks.some(callback => callback.contactId === preflight.fileId
+        || exactFileNumber(callback.fileNumber) === preflight.fileNumber)) {
+        throw new Error("A carrier callback is pending for this exact file. No new claim call can be approved.");
+      }
+    }
+    return preflight;
+  }
 
   function invalidateLocalApprovals() {
     approvals.clear();
@@ -837,14 +963,7 @@ export function createOperatorCoordinator({
     const verification = await verifiedBridgeSession();
     requireCurrentApprovalGeneration(generation);
     const attestedBoundary = requireReadyForNormalWork(verification);
-    const communicationPreflight = assertClaimCommunicationReview(
-      await bridgeRequest(
-        "POST",
-        "/ops/review-chance-files",
-        claimCommunicationReviewRequest(normalizedInput)
-      ),
-      normalizedInput
-    );
+    const communicationPreflight = await reviewClaimForPlan(normalizedInput);
     requireCurrentApprovalGeneration(generation);
     const configuration = assertClaimFilingConfiguration(
       await bridgeRequest("POST", "/claim-filing/configuration", {}),
@@ -854,10 +973,13 @@ export function createOperatorCoordinator({
     const response = await bridgeRequest(
       "POST",
       "/claim-filing/prepare",
-      normalizedInput
+      claimBridgeInput(normalizedInput)
     );
     requireCurrentApprovalGeneration(generation);
     const { fileNumber, expiresAt } = assertClaimPlan(response, normalizedInput, now());
+    if (normalizedInput.reviewMode === "reviewed_packet") {
+      assertReviewedPacketPlan(response, normalizedInput, communicationPreflight.fileId);
+    }
     const approvalId = String(newApprovalId() || "").trim();
     if (!UUID.test(approvalId) || approvals.has(approvalId)) {
       throw new Error("The local operator could not issue a unique one-use Retell approval ID.");
@@ -915,18 +1037,13 @@ export function createOperatorCoordinator({
           "The bridge boot/build/policy/runtime boundary changed after call approval. Nothing was called."
         );
       }
-      const communicationPreflight = assertClaimCommunicationReview(
-        await bridgeRequest(
-          "POST",
-          "/ops/review-chance-files",
-          claimCommunicationReviewRequest(normalizedInput)
-        ),
-        normalizedInput
-      );
+      const communicationPreflight = await reviewClaimForPlan(normalizedInput);
       requireCurrentApprovalGeneration(pending.generation);
       if (pending.communicationDigest !== communicationPreflight.digest) {
         throw new Error(
-          "The exact-file JobNimbus, Gmail, or Quo evidence changed after call approval. Nothing was called; review a fresh plan."
+          normalizedInput.reviewMode === "reviewed_packet"
+            ? "The exact-file JobNimbus evidence or reviewed packet changed after approval. Nothing was called; review a fresh plan."
+            : "The exact-file JobNimbus, Gmail, or Quo evidence changed after call approval. Nothing was called; review a fresh plan."
         );
       }
       const configuration = assertClaimFilingConfiguration(
@@ -941,7 +1058,7 @@ export function createOperatorCoordinator({
       }
 
       const response = await bridgeRequest("POST", "/claim-filing/call", {
-        ...normalizedInput,
+        ...claimBridgeInput(normalizedInput),
         execute: true,
         planDigest: pending.planDigest,
         approvalChallenge: pending.challenge
@@ -981,21 +1098,7 @@ export function createOperatorCoordinator({
     const verification = await verifiedBridgeSession();
     requireAttestedReadBoundary(verification);
     const response = await bridgeRequest("POST", "/claim-filing/callbacks", {});
-    const callbacks = Array.isArray(response?.callbacks) ? response.callbacks : null;
-    if (
-      response?.mode !== "read_only"
-      || callbacks === null
-      || response?.count !== callbacks.length
-      || callbacks.some((callback) => {
-        const fileNumber = exactFileNumber(callback?.fileNumber);
-        return !/^\d+$/.test(fileNumber)
-          || CHANCE_RUN_EXCLUDED_FILE_NUMBERS.includes(fileNumber)
-          || !String(callback?.contactId || "").trim()
-          || !String(callback?.originalCallId || "").trim();
-      })
-    ) {
-      throw new Error("The bridge returned an incomplete or out-of-scope pending-callback list.");
-    }
+    assertPendingClaimCallbacksResponse(response);
     return stripApprovalSecrets(response);
   }
 

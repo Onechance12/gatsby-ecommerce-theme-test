@@ -119,6 +119,7 @@ test("the coordinator never stores or executes an altered note display", async (
     .replace('"./pdf-upload-contract.mjs"', JSON.stringify(new URL("./pdf-upload-contract.mjs", import.meta.url).href))
     .replace('"./pdf-upload-release.mjs"', JSON.stringify(new URL("./pdf-upload-release.mjs", import.meta.url).href))
     .replace('"./local-pdf.mjs"', JSON.stringify(new URL("./local-pdf.mjs", import.meta.url).href))
+    .replace('"./reviewed-claim-packet.mjs"', JSON.stringify(new URL("./reviewed-claim-packet.mjs", import.meta.url).href))
     .replace('"./approved-note-plan.mjs"', JSON.stringify(helperUrl))));
   for (const mutation of [null,
     (r) => { delete r.operations; },

@@ -12,6 +12,9 @@ import { APPROVED_NOTES_ENABLED } from "./approved-note-release.mjs";
 import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { createOperatorCoordinator } from "./operator-coordinator.mjs";
+import {
+  PACKET_REVIEW_SOURCES, PACKET_REVIEW_METHODS, PACKET_REVIEW_FACT_KEYS, CLAIM_STOP_SIGNAL_CODES
+} from "./reviewed-claim-packet.mjs";
 import { createInstalledManagementReportClient } from "./management-report.mjs";
 import {
   createResearchCoordinator,
@@ -681,6 +684,18 @@ const claimFilingOverridesSchema = z.object({
 const claimFilingInputShape = {
   query: z.string().regex(/^#?\d+$/),
   goal: z.enum(["file_new_claim", "find_existing_claim"]).optional(),
+  reviewMode: z.enum(["full_evidence", "reviewed_packet"]).optional(),
+  packetReview: z.object({
+    fileId: z.string().min(1).max(256),
+    reviewedAt: z.string().min(1).max(35),
+    sources: z.array(z.object({
+      source: z.enum(PACKET_REVIEW_SOURCES),
+      reference: z.string().min(1).max(256),
+      reviewMethod: z.enum(PACKET_REVIEW_METHODS),
+      fields: z.array(z.enum(PACKET_REVIEW_FACT_KEYS)).min(1).max(PACKET_REVIEW_FACT_KEYS.length)
+    }).strict()).min(1).max(30),
+    knownStopSignals: z.array(z.enum(CLAIM_STOP_SIGNAL_CODES)).max(CLAIM_STOP_SIGNAL_CODES.length)
+  }).strict().optional(),
   to: z.string().min(1).optional(),
   carrierPhone: z.string().min(1).optional(),
   retryOfCallId: z.string().min(1).optional(),
@@ -708,14 +723,14 @@ register(
 
 register(
   "retell_claim_call_plan",
-  "Prepare one exact Chance-manifest claim-filing call only after a fresh exact-file JobNimbus, Gmail, and Quo review finds no new-claim stop signal. The wrapper forces includeCarrierBatch:false, allows only file_new_claim or find_existing_claim, rejects #2628, freshly attests the bridge and live Retell configuration, and retains the communication digest plus short-lived one-use challenge locally. This never places a call. Show the complete returned packet, communicationPreflight, readiness, destination, planDigest, approvalId, and approvedInput to Chance for exact approval.",
+  "Prepare one exact Chance-manifest claim-filing call. Default full_evidence mode requires a complete fresh JobNimbus/Gmail/Quo review. Only when Chance explicitly requests use of an already reviewed packet, select reviewed_packet and provide packetReview: exact fileId, review timestamp within 24 hours, field-specific source references/methods, and all known stop signals. This mode fresh-checks complete JobNimbus evidence and pending callbacks without re-reading Gmail/Quo; it exposes those history limitations and caller-reported provenance for explicit human acceptance. It cannot clear known claim/attempt/callback stops. Both modes force includeCarrierBatch:false, reject #2628, freshly attest the bridge and live Retell configuration, and retain an immutable local review digest and short-lived one-use challenge. This never places a call. Show the complete packet, communicationPreflight including every limitation/approvalWarning, readiness, destination, planDigest, approvalId and approvedInput; obtain exact approval for ONE live call.",
   claimFilingInputShape,
   (input) => OPERATOR.planClaimFilingCall(input)
 );
 
 register(
   "retell_claim_call_execute",
-  "Place exactly one Retell carrier claim-filing call only after Chance explicitly approves the immediately preceding complete plan. Requires that plan's local approvalId, planDigest, and every unchanged input field. The hidden bridge challenge is consumed once; immediately before calling, the wrapper re-attests the bridge, reruns the exact-file JobNimbus/Gmail/Quo review, requires its evidence digest to remain unchanged, and rechecks the live Retell configuration. This does not update JobNimbus, create a note or task, send an email/text, or expose claim-result writeback.",
+  "Place exactly one Retell carrier claim-filing call only after Chance explicitly approves the immediately preceding complete plan, including disclosed communication limitations in reviewed_packet mode. Repeat its approvalId, planDigest and every unchanged approvedInput field (including reviewMode/packetReview). The hidden challenge is consumed once. Re-attest the bridge and live Retell configuration and require the local review digest unchanged: full_evidence rechecks JobNimbus/Gmail/Quo; reviewed_packet rechecks complete exact-file JobNimbus evidence and pending callbacks, not Gmail/Quo. The bridge still enforces its atomic active/prior-call and callback duplicate guards. No JobNimbus write, note/task, email/text or claim-result writeback is authorized.",
   {
     approvalId: z.string().uuid(),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/),
