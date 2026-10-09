@@ -82,6 +82,7 @@ import {
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { createGmailAttachmentReferences } from "./gmail/attachment-reference.js";
+import { findOutboundReservationConflict } from "./gmail/reservation-policy.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import {
   approvedNoteCreatedId,
@@ -9085,7 +9086,8 @@ async function gmailDraft(input) {
     : input);
   const resolvedMessage = await resolveGmailMessageBody(input, attachments);
   const body = resolvedMessage.body;
-  const reusable = await reusableGmailDraft(input, subject);
+  const reviewedDraftReservationIds = new Set();
+  const reusable = await reusableGmailDraft(input, subject, reviewedDraftReservationIds);
   if (reusable) {
     const bodyMatches = normalizeEmailBody(reusable.snapshot.body) === normalizeEmailBody(body);
     if (input.execute === true) {
@@ -9107,7 +9109,7 @@ async function gmailDraft(input) {
       bodyMatches,
       instruction: bodyMatches
         ? "A verified Gmail draft already exists for this file and subject. Do not create another draft. After Chance separately approves sending it, use gmail.send_existing_draft with this exact draftId; the reviewed source draft remains for separately approved cleanup."
-        : "A Gmail draft already exists for this file and subject, but its body does not match the current approved carrier template. Do not send it and do not create a duplicate. Show Chance the mismatch and obtain approval before replacing the existing draft.",
+        : "A Gmail draft already exists for this file and subject, but its body does not match the approved text. Do not send it, overwrite it, or create a duplicate. Review that exact draft and obtain separate approval to discard only the old draft copy; preserve any sent message. Draft creation does not replace an existing draft.",
       sendPayload: cleanObject({
         query: input.query || input.fileQuery || "",
         draftId: reusable.snapshot.id
@@ -9134,10 +9136,23 @@ async function gmailDraft(input) {
     bodyTemplate: resolvedMessage.template,
     threadId,
     attemptId: String(input.attemptId || "initial"),
+    draftReservationVersion: 2,
     attachments: attachments.map((attachment) => emailAttachmentDescriptor(attachment, attachment.source))
   };
   const approvalDigest = digest({ channel: "gmail", action: "create_draft", plan });
+  const { draftReservationVersion, ...legacyPlan } = plan;
+  const reservationMetadata = {
+    to,
+    subject,
+    sourceKey: operatorFile
+      ? `claim-draft:${operatorFile.id}:${subject.trim()}`
+      : "",
+    contentDigest: gmailDraftReconciliationDigest(plan),
+    legacyApprovalDigest: digest({ channel: "gmail", action: "create_draft", plan: legacyPlan }),
+    reviewedDraftReservationIds: [...reviewedDraftReservationIds]
+  };
   if (input.execute !== true) {
+    await assertOutboundReservationAvailable("gmail_draft", approvalDigest, reservationMetadata);
     return {
       mode: "dry_run",
       plan,
@@ -9146,13 +9161,7 @@ async function gmailDraft(input) {
   }
   requireApprovalDigest(input.approvalDigest, approvalDigest, "Gmail draft");
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to create Gmail drafts.");
-  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, {
-    to,
-    subject,
-    sourceKey: operatorFile
-      ? `claim-draft:${operatorFile.id}:${subject.trim()}`
-      : ""
-  });
+  const reservation = await reserveOutboundSend("gmail_draft", approvalDigest, reservationMetadata);
   let result;
   let verifiedByReadback = false;
   try {
@@ -9475,34 +9484,50 @@ async function gmailSendExistingDraft(input, draftId, operatorFile = null, optio
   };
 }
 
-async function reusableGmailDraft(input, subject) {
+async function reusableGmailDraft(input, subject, reviewedReservationIds = null) {
   const query = input.query || input.fileQuery;
   if (!query) return null;
   const file = await optionalChanceFile(query);
   if (!file) return null;
-  const receipt = latestActionReceipts(MEMORY_CONFIG, 40, { subjectKey: file.id })
-    .find((row) => row.channel === "gmail" && row.action === "create_draft" && row.status === "drafted" && row.externalId && row.summary.includes(`subject ${subject}`));
-  let draftId = String(receipt?.externalId || "").trim();
-  if (!draftId) {
-    const sourceKeyHash = createHash("sha256")
-      .update(`claim-draft:${file.id}:${String(subject || "").trim()}`, "utf8")
-      .digest("hex");
-    const outbound = (await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger"))
-      .find((row) => (
-        row.channel === "gmail_draft"
-        && row.sourceKeyHash === sourceKeyHash
-        && row.status === "completed"
-        && row.externalId
-      ));
-    draftId = String(outbound?.externalId || "").trim();
-  }
-  if (!draftId) return null;
-  try {
-    return { file, receipt: receipt || null, snapshot: await gmailDraftSnapshot(draftId) };
-  } catch (error) {
-    if (error?.statusCode === 404) return null;
+  const receipts = latestActionReceipts(MEMORY_CONFIG, 40, { subjectKey: file.id })
+    .filter((row) => row.channel === "gmail" && row.action === "create_draft" && row.status === "drafted" && row.externalId && row.summary.includes(`subject ${subject}`));
+  const sourceKeyHash = createHash("sha256")
+    .update(`claim-draft:${file.id}:${String(subject || "").trim()}`, "utf8")
+    .digest("hex");
+  const outbound = (await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger"))
+    .filter((row) => (
+      row.channel === "gmail_draft"
+      && row.sourceKeyHash === sourceKeyHash
+      && row.status === "completed"
+      && row.externalId
+    ));
+  for (const row of outbound) reviewedReservationIds?.add(row.id);
+  const draftIds = [...new Set([...receipts, ...outbound].map(
+    (row) => String(row.externalId || "").trim()
+  ).filter(Boolean))];
+  if (draftIds.length > 100) {
+    const error = new Error("This claim has more than 100 recorded draft copies. Complete exact-file draft review is required before another draft can be planned.");
+    error.statusCode = 503;
     throw error;
   }
+  let reusable = null;
+  for (const draftId of draftIds) {
+    let snapshot;
+    try {
+      snapshot = await gmailDraftSnapshot(draftId);
+    } catch (error) {
+      if (Number(error?.statusCode) === 404) continue;
+      throw error;
+    }
+    if (snapshot.subject !== String(subject || "").trim()) {
+      conflictError("A recorded draft's claim subject changed. Review that exact draft before preparing new correspondence.");
+    }
+    if (reusable) {
+      conflictError("Multiple recorded Gmail drafts remain for this exact file and claim. Review the individual draft copies; no new draft or overwrite was prepared.");
+    }
+    reusable = { file, receipt: receipts.find((row) => String(row.externalId) === draftId) || null, snapshot };
+  }
+  return reusable;
 }
 
 async function reconcileGmailDraftIntent(intent) {
@@ -16480,14 +16505,12 @@ async function reserveOutboundSend(channel, approvalDigest, metadata = {}) {
     const sourceKeyHash = metadata.sourceKey
       ? createHash("sha256").update(String(metadata.sourceKey), "utf8").digest("hex")
       : "";
-    const existing = ledger.find((row) => (
-      row.channel === channel
-      && row.status !== "verified_not_applied"
-      && (
-        row.approvalDigest === approvalDigest
-        || (sourceKeyHash && row.sourceKeyHash === sourceKeyHash)
-      )
-    ));
+    const existing = findOutboundReservationConflict(ledger, {
+      channel, approvalDigest, sourceKeyHash,
+      contentDigest: metadata.contentDigest,
+      legacyApprovalDigest: metadata.legacyApprovalDigest,
+      reviewedDraftReservationIds: metadata.reviewedDraftReservationIds
+    });
     if (existing) {
       const error = new Error(`This exact approved ${channel} send is already ${existing.status}. Review its receipt before any retry.`);
       error.statusCode = 409;
@@ -16501,12 +16524,33 @@ async function reserveOutboundSend(channel, approvalDigest, metadata = {}) {
       createdAt: new Date().toISOString(),
       destinationHash: metadata.to ? createHash("sha256").update(String(metadata.to)).digest("hex") : "",
       subjectHash: metadata.subject ? createHash("sha256").update(String(metadata.subject), "utf8").digest("hex") : "",
-      sourceKeyHash
+      sourceKeyHash,
+      ...(channel === "gmail_draft" && metadata.contentDigest
+        ? { contentDigest: metadata.contentDigest }
+        : {})
     };
     ledger.push(row);
     await writeOutboundSendLedger(ledger);
     return row;
   });
+}
+
+async function assertOutboundReservationAvailable(channel, approvalDigest, metadata = {}) {
+  const sourceKeyHash = metadata.sourceKey
+    ? createHash("sha256").update(String(metadata.sourceKey), "utf8").digest("hex")
+    : "";
+  const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+  const existing = findOutboundReservationConflict(ledger, {
+    channel, approvalDigest, sourceKeyHash,
+    contentDigest: metadata.contentDigest,
+    legacyApprovalDigest: metadata.legacyApprovalDigest,
+    reviewedDraftReservationIds: metadata.reviewedDraftReservationIds
+  });
+  if (existing) {
+    const error = new Error(`This approved ${channel} intent is already ${existing.status}. Review its receipt before another approval; no new draft was prepared.`);
+    error.statusCode = 409;
+    throw error;
+  }
 }
 
 async function assertOutboundSourceAvailable(channel, sourceKey) {

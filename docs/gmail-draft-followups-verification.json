@@ -1,0 +1,54 @@
+{
+  "status": "tested_local_candidate_not_deployed",
+  "baseBridgeCommit": "84156df90ec4ab4ced42ff1abf862b001189a8da",
+  "branch": "codex/hcn-claim-draft-followups-20261009",
+  "scope": "Exact-file Gmail draft reservation and recorded-copy reuse; no new send capability",
+  "changes": [
+    "Completed, reviewed draft reservations no longer permanently lock a claim against different freshly approved content.",
+    "New reservations retain an immutable content fingerprint; exact content and current or legacy approval replay remain blocked.",
+    "All known completed draft copies are freshly reviewed; only provider 404 means the recorded copy is absent.",
+    "Multiple remaining copies, changed claim subjects, provider failures, incomplete receipts and unresolved outcomes fail closed.",
+    "A reservation completed after the copy inventory must be reviewed before another draft can be created.",
+    "Reservation conflicts are checked during planning and again under the serialized execution ledger lock.",
+    "A signed server-side plan version invalidates old plans without rewriting their history.",
+    "Existing-draft mismatch instructions require separately approved draft-only cleanup and preserve Sent messages."
+  ],
+  "unchanged": [
+    "Dedicated Mac Operator identity, exact 58-file manifest, excluded file 2628 and six immutable historical receipts",
+    "Separate exact approvals for draft creation and reviewed-draft sending",
+    "Single-use Gmail draft-source send lock and unresolved-outcome recovery gates",
+    "Generic email, Quo and other call restrictions",
+    "Client-data separation from Jobrolo and Chance Brain",
+    "Installed plugin, production bridge, runtime settings, credentials and build pins"
+  ],
+  "verification": {
+    "command": "npm run check",
+    "environment": "Local test fixtures; provider refresh/API keys blanked; no dependency installation",
+    "exitCode": 0,
+    "tests": 1002,
+    "passed": 998,
+    "failed": 0,
+    "skipped": 4,
+    "skippedReason": "Existing optional real-provider research integration tests",
+    "groups": [
+      { "name": "research precheck", "passed": 48, "failed": 0, "skipped": 0 },
+      { "name": "Gmail communication evidence and reservation policy", "passed": 14, "failed": 0, "skipped": 0 },
+      { "name": "PDF transport and Mac Operator", "passed": 373, "failed": 0, "skipped": 4 },
+      { "name": "bridge operational and security regression", "passed": 563, "failed": 0, "skipped": 0 }
+    ],
+    "targetedRegression": "locked Chance draft follow-up permits new content after cleanup while completed sends stay single-use",
+    "syntaxCheck": "passed",
+    "gitDiffWhitespaceCheck": "passed"
+  },
+  "externalEffectsThisImplementation": "None; draft creation and sends in tests used loopback synthetic fixtures only",
+  "remaining": [
+    "Separately approved coordinated bridge release and matching local Operator build pin",
+    "Full fresh session attestation with unchanged least-privilege policy and receipt isolation",
+    "A fresh exact-file draft plan and separate client-action approval; no old plan replay"
+  ],
+  "excluded": [
+    "Deployment, pushing or merging code and pin changes",
+    "Provider draft cleanup, new drafts or email sends",
+    "Automatic replay of failed actions or intentional same-content resends"
+  ]
+}

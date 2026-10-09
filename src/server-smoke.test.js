@@ -309,6 +309,7 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
   let gmailDraftCreateCount = 0;
   let gmailSendCount = 0;
   let gmailDraftReadCount = 0;
+  let gmailDraftReadHook = null;
   let gmailSentMessageMutation = String(options.gmailSentMessageMutation || "");
   const fixtureRelationField = (url) => {
     try {
@@ -384,7 +385,9 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       ? url.pathname.match(/^\/gmail\/v1\/users\/me\/drafts\/([^/]+)$/)
       : null;
     if (gmailDraftMatch && req.method === "GET") {
-      const draft = gmailDrafts.get(decodeURIComponent(gmailDraftMatch[1]));
+      const draftId = decodeURIComponent(gmailDraftMatch[1]);
+      await gmailDraftReadHook?.(draftId);
+      const draft = gmailDrafts.get(draftId);
       if (!draft) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "Draft not found" } }));
@@ -1027,6 +1030,8 @@ async function startOperatorJobNimbusFixture(t, port, options = {}) {
       gmailSentMessageMutation = String(value || "");
     },
     addGmailDraft: (draft) => gmailDrafts.set(String(draft?.id || ""), structuredClone(draft)),
+    removeGmailDraft: (id) => gmailDrafts.delete(String(id)),
+    setGmailDraftReadHook: (hook) => { gmailDraftReadHook = hook; },
     getTaskQueryFields: () => [...taskQueryFields],
     getTaskPageRequests: () => structuredClone(taskPageRequests),
     getActivityPageRequests: () => structuredClone(activityPageRequests),
@@ -13354,6 +13359,173 @@ test("locked Chance run fails closed when matching or mismatching Gmail drafts a
   assert.equal(mismatchingReview.operations[0].plan.mode, "existing_draft");
   assert.equal(mismatchingReview.operations[0].plan.bodyMatches, false);
   assert.equal(fixtureApi.getGmailDraftCreateCount(), 0);
+});
+
+test("locked Chance draft follow-up permits new content after cleanup while completed sends stay single-use", async (t) => {
+  const bridgePort = 19360;
+  const fakeApiPort = 19361;
+  const memoryRoot = await mkdtemp(path.join(tmpdir(), "codex-draft-followup-"));
+  t.after(() => rm(memoryRoot, { recursive: true, force: true }));
+  const priorSent = {
+    id: "legacy-sent-message", threadId: "legacy-thread", labelIds: ["SENT"],
+    payload: { mimeType: "text/plain", headers: [
+      { name: "From", value: "Chance <chance@example.test>" },
+      { name: "To", value: "carrier@example.test" }, { name: "Subject", value: "ABC-123" }
+    ], body: { data: Buffer.from("Prior request for inspection documents.").toString("base64url") } }
+  };
+  const fixture = await startOperatorJobNimbusFixture(t, fakeApiPort, {
+    communicationScope: true, gmailMessages: [priorSent]
+  });
+  const manifest = lockedOperatorManifestFixture();
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: process.cwd(), env: {
+      ...process.env, NODE_ENV: "test", PORT: String(bridgePort),
+      JOBNIMBUS_BRIDGE_TOKEN: "", CODEX_MAC_OPERATOR_TOKEN: "fixture-codex-mac-operator-token-1234567890",
+      JOBNIMBUS_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`, JOBNIMBUS_API_KEY: "fixture-key",
+      GOOGLE_CLIENT_ID: "fixture-client", GOOGLE_CLIENT_SECRET: "fixture-secret", GOOGLE_REFRESH_TOKEN: "fixture-refresh",
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${fakeApiPort}/oauth-token`, GMAIL_API_BASE_URL: `http://127.0.0.1:${fakeApiPort}`,
+      ALLOW_GOOGLE_USER_AUTH: "false", ALLOW_GMAIL_SEND: "false", QUO_API_KEY: "",
+      MEMORY_ROOT: memoryRoot, REQUIRE_CHANCE_RUN_POLICY: "true",
+      CHANCE_OPERATOR_RUN_MANIFEST_JSON: JSON.stringify(manifest.input), BRIDGE_ALLOW_WRITES: "true"
+    }, stdio: ["ignore", "pipe", "pipe"]
+  });
+  t.after(() => child.kill("SIGTERM"));
+  await waitForServer(child, bridgePort);
+  const headers = {
+    authorization: "Bearer fixture-codex-mac-operator-token-1234567890", "content-type": "application/json"
+  };
+  const request = (operation, approved = null) => fetch(`http://127.0.0.1:${bridgePort}/ops/action-batch`, {
+    method: "POST", headers, body: JSON.stringify({
+      runPolicy: manifest.runPolicy, operations: [operation], execute: Boolean(approved),
+      ...(approved ? { approvalDigest: approved.approvalDigest, approvalChallenge: approved.approvalChallenge } : {})
+    })
+  });
+  async function plan(operation) {
+    const response = await request(operation);
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  }
+  async function execute(operation, approved) {
+    const response = await request(operation, approved);
+    assert.equal(response.status, 200, await response.clone().text());
+    const result = await response.json();
+    assert.equal(result.mode, "executed", JSON.stringify(result));
+    assert.equal(result.batch.completed[0].receipt.verifiedByReadback, true);
+    return result;
+  }
+  const draftOperation = (body) => ({ type: "gmail.create_draft", payload: {
+    query: "2739", to: "carrier@example.test", subject: "ABC-123", body, insuranceClaimEmail: true
+  } });
+  const first = draftOperation("Following up for the inspection documents and current status.");
+  const initial = await plan(first);
+  const { draftReservationVersion, ...legacyPlan } = initial.operations[0].plan.plan;
+  assert.equal(draftReservationVersion, 2);
+  const oldBodyPlan = { ...legacyPlan, body: "Prior request for inspection documents." };
+  const hash = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+  const sourceKeyHash = hash("claim-draft:contact-chance:ABC-123");
+  const legacyRows = [
+    { id: "legacy-create", channel: "gmail_draft", status: "completed", externalId: "legacy-discarded-draft",
+      sourceKeyHash, approvalDigest: digest({ channel: "gmail", action: "create_draft", plan: oldBodyPlan }) },
+    { id: "legacy-send", channel: "gmail", status: "completed", externalId: priorSent.id,
+      sourceKeyHash: hash("gmail-draft:legacy-discarded-draft"), approvalDigest: "legacy-send-approval" }
+  ];
+  const outboundPath = path.join(memoryRoot, "bridge", "outbound-sends.json");
+  await writeFile(outboundPath, JSON.stringify(legacyRows), "utf8");
+  const readOutbound = async () => JSON.parse(await readFile(outboundPath, "utf8"));
+
+  // The exact completed legacy approval stays blocked even after its provider
+  // draft was discarded. New wording is a separately approved revision.
+  const legacyReplay = await request(draftOperation(oldBodyPlan.body));
+  assert.equal(legacyReplay.status, 409);
+  assert.match(await legacyReplay.text(), /already completed.*no new draft was prepared/i);
+  assert.equal(fixture.getGmailDraftCreateCount(), 0);
+  const fresh = await plan(first);
+  assert.notEqual(fresh.operations[0].plan.approvalDigest,
+    digest({ channel: "gmail", action: "create_draft", plan: legacyPlan }));
+  assert.equal(fixture.getGmailDraftCreateCount(), 0);
+  const created = await execute(first, fresh);
+  const firstDraftId = created.batch.completed[0].receipt.externalId;
+  assert.equal(fixture.getGmailDraftCreateCount(), 1);
+  assert.equal(fixture.getGmailSendCount(), 0);
+  let outbound = await readOutbound();
+  assert.deepEqual(outbound.slice(0, 2), legacyRows);
+  assert.match(outbound[2].contentDigest, /^[a-f0-9]{64}$/);
+
+  const duplicateReview = await plan(first);
+  assert.equal(duplicateReview.operations[0].plan.mode, "existing_draft");
+  assert.equal(duplicateReview.operations[0].plan.bodyMatches, true);
+  assert.equal(duplicateReview.operations[0].plan.draft.id, firstDraftId);
+  const second = draftOperation("Please also send the assigned adjuster's contact details.");
+  const differentReview = await plan(second);
+  assert.equal(differentReview.operations[0].plan.mode, "existing_draft");
+  assert.equal(differentReview.operations[0].plan.bodyMatches, false);
+  assert.equal(differentReview.operations[0].plan.draft.id, firstDraftId);
+  assert.match(differentReview.operations[0].plan.instruction, /separate approval to discard only the old draft copy/i);
+  assert.equal(fixture.getGmailDraftCreateCount(), 1);
+
+  // This send is fixture-only, separately planned and approved. The source
+  // is retained, and a second send from that exact draft remains forbidden.
+  const send = { type: "gmail.send_existing_draft", payload: { query: "2739", draftId: firstDraftId } };
+  const sent = await execute(send, await plan(send));
+  assert.equal(sent.batch.completed[0].receipt.sourceDraftRetention, "retained_for_separate_cleanup");
+  assert.equal(fixture.getGmailSendCount(), 1);
+  assert.equal((await request(send)).status, 409);
+  assert.deepEqual(fixture.getGmailMessage(priorSent.id), priorSent);
+  fixture.removeGmailDraft(firstDraftId); // simulate separately approved cleanup
+  const contentReplay = await request(first);
+  assert.equal(contentReplay.status, 409);
+  assert.equal(fixture.getGmailDraftCreateCount(), 1);
+  const secondCreated = await execute(second, await plan(second));
+  const secondDraftId = secondCreated.batch.completed[0].receipt.externalId;
+  assert.equal(fixture.getGmailDraftCreateCount(), 2);
+  assert.equal(fixture.getGmailSendCount(), 1);
+  const secondReview = await plan(second);
+  assert.equal(secondReview.operations[0].plan.draft.id, secondDraftId);
+
+  // Do not hide multiple remaining copies by selecting just the first/newest
+  // ledger entry. The mismatch remains a read-only review, not an overwrite.
+  fixture.addGmailDraft(fixtureGmailDraftFromRaw({ draftId: firstDraftId,
+    messageId: "restored-first-message", threadId: "", raw: Buffer.from(
+      `To: carrier@example.test\r\nSubject: ABC-123\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${first.payload.body}`
+    ).toString("base64url") }));
+  const ambiguous = await request(second);
+  assert.equal(ambiguous.status, 409);
+  assert.match(await ambiguous.text(), /multiple recorded Gmail drafts/i);
+  fixture.removeGmailDraft(firstDraftId);
+  fixture.removeGmailDraft(secondDraftId);
+  // A different request can finish after our ledger inventory but before
+  // reservation. Its unreviewed receipt must block, not silently authorize a
+  // second provider copy merely because its approved content is different.
+  let injectedConcurrentCompletion = false;
+  fixture.setGmailDraftReadHook(async () => {
+    if (injectedConcurrentCompletion) return;
+    injectedConcurrentCompletion = true;
+    const current = await readOutbound();
+    current.push({ id: "concurrent-completion", channel: "gmail_draft", sourceKeyHash,
+      approvalDigest: "concurrent-approval", status: "completed", externalId: "concurrent-draft",
+      contentDigest: hash("Different concurrent draft content.") });
+    await writeFile(outboundPath, JSON.stringify(current), "utf8");
+  });
+  const concurrent = await request(draftOperation("Fresh follow-up after another request completed."));
+  assert.equal(concurrent.status, 409);
+  assert.match(await concurrent.text(), /already completed.*no new draft was prepared/i);
+  assert.equal(injectedConcurrentCompletion, true);
+  assert.equal(fixture.getGmailDraftCreateCount(), 2);
+  fixture.setGmailDraftReadHook(null);
+  outbound = await readOutbound();
+  assert.deepEqual(outbound.filter((row) => row.id.startsWith("legacy-")), legacyRows);
+  const completedCount = fixture.getGmailDraftCreateCount();
+  outbound.push({ id: "orphaned-legacy-unknown", channel: "gmail_draft", sourceKeyHash,
+    approvalDigest: "unresolved-legacy-approval", status: "in_progress", externalId: "" });
+  await writeFile(outboundPath, JSON.stringify(outbound), "utf8");
+  const unknown = await request(draftOperation("Another new request that must wait for recovery."));
+  assert.equal(unknown.status, 409);
+  assert.match(await unknown.text(), /already in_progress.*no new draft was prepared/i);
+  assert.equal(fixture.getGmailDraftCreateCount(), completedCount);
+  assert.equal(fixture.getGmailSendCount(), 1);
+  assert.deepEqual(fixture.getGmailMessage(priorSent.id), priorSent);
+  assert.equal(fixture.getContactUpdateCount(), 0);
+  assert.equal(fixture.getCurrentTaskCreateCount(), 0);
 });
 
 test("Mac operator interprets provider string booleans and rejects inactive or closed single files", async (t) => {
