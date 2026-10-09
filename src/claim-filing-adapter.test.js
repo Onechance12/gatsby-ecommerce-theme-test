@@ -105,6 +105,17 @@ test("claim prompt gives new filing and existing-claim lookup distinct openings"
   assert.match(prompt, /For find_existing_claim choose Existing Claim\/Claim Status/i);
 });
 
+test("claim prompt omits the unsupported license number and keeps company intake contacts", () => {
+  const prompt = renderRetellPrompt({});
+  assert.doesNotMatch(prompt, /3351885|Texas license\s*\d/i);
+  assert.match(prompt, /Public adjuster contact: Chance Pearson/i);
+  assert.match(prompt, /Do not invent or volunteer a license number/i);
+  assert.match(prompt, /If asked, say: 'I don't have that number verified in front of me\.'/i);
+  assert.match(prompt, /Office: 3500 Oak Lawn Avenue, Suite 460C, Dallas, Texas 75219/i);
+  assert.match(prompt, /Contact number, only when asked/i);
+  assert.match(prompt, /Contact email, only when asked: cpearson@wavepa\.com/i);
+});
+
 test("an otherwise-ready no-policy filing asks for insured-and-address lookup instead of speaking Missing", () => {
   const input = fixture();
   input.file.policyNumber = "";
