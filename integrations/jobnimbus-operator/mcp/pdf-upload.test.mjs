@@ -93,7 +93,7 @@ test("plan refuses every materially altered display; receipts require verified b
 async function enabledCandidate(t) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "enabled-pdf-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const file of ["scope.mjs", "operator-coordinator.mjs", "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs"]) {
+  for (const file of ["scope.mjs", "operator-coordinator.mjs", "reviewed-claim-packet.mjs", "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs"]) {
     await copyFile(new URL(`./${file}`, import.meta.url), path.join(root, file));
   }
   const release = await readFile(new URL("./pdf-upload-release.mjs", import.meta.url), "utf8");

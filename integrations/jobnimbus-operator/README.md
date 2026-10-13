@@ -1,5 +1,29 @@
 # JobNimbus Operator for Mac
 
+## Unreleased reviewed-claim-packet separation (2026-10-09)
+
+The existing Retell plan/execute tools now have an explicit `reviewed_packet`
+candidate mode. Default `full_evidence` is unchanged. Human-directed execution
+can use a file-bound, timestamped packet and field-specific review provenance
+without repeating Gmail/Quo scans. Unchecked history and caller-reported source
+review stay prominent in the one-call approval screen; they are not reported
+as a completed communication audit or proof of no existing claim.
+
+Fresh complete JobNimbus evidence, known-stop detection, pending-callback reads,
+unchanged packet/callback variables, exact build/configuration, single-use
+approval, and existing atomic Retell duplicate guards still apply. No bridge
+handler, agent prompt, capability, manifest, roster, writeback or send changes.
+See [the mode's workflow](skills/jobnimbus-operator/references/reviewed-claim-packet.md).
+
+Development approval does not deploy or activate this candidate. Do not edit
+the installed plugin cache or change pins to use it. A separate versioned
+Operator release must preserve the live exact bridge/manifest/legacy-isolation
+pins and all previously released helpers/actions, then pass full attestation.
+If publishing source also deploys the bridge, coordinate its new provider-
+attested commit and Operator pin instead of disabling the exact-build check.
+Do not publish a new Retell prompt for this wrapper-only change. A read-only
+pilot never approves a call, DOL, retry or JobNimbus update.
+
 ## Unreleased communication-evidence repair (2026-10-08)
 
 This local candidate builds on the existing bridge and Mac Operator. It fixes
