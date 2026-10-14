@@ -1,7 +1,10 @@
 // Direct Quo (formerly OpenPhone) API client. Reads scan every team line
 // because a homeowner or adjuster may have communicated through any of them.
-// Sending remains approval-gated by both execute:true and ALLOW_QUO_SEND=true.
+// Sending remains approval-gated by the calling workflow and an explicit
+// allowSend configuration. Generic routes bind that flag to ALLOW_QUO_SEND;
+// the locked Mac operator lane may enable it only inside its pinned manifest.
 
+import { createHash } from "node:crypto";
 import { BoundedJsonProviderError, fetchBoundedJson } from "../http/bounded-json.js";
 
 const MIN_REQUEST_INTERVAL_MS = 140;
@@ -397,6 +400,64 @@ export async function sendQuoText(config, input = {}) {
   };
 }
 
+export async function readQuoTextReceipt(config, input = {}) {
+  const id = String(input.id || "").trim();
+  const from = toE164(input.from || "");
+  const to = toE164(input.to || "");
+  const contentSha256 = String(input.contentSha256 || "").trim().toLowerCase();
+  const characterCount = Number(input.characterCount);
+  if (!id || id.length > 512 || /[\s\x00-\x1f\x7f]/.test(id)) {
+    throw new Error("Quo text readback requires one exact provider message id.");
+  }
+  if (!from || !to || from === to) {
+    throw new Error("Quo text readback requires exact distinct E.164 sender and recipient numbers.");
+  }
+  if (!/^[a-f0-9]{64}$/.test(contentSha256)
+    || !Number.isSafeInteger(characterCount) || characterCount < 1 || characterCount > 1600) {
+    throw new Error("Quo text readback requires the exact approved content hash and character count.");
+  }
+  const history = await readQuoHistoryStrict(config, {
+    phone: to,
+    maxResults: 50,
+    maxPages: 10
+  });
+  if (history.completeness.complete !== true) {
+    const error = new Error("Quo text readback is incomplete. The send outcome requires reconciliation and must never be retried automatically.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const matches = history.timeline.filter((item) => (
+    item.type === "text" && item.id === id
+  ));
+  const item = matches.length === 1 ? matches[0] : null;
+  if (
+    !item
+    || String(item.direction || "").toLowerCase() !== "outgoing"
+    || item.lineNumber !== from
+    || item.from !== from
+    || !Array.isArray(item.to)
+    || item.to.length !== 1
+    || item.to[0] !== to
+    || item.contentSha256 !== contentSha256
+    || item.characterCount !== characterCount
+  ) {
+    const error = new Error("Quo text readback does not match the exact approved provider id, sender, recipient, and content. Never retry this send.");
+    error.statusCode = 409;
+    throw error;
+  }
+  return Object.freeze({
+    externalId: item.id,
+    conversationId: item.conversationId,
+    phoneNumberId: item.phoneNumberId,
+    sender: item.from,
+    recipient: item.to[0],
+    contentSha256: item.contentSha256,
+    characterCount: item.characterCount,
+    status: String(item.status || "accepted").toLowerCase(),
+    verifiedByReadback: true
+  });
+}
+
 async function collectAcrossLines(config, numbers, nameById, phone, kind, maxResults) {
   const byId = new Map();
   for (const line of numbers) {
@@ -441,15 +502,32 @@ function strictTimelineItem(row, line, nameById, kind, expectedPhone) {
   const atUtc = String(row.createdAt || row.startedAt || "");
   const id = String(row.id || `${line.id}:${atUtc}:${kind}`);
   if (kind === "messages") {
+    const hasText = row.text !== undefined;
+    const hasContent = row.content !== undefined;
+    if (
+      (hasText && typeof row.text !== "string")
+      || (hasContent && typeof row.content !== "string")
+      || (hasText && hasContent && row.text !== row.content)
+    ) {
+      throw quoHistoryProviderFailure({ stage: "messages", reason: "invalid_message_content" });
+    }
+    const content = hasText ? row.text : hasContent ? row.content : "";
     return {
       id,
       type: "text",
       line: nameById[line.id] || line.number,
+      lineNumber: toE164(line.number || ""),
+      phoneNumberId: String(row.phoneNumberId || ""),
+      from: toE164(row.from || ""),
+      to: row.to.map((value) => toE164(value || "")),
+      conversationId: String(row.conversationId || ""),
       at: toCentral(atUtc),
       atUtc,
       direction: row.direction || "",
       status: row.status || "",
-      text: String(row.text || row.content || "").replace(/\s+/g, " ").trim()
+      text: content.replace(/\s+/g, " ").trim(),
+      contentSha256: createHash("sha256").update(content, "utf8").digest("hex"),
+      characterCount: content.length
     };
   }
   const voicemailFields = [row.voicemail?.transcript, row.voicemailTranscript];
@@ -547,7 +625,7 @@ function quoHistoryProviderFailure({ stage = "history", reason = "unknown", caus
     ? stage : "history";
   const safeReason = [
     "unknown", "provider_read", "invalid_response", "record_scope_mismatch",
-    "invalid_participants", "invalid_message_addressing", "invalid_voicemail",
+    "invalid_participants", "invalid_message_addressing", "invalid_message_content", "invalid_voicemail",
     "invalid_line_inventory", "line_inventory_ceiling", "empty_line_inventory"
   ].includes(reason) ? reason : "unknown";
   const readStatus = cause instanceof BoundedJsonProviderError

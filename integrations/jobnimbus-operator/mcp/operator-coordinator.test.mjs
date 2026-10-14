@@ -1320,7 +1320,7 @@ test("happy execute re-attests unchanged boundary and posts the hidden challenge
   assert.equal(h.approvals.size, 0);
 });
 
-test("existing-draft send plans and executes only the unchanged sole operation", async () => {
+test("existing-draft send approval survives an async host handoff, then executes only the unchanged sole operation", async () => {
   const h = harness();
   const plan = await h.coordinator.planActionBatch(SEND_OPERATIONS);
   assert.equal(plan.approvalDigest, "digest-1");
@@ -1334,8 +1334,10 @@ test("existing-draft send plans and executes only the unchanged sole operation",
     }
   }]);
 
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.approvals.has(plan.approvalDigest), true);
   const response = await h.coordinator.executeActionBatch(
-    "digest-1",
+    plan.approvalDigest,
     SEND_OPERATIONS,
     "assigned"
   );

@@ -7,6 +7,9 @@ import {
   CHANCE_OPERATOR_ALLOWED_STAGE_EVIDENCE_SOURCES,
   CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
+  CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
   CHANCE_OPERATOR_RUN_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
@@ -141,6 +144,29 @@ test("approved notes require the separately reviewed opt-in manifest and leave l
   assert.throws(() => resolveChanceOperatorRunPolicy({ id: legacy.id, sha256: legacy.sha256 }, notes), /not pinned/);
   assert.equal(summary.taskCompletionAllowed, false);
   assert.equal(summary.rawGmailSendAllowed, false);
+});
+
+test("approved Quo SMS requires the cumulative reviewed manifest and advertises narrow safety flags", () => {
+  const options = { now: Date.parse("2026-08-23T00:00:00.000Z") };
+  assert.throws(() => loadChanceOperatorRunManifest(manifestInput({
+    id: CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
+    allowedActionTypes: [...CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES]
+  }), options), /action types/);
+  const sms = loadChanceOperatorRunManifest(manifestInput({
+    id: CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
+    allowedActionTypes: [...CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES]
+  }), options);
+  const summary = chanceOperatorRunManifestSummary(sms);
+  assert.equal(summary.outboundSendAllowed, false);
+  assert.equal(summary.rawGmailSendAllowed, false);
+  assert.equal(summary.quoSmsAllowed, true);
+  assert.equal(summary.quoSmsSoleOperation, true);
+  assert.equal(summary.quoSmsExactSenderRequired, true);
+  assert.equal(summary.quoSmsProviderReadbackRequired, true);
+  assert.equal(summary.quoSmsDuplicateProtectionRequired, true);
+  assert.equal(summary.pdfUploadAllowed, true);
+  assert.equal(summary.noteCreationAllowed, true);
+  assert.equal(summary.allowedActionTypes.at(-1), "quo.send_text");
 });
 
 test("manifest rejects expiry, duplicates, excluded file, and non-58 rosters", () => {

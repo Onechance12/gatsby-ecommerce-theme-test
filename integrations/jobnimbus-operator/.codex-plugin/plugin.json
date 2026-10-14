@@ -1,7 +1,7 @@
 {
   "name": "jobnimbus-operator",
   "version": "0.5.0+codex.20260918151817",
-  "description": "Thresher-locked Mac operator for the exact 58 Chance JobNimbus files, with approved notes, JobNimbus/Gmail actions and single-file Retell claim filing.",
+  "description": "Thresher-locked Mac operator for the exact 58 Chance JobNimbus files, with approved notes, reviewed PDF uploads, approval-gated Quo SMS, JobNimbus/Gmail actions and single-file Retell claim filing.",
   "author": {
     "name": "Chance Pearson"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "JobNimbus Operator",
     "shortDescription": "Work the 58 Chance files and open claims with exact approvals.",
-    "longDescription": "Connects Codex to an immutable 58-file Chance roster through an exact provider-attested bridge build and six-receipt historical-isolation attestation. JobNimbus writes and Gmail draft creation stay in the existing approval batch; one reviewed bridge-created draft may be sent only through a later sole-operation plan and separate exact approval with Gmail Sent readback. The activated notes release adds one exact approved note with provider ID and text-hash readback, optionally binding one canonical @RichardR mention request without claiming notification delivery. A separate single-file Retell lane can file a new claim or find an existing claim only after fresh evidence, live agent-configuration verification, complete plan display, and exact Chance approval. #2628, automatic writeback, raw sends, direct notes, task completion, calendar writes, generic/homeowner/follow-up calls, company mutations, and backward stage moves remain blocked.",
+    "longDescription": "Connects Codex to an immutable 58-file Chance roster through an exact provider-attested bridge build and six-receipt historical-isolation attestation. JobNimbus writes and Gmail draft creation stay in the existing approval batch; one reviewed bridge-created draft may be sent only through a later sole-operation plan and separate exact approval with Gmail Sent readback. Approved notes and local PDF uploads remain sole-operation and provider-readback-bound. When its exact cumulative manifest release is active, one dedicated Quo SMS lane binds the exact file, verified Wave sender, recipient and full text to a short-lived single-use approval and accepts completion only with provider message-ID readback; generic Quo sending remains disabled. A separate single-file Retell lane can file a new claim or find an existing claim only after fresh evidence, live agent-configuration verification, complete plan display, and exact Chance approval. #2628, automatic writeback, raw sends, direct notes, task completion, calendar writes, generic/homeowner/follow-up calls, company mutations, and backward stage moves remain blocked.",
     "developerName": "Chance Pearson",
     "category": "Productivity",
     "capabilities": [
@@ -19,10 +19,12 @@
       "Unified scheduling",
       "Approval-gated operations",
       "Approved exact-file notes",
+      "Approval-bound local PDF upload with content readback",
+      "Approval-gated exact-file Quo SMS with provider readback",
       "Reviewed Gmail draft delivery",
       "Single-file Retell claim filing"
     ],
-    "defaultPrompt": "Run bridge_restart_verify first and require the exact provider-attested build, Mac identity, six-receipt historical-isolation attestation, pinned JobNimbus action-batch plus single-file Retell claim-filing boundary, 58-file manifest, ready:true, unresolvedCount:0, and hardBlockedCount:0. Reconcile only explicitly eligible new unresolved receipts; historical attention is never replayed and hard-blocked receipts stop work. For claim filing, verify the live Retell configuration, prepare only one exact manifest file with includeCarrierBatch:false and goal file_new_claim or find_existing_claim, show the complete plan/destination/digest/approval ID, and call only after exact current approval. Never touch #2628, expose claim writeback, or use raw/direct sends. A reviewed bridge-created Gmail draft may be sent only through a later sole-operation gmail.send_existing_draft plan and separate exact current approval."
+    "defaultPrompt": "Run bridge_restart_verify first and require the exact provider-attested build, Mac identity, six-receipt historical-isolation attestation, pinned JobNimbus action-batch plus dedicated Quo SMS and single-file Retell claim-filing boundaries, 58-file manifest, ready:true, unresolvedCount:0, and hardBlockedCount:0. Reconcile only explicitly eligible new unresolved receipts; historical attention is never replayed and hard-blocked receipts stop work. For an SMS, use only quo_sms_plan with the exact file, verified Wave sender, recipient and complete text, show the full plan, and call quo_sms_execute only after Chance approves that exact current plan in the same persistent native process. Never use generic Quo sending. For claim filing, verify the live Retell configuration, prepare only one exact manifest file with includeCarrierBatch:false and goal file_new_claim or find_existing_claim, show the complete plan/destination/digest/approval ID, and call only after exact current approval. Never touch #2628, expose claim writeback, or use raw/direct sends. A reviewed bridge-created Gmail draft may be sent only through a later sole-operation gmail.send_existing_draft plan and separate exact current approval."
   },
   "mcpServers": "./.mcp.json"
 }

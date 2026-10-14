@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
 import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
-import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import { readLocalPdf } from "./local-pdf.mjs";
+import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
+import {
+  QUO_SMS_TYPE,
+  assertQuoSmsPlan,
+  validateQuoSmsPayload
+} from "./quo-sms-contract.mjs";
 import {
   normalizePacketReview, assertPacketReviewCurrent, assertPacketReviewFileSources,
   assertReviewedPacketPlan
@@ -17,6 +22,7 @@ import {
   CHANCE_LEGACY_ISOLATION,
   CHANCE_RUN_POLICY,
   EXPECTED_BRIDGE_BUILD,
+  PDF_WORKFLOW_ENABLED,
   approvalBoundary,
   assertDedicatedMacOperatorIdentity,
   assertExecutionReceiptAttestation,
@@ -1136,6 +1142,7 @@ export function createOperatorCoordinator({
     assertRunPolicyAttestation(response, { requireFullSurface: true });
     assertApprovedNotePlan(response, operations, operatorScope, { enabled: CHANCE_RUN_ACTION_TYPES.includes("jobnimbus.create_note") });
     assertPdfPlan(response, operations);
+    assertQuoSmsPlan(response, operations);
     const expiresAt = Date.parse(String(response?.approvalExpiresAt || ""));
     if (!Number.isFinite(expiresAt) || expiresAt <= now()) {
       throw new Error("The bridge did not return a live approval expiry. Nothing was approved.");
@@ -1145,6 +1152,7 @@ export function createOperatorCoordinator({
       challenge,
       operations: canonical(operations),
       ...(operations[0]?.type === PDF_UPLOAD_TYPE ? { pdfFileId: response.files[0].id } : {}),
+      ...(operations[0]?.type === QUO_SMS_TYPE ? { smsFileId: response.files[0].id } : {}),
       operatorScope,
       runPolicy: canonical(CHANCE_RUN_POLICY),
       attestedBoundary: canonical(attestedBoundary),
@@ -1200,6 +1208,10 @@ export function createOperatorCoordinator({
       if (pending.pdfFileId && (response?.batch?.files?.length !== 1
         || response.batch.files[0].id !== pending.pdfFileId)) {
         throw new Error("PDF receipt target differs from the approved provider file ID. Reconcile before retrying.");
+      }
+      if (pending.smsFileId && (response?.batch?.files?.length !== 1
+        || response.batch.files[0].id !== pending.smsFileId)) {
+        throw new Error("Quo SMS receipt target differs from the approved provider file ID. Reconcile before retrying.");
       }
       assertExecutionReceiptAttestation(response, approvalDigest, {
         operations,
@@ -1303,7 +1315,7 @@ export function createOperatorCoordinator({
 
   async function planPdfUpload(input) {
     const generation = invalidateLocalApprovals();
-    if (!PDF_UPLOADS_ENABLED) throw new Error("PDF upload is built but not activated. A reviewed coordinated release is required.");
+    if (!PDF_WORKFLOW_ENABLED) throw new Error("PDF upload is built but not activated. A reviewed coordinated release is required.");
     const payload = await readLocalPdf(input);
     requireCurrentApprovalGeneration(generation);
     // The immutable byte snapshot is retained only in the one-use local
@@ -1313,11 +1325,41 @@ export function createOperatorCoordinator({
 
   async function executePdfUpload(approvalDigest) {
     const pending = approvals.get(approvalDigest);
-    if (!PDF_UPLOADS_ENABLED || pending?.kind !== "action_batch") throw new Error("No current approved PDF snapshot exists.");
+    if (!PDF_WORKFLOW_ENABLED || pending?.kind !== "action_batch") throw new Error("No current approved PDF snapshot exists.");
     const operations = JSON.parse(pending.operations);
     if (operations.length !== 1 || operations[0].type !== PDF_UPLOAD_TYPE) throw new Error("This digest is not a sole PDF-upload plan.");
     // Never reopen a potentially changed path, accept replacement bytes, or
     // re-create an expired/lost plan. Execution uses exactly the reviewed bytes.
+    return executeActionBatch(approvalDigest, operations, "assigned");
+  }
+
+  async function planQuoSms(input) {
+    invalidateLocalApprovals();
+    if (!QUO_SMS_ENABLED) {
+      throw new Error("Quo SMS is built but not activated. A reviewed coordinated release is required.");
+    }
+    const payload = validateQuoSmsPayload(input);
+    return planActionBatch([{
+      type: QUO_SMS_TYPE,
+      payload: {
+        query: payload.query,
+        from: payload.from,
+        to: payload.to,
+        content: payload.content
+      }
+    }], "assigned");
+  }
+
+  async function executeQuoSms(approvalDigest) {
+    const pending = approvals.get(approvalDigest);
+    if (!QUO_SMS_ENABLED || pending?.kind !== "action_batch") {
+      throw new Error("No current approved Quo SMS plan exists.");
+    }
+    const operations = JSON.parse(pending.operations);
+    if (operations.length !== 1 || operations[0].type !== QUO_SMS_TYPE) {
+      throw new Error("This digest is not a sole Quo SMS plan.");
+    }
+    validateQuoSmsPayload(operations[0].payload);
     return executeActionBatch(approvalDigest, operations, "assigned");
   }
 
@@ -1333,6 +1375,8 @@ export function createOperatorCoordinator({
     executeActionBatch,
     reconcileActionBatch,
     planPdfUpload,
-    executePdfUpload
+    executePdfUpload,
+    planQuoSms,
+    executeQuoSms
   });
 }

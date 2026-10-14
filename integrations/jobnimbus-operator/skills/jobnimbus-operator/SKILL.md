@@ -1,9 +1,36 @@
 ---
 name: jobnimbus-operator
-description: Use the Mac JobNimbus Operator for HCN/Wave evidence, exact-file Gmail and Quo review, read-only all-adjuster 3x10 gap reports, scheduling, documents, approved JobNimbus notes and action batches, reviewed-draft Gmail delivery, and single-file Retell claim filing.
+description: Use the Mac JobNimbus Operator for HCN/Wave evidence, exact-file Gmail and Quo review, read-only all-adjuster 3x10 gap reports, scheduling, documents, approved JobNimbus notes and action batches, reviewed-draft Gmail delivery, approval-gated exact Quo SMS when activated, and single-file Retell claim filing.
 ---
 
 # JobNimbus Operator
+
+## Exact Quo SMS — inactive candidate
+
+This source adds `quo_sms_plan` and `quo_sms_execute`, but they are absent unless
+`quo-sms-release.mjs` is compiled with separately reviewed exact bridge,
+`chance-58-files-sms-v1` manifest, historical-isolation, and Operator package
+pins. Source/build approval does not activate them or authorize a message. If
+either tool or its SMS policy flags are missing, stop; never use generic Quo,
+the browser, a raw API/key, a one-shot script, or a different worker.
+
+After activation, call `quo_sms_plan` with exactly `{query,from,to,content}`.
+Use one exact numeric manifest file, the exact verified Wave sender in E.164,
+the exact freshly file-bound recipient in E.164, and the complete final text.
+Show Chance the file, sender, recipient, full text, content SHA-256/count,
+expiry, and approval digest. Only an explicit approval of that exact current
+plan permits `quo_sms_execute` with its digest in the same persistent process.
+Separate user turns are supported only when the native host keeps that process
+attached; never hand the digest to a new chat or delegated/cloud worker. A
+restart, newer plan, changed byte, sender/recipient change, expiry, build or
+policy drift consumes/invalidates the approval and requires a fresh plan.
+
+Accept completion only when the receipt has an exact Quo provider message ID,
+`verifiedByReadback:true`, matching sender/recipient/content hash/count, and a
+delivery status. Queued/sent is not delivered. Any partial/unknown outcome uses
+the existing exact-batch reconciliation once; it never resends. Missing ID or
+unprovable state quarantines the file. Approval of a PDF, draft, note, call,
+earlier text, or this candidate's release never authorizes a client SMS.
 
 ## Reviewed claim packets — unreleased candidate
 
@@ -155,9 +182,11 @@ in the filename. Keep the ordinary operational scope restrictions unchanged.
 - Keep `gmail.create_draft` single-file. Set `insuranceClaimEmail:true`; the subject must exactly equal the live JobNimbus claim number. Drafts are not sends.
 - Keep `jobnimbus.create_note` single-file and the sole operation, with exactly `{query,note}`. Display all text and any canonical Richard mention intent before approval. Verify the returned provider note ID, exact text hash, and unchanged intended recipient; never infer notification delivery from a saved note.
 - `gmail.send_existing_draft` is a later, separate sole-operation batch. Use only the exact `draftId` returned by a completed, provider-readback-confirmed `gmail.create_draft` receipt for the same current manifest file. Show Chance the fresh immutable draft snapshot and obtain a new exact approval. The bridge requires the live claim-number subject, sends no caller-supplied body/recipient/attachment content, proves the Gmail `SENT` message by readback, and re-proves that the source draft remains unchanged. Never treat approval to create a draft as approval to send it.
+- When the SMS release is activated, do not put `quo.send_text` into `action_batch_plan`; the generic tool excludes it. Use only `quo_sms_plan` and `quo_sms_execute` with the exact workflow above.
 - The plugin pins the run-policy ID/hash. Never add, change, or model-supply `runPolicy` or `operatorScope`.
 - Show Chance the complete plan, ordered file list, operation count, sequential fail-stop/no-rollback semantics, and `approvalDigest`.
 - Call `action_batch_execute` only after Chance explicitly approves that exact current plan.
+- An ordinary user approval reply is not a restart. In the same attached native MCP process, call `action_batch_execute` directly after approval; do not call `bridge_restart_verify`, reconnect, or start any newer plan between plan and execute. If the native process or tool connection is gone, the approval is invalid and a fresh plan is required after re-attestation—never use a browser, raw API, or another worker.
 - Never treat setup approval, an old approval, or general permission as approval for a new batch.
 - Starting any newer `action_batch_plan` attempt invalidates every older local plan, even if the newer attempt fails its admission check.
 - The plugin retains the single-use approval challenge internally. Never ask Chance to copy one.
@@ -165,7 +194,7 @@ in the filename. Keep the ordinary operational scope restrictions unchanged.
 - On partial failure, preserve completed readback receipts, treat the failed file as requiring reconciliation, and do not retry failed or unattempted actions without fresh evidence and a new approval.
 - For `applied_verified`, accept the reconciled receipt as the execution record. For `not_applied_verified`, retry nothing automatically; if the action is still needed, obtain fresh evidence and prepare a new approval plan. `verified_noop` means the receipt was already resolved and remains unchanged.
 - For `manual_quarantined` with outcome `unknown_file_quarantined`, never retry that batch or action. `manualQuarantine.scope:"file"` carries one numeric `fileNumber` and an identical one-item `fileNumbers` list. Scope `files` carries a blank singular value and a nonempty unique numeric list; only those files stay blocked. Scope `global` carries a blank singular value and an empty list, leaves the batch hard-blocked, and stops all work—never call reconciliation on it again. After file/files recovery is complete and `bridge_restart_verify` returns `ready:true`, unrelated manifest files may continue normally.
-- Raw/new-message email sends, Quo texts, direct note routes, calendar writes, task completion, backward stage moves, #2628, nonmanifest files, and every call outside the separate single-file Retell claim-filing lane are not exposed by this operator plugin. Only the exact reviewed-draft send and approved-note batch described above are available.
+- Raw/new-message email sends, generic/direct Quo texts, direct note routes, calendar writes, task completion, backward stage moves, #2628, nonmanifest files, and every call outside the separate single-file Retell claim-filing lane are not exposed by this operator plugin. The only SMS exception after its separate activation is the dedicated exact-file `quo_sms_plan` / `quo_sms_execute` workflow above; otherwise only the exact reviewed-draft send and approved-note batch described above are available.
 
 ## Retell Claim-Filing Approval Rules
 
@@ -180,7 +209,7 @@ in the filename. Keep the ordinary operational scope restrictions unchanged.
 - The plugin retains the server challenge internally. It re-attests the full bridge boundary and exact live Retell configuration immediately before execution. The plan itself must bind the exact published agent version/configuration digest and full approved callback-packet digest. Any changed input, digest, boot, build, policy, isolation, receipt state, runtime, identity/access, capability, agent/LLM version, prompt, tool, extraction schema, timezone, callback configuration, packet, or expiry consumes the local approval and places no call.
 - Starting any newer action-batch or Retell call plan invalidates every older local plan across both lanes. `bridge_restart_verify` and an MCP/app restart do the same.
 - After execution, use `retell_claim_call_get` until the call/callback chain ends, then audit the transcript against every extracted value. A completed result must carry the durable guarded-completion receipt bound to the exact call, transcript digest, carrier-issued claim/reference number, and valid coverage disposition. Any policy correction volunteered by the carrier is optional evidence, not a completion requirement. Without the receipt, the call is review-only. Use `retell_claim_pending_callbacks` to identify carrier callbacks that still need continuation. Callback proof must be unequivocal carrier-attributed confirmation; receipt/submission, offers, conditions, and model analysis are insufficient. A callback from a different ANI fails closed for manual recovery and never receives a client packet. These tools are read-only.
-- The plugin exposes no claim-result writeback route, and call execution must attest both `automaticJobNimbusWriteback:false` and `automaticChanceBrainWriteback:false`. Never treat a transcript extraction or dry-run proposal as a JobNimbus update. Any verified contact/status/current-task change requires a new supported `action_batch_plan` and separate exact approval. Notes, calendar writes, Quo texts, raw email sends, task completion, and client-memory writeback remain unavailable; the separate reviewed-draft Gmail action never inherits authority from a Retell call.
+- The plugin exposes no claim-result writeback route, and call execution must attest both `automaticJobNimbusWriteback:false` and `automaticChanceBrainWriteback:false`. Never treat a transcript extraction or dry-run proposal as a JobNimbus update. Any verified contact/status/current-task change requires a new supported `action_batch_plan` and separate exact approval. Notes, calendar writes, generic Quo texts, raw email sends, task completion, and client-memory writeback remain unavailable; an activated dedicated SMS plan and the separate reviewed-draft Gmail action never inherit authority from a Retell call.
 - A failed or ambiguous execute consumes the local approval. First review the call result/ledger and pending callbacks to determine whether Retell already registered or completed the call; never blindly retry. A fresh plan and explicit approval are required for any intentional retry, and this initial operator lane does not expose a retry override.
 
 ## Action Payload Contracts

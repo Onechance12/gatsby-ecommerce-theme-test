@@ -1,5 +1,51 @@
 # JobNimbus Operator for Mac
 
+## Inactive exact Quo SMS candidate (2026-10-14)
+
+`mcp/quo-sms-release.mjs` defaults **disabled**. This source adds a dedicated
+`quo_sms_plan` / `quo_sms_execute` pair over the existing action-batch approval
+and receipt ledgers. It does not enable `ALLOW_QUO_SEND`, expose the generic
+Quo send route/capability, send a client message, modify the installed plugin,
+or alter production configuration.
+
+Activation requires a separately reviewed bridge commit, exact
+`chance-58-files-sms-v1` manifest hash, unchanged 58-file roster/#2628
+exclusion/six historical fingerprints, and a versioned installed Operator pin.
+The cumulative manifest preserves the reviewed note and PDF actions and adds
+only sole-operation `quo.send_text`. The dedicated tool accepts exactly
+`{query,from,to,content}`. It requires an exact numeric manifest file, exact
+E.164 verified Wave sender, freshly unique client/adjuster recipient on that
+file, full displayed text, short-lived one-use approval, and unchanged
+boot/build/policy/runtime immediately before execution.
+
+The bridge reserves the immutable send digest before the provider POST. A
+completed receipt must read the exact Quo provider message ID back and prove
+outgoing direction, sender, recipient, exact-content SHA-256/character count,
+and current delivery status. Queued/sent is evidence that the exact provider
+message exists, not proof of carrier delivery. Any timeout, missing ID,
+incomplete history, mismatched readback, restart window, or receipt-write
+failure becomes reconciliation-only and is never automatically resent. An
+unprovable outcome quarantines that exact file. Message text is kept out of
+durable action/outbound ledgers; the approval plan necessarily displays it.
+The hidden approval challenge lives only in the current MCP process. Separate
+user turns can complete the plan only when the native host routes both turns to
+that same persistent process. A new chat/worker or process restart cannot resume
+the plan and must produce a fresh plan for fresh approval.
+
+Development verification uses only local synthetic JobNimbus/Quo providers.
+It covers changed text/sender/recipient, generic-route denial with the global
+Quo gate off, provider readback, duplicate execution, restart invalidation,
+reconciliation without a second POST, and missing-ID quarantine. Publishing,
+deployment, manifest creation, installation, restart, and any client SMS
+each require their own later approval. No live message was sent here.
+
+Under an explicit release approval, `scripts/activate-approved-quo-sms.mjs
+preview` reads only the live manifest and historical-isolation variables and
+prints safe metadata. Its `activate <preview-hash>` mode changes only those two
+variables, preserves the exact roster, expiry, #2628 exclusion, allowed contact
+fields, evidence sources, and six immutable fingerprints, and appends only
+`quo.send_text`. It does not enable generic Quo sending or deploy the service.
+
 ## Unreleased reviewed-claim-packet separation (2026-10-09)
 
 The existing Retell plan/execute tools now have an explicit `reviewed_packet`
@@ -69,7 +115,7 @@ Coordinated release gate:
    cases. Record source freshness and exact remaining holds. No draft, send,
    call, upload, task or CRM change is authorized by this pilot.
 5. Obtain separate exact-file approvals for any subsequent supported action.
-   Quo send/carrier-follow-up activation needs its own reviewed immutable plan,
+   Carrier-follow-up activation needs its own reviewed immutable plan,
    single-use approval, configured line/recipient proof, uncertain-outcome
    reconciliation, provider readback and restart/build-drift tests. Existing
    backend routes alone do not activate those lanes.
@@ -182,7 +228,9 @@ Local Codex operator for the production HCN/Wave bridge.
 - Read-only company exact-file review remains available; company mutations and company claim calls are disabled
 - Broad company indexes, sweeps, and arbitrary mailbox/phone queries remain blocked
 
-The operator exposes two narrow approval lanes:
+The activated production operator exposes two narrow approval lanes; the
+inactive SMS candidate described above would add a third dedicated plan/execute
+pair only after its coordinated release:
 
 1. JobNimbus/Gmail actions use the existing exact dry-run digest and hidden single-use challenge action batch. Contact corrections, forward stage moves, and marked current-control tasks may group up to five exact Chance files in contact → status → task order. Gmail draft creation is a sole-operation batch and is not a send. A bridge-created draft may be delivered only through a later sole-operation `gmail.send_existing_draft` plan using its exact returned `draftId`, fresh immutable snapshot, and a new Chance approval. The bridge verifies the Gmail `SENT` message and retained unchanged source draft.
 2. Retell claim filing uses a separate single-file plan and execution pair. It supports only `file_new_claim` and `find_existing_claim`, always forces `includeCarrierBatch:false`, freshly reads the exact manifest file, and places no call until Chance explicitly approves the complete current packet, destination, communication preflight, `planDigest`, local `approvalId`, and unchanged input. Planning first runs a fresh exact-file JobNimbus, Gmail, and transcript-requested Quo review; unavailable, ambiguous, provider-incomplete, paginated, or partially reviewed evidence fails closed, and strong existing-claim, prior-filing, carrier-receipt, carrier-inspection, or callback signals stop a new-claim plan. New claims bind an explicit coverage disposition and practical file-specific damage facts; a prior/unverified policy is a lookup reference only. The bridge challenge stays hidden and is consumed once.

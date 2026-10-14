@@ -7,10 +7,11 @@ import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { CHANCE_RUN_ACTION_TYPES } from "./scope.mjs";
+import { CHANCE_RUN_ACTION_TYPES, PDF_WORKFLOW_ENABLED } from "./scope.mjs";
 import { APPROVED_NOTES_ENABLED } from "./approved-note-release.mjs";
-import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
+import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
+import { QUO_SMS_TYPE } from "./quo-sms-contract.mjs";
 import { createOperatorCoordinator } from "./operator-coordinator.mjs";
 import {
   PACKET_REVIEW_SOURCES, PACKET_REVIEW_METHODS, PACKET_REVIEW_FACT_KEYS, CLAIM_STOP_SIGNAL_CODES
@@ -41,7 +42,9 @@ const FILE_CACHE = path.join(
   "files"
 );
 // PDF bytes enter only through the local-file tools, not a chat base64 payload.
-const ACTION_TYPES = CHANCE_RUN_ACTION_TYPES.filter((type) => type !== PDF_UPLOAD_TYPE);
+const ACTION_TYPES = CHANCE_RUN_ACTION_TYPES.filter(
+  (type) => ![PDF_UPLOAD_TYPE, QUO_SMS_TYPE].includes(type)
+);
 
 function operatorToken() {
   try {
@@ -777,7 +780,7 @@ const operationSchema = z.object({
   }
 });
 
-if (PDF_UPLOADS_ENABLED) {
+if (PDF_WORKFLOW_ENABLED) {
   register(
     "pdf_upload_plan",
     "Snapshot one reviewed local PDF for one active Chance-manifest file. No upload yet. Show the exact client, filename, privacy, size, SHA-256 and approvalDigest to Chance. PDF contents are not printed or persisted by the bridge. A new plan invalidates older approvals. Upload approval does not approve an email draft or send.",
@@ -792,13 +795,36 @@ if (PDF_UPLOADS_ENABLED) {
   );
 }
 
+if (QUO_SMS_ENABLED) {
+  register(
+    "quo_sms_plan",
+    "Prepare one exact SMS for one active Chance-manifest file from the authenticated employee's verified Wave line. Nothing is sent. The returned plan binds the exact JobNimbus file, sender, recipient, full text, content hash and one-use approval digest. Show the complete plan to Chance; approval of any prior text, PDF, email, call or CRM action does not authorize this SMS.",
+    {
+      query: z.string().regex(/^#?\d+$/),
+      from: z.string().regex(/^\+[1-9]\d{7,14}$/),
+      to: z.string().regex(/^\+[1-9]\d{7,14}$/),
+      content: z.string().min(1).max(1600)
+    },
+    (input) => OPERATOR.planQuoSms(input)
+  );
+  register(
+    "quo_sms_execute",
+    "Send only the unchanged Quo SMS that Chance explicitly approved in the immediately preceding exact plan. The hidden challenge is consumed once. The wrapper re-attests the same bridge boot/build/policy/runtime and accepts completion only with provider message-ID readback proving the exact sender, recipient and content hash. Any uncertain outcome is non-retryable and requires receipt reconciliation.",
+    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/) },
+    ({ approvalDigest }) => OPERATOR.executeQuoSms(approvalDigest)
+  );
+}
+
 register(
   "action_batch_plan",
   "Prepare an exact dry-run JobNimbus/Gmail batch under the pinned 58-file Thresher manifest. The wrapper freshly re-attests the exact bridge build, boot, policy, six-receipt historical isolation, runtime, identity, capabilities, and ready receipt boundary before posting. Up to five exact Chance files may contain one contact correction, one forward stage move, and one current-control task each, in that order. Gmail draft creation remains a sole-operation batch and is not a send. A reviewed bridge-created draft may be sent only in a later sole-operation gmail.send_existing_draft batch with exactly {query,draftId} and a new approval. "
-    + (APPROVED_NOTES_ENABLED || PDF_UPLOADS_ENABLED
+    + (APPROVED_NOTES_ENABLED || PDF_WORKFLOW_ENABLED
       ? "One exact-file JobNimbus note may be prepared as a sole-operation batch with exactly {query,note}. Only one canonical @RichardR mention request is accepted, bound to Richard R's exact user ID in the displayed plan. All other @ text is blocked. Mention rendering and notification delivery are unverified: preserve mentionsVerified:false and accountingNotified:false. "
       : "JobNimbus notes are not activated and remain blocked. ")
-    + "Raw sends, #2628, completions, calendar writes, backward moves, and every call outside the separate single-file Retell claim-filing lane are blocked. Show the complete returned plan and approvalDigest to Chance before execution.",
+    + (QUO_SMS_ENABLED
+      ? "Quo SMS is excluded from this generic batch tool and is available only through the dedicated exact-message plan/execute pair. "
+      : "Quo SMS is not activated and remains blocked. ")
+    + "Raw sends, #2628, completions, calendar writes, backward moves, and every call outside the separate single-file Retell claim-filing lane are blocked. Show the complete returned plan and approvalDigest to Chance before execution. The ordinary user approval turn must stay on this same attached native MCP process; do not run bridge_restart_verify or start another plan before the approved execute.",
   {
     operations: z.array(operationSchema).min(1).max(15)
   },
@@ -807,7 +833,7 @@ register(
 
 register(
   "action_batch_execute",
-  "Execute only the unchanged action batch that Chance explicitly approved in the immediately preceding plan. Requires that plan's approvalDigest and exact operations; the hidden challenge is consumed once and never exposed to chat. Before posting, the wrapper freshly re-attests ready:true and requires the exact same stored boot, build, policy, historical isolation, runtime, identity, and capability boundary. Existing-draft Gmail delivery is accepted only when the receipt proves the exact approved draftId, a provider Sent-message id, immutable readback, and retained source draft.",
+  "Execute only the unchanged action batch that Chance explicitly approved in the immediately preceding plan. After Chance's approval reply, call this directly in the same attached native MCP process; do not call bridge_restart_verify, reconnect, or start another plan between planning and execution. Requires that plan's approvalDigest and exact operations; the hidden challenge is consumed once and never exposed to chat. Before posting, the wrapper freshly re-attests ready:true and requires the exact same stored boot, build, policy, historical isolation, runtime, identity, and capability boundary. Existing-draft Gmail delivery is accepted only when the receipt proves the exact approved draftId, a provider Sent-message id, immutable readback, and retained source draft.",
   {
     approvalDigest: z.string().min(1),
     operations: z.array(operationSchema).min(1).max(15)
