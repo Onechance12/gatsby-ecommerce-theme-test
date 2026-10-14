@@ -5,6 +5,7 @@ export const CHANCE_OPERATOR_RUN_POLICY_ID = "chance-58-files-v1";
 // grant note access to the existing five-action production manifest.
 export const CHANCE_OPERATOR_NOTES_RUN_POLICY_ID = "chance-58-files-notes-v1";
 export const CHANCE_OPERATOR_PDF_RUN_POLICY_ID = "chance-58-files-pdf-v1";
+export const CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID = "chance-58-files-sms-v1";
 export const CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION = 1;
 export const CHANCE_OPERATOR_RUN_FILE_COUNT = 58;
 
@@ -24,6 +25,9 @@ export const CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES = Object.freeze([
 ]);
 export const CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES = Object.freeze([
   ...CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES, "jobnimbus.upload_pdf"
+]);
+export const CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES = Object.freeze([
+  ...CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES, "quo.send_text"
 ]);
 
 const CHANCE_OPERATOR_LEGACY_ALLOWED_ACTION_TYPES = Object.freeze(
@@ -195,8 +199,13 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
     throw new Error(`The Chance operator run manifest requires schemaVersion ${CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION}.`);
   }
   const id = String(input.id || "").trim();
-  if (![CHANCE_OPERATOR_RUN_POLICY_ID, CHANCE_OPERATOR_NOTES_RUN_POLICY_ID, CHANCE_OPERATOR_PDF_RUN_POLICY_ID].includes(id)) {
-    throw new Error(`The Chance operator run manifest id must be ${CHANCE_OPERATOR_RUN_POLICY_ID}.`);
+  if (![
+    CHANCE_OPERATOR_RUN_POLICY_ID,
+    CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
+    CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
+    CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+  ].includes(id)) {
+    throw new Error("The Chance operator run manifest id is not a supported reviewed release policy.");
   }
   if (String(input.operatorScope || "").trim().toLowerCase() !== "assigned") {
     throw new Error("The Chance operator run manifest must use assigned scope.");
@@ -209,7 +218,10 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
   if (!exactStringSet(input.excludedFileNumbers, CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS)) {
     throw new Error("The Chance operator run manifest must exclude JobNimbus file #2628.");
   }
-  const allowedActionTypes = id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID
+  const allowedActionTypes = id === CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+    ? (exactStringSet(input.allowedActionTypes, CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES)
+      ? CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES : null)
+    : id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID
     ? (exactStringSet(input.allowedActionTypes, CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES)
       ? CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES : null)
     : id === CHANCE_OPERATOR_NOTES_RUN_POLICY_ID
@@ -289,9 +301,16 @@ export function chanceOperatorRunManifestSummary(manifest) {
       noteMentionRequestsAllowed: true,
       noteCreationSoleOperation: true
     } : {}),
-    ...(manifest.id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID ? {
+    ...(manifest.allowedActionTypes.includes("jobnimbus.upload_pdf") ? {
       pdfUploadAllowed: true, pdfUploadSoleOperation: true,
       pdfUploadContentReadbackRequired: true, pdfUploadMaxBytes: 8388608
+    } : {}),
+    ...(manifest.allowedActionTypes.includes("quo.send_text") ? {
+      quoSmsAllowed: true,
+      quoSmsSoleOperation: true,
+      quoSmsExactSenderRequired: true,
+      quoSmsProviderReadbackRequired: true,
+      quoSmsDuplicateProtectionRequired: true
     } : {}),
     backwardStageMovesAllowed: false,
     stageEvidenceRequired: true

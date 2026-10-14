@@ -160,7 +160,7 @@ test("plugin documentation pins build, dual lanes, runtime gates, and fresh acti
     assert.match(document, /boot.*build.*policy.*isolation.*runtime.*(?:change|boundary)/is);
   }
   assert.match(scope, /sourceCommit: APPROVED_NOTES_ENABLED \? ACTIVE_RELEASE\.bridgeCommit : "[a-f0-9]{40}"/);
-  assert.match(scope, /const ACTIVE_RELEASE = PDF_UPLOADS_ENABLED \? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE/);
+  assert.match(scope, /const ACTIVE_RELEASE = QUO_SMS_ENABLED[\s\S]*QUO_SMS_RELEASE[\s\S]*PDF_UPLOADS_ENABLED \? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE/);
   assert.match(scope, /EXPECTED_OPERATOR_CAPABILITIES/);
   assert.match(coordinator, /attestedBoundary: canonical\(attestedBoundary\)/);
   assert.match(coordinator, /pending\.attestedBoundary !== canonical\(currentBoundary\)/);

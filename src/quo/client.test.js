@@ -5,6 +5,7 @@ import {
   readQuoHistoryStrict,
   readQuoTranscript,
   readQuoInbox,
+  readQuoTextReceipt,
   sendQuoText
 } from "./client.js";
 
@@ -945,6 +946,71 @@ test("Quo live send resolves the configured number to its PN line id", async () 
     assert.equal(result.message.phoneNumberId, "PN_chance");
     assert.equal(requests.length, 2);
     assert.equal(JSON.parse(requests[1].options.body).from, "PN_chance");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Quo SMS readback proves exact provider id, addressing, content hash and status", async () => {
+  const originalFetch = globalThis.fetch;
+  const content = "Synthetic inspection scheduling message — reply with a convenient time. Saturday at 11:00 or 12:00 also works.";
+  const contentSha256 = (await import("node:crypto"))
+    .createHash("sha256").update(content, "utf8").digest("hex");
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith("/phone-numbers")) {
+      return jsonResponse(200, {
+        data: [{ id: "PN_synthetic", name: "Synthetic Sender", number: "+12025550101" }]
+      });
+    }
+    if (parsed.pathname.endsWith("/messages")) {
+      return jsonResponse(200, { data: [{
+        id: "MSG_exact",
+        phoneNumberId: "PN_synthetic",
+        conversationId: "CONV_exact",
+        from: "+12025550101",
+        to: ["+12025550102"],
+        direction: "outgoing",
+        status: "queued",
+        createdAt: "2026-10-14T14:00:00Z",
+        content
+      }] });
+    }
+    if (parsed.pathname.endsWith("/calls")) return jsonResponse(200, { data: [] });
+    return jsonResponse(404, { message: "not found" });
+  };
+  try {
+    const receipt = await readQuoTextReceipt({
+      apiKey: "fixture",
+      baseUrl: "https://api.quo.test/v1"
+    }, {
+      id: "MSG_exact",
+      from: "+12025550101",
+      to: "+12025550102",
+      contentSha256,
+      characterCount: content.length
+    });
+    assert.deepEqual(receipt, {
+      externalId: "MSG_exact",
+      conversationId: "CONV_exact",
+      phoneNumberId: "PN_synthetic",
+      sender: "+12025550101",
+      recipient: "+12025550102",
+      contentSha256,
+      characterCount: content.length,
+      status: "queued",
+      verifiedByReadback: true
+    });
+    await assert.rejects(readQuoTextReceipt({
+      apiKey: "fixture",
+      baseUrl: "https://api.quo.test/v1"
+    }, {
+      id: "MSG_exact",
+      from: "+12025550101",
+      to: "+12025550102",
+      contentSha256: "0".repeat(64),
+      characterCount: content.length
+    }), /never retry/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

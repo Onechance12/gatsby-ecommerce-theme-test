@@ -23,6 +23,8 @@ test("activated candidate validates exact note intent, readback and notification
   await writeFile(path.join(directory, "pdf-upload-release.mjs"), pdfRelease
     .replace(/enabled: (?:false|true)/, "enabled: false"));
   await copyFile(new URL("./pdf-upload-contract.mjs", import.meta.url), path.join(directory, "pdf-upload-contract.mjs"));
+  await copyFile(new URL("./quo-sms-release.mjs", import.meta.url), path.join(directory, "quo-sms-release.mjs"));
+  await copyFile(new URL("./quo-sms-contract.mjs", import.meta.url), path.join(directory, "quo-sms-contract.mjs"));
   const scope = await import(pathToFileURL(path.join(directory, "scope.mjs")));
   for (const note of ["Paused due to license.", "Check received. @RichardR Please review."]) {
   await t.test(note.includes("@") ? "canonical Richard mention request" : "plain note", () => {

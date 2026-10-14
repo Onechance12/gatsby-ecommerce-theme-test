@@ -42,9 +42,15 @@ import {
   readQuoHistory,
   readQuoHistoryStrict,
   readQuoInbox,
+  readQuoTextReceipt,
   readQuoTranscript,
   sendQuoText
 } from "./quo/client.js";
+import {
+  APPROVED_QUO_SMS_TYPE,
+  quoSmsContentSha256,
+  validateApprovedQuoSmsPayload
+} from "./quo/approved-sms.js";
 import { buildRetellLlmFromPacket, postCallAnalysisSchema } from "./claim-filing-core/retellPrompt.js";
 import {
   buildRetellClaimAgentSettings,
@@ -108,6 +114,8 @@ import {
   CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
   CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
+  CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
   loadChanceOperatorRunManifest,
@@ -9697,6 +9705,64 @@ async function reconcileGmailSendIntent(intent) {
   };
 }
 
+async function reconcileApprovedQuoSmsIntent(intent, providerMessageId) {
+  const expected = intent?.reconciliation || {};
+  const approvalDigest = String(expected.channelApprovalDigest || "").trim();
+  const sender = String(expected.sender || "").trim();
+  const recipient = String(expected.recipient || "").trim();
+  const contentSha256 = String(expected.contentSha256 || "").trim().toLowerCase();
+  const characterCount = Number(expected.characterCount);
+  if (
+    !/^[a-f0-9]{64}$/.test(approvalDigest)
+    || !/^\+[1-9]\d{7,14}$/.test(sender)
+    || !/^\+[1-9]\d{7,14}$/.test(recipient)
+    || !/^[a-f0-9]{64}$/.test(contentSha256)
+    || !Number.isSafeInteger(characterCount)
+    || characterCount < 1
+    || characterCount > 1600
+  ) {
+    conflictError("The interrupted Quo SMS lacks a complete immutable sender, recipient, and content-hash intent. Never retry this send.");
+  }
+  const outbound = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+  const reservations = outbound.filter((row) => (
+    row.channel === "quo" && row.approvalDigest === approvalDigest
+  ));
+  if (reservations.length !== 1) {
+    conflictError("The interrupted Quo SMS does not have one exact durable outbound reservation. Never retry this send.");
+  }
+  const reservation = reservations[0];
+  const exactMessageId = String(providerMessageId || reservation.externalId || "").trim();
+  if (!exactMessageId) {
+    conflictError("The interrupted Quo SMS has no durable provider message id. Its outcome cannot be proven; never retry this send.");
+  }
+  const readback = await readQuoTextReceipt(quoConfig(), {
+    id: exactMessageId,
+    from: sender,
+    to: recipient,
+    contentSha256,
+    characterCount
+  });
+  await withOutboundSendMutation(async () => {
+    const ledger = await readSecurityLedger(OUTBOUND_SEND_STORE_PATH, "Outbound send ledger");
+    const row = ledger.find((item) => item.id === reservation.id);
+    if (!row || row.approvalDigest !== approvalDigest) {
+      conflictError("The Quo SMS reservation changed during reconciliation.");
+    }
+    row.status = ["failed", "undelivered"].includes(readback.status)
+      ? `completed_${readback.status}`
+      : "completed";
+    row.externalId = readback.externalId;
+    row.reconciledAt = new Date().toISOString();
+    row.updatedAt = row.reconciledAt;
+    await writeOutboundSendLedger(ledger);
+  });
+  return {
+    applied: true,
+    externalId: readback.externalId,
+    readback
+  };
+}
+
 function operatorCompatibleReceiptRunPolicies() {
   const current = CHANCE_OPERATOR_RUN_MANIFEST;
   if (!current) return new Map();
@@ -9719,14 +9785,25 @@ function operatorCompatibleReceiptRunPolicies() {
       excludedFileNumbers: current.excludedFileNumbers,
       allowedContactFields: current.allowedContactFields
     };
-    if (current.id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID) {
+    if (current.id === CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID) {
+      const previousPdf = loadChanceOperatorRunManifest({
+        ...predecessorBase, id: CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
+        allowedActionTypes: [...CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES]
+      }, historicalHashOptions);
+      accepted.set(key(previousPdf), { requireVerifiedReadback: true });
+    }
+    if ([CHANCE_OPERATOR_PDF_RUN_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID].includes(current.id)) {
       const previousNotes = loadChanceOperatorRunManifest({
         ...predecessorBase, id: CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
         allowedActionTypes: [...CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES]
       }, historicalHashOptions);
       accepted.set(key(previousNotes), { requireVerifiedReadback: true });
     }
-    if ([CHANCE_OPERATOR_NOTES_RUN_POLICY_ID, CHANCE_OPERATOR_PDF_RUN_POLICY_ID].includes(current.id)) {
+    if ([
+      CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
+      CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
+      CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+    ].includes(current.id)) {
       const previousFiveAction = loadChanceOperatorRunManifest({
         ...predecessorBase,
         allowedActionTypes: [...CHANCE_OPERATOR_ALLOWED_ACTION_TYPES]
@@ -10005,12 +10082,12 @@ function gmailPartHeaders(part) {
   return out;
 }
 
-function quoConfig() {
+function quoConfig(options = {}) {
   return {
     apiKey: QUO_API_KEY,
     baseUrl: QUO_API_BASE_URL,
     defaultFrom: QUO_DEFAULT_FROM_NUMBER,
-    allowSend: ALLOW_QUO_SEND,
+    allowSend: options.allowSend === true || ALLOW_QUO_SEND,
     redact: redactSensitiveText
   };
 }
@@ -10189,12 +10266,22 @@ async function quoTranscript(input = {}) {
   };
 }
 
-async function quoSend(input = {}) {
-  const query = required(input.query, "query");
+async function quoSend(input = {}, options = {}) {
+  const runPolicy = options.runPolicy || null;
+  const approvedOperatorLane = isMacCodexOperatorRequest()
+    && !operatorCompanyScopeActive()
+    && runPolicy?.enforced === true
+    && runPolicy.id === CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+    && runPolicy.allowedActionTypes.includes(APPROVED_QUO_SMS_TYPE);
+  const approvedPayload = approvedOperatorLane
+    ? validateApprovedQuoSmsPayload(input, { allowOperatorScope: true })
+    : null;
+  const execute = options.execute === undefined ? input.execute === true : options.execute === true;
+  const query = approvedPayload?.query || required(input.query, "query");
   const { contact } = await findChanceContact(query);
   const file = compactContact(contact);
-  const to = String(input.to || file.phone || "").trim();
-  const content = required(input.content || input.message || input.text, "content");
+  const to = approvedPayload?.to || String(input.to || file.phone || "").trim();
+  const content = approvedPayload?.content || required(input.content || input.message || input.text, "content");
   if (currentRequestIdentity()?.type === "codex_operator_token") {
     await assertUniqueChanceFilePhone(file, "Quo sending");
     if (input.userId !== undefined && String(input.userId || "").trim()) {
@@ -10208,8 +10295,11 @@ async function quoSend(input = {}) {
     }
   }
   const authorizedLine = await authorizedQuoLine();
-  const from = authorizedLine.number;
+  const from = normalizePhone(authorizedLine.number);
   if (!from) badRequest("No Quo sending line is configured for the authenticated employee.");
+  if (approvedOperatorLane && approvedPayload.from !== from) {
+    badRequest("The approved Quo SMS sender does not match the authenticated employee's verified Wave line.");
+  }
   const preview = await sendQuoText(quoConfig(), {
     from,
     to,
@@ -10217,9 +10307,14 @@ async function quoSend(input = {}) {
     userId: currentRequestIdentity()?.type === "codex_operator_token" ? undefined : input.userId,
     execute: false
   });
-  const plan = { ...preview.plan, attemptId: String(input.attemptId || "initial") };
+  const plan = approvedOperatorLane
+    ? {
+        ...preview.plan,
+        contentSha256: approvedPayload.contentSha256
+      }
+    : { ...preview.plan, attemptId: String(input.attemptId || "initial") };
   const approvalDigest = digest({ channel: "quo", action: "send_text", fileId: file.id, plan });
-  if (input.execute !== true) {
+  if (!execute) {
     return {
       mode: "dry_run",
       file,
@@ -10229,29 +10324,54 @@ async function quoSend(input = {}) {
     };
   }
   if (!ALLOW_WRITES) badRequest("Writes are disabled. Set BRIDGE_ALLOW_WRITES=true in Render to send Quo texts.");
-  if (!ALLOW_QUO_SEND) badRequest("Quo sending is disabled. Set ALLOW_QUO_SEND=true in Render.");
-  requireApprovalDigest(input.approvalDigest, approvalDigest, "Quo send");
+  if (!approvedOperatorLane && !ALLOW_QUO_SEND) badRequest("Quo sending is disabled. Set ALLOW_QUO_SEND=true in Render.");
+  requireApprovalDigest(options.approvalDigest || input.approvalDigest, approvalDigest, "Quo send");
   const reservation = await reserveOutboundSend("quo", approvalDigest, { to: plan.to });
   let result;
+  let verifiedReadback = null;
   try {
-    result = await sendQuoText(quoConfig(), {
+    result = await sendQuoText(quoConfig({ allowSend: approvedOperatorLane }), {
       from: preview.plan.from,
       to: preview.plan.to,
       content: preview.plan.content,
       userId: currentRequestIdentity()?.type === "codex_operator_token" ? undefined : input.userId,
       execute: true
     });
-    const acceptedStatus = String(result.message.status || "accepted").toLowerCase();
+    const providerMessageId = String(result.message.id || "").trim();
+    if (approvedOperatorLane) {
+      if (!providerMessageId) {
+        conflictError("Quo accepted the approved SMS without an exact provider message id. Never retry; reconcile the durable receipt.");
+      }
+      if (typeof options.recordProviderMessageId === "function") {
+        await options.recordProviderMessageId(providerMessageId);
+      }
+      verifiedReadback = await readQuoTextReceipt(quoConfig(), {
+        id: providerMessageId,
+        from: plan.from,
+        to: plan.to,
+        contentSha256: plan.contentSha256,
+        characterCount: plan.characterCount
+      });
+    }
+    const acceptedStatus = String(
+      verifiedReadback?.status || result.message.status || "accepted"
+    ).toLowerCase();
     await completeOutboundSend(
       reservation.id,
-      acceptedStatus === "delivered" ? "completed" : `accepted_${acceptedStatus}`,
-      result.message.id || ""
+      approvedOperatorLane
+        ? (acceptedStatus === "failed" || acceptedStatus === "undelivered"
+            ? `completed_${acceptedStatus}`
+            : "completed")
+        : acceptedStatus === "delivered" ? "completed" : `accepted_${acceptedStatus}`,
+      providerMessageId
     );
   } catch (error) {
     await completeOutboundSend(reservation.id, "failed_requires_review", "", redactSensitiveText(error.message));
     throw error;
   }
-  const deliveryStatus = String(result.message.status || "accepted").toLowerCase();
+  const deliveryStatus = String(
+    verifiedReadback?.status || result.message.status || "accepted"
+  ).toLowerCase();
   const deliveryConfirmed = deliveryStatus === "delivered";
   const deliveryFailed = deliveryStatus === "failed" || deliveryStatus === "undelivered";
   const memoryCloseout = isCodexOperatorRequest()
@@ -10270,6 +10390,15 @@ async function quoSend(input = {}) {
   return {
     ...result,
     file,
+    ...(verifiedReadback ? {
+      externalId: verifiedReadback.externalId,
+      conversationId: verifiedReadback.conversationId,
+      sender: verifiedReadback.sender,
+      recipient: verifiedReadback.recipient,
+      contentSha256: verifiedReadback.contentSha256,
+      characterCount: verifiedReadback.characterCount,
+      verifiedByReadback: true
+    } : {}),
     delivery: {
       status: deliveryStatus,
       confirmed: deliveryConfirmed,
@@ -11638,7 +11767,13 @@ function minimizedActionBatchReceipt(row, options = {}) {
         mentionRequested: intent.reconciliation?.mentionRequested,
         intendedRecipient: intent.reconciliation?.intendedRecipient
       } : {}),
-      ...(intent.type === PDF_UPLOAD_TYPE ? validatePdfMetadata(intent.reconciliation) : {})
+      ...(intent.type === PDF_UPLOAD_TYPE ? validatePdfMetadata(intent.reconciliation) : {}),
+      ...(intent.type === APPROVED_QUO_SMS_TYPE ? {
+        sender: intent.reconciliation?.sender || "",
+        recipient: intent.reconciliation?.recipient || "",
+        contentSha256: intent.reconciliation?.contentSha256 || "",
+        characterCount: Number(intent.reconciliation?.characterCount || 0)
+      } : {})
     })),
     completed: completed.map((item) => ({
       index: item.index,
@@ -11660,6 +11795,13 @@ function minimizedActionBatchReceipt(row, options = {}) {
         } : {}),
         ...(item.type === PDF_UPLOAD_TYPE ? {
           ...validatePdfMetadata(item.receipt), contentVerified: item.receipt.contentVerified
+        } : {}),
+        ...(item.type === APPROVED_QUO_SMS_TYPE ? {
+          sender: item.receipt?.sender || "",
+          recipient: item.receipt?.recipient || "",
+          contentSha256: item.receipt?.contentSha256 || "",
+          characterCount: Number(item.receipt?.characterCount || 0),
+          conversationId: item.receipt?.conversationId || ""
         } : {}),
         deliveryStatus: item.receipt?.deliveryStatus || "",
         deliveryConfirmed: item.receipt?.deliveryConfirmed,
@@ -11847,6 +11989,7 @@ async function actionBatchReconcile(input = {}) {
     }
     let applied = false;
     let externalId = "";
+    let reconciledQuoReadback = null;
     try {
       if (intent.type === "jobnimbus.update_contact" || intent.type === "jobnimbus.update_status") {
         const contact = await jobNimbus(`/contacts/${encodeURIComponent(intent.fileId)}`);
@@ -11883,6 +12026,14 @@ async function actionBatchReconcile(input = {}) {
         const sendReconciliation = await reconcileGmailSendIntent(intent);
         applied = sendReconciliation.applied;
         externalId = sendReconciliation.externalId;
+      } else if (intent.type === APPROVED_QUO_SMS_TYPE) {
+        const smsReconciliation = await reconcileApprovedQuoSmsIntent(
+          intent,
+          row.current.providerMessageId
+        );
+        applied = smsReconciliation.applied;
+        externalId = smsReconciliation.externalId;
+        reconciledQuoReadback = smsReconciliation.readback;
       } else {
         conflictError("This interrupted operation requires channel-specific reconciliation and cannot be automatically retried or closed.");
       }
@@ -11918,6 +12069,16 @@ async function actionBatchReconcile(input = {}) {
             ...(intent.type === "gmail.send_existing_draft" ? {
               sourceDraftId: String(intent.reconciliation?.draftId || ""),
               sourceDraftRetention: "retained_for_separate_cleanup"
+            } : {}),
+            ...(intent.type === APPROVED_QUO_SMS_TYPE ? {
+              sender: intent.reconciliation.sender,
+              recipient: intent.reconciliation.recipient,
+              contentSha256: intent.reconciliation.contentSha256,
+              characterCount: intent.reconciliation.characterCount,
+              conversationId: reconciledQuoReadback?.conversationId || "",
+              deliveryStatus: reconciledQuoReadback?.status || "accepted",
+              deliveryConfirmed: reconciledQuoReadback?.status === "delivered",
+              manualVerificationRequired: false
             } : {})
           }
       });
@@ -12028,6 +12189,7 @@ async function processActionBatch(input = {}) {
     let verifiedReceipt = null;
     try {
       const result = await executeActionOperation(operations[index], plans[index], {
+        runPolicy,
         recordProviderDocumentId: async (providerDocumentId) => {
           batch.current.providerDocumentId = providerDocumentId;
           operationCurrent.providerDocumentId = providerDocumentId;
@@ -12036,6 +12198,11 @@ async function processActionBatch(input = {}) {
         recordProviderNoteId: async (providerNoteId) => {
           batch.current.providerNoteId = providerNoteId;
           operationCurrent.providerNoteId = providerNoteId;
+          await updateActionBatch(batch);
+        },
+        recordProviderMessageId: async (providerMessageId) => {
+          batch.current.providerMessageId = providerMessageId;
+          operationCurrent.providerMessageId = providerMessageId;
           await updateActionBatch(batch);
         }
       });
@@ -12167,8 +12334,26 @@ async function prepareCanonicalActionBatch(operationsInput, options = {}) {
   const runPolicy = options.runPolicy || null;
   if (operations.some((operation) => operation.type === PDF_UPLOAD_TYPE)
     && (!isMacCodexOperatorRequest() || operatorCompanyScopeActive() || !runPolicy?.enforced
-      || runPolicy.id !== CHANCE_OPERATOR_PDF_RUN_POLICY_ID || operations.length !== 1)) {
+      || ![CHANCE_OPERATOR_PDF_RUN_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID].includes(runPolicy.id)
+      || operations.length !== 1)) {
     badRequest("PDF upload requires the separately activated PDF manifest and a sole exact assigned-file operation.");
+  }
+  if (operations.some((operation) => operation.type === APPROVED_QUO_SMS_TYPE)) {
+    if (
+      !isMacCodexOperatorRequest()
+      || operatorCompanyScopeActive()
+      || !runPolicy?.enforced
+      || runPolicy.id !== CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+      || operations.length !== 1
+      || operations[0].type !== APPROVED_QUO_SMS_TYPE
+    ) {
+      badRequest("Quo SMS requires the separately activated SMS manifest and one sole exact assigned-file operation.");
+    }
+    try {
+      validateApprovedQuoSmsPayload(operations[0].payload, { allowOperatorScope: true });
+    } catch (error) {
+      badRequest(error.message);
+    }
   }
   if (runPolicy?.enforced) {
     if (operations.some((operation) => operation.type === "jobnimbus.create_note")) {
@@ -16116,7 +16301,9 @@ async function prepareActionOperation(operation, options = {}) {
     case "gmail.send_existing_draft": plan = await gmailSend(input, {
       operatorExistingDraftLane: true
     }); break;
-    case "quo.send_text": plan = await quoSend(input); break;
+    case "quo.send_text": plan = options.runPolicy?.enforced
+      ? await quoSend(operation.payload, { runPolicy: options.runPolicy, execute: false })
+      : await quoSend(input); break;
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
   return { type: operation.type, plan };
@@ -16157,7 +16344,14 @@ async function executeActionOperation(operation, prepared, options = {}) {
       { ...input, approvalDigest: prepared.plan.approvalDigest },
       { operatorExistingDraftLane: true }
     );
-    case "quo.send_text": return quoSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
+    case "quo.send_text": return options.runPolicy?.enforced
+      ? quoSend(operation.payload, {
+          runPolicy: options.runPolicy,
+          execute: true,
+          approvalDigest: prepared.plan.approvalDigest,
+          recordProviderMessageId: options.recordProviderMessageId
+        })
+      : quoSend({ ...input, approvalDigest: prepared.plan.approvalDigest });
     default: badRequest(`Unsupported action type: ${operation.type}`);
   }
 }
@@ -16399,6 +16593,14 @@ function actionBatchIntent(operation, prepared, file, index) {
       contentDigest: gmailImmutableSendDigest(plan),
       sourceDraftContentDigest: String(plan.contentDigest || "").trim()
     };
+  } else if (operation.type === APPROVED_QUO_SMS_TYPE) {
+    reconciliation = {
+      sender: String(plan.from || ""),
+      recipient: String(plan.to || ""),
+      contentSha256: String(plan.contentSha256 || ""),
+      characterCount: Number(plan.characterCount || 0),
+      channelApprovalDigest: String(prepared?.plan?.approvalDigest || "")
+    };
   }
   const stable = {
     index,
@@ -16598,6 +16800,8 @@ function summarizeOperationResult(result) {
     && result?.mode === "executed"
     && result?.verifiedByReadback !== true
     && !deliveryStatus;
+  const exactQuoSmsReadback = result?.verifiedByReadback === true
+    && /^[a-f0-9]{64}$/.test(String(result?.contentSha256 || ""));
   const receipt = cleanObject({
     mode: result?.mode || "executed",
     fileId: result?.file?.id || "",
@@ -16614,10 +16818,17 @@ function summarizeOperationResult(result) {
       mentionsVerified: false,
       accountingNotified: false
     } : {}),
+    ...(result?.contentSha256 ? {
+      sender: result.sender,
+      recipient: result.recipient,
+      contentSha256: result.contentSha256,
+      characterCount: result.characterCount,
+      conversationId: result.conversationId || ""
+    } : {}),
     deliveryStatus,
     deliveryConfirmed: deliveryStatus ? deliveryConfirmed : undefined,
     manualVerificationRequired: deliveryStatus
-      ? !deliveryConfirmed && !deliveryFailed
+      ? !deliveryConfirmed && !deliveryFailed && !exactQuoSmsReadback
       : hcnManualVerificationRequired || undefined,
     sourceDraftId: result?.sourceDraftId || "",
     sourceDraftRetention: result?.sourceDraftRetention?.status || "",

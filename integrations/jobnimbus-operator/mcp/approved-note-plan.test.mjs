@@ -106,7 +106,8 @@ test("the coordinator never stores or executes an altered note display", async (
     export const CHANCE_RUN_ACTION_TYPES = ["jobnimbus.create_note"],
       CHANCE_RUN_ALLOWED_CONTACT_FIELDS = [], CHANCE_RUN_ALLOWED_STAGE_EVIDENCE_SOURCES = [],
       CHANCE_RUN_EXCLUDED_FILE_NUMBERS = ["2628"], CHANCE_RUN_FILE_COUNT = 58,
-      CHANCE_LEGACY_ISOLATION = {entries: []}, CHANCE_RUN_POLICY = {}, EXPECTED_BRIDGE_BUILD = {};
+      CHANCE_LEGACY_ISOLATION = {entries: []}, CHANCE_RUN_POLICY = {}, EXPECTED_BRIDGE_BUILD = {},
+      PDF_WORKFLOW_ENABLED = false;
     export const assertDedicatedMacOperatorIdentity = () => {}, assertExecutionReceiptAttestation = () => {},
       assertLegacyIsolationAttestation = () => {}, assertPlatformSessionAttestation = () => {},
       assertReconciliationReceiptAttestation = () => {}, assertRunPolicyAttestation = () => {};
@@ -119,6 +120,8 @@ test("the coordinator never stores or executes an altered note display", async (
     .replace('"./pdf-upload-contract.mjs"', JSON.stringify(new URL("./pdf-upload-contract.mjs", import.meta.url).href))
     .replace('"./pdf-upload-release.mjs"', JSON.stringify(new URL("./pdf-upload-release.mjs", import.meta.url).href))
     .replace('"./local-pdf.mjs"', JSON.stringify(new URL("./local-pdf.mjs", import.meta.url).href))
+    .replace('"./quo-sms-release.mjs"', JSON.stringify(new URL("./quo-sms-release.mjs", import.meta.url).href))
+    .replace('"./quo-sms-contract.mjs"', JSON.stringify(new URL("./quo-sms-contract.mjs", import.meta.url).href))
     .replace('"./reviewed-claim-packet.mjs"', JSON.stringify(new URL("./reviewed-claim-packet.mjs", import.meta.url).href))
     .replace('"./approved-note-plan.mjs"', JSON.stringify(helperUrl))));
   for (const mutation of [null,

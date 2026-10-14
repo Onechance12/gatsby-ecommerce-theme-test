@@ -8,8 +8,13 @@ import {
 } from "./approved-note-release.mjs";
 import { PDF_UPLOAD_RELEASE, PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
 import { PDF_UPLOAD_TYPE, validatePdfPayload, validatePdfMetadata, assertPdfReceipt } from "./pdf-upload-contract.mjs";
-const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_UPLOADS_ENABLED;
-const ACTIVE_RELEASE = PDF_UPLOADS_ENABLED ? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE;
+import { QUO_SMS_ENABLED, QUO_SMS_RELEASE } from "./quo-sms-release.mjs";
+import { QUO_SMS_TYPE, assertQuoSmsReceipt, validateQuoSmsPayload } from "./quo-sms-contract.mjs";
+export const PDF_WORKFLOW_ENABLED = PDF_UPLOADS_ENABLED || QUO_SMS_ENABLED;
+const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_WORKFLOW_ENABLED;
+const ACTIVE_RELEASE = QUO_SMS_ENABLED
+  ? QUO_SMS_RELEASE
+  : PDF_UPLOADS_ENABLED ? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE;
 
 export const CHANCE_RUN_POLICY = Object.freeze({
   id: APPROVED_NOTES_ENABLED ? ACTIVE_RELEASE.policyId : "chance-58-files-v1",
@@ -151,7 +156,8 @@ export const CHANCE_RUN_ACTION_TYPES = Object.freeze([
   "gmail.create_draft",
   "gmail.send_existing_draft",
   ...(APPROVED_NOTES_ENABLED ? ["jobnimbus.create_note"] : []),
-  ...(PDF_UPLOADS_ENABLED ? [PDF_UPLOAD_TYPE] : [])
+  ...(PDF_WORKFLOW_ENABLED ? [PDF_UPLOAD_TYPE] : []),
+  ...(QUO_SMS_ENABLED ? [QUO_SMS_TYPE] : [])
 ]);
 
 export const CHANCE_RUN_ALLOWED_STAGE_EVIDENCE_SOURCES = Object.freeze([
@@ -585,9 +591,17 @@ export function assertRunPolicyAttestation(
       || (APPROVED_NOTES_ENABLED && policy.noteMentionsAllowed !== false)
       || (APPROVED_NOTES_ENABLED && policy.noteMentionRequestsAllowed !== true)
       || (APPROVED_NOTES_ENABLED && policy.noteCreationSoleOperation !== true)
-      || (PDF_UPLOADS_ENABLED && (policy.pdfUploadAllowed !== true || policy.pdfUploadSoleOperation !== true
+      || (PDF_WORKFLOW_ENABLED && (policy.pdfUploadAllowed !== true || policy.pdfUploadSoleOperation !== true
         || policy.pdfUploadContentReadbackRequired !== true || policy.pdfUploadMaxBytes !== 8388608))
-      || (!PDF_UPLOADS_ENABLED && policy.pdfUploadAllowed === true)
+      || (!PDF_WORKFLOW_ENABLED && policy.pdfUploadAllowed === true)
+      || (QUO_SMS_ENABLED && (
+        policy.quoSmsAllowed !== true
+        || policy.quoSmsSoleOperation !== true
+        || policy.quoSmsExactSenderRequired !== true
+        || policy.quoSmsProviderReadbackRequired !== true
+        || policy.quoSmsDuplicateProtectionRequired !== true
+      ))
+      || (!QUO_SMS_ENABLED && policy.quoSmsAllowed === true)
       || policy.backwardStageMovesAllowed !== false
       || policy.stageEvidenceRequired !== true
     ) {
@@ -866,9 +880,23 @@ export function assertExecutionReceiptAttestation(
     }
     if (descriptor.type === PDF_UPLOAD_TYPE) {
       const expected = validatePdfPayload(operations[index]?.payload).metadata;
-      if (!PDF_UPLOADS_ENABLED || operations.length !== 1
+      if (!PDF_WORKFLOW_ENABLED || operations.length !== 1
         || Object.entries(expected).some(([key, value]) => intent.reconciliation[key] !== value)) {
         throw new Error("PDF intent differs from the approved bytes or metadata.");
+      }
+    }
+    if (descriptor.type === QUO_SMS_TYPE) {
+      const expected = validateQuoSmsPayload(operations[index]?.payload);
+      if (
+        !QUO_SMS_ENABLED
+        || operations.length !== 1
+        || intent.reconciliation.sender !== expected.from
+        || intent.reconciliation.recipient !== expected.to
+        || intent.reconciliation.contentSha256 !== expected.contentSha256
+        || intent.reconciliation.characterCount !== expected.characterCount
+        || !/^[a-f0-9]{64}$/.test(String(intent.reconciliation.channelApprovalDigest || ""))
+      ) {
+        throw new Error("Quo SMS intent differs from the exact approved sender, recipient, or text.");
       }
     }
     intentIndexes.add(index);
@@ -927,6 +955,7 @@ export function assertExecutionReceiptAttestation(
     }
     completedIndexes.add(index);
     if (descriptor.type === PDF_UPLOAD_TYPE) assertPdfReceipt(receipt, operations[index]?.payload);
+    if (descriptor.type === QUO_SMS_TYPE) assertQuoSmsReceipt(receipt, operations[index]?.payload);
   }
 
   const notAttemptedIndexes = new Set();
@@ -1074,6 +1103,7 @@ export function assertReconciliationReceiptAttestation(response, batchId) {
   const noteIntentHashes = new Map();
   const noteMentionIntents = new Map();
   const pdfIntents = new Map();
+  const smsIntents = new Map();
   for (const intent of receipt.intents) {
     const descriptor = descriptors.get(intent?.index);
     if (
@@ -1097,6 +1127,19 @@ export function assertReconciliationReceiptAttestation(response, batchId) {
     }
     intentIndexes.add(intent.index);
     if (descriptor.type === PDF_UPLOAD_TYPE) pdfIntents.set(intent.index, validatePdfMetadata(intent));
+    if (descriptor.type === QUO_SMS_TYPE) {
+      if (
+        !/^\+[1-9]\d{7,14}$/.test(String(intent.sender || ""))
+        || !/^\+[1-9]\d{7,14}$/.test(String(intent.recipient || ""))
+        || !/^[a-f0-9]{64}$/.test(String(intent.contentSha256 || ""))
+        || !Number.isSafeInteger(intent.characterCount)
+        || intent.characterCount < 1
+        || intent.characterCount > 1600
+      ) {
+        throw new Error("The reconciled Quo SMS intent omitted exact addressing or content-hash proof.");
+      }
+      smsIntents.set(intent.index, intent);
+    }
   }
 
   const completedIndexes = new Set();
@@ -1130,8 +1173,23 @@ export function assertReconciliationReceiptAttestation(response, batchId) {
     }
     completedIndexes.add(item.index);
     if (descriptor.type === PDF_UPLOAD_TYPE) {
-      if (!PDF_UPLOADS_ENABLED || receipt.operationCount !== 1) throw new Error("PDF recovery is not activated or is mixed with other actions.");
+      if (!PDF_WORKFLOW_ENABLED || receipt.operationCount !== 1) throw new Error("PDF recovery is not activated or is mixed with other actions.");
       assertPdfReceipt(item.receipt, pdfIntents.get(item.index));
+    }
+    if (descriptor.type === QUO_SMS_TYPE) {
+      const expected = smsIntents.get(item.index);
+      if (
+        !QUO_SMS_ENABLED
+        || receipt.operationCount !== 1
+        || !/^[A-Za-z0-9_-]{1,512}$/.test(String(item.receipt?.externalId || ""))
+        || item.receipt?.sender !== expected?.sender
+        || item.receipt?.recipient !== expected?.recipient
+        || item.receipt?.contentSha256 !== expected?.contentSha256
+        || item.receipt?.characterCount !== expected?.characterCount
+        || !String(item.receipt?.deliveryStatus || "").trim()
+      ) {
+        throw new Error("The reconciled Quo SMS receipt omitted exact provider readback evidence.");
+      }
     }
   }
   const notAttemptedIndexes = new Set();
@@ -1327,10 +1385,17 @@ export function scopedOperations(operations, operatorScope) {
   }
   validateApprovedNoteOperation(operations, operatorScope, { enabled: APPROVED_NOTES_ENABLED });
   if (operations.some((operation) => operation?.type === PDF_UPLOAD_TYPE)) {
-    if (!PDF_UPLOADS_ENABLED || operatorScope !== "assigned" || operations.length !== 1) {
+    if (!PDF_WORKFLOW_ENABLED || operatorScope !== "assigned" || operations.length !== 1) {
       throw new Error("PDF uploads require the activated release and one sole assigned-file operation.");
     }
     validatePdfPayload(operations[0].payload);
+  }
+  if (operations.some((operation) => operation?.type === QUO_SMS_TYPE)) {
+    if (!QUO_SMS_ENABLED || operatorScope !== "assigned" || operations.length !== 1
+      || operations[0]?.type !== QUO_SMS_TYPE) {
+      throw new Error("Quo SMS requires the activated release and one sole assigned-file operation.");
+    }
+    validateQuoSmsPayload(operations[0].payload);
   }
   const existingDraftSends = operations.filter(
     (operation) => operation?.type === "gmail.send_existing_draft"
