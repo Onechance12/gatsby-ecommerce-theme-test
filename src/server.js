@@ -3682,7 +3682,7 @@ async function assertMacOperatorClaimPlanningReady() {
   const expiresAtMs = Date.parse(expiresAt);
   if (Number.isFinite(expiresAtMs) && expiresAtMs > Date.now()) return;
   const error = new Error(
-    "The Chance operator file-scope policy expired. Refresh and review the assignment policy before configuring, preparing, or placing a claim call."
+    "The Chance operator run manifest expired. Refresh and review the file-scope policy before configuring, preparing, or placing a claim call."
   );
   error.statusCode = 409;
   throw error;

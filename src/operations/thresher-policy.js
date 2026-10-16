@@ -377,7 +377,7 @@ export function resolveChanceOperatorRunPolicy(input, manifest) {
     );
   }
   if (Date.parse(manifest.expiresAt) <= Date.now()) {
-    throw new Error("The Chance operator file-scope policy expired. Refresh and review the assignment policy before preparing actions.");
+    throw new Error("The Chance operator run manifest expired. Refresh and review the file-scope policy before preparing actions.");
   }
   return chanceOperatorRunPolicy(manifest);
 }
