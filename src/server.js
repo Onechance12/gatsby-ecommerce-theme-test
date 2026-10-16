@@ -90,6 +90,7 @@ import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { createGmailAttachmentReferences } from "./gmail/attachment-reference.js";
 import { findOutboundReservationConflict } from "./gmail/reservation-policy.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
+import { assignedRoster, liveAssignedContactAllowed } from "./jobnimbus/assigned-roster.js";
 import {
   approvedNoteCreatedId,
   approvedNoteIntentMatches,
@@ -116,6 +117,7 @@ import {
   CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
   CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
+  CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
   loadChanceOperatorRunManifest,
@@ -389,7 +391,11 @@ function initializeChanceOperatorRunManifest() {
     };
   }
   try {
-    return { manifest: loadChanceOperatorRunManifest(raw), error: "" };
+    const manifest = loadChanceOperatorRunManifest(raw);
+    if (manifest.assignmentMode === "live_assigned" && manifest.assignmentOwnerId !== CHANCE_OWNER_ID) {
+      throw new Error("The reviewed live assignment owner does not match the configured Chance owner.");
+    }
+    return { manifest, error: "" };
   } catch (error) {
     return { manifest: null, error: String(error?.message || error) };
   }
@@ -3390,6 +3396,12 @@ async function searchContacts(input) {
   });
   return {
     query,
+    ...(isMacCodexOperatorRequest() && !operatorCompanyScopeActive() && !matches.length
+      && contacts.some((contact) => isInsuranceFile(contact) && assignedTo(contact, CHANCE_OWNER_ID)
+        && chanceMatchScore(contact, rawQuery) >= 85 && !chanceOperatorContactAllowed(contact))
+      ? { limitationCodes: ["assigned_file_scope_blocked"],
+          instruction: "The assigned file exists but is blocked by the current operator file-scope policy; do not report it as a missing client." }
+      : {}),
     ...(isCodexOperatorRequest() ? { scope: operatorFileScopeLabel() } : {}),
     count: compactMatches.length,
     matches: compactMatches,
@@ -8251,6 +8263,14 @@ function approvedPdfService() {
     ...transport,
     resolveFile: async (query, expectedFileId) => {
       const number = query.replace(/^#/, "");
+      if (CHANCE_OPERATOR_RUN_MANIFEST?.assignmentMode === "live_assigned") {
+        const { contact } = await findChanceContact(query, { expectedFileId });
+        assertOperatorContactScope(contact);
+        if (String(contact.number || contact.recid) !== number) {
+          conflictError("PDF target changed from the approved exact assigned file.");
+        }
+        return compactContact(contact);
+      }
       const binding = CHANCE_OPERATOR_RUN_MANIFEST?.files.find((row) => row.number === number);
       if (!binding || (expectedFileId && binding.fileId !== expectedFileId)) {
         conflictError("PDF target is not bound to the exact approved manifest file.");
@@ -9768,6 +9788,22 @@ function operatorCompatibleReceiptRunPolicies() {
   if (!current) return new Map();
   const key = (manifest) => `${manifest.id}:${manifest.sha256}`;
   const accepted = new Map([[key(current), { requireVerifiedReadback: true }]]);
+  if (current.assignmentMode === "live_assigned") {
+    // Reviewed predecessor receipts retain their file locks and provenance;
+    // changing assignment scope never replays an old or unknown effect.
+    if (current.receiptPredecessor) {
+      for (const [policyKey, value] of compatibleFixedReceiptPolicies(current.receiptPredecessor)) {
+        accepted.set(policyKey, value);
+      }
+    }
+    return accepted;
+  }
+  return compatibleFixedReceiptPolicies(current);
+}
+
+function compatibleFixedReceiptPolicies(current) {
+  const key = (manifest) => `${manifest.id}:${manifest.sha256}`;
+  const accepted = new Map([[key(current), { requireVerifiedReadback: true }]]);
   if (current.allowedActionTypes.includes("gmail.send_existing_draft")) {
     // Reconstruct receipt identities even after expiry; this never extends the
     // separately enforced current manifest's authorization lifetime.
@@ -10271,7 +10307,7 @@ async function quoSend(input = {}, options = {}) {
   const approvedOperatorLane = isMacCodexOperatorRequest()
     && !operatorCompanyScopeActive()
     && runPolicy?.enforced === true
-    && runPolicy.id === CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+    && [CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID, CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID].includes(runPolicy.id)
     && runPolicy.allowedActionTypes.includes(APPROVED_QUO_SMS_TYPE);
   const approvedPayload = approvedOperatorLane
     ? validateApprovedQuoSmsPayload(input, { allowOperatorScope: true })
@@ -10719,15 +10755,18 @@ async function reviewChanceFiles(input = {}) {
     throw error;
   }
   let contacts;
+  let roster;
   if (input.query) {
     contacts = [(await findChanceContact(input.query)).contact];
   } else {
-    contacts = (await listContacts({ maxPages: Number(input.maxPages || 25) }))
-      .filter(isInsuranceFile)
-      .filter(chanceOperatorContactAllowed)
-      .filter((contact) => assignedTo(contact, CHANCE_OWNER_ID))
-      .filter((contact) => input.activeOnly === false || isOpenActive(contact))
-      .sort(fileSort);
+    roster = assignedRoster(await listContacts({ maxPages: Number(input.maxPages || 25) }), {
+      ownerId: CHANCE_OWNER_ID, insurance: isInsuranceFile, assigned: assignedTo,
+      active: isOpenActive, actionAllowed: chanceOperatorContactAllowed,
+      activeOnly: input.activeOnly !== false,
+      assignmentMode: isMacCodexOperatorRequest()
+        ? CHANCE_OPERATOR_RUN_MANIFEST?.assignmentMode : "live_assigned"
+    });
+    contacts = roster.files.sort(fileSort);
   }
   const total = contacts.length;
   if (input.indexOnly === true && !input.query) {
@@ -10737,10 +10776,16 @@ async function reviewChanceFiles(input = {}) {
       scope: "chance_assigned_file_index",
       mode: "index",
       total,
+      countScope: roster.countScope,
+      filters: roster.filters,
+      counts: roster.counts,
+      coverage: roster.coverage,
+      limitations: roster.limitations,
       files: contacts.map(compactChanceIndexContact),
       brain: operatorRequest ? operatorBrainBoundary() : reviewBrainContext("", input.maxPerSection),
       assistantDirective: [
         "This is a lightweight, fresh JobNimbus index for prioritization only.",
+        "total counts returned files, not necessarily the full assigned book. Report counts.assignedInsurance and counts.assignedOpenActiveInsurance with filters and coverage; never label a fixed_manifest_subset as the whole book.",
         operatorRequest
           ? "Chance Brain client memory is neither read nor written by the Codex operator."
           : "The company brain is included, but rich client snapshots are intentionally not overwritten by this lightweight index.",
@@ -10772,6 +10817,11 @@ async function reviewChanceFiles(input = {}) {
     page,
     limit,
     total,
+    ...(roster ? {
+      countScope: roster.countScope, counts: roster.counts,
+      filters: roster.filters,
+      coverage: roster.coverage, limitations: roster.limitations
+    } : {}),
     pageCount: Math.ceil(total / limit),
     complete: packets.every((packet) => packet.complete),
     packets,
@@ -10819,10 +10869,13 @@ async function startThresherOperationalSession(input = {}) {
       identity,
       generatedAt: new Date().toISOString(),
       total: 0,
+      countScope: index.countScope, counts: index.counts,
+      filters: index.filters,
+      coverage: index.coverage, limitations: index.limitations,
       selected: null,
       review: null,
       assistantDirective: [
-        "No active Chance-assigned JobNimbus files were found.",
+        "No files are available under the requested filters and operator action scope. This does not prove the assigned book is empty; report the assigned counts and coverage.",
         "Do not invent an approval queue. Report the empty result."
       ]
     };
@@ -10846,6 +10899,9 @@ async function startThresherOperationalSession(input = {}) {
     identity,
     generatedAt: new Date().toISOString(),
     total: index.total,
+    countScope: index.countScope, counts: index.counts,
+    filters: index.filters,
+    coverage: index.coverage, limitations: index.limitations,
     rankedCandidates: ranked.slice(0, 10),
     selected,
     review,
@@ -11440,7 +11496,8 @@ function resolveChanceLegacyHistoricalIsolation(ledger) {
       receiptFileId
       && receiptFileNumber
       && chanceManifestFileBinding(
-        CHANCE_OPERATOR_RUN_MANIFEST,
+        CHANCE_OPERATOR_RUN_MANIFEST?.assignmentMode === "live_assigned"
+          ? CHANCE_OPERATOR_RUN_MANIFEST.receiptPredecessor : CHANCE_OPERATOR_RUN_MANIFEST,
         receiptFileNumber,
         receiptFileId
       )
@@ -11488,7 +11545,7 @@ async function operatorRunPolicy() {
     "completed_pending_verification"
   ]);
   const manifestFileIds = new Set(
-    (CHANCE_OPERATOR_RUN_MANIFEST?.files || [])
+    (CHANCE_OPERATOR_RUN_MANIFEST?.files || CHANCE_OPERATOR_RUN_MANIFEST?.receiptPredecessor?.files || [])
       .map((file) => String(file.fileId || ""))
       .filter(Boolean)
   );
@@ -11611,11 +11668,7 @@ async function operatorRunPolicy() {
 function minimizedHardBlockedRunReceipt(row, principalHash) {
   const files = validatedActionBatchFileScope(row);
   const manifestMatches = CHANCE_OPERATOR_RUN_MANIFEST
-    ? files.filter((file) => chanceManifestFileBinding(
-        CHANCE_OPERATOR_RUN_MANIFEST,
-        file.number,
-        file.id
-      ))
+    ? files.filter((file) => receiptFileReferenceAllowed(row, file))
     : [];
   const scope = !files.length || (
     manifestMatches.length > 0
@@ -12334,7 +12387,7 @@ async function prepareCanonicalActionBatch(operationsInput, options = {}) {
   const runPolicy = options.runPolicy || null;
   if (operations.some((operation) => operation.type === PDF_UPLOAD_TYPE)
     && (!isMacCodexOperatorRequest() || operatorCompanyScopeActive() || !runPolicy?.enforced
-      || ![CHANCE_OPERATOR_PDF_RUN_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID].includes(runPolicy.id)
+      || ![CHANCE_OPERATOR_PDF_RUN_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID, CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID].includes(runPolicy.id)
       || operations.length !== 1)) {
     badRequest("PDF upload requires the separately activated PDF manifest and a sole exact assigned-file operation.");
   }
@@ -12343,7 +12396,7 @@ async function prepareCanonicalActionBatch(operationsInput, options = {}) {
       !isMacCodexOperatorRequest()
       || operatorCompanyScopeActive()
       || !runPolicy?.enforced
-      || runPolicy.id !== CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+      || ![CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID, CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID].includes(runPolicy.id)
       || operations.length !== 1
       || operations[0].type !== APPROVED_QUO_SMS_TYPE
     ) {
@@ -12505,6 +12558,15 @@ async function findChanceContact(query, options = {}) {
     .sort((a, b) => b.score - a.score || fileSort(a.contact, b.contact));
 
   if (!matches.length) {
+    if (!companyScope && isMacCodexOperatorRequest() && contacts.some((contact) => (
+      isInsuranceFile(contact) && assignedTo(contact, CHANCE_OWNER_ID)
+      && chanceMatchScore(contact, needle) >= 85 && !chanceOperatorContactAllowed(contact)
+    ))) {
+      const error = new Error("This assigned JobNimbus file exists, but the current operator file-scope policy blocks it. This is not a missing client or a Quo login problem. Nothing was sent or changed.");
+      error.statusCode = 403;
+      error.code = "ASSIGNED_FILE_SCOPE_BLOCKED";
+      throw error;
+    }
     badRequest(
       `No ${
         companyScope ? "company" : "Chance Pearson"
@@ -13423,7 +13485,7 @@ async function listResourcePages(endpoint, maxPages = 10, options = {}) {
     offset,
     filter
   })), name);
-  if (probe.length) {
+  if (probe.length || (declaredTotal !== null && offset < declaredTotal)) {
     throw new Error("JobNimbus pagination is incomplete at the reviewed bound.");
   }
   return rows;
@@ -14352,6 +14414,15 @@ async function operatorBatchScope(operations, plans, options = {}) {
   const runPolicy = options.runPolicy || null;
   if (runPolicy?.enforced) {
     for (const file of orderedFiles) {
+      if (runPolicy.manifest.assignmentMode === "live_assigned") {
+        const current = await jobNimbus(`/contacts/${encodeURIComponent(file.id)}`);
+        assertOperatorContactScope(current);
+        if (String(current.jnid || current.id) !== file.id
+          || String(current.number || current.recid) !== String(file.number)
+          || !liveAssignedContactAllowed(current, runPolicy.manifest.assignmentOwnerId)) {
+          conflictError("The exact active assignment changed after preparation. Nothing was sent or changed.");
+        }
+      }
       if (runPolicy.excludedFileNumbers.includes(String(file.number || "").replace(/^#/, ""))) {
         badRequest(`JobNimbus file #${file.number} is excluded from the ${runPolicy.id} Chance work-file run.`);
       }
@@ -14557,14 +14628,25 @@ function validatedQuarantineFileScope(row) {
   if (
     CHANCE_OPERATOR_RUN_MANIFEST
     && normalized.some(
-      (file) => !chanceManifestFileBinding(
-        CHANCE_OPERATOR_RUN_MANIFEST,
-        file.number,
-        file.id
-      )
+      (file) => !receiptFileReferenceAllowed(row, file)
     )
   ) return [];
   return normalized;
+}
+
+function receiptFileReferenceAllowed(row, file) {
+  const policy = CHANCE_OPERATOR_RUN_MANIFEST;
+  if (policy?.assignmentMode !== "live_assigned") {
+    return Boolean(chanceManifestFileBinding(policy, file.number, file.id));
+  }
+  if (!validActionBatchPrincipalHash(row.principalHash) || row.operatorScope !== "assigned") return false;
+  if (row.runPolicyId === policy.id && row.runPolicySha256 === policy.sha256) {
+    // References preserve file locks after reassignment; they do not authorize
+    // a new read, plan, call, upload or send.
+    return Boolean(chanceManifestFileBinding(policy, file.number, file.id));
+  }
+  return operatorCompatibleReceiptRunPolicies().has(`${row.runPolicyId}:${row.runPolicySha256}`)
+    && Boolean(chanceManifestFileBinding(policy.receiptPredecessor, file.number, file.id));
 }
 
 function actionBatchResourceLockScope(row) {
@@ -14578,11 +14660,7 @@ function actionBatchResourceLockScope(row) {
       !CHANCE_OPERATOR_RUN_MANIFEST
       || !operatorCompatibleReceiptRunPolicies().has(`${runPolicyId}:${runPolicySha256}`)
       || files.some(
-        (file) => !chanceManifestFileBinding(
-          CHANCE_OPERATOR_RUN_MANIFEST,
-          file.number,
-          file.id
-        )
+        (file) => !receiptFileReferenceAllowed(row, file)
       )
     ) return { global: true, files: [] };
   }
@@ -15642,6 +15720,10 @@ function chanceOperatorContactAllowed(contact) {
   const number = String(contact?.number || contact?.recid || "").trim().replace(/^#/, "");
   if (CHANCE_OPERATOR_EXCLUDED_FILES.has(number)) return false;
   if (CHANCE_OPERATOR_RUN_MANIFEST) {
+    if (CHANCE_OPERATOR_RUN_MANIFEST.assignmentMode === "live_assigned") {
+      return CHANCE_OPERATOR_RUN_MANIFEST.assignmentOwnerId === CHANCE_OWNER_ID
+        && liveAssignedContactAllowed(contact, CHANCE_OWNER_ID);
+    }
     return Boolean(chanceManifestFileBinding(
       CHANCE_OPERATOR_RUN_MANIFEST,
       number,

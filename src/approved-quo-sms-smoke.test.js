@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import {
   CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
+  CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID,
   loadChanceOperatorRunManifest
 } from "./operations/thresher-policy.js";
 import {
@@ -122,11 +124,11 @@ async function fixture(t, options = {}) {
           conversationId: `CONV_${state.posts}`,
           phoneNumberId: "PN_synthetic",
           from: FROM,
-          to: [TO],
+          to: state.body.to,
           direction: "outgoing",
           status: "queued",
           createdAt: "2026-10-14T14:00:00Z",
-          content: TEXT
+          content: state.body.content
         });
       }
       if (state.mode === "post_timeout") return req.socket.destroy();
@@ -167,7 +169,7 @@ async function fixture(t, options = {}) {
   const allowedActionTypes = options.old
     ? CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES
     : CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES;
-  const input = {
+  let input = {
     schemaVersion: 1,
     id: policyId,
     operatorScope: "assigned",
@@ -183,6 +185,16 @@ async function fixture(t, options = {}) {
     allowedActionTypes: [...allowedActionTypes],
     allowedContactFields: [...CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS]
   };
+  if (options.omitAssignedFile) {
+    input.files[0] = { number: "8001", fileId: "fixture-unrelated-8001" };
+  }
+  if (options.live) {
+    const receiptPredecessor = options.migrate ? structuredClone(input) : undefined;
+    const { files, ...baseInput } = input;
+    input = { ...baseInput, schemaVersion: 2, id: CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID,
+      assignmentMode: "live_assigned", assignmentOwnerId: OWNER,
+      ...(receiptPredecessor ? { receiptPredecessor } : {}) };
+  }
   const manifest = loadChanceOperatorRunManifest(input);
   const runPolicy = { id: manifest.id, sha256: manifest.sha256 };
   const base = `http://127.0.0.1:${provider.address().port}`;
@@ -246,8 +258,17 @@ async function fixture(t, options = {}) {
   };
   return {
     state,
+    contacts,
+    manifest,
     root,
     request,
+    readPolicy: async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/ops/run-policy`, {
+        headers: { authorization: `Bearer ${TOKEN}` }
+      });
+      assert.equal(response.status, 200);
+      return response.json();
+    },
     prepare: (operations) => request("/ops/action-batch", {
       runPolicy,
       operations,
@@ -262,6 +283,90 @@ async function fixture(t, options = {}) {
     })
   };
 }
+
+test("fixed roster reports the actual assigned count and explains a blocked existing client", async (t) => {
+  const f = await fixture(t, { omitAssignedFile: true });
+  const index = await f.request("/ops/review-chance-files", { indexOnly: true });
+  assert.equal(index.status, 200, JSON.stringify(index.body));
+  assert.equal(index.body.total, 1);
+  assert.equal(index.body.counts.assignedInsurance, 3);
+  assert.equal(index.body.counts.restrictedByActionScope, 2);
+  assert.equal(index.body.countScope, "fixed_manifest_subset");
+  const blocked = await f.prepare([operation()]);
+  assert.equal(blocked.status, 403, JSON.stringify(blocked.body));
+  assert.match(blocked.body.error, /assigned JobNimbus file exists/);
+  assert.equal(f.state.posts, 0);
+});
+
+test("reviewed live policy discovers newly assigned files and sends only an exact approved synthetic SMS", async (t) => {
+  const f = await fixture(t, { live: true });
+  // Added after startup: no policy/file-count rewrite is needed.
+  f.contacts.push({ ...f.contacts[0], number: 990003, jnid: "synthetic-new-assignment",
+    mobile_phone: "+12025550105", display_name: "Synthetic New Assignment" });
+  const index = await f.request("/ops/review-chance-files", { indexOnly: true });
+  assert.equal(index.status, 200, JSON.stringify(index.body));
+  assert.equal(index.body.total, 3);
+  assert.equal(index.body.counts.assignedInsurance, 4);
+  assert.equal(index.body.countScope, "live_assigned_insurance");
+  const ops = [operation({ query: "#990003", to: "+12025550105" })];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  assert.equal(f.state.posts, 0);
+  const sent = await f.execute(ops, plan.body);
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(sent.body.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(sent.body.batch.completed[0].receipt.recipient, "+12025550105");
+  assert.equal(f.state.posts, 1);
+});
+
+test("live policy blocks changed ownership, inactivity, exclusion and generic send routes", async (t) => {
+  const f = await fixture(t, { live: true });
+  const ops = [operation()];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  f.contacts[0].owners = [{ id: "another-synthetic-owner" }];
+  assert.notEqual((await f.execute(ops, plan.body)).status, 200);
+  f.contacts[0].owners = [{ id: OWNER }];
+  f.contacts[0].is_closed = true;
+  assert.notEqual((await f.prepare(ops)).status, 200);
+  assert.notEqual((await f.prepare([operation({ query: "#2628", to: "+12025550104" })])).status, 200);
+  assert.equal((await f.request("/quo/send", { query: "#990001", to: TO, content: TEXT, execute: true })).status, 403);
+  assert.equal(f.state.posts, 0);
+});
+
+test("live-policy migration preserves exact prior quarantines, never globalizes or clears them silently", async (t) => {
+  const f = await fixture(t, { live: true, migrate: true });
+  assert.equal((await f.prepare([operation()])).status, 200);
+  const ledgerPath = path.join(f.root, "bridge", "action-batches.json");
+  const ownPrincipal = createHash("sha256").update("codex_operator_token|codex-mac-operator||codex_operator").digest("hex");
+  for (const principalHash of [ownPrincipal, "9".repeat(64)]) {
+    const quarantine = {
+      schemaVersion: 2, id: `synthetic-prior-quarantine-${principalHash.slice(0, 8)}`,
+      principalHash, operatorScope: "assigned", status: "manual_quarantined",
+      runPolicyId: f.manifest.receiptPredecessor.id,
+      runPolicySha256: f.manifest.receiptPredecessor.sha256,
+      operationCount: 1, fileCount: 1, batchMode: "assigned_single_file_v2",
+      files: [{ id: "contact-synthetic-alpha", number: "990001", operationIndexes: [0], operationTypes: ["quo.send_text"] }],
+      completed: [], recovery: { fileScopedQuarantine: true, automaticRetryAllowed: false },
+      manualQuarantine: { scope: "file", fileId: "contact-synthetic-alpha", fileIds: ["contact-synthetic-alpha"],
+        fileNumber: "990001", fileNumbers: ["990001"] }
+    };
+    await writeFile(ledgerPath, JSON.stringify([quarantine]));
+    assert.equal((await f.readPolicy()).ready, true);
+    assert.equal((await f.prepare([operation()])).status, 409);
+    assert.equal((await f.prepare([operation({ query: "#990002", to: "+12025550103" })])).status, 200);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath, "utf8")), [quarantine]);
+    for (const change of [
+      { runPolicySha256: "f".repeat(64) },
+      { files: [{ ...quarantine.files[0], id: "synthetic-wrong-file" }] }
+    ]) {
+      await writeFile(ledgerPath, JSON.stringify([{ ...quarantine, ...change }]));
+      assert.equal((await f.readPolicy()).ready, false);
+      assert.equal((await f.prepare([operation({ query: "#990002", to: "+12025550103" })])).status, 409);
+    }
+  }
+  assert.equal(f.state.posts, 0);
+});
 
 test("Quo SMS requires the new manifest while generic Quo send remains disabled", async (t) => {
   const fixtureState = await fixture(t, { old: true });
@@ -324,8 +429,9 @@ test("Quo SMS exact plan, provider readback receipt and durable duplicate guard"
   assert.equal(outboundLedger.includes("fixture-quo-key"), false);
 });
 
-test("Quo SMS uncertain readback reconciles by provider id without a second send", async (t) => {
-  const fixtureState = await fixture(t);
+for (const live of [false, true]) {
+test(`${live ? "Live-assigned" : "Fixed-roster"} Quo SMS uncertain readback reconciles by provider id without a second send`, async (t) => {
+  const fixtureState = await fixture(t, { live });
   const operations = [operation()];
   const planned = await fixtureState.prepare(operations);
   fixtureState.state.mode = "wrong_readback";
@@ -349,8 +455,8 @@ test("Quo SMS uncertain readback reconciles by provider id without a second send
   assert.equal(fixtureState.state.posts, 1);
 });
 
-test("Quo SMS missing provider id is quarantined and never retried", async (t) => {
-  const fixtureState = await fixture(t);
+test(`${live ? "Live-assigned" : "Fixed-roster"} Quo SMS missing provider id is quarantined and never retried`, async (t) => {
+  const fixtureState = await fixture(t, { live });
   const operations = [operation()];
   const planned = await fixtureState.prepare(operations);
   fixtureState.state.mode = "missing_id";
@@ -364,3 +470,4 @@ test("Quo SMS missing provider id is quarantined and never retried", async (t) =
   assert.equal(reconciled.body.outcome, "unknown_file_quarantined");
   assert.equal(fixtureState.state.posts, 1);
 });
+}
