@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import { CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES, CHANCE_OPERATOR_NOTES_ALLOWED
   CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS, loadChanceOperatorRunManifest } from "./operations/thresher-policy.js";
 import { PDF_UPLOAD_TYPE, pdfHash, assertPdfPlan, assertPdfReceipt } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
+import { pdfResolutionSource, validPdfReceiptResolution, assertPdfResolutionReceipt } from "../integrations/jobnimbus-operator/mcp/pdf-receipt-resolution.mjs";
 
 // Synthetic bytes only. This tests immutable transport/approval, not PDF layout.
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n");
@@ -39,7 +40,7 @@ async function fixture(t, options = {}) {
       let rows = state.records.filter((row) => field === "related.id" && row.related.some((r) => r.id === id));
       if (state.mode === "wrong_inventory") rows = [{ jnid: "other-file-doc", related: [{ id: "other-file" }] }];
       if (state.mode === "wrong_file") rows = rows.map((row) => ({ ...row, related: [{ id: "contact-2741" }] }));
-      if (state.mode === "wrong_privacy") rows = rows.map((row) => ({ ...row, is_private: true }));
+      if (state.mode === "wrong_privacy") rows = rows.map((row) => ({ ...row, is_private: !state.body.isPrivate }));
       if (state.mode === "metadata_timeout" && state.records.length) return req.socket.destroy();
       return json(200, { files: rows.slice(Number(url.searchParams.get("from") || 0)), count: rows.length });
     }
@@ -76,6 +77,7 @@ async function fixture(t, options = {}) {
     if (url.pathname.startsWith("/download/")) {
       const bytes = state.bytes.get(url.pathname.split("/").at(-1));
       if (!bytes) return json(404, { error: "Fixture missing" });
+      state.afterDownload?.();
       res.writeHead(200, { "content-type": "application/pdf" });
       return res.end(state.mode === "wrong_bytes" ? Buffer.from("changed") : bytes);
     }
@@ -127,7 +129,7 @@ async function fixture(t, options = {}) {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
     return { status: result.status, body: await result.json() };
   };
-  return { state, root, contacts, request,
+  return { state, root, contacts, request, runPolicy,
     prepare: (operations) => request("/ops/action-batch", { runPolicy, operations, execute: false }),
     execute: (operations, plan) => request("/ops/action-batch", { runPolicy, operations, execute: true,
       approvalDigest: plan.approvalDigest, approvalChallenge: plan.approvalChallenge }) };
@@ -144,6 +146,164 @@ test("live-assigned PDF uses fresh exact ownership without a frozen file roster"
   assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [1, 1, 1]);
   assert.equal(f.state.metadataGets, 0);
 });
+
+// Synthetic-only fixture. Never edit a real receipt to create a recovery case.
+async function privateMismatch(t, options = {}) {
+  const f = await fixture(t, { live: true, ...options });
+  const ops = [operation({ isPrivate: true })];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  f.state.mode = "wrong_privacy";
+  const attempted = await f.execute(ops, plan.body);
+  assert.equal(attempted.body.mode, "partial_failure");
+  const batchId = attempted.body.batch.id;
+  const quarantined = await f.request("/ops/action-batch-reconcile", { batchId });
+  assert.equal(quarantined.body.mode, "manual_quarantined");
+  f.state.records[0].is_private = false;
+  f.state.mode = "normal";
+  const actualPath = path.join(f.root, "bridge", "action-batches.json");
+  return { ...f, batchId, ops, uploadPlan: plan.body, ledgerPath: actualPath,
+    resolution: { query: "#2739", documentId: "created-doc-1", acceptedIsPrivate: false },
+    recovery: (resolution, approval) => f.request("/ops/action-batch-reconcile", {
+      batchId, resolution, runPolicy: f.runPolicy, execute: Boolean(approval),
+      ...(approval ? { approvalDigest: approval.approvalDigest, approvalChallenge: approval.approvalChallenge } : {})
+    }) };
+}
+
+test("new exact approval accepts only existing nonprivate PDF and preserves every original receipt field", async (t) => {
+  const f = await privateMismatch(t);
+  const counts = [f.state.reserves, f.state.puts, f.state.completes];
+  const originalRows = JSON.parse(await readFile(f.ledgerPath, "utf8"));
+  const original = originalRows.find((row) => row.id === f.batchId);
+  const beforeSource = pdfResolutionSource(original);
+  const followUp = [{ type: "jobnimbus.update_contact", payload: { query: "#2739", fields: { cf_string_7: "Synthetic adjuster" } } }];
+  const blockedBefore = await f.prepare(followUp);
+  assert.equal(blockedBefore.status, 409);
+  const plan = await f.recovery(f.resolution);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  assert.equal(plan.body.proof.originalMetadata.isPrivate, true);
+  assert.equal(plan.body.proof.acceptedMetadata.isPrivate, false);
+  assert.equal(plan.body.proof.sourceRowSha256, beforeSource.sourceRowSha256);
+  assert.equal(plan.body.proof.identityProvenance, "preserved_reservation_id");
+  assert.equal(plan.body.proof.providerWrites, false);
+  const result = await f.recovery(f.resolution, plan.body);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assertPdfResolutionReceipt(result.body, plan.body);
+  const savedRows = JSON.parse(await readFile(f.ledgerPath, "utf8"));
+  const saved = savedRows.find((row) => row.id === f.batchId);
+  assert.equal(validPdfReceiptResolution(saved), true);
+  const { pdfReceiptResolution, ...unchanged } = saved;
+  assert.deepEqual(unchanged, original);
+  assert.equal(saved.status, "manual_quarantined");
+  const detail = await f.request("/ops/action-batch-receipts", { batchId: f.batchId });
+  assert.equal(detail.body.receipt.fileHoldReleased, true);
+  assert.equal(detail.body.receipt.pdfReceiptResolutionValid, true);
+  const nextPlan = await f.prepare(followUp);
+  assert.equal(nextPlan.status, 200, JSON.stringify(nextPlan.body));
+  assert.equal((await f.recovery(f.resolution, plan.body)).status, 409);
+  assert.equal((await f.prepare([operation({ filename: "Other.pdf" })])).status, 409);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+});
+
+test("historically missing reservation ID stays missing; new plan explicitly binds the unique live candidate", async (t) => {
+  const f = await privateMismatch(t);
+  const rows = JSON.parse(await readFile(f.ledgerPath, "utf8"));
+  const row = rows.find((item) => item.id === f.batchId);
+  delete row.manualQuarantine.providerDocumentId;
+  await writeFile(f.ledgerPath, JSON.stringify(rows));
+  const original = structuredClone(row);
+  const plan = await f.recovery(f.resolution);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  assert.equal(plan.body.proof.identityProvenance, "human_selected_live_candidate_no_durable_reservation_id");
+  const executed = await f.recovery(f.resolution, plan.body);
+  assert.equal(executed.status, 200, JSON.stringify(executed.body));
+  const saved = JSON.parse(await readFile(f.ledgerPath, "utf8")).find((item) => item.id === f.batchId);
+  const { pdfReceiptResolution, ...unchanged } = saved;
+  assert.deepEqual(unchanged, original);
+  assert.equal(Object.hasOwn(unchanged.manualQuarantine, "providerDocumentId"), false);
+});
+
+for (const scenario of ["wrong_bytes", "wrong_file", "duplicate", "private", "missing_privacy", "missing_size", "wrong_name", "reassigned", "closed", "moved_after_plan", "changed_source", "moved_during_read", "reassigned_during_read"]) {
+  test(`PDF disposition ${scenario}: no hold release and no provider effects`, async (t) => {
+    const f = await privateMismatch(t);
+    const counts = [f.state.reserves, f.state.puts, f.state.completes];
+    const plan = await f.recovery(f.resolution);
+    assert.equal(plan.status, 200, JSON.stringify(plan.body));
+    if (scenario === "wrong_bytes" || scenario === "wrong_file") f.state.mode = scenario;
+    if (scenario === "duplicate") f.state.records.push({ ...f.state.records[0], jnid: "duplicate-doc-2" });
+    if (scenario === "private") f.state.records[0].is_private = true;
+    if (scenario === "missing_privacy") delete f.state.records[0].is_private;
+    if (scenario === "missing_size") delete f.state.records[0].size;
+    if (scenario === "wrong_name") f.state.records[0].name = "Changed.pdf";
+    if (scenario === "reassigned") f.contacts[0].owners = [{ id: "another-owner" }];
+    if (scenario === "closed") f.contacts[0].is_closed = true;
+    if (scenario === "moved_after_plan") f.state.records[0].related = [{ id: "contact-2741" }];
+    if (scenario === "moved_during_read") f.state.afterDownload = () => { f.state.records[0].related = [{ id: "contact-2741" }]; };
+    if (scenario === "reassigned_during_read") f.state.afterDownload = () => { f.contacts[0].owners = [{ id: "another-owner" }]; };
+    if (scenario === "changed_source") {
+      const rows = JSON.parse(await readFile(f.ledgerPath, "utf8"));
+      rows.find((row) => row.id === f.batchId).manualQuarantine.reason = "Changed synthetic audit history";
+      await writeFile(f.ledgerPath, JSON.stringify(rows));
+    }
+    const failed = await f.recovery(f.resolution, plan.body);
+    assert.notEqual(failed.status, 200, JSON.stringify(failed.body));
+    const saved = JSON.parse(await readFile(f.ledgerPath, "utf8")).find((row) => row.id === f.batchId);
+    assert.equal(validPdfReceiptResolution(saved), false);
+    assert.equal(saved.pdfReceiptResolution, undefined);
+    assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+  });
+}
+
+test("upload approval cannot approve a disposition; failed proof consumes the new server challenge", async (t) => {
+  const f = await privateMismatch(t);
+  const plan = await f.recovery(f.resolution);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  const oldApproval = await f.recovery(f.resolution, { ...plan.body, approvalChallenge: f.uploadPlan.approvalChallenge });
+  assert.equal(oldApproval.status, 409);
+  f.state.records[0].is_private = true;
+  assert.equal((await f.recovery(f.resolution, plan.body)).status, 409);
+  f.state.records[0].is_private = false;
+  const repeated = await f.recovery(f.resolution, plan.body);
+  assert.equal(repeated.status, 409);
+  assert.match(repeated.body.error, /consumed/);
+  assert.equal((await f.recovery({ ...f.resolution, execute: true })).status, 400);
+  assert.equal((await f.recovery({ ...f.resolution, acceptedIsPrivate: true })).status, 400);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [1, 1, 1]);
+});
+
+test("failed internal disposition storage retains the original hold and consumes approval", async (t) => {
+  const f = await privateMismatch(t, { failLedgerAt: 6 });
+  const before = await readFile(f.ledgerPath, "utf8");
+  const plan = await f.recovery(f.resolution);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  const failed = await f.recovery(f.resolution, plan.body);
+  assert.notEqual(failed.status, 200);
+  assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+  assert.equal((await f.recovery(f.resolution, plan.body)).status, 409);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [1, 1, 1]);
+});
+
+for (const scenario of ["other_quarantine", "global_hold", "foreign_principal", "invalid_intent", "forged_resolution"]) {
+  test(`PDF disposition does not bypass ${scenario}`, async (t) => {
+    const f = await privateMismatch(t);
+    const rows = JSON.parse(await readFile(f.ledgerPath, "utf8"));
+    const row = rows.find((item) => item.id === f.batchId);
+    if (scenario === "other_quarantine" || scenario === "global_hold") {
+      const other = structuredClone(row); other.id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      if (scenario === "global_hold") { other.manualQuarantine.fileIds = []; other.recovery.fileScopedQuarantine = false; }
+      rows.push(other);
+    }
+    if (scenario === "foreign_principal") row.principalHash = "a".repeat(64);
+    if (scenario === "invalid_intent") row.intents[0].reconciliation.filename = "Tampered.pdf";
+    if (scenario === "forged_resolution") row.pdfReceiptResolution = { fileHoldReleased: true };
+    await writeFile(f.ledgerPath, JSON.stringify(rows));
+    const before = await readFile(f.ledgerPath, "utf8");
+    const plan = await f.recovery(f.resolution);
+    assert.equal(plan.status, 409, JSON.stringify(plan.body));
+    assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+    assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [1, 1, 1]);
+  });
+}
 
 test("live-assigned PDF rechecks assignment before reserving upload bytes", async (t) => {
   const f = await fixture(t, { live: true });

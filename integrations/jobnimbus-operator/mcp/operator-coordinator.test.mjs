@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { APPROVED_NOTES_ENABLED as LEGACY_NOTES_ENABLED } from "./approved-note-release.mjs";
 import { PDF_UPLOADS_ENABLED } from "./pdf-upload-release.mjs";
+import { QUO_SMS_ENABLED, QUO_SMS_RELEASE } from "./quo-sms-release.mjs";
 
 import { createOperatorCoordinator } from "./operator-coordinator.mjs";
 import {
@@ -18,7 +19,8 @@ import {
 
 const FUTURE = "2099-09-23T05:00:00.000Z";
 const NOW = Date.parse("2090-01-01T00:00:00.000Z");
-const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_UPLOADS_ENABLED;
+const PDF_WORKFLOW_ENABLED = PDF_UPLOADS_ENABLED || QUO_SMS_ENABLED;
+const APPROVED_NOTES_ENABLED = LEGACY_NOTES_ENABLED || PDF_WORKFLOW_ENABLED;
 const HISTORICAL_IDS = Object.freeze(
   CHANCE_LEGACY_ISOLATION_ENTRIES.map((entry) => entry.batchId)
 );
@@ -62,6 +64,10 @@ function runPolicy() {
     sha256: CHANCE_RUN_POLICY.sha256,
     expiresAt: FUTURE,
     fileCount: CHANCE_RUN_FILE_COUNT,
+    ...(QUO_SMS_RELEASE.assignmentMode === "live_assigned" ? {
+      schemaVersion: 2, assignmentMode: "live_assigned",
+      assignmentOwnerId: QUO_SMS_RELEASE.assignmentOwnerId, freshAssignmentRequired: true
+    } : {}),
     excludedFileNumbers: ["2628"],
     allowedActionTypes: [...CHANCE_RUN_ACTION_TYPES],
     allowedContactFields: [...CHANCE_RUN_ALLOWED_CONTACT_FIELDS],
@@ -72,11 +78,15 @@ function runPolicy() {
     rawGmailSendAllowed: false,
     noteCreationAllowed: APPROVED_NOTES_ENABLED,
     ...(APPROVED_NOTES_ENABLED ? { noteMentionsAllowed: false, noteMentionRequestsAllowed: true, noteCreationSoleOperation: true } : {}),
-    ...(PDF_UPLOADS_ENABLED ? {
+    ...(PDF_WORKFLOW_ENABLED ? {
       pdfUploadAllowed: true,
       pdfUploadSoleOperation: true,
       pdfUploadContentReadbackRequired: true,
       pdfUploadMaxBytes: 8388608
+    } : {}),
+    ...(QUO_SMS_ENABLED ? {
+      quoSmsAllowed: true, quoSmsSoleOperation: true, quoSmsExactSenderRequired: true,
+      quoSmsProviderReadbackRequired: true, quoSmsDuplicateProtectionRequired: true
     } : {}),
     backwardStageMovesAllowed: false,
     stageEvidenceRequired: true
@@ -99,7 +109,7 @@ function whoamiFixture() {
         "approval_batches:prepare_execute",
         "retell_claim_filing:prepare_execute_review"
       ],
-      jobNimbusOwnerId: "owner-1",
+      jobNimbusOwnerId: QUO_SMS_RELEASE.assignmentOwnerId || "owner-1",
       jobNimbusScope: "assigned",
       quoLineConfigured: true
     },
@@ -778,13 +788,13 @@ test("policy fixture matches the active release's note and PDF safety flags", ()
   const policy = runPolicy();
   assert.equal(policy.noteCreationAllowed, APPROVED_NOTES_ENABLED);
   assert.equal(policy.allowedActionTypes.includes("jobnimbus.create_note"), APPROVED_NOTES_ENABLED);
-  assert.equal(policy.allowedActionTypes.includes("jobnimbus.upload_pdf"), PDF_UPLOADS_ENABLED);
+  assert.equal(policy.allowedActionTypes.includes("jobnimbus.upload_pdf"), PDF_WORKFLOW_ENABLED);
   if (APPROVED_NOTES_ENABLED) {
     assert.equal(policy.noteMentionsAllowed, false);
     assert.equal(policy.noteMentionRequestsAllowed, true);
     assert.equal(policy.noteCreationSoleOperation, true);
   }
-  if (PDF_UPLOADS_ENABLED) {
+  if (PDF_WORKFLOW_ENABLED) {
     assert.equal(policy.pdfUploadAllowed, true);
     assert.equal(policy.pdfUploadSoleOperation, true);
     assert.equal(policy.pdfUploadContentReadbackRequired, true);
@@ -802,7 +812,7 @@ test("plan rejects note and PDF safety-flag drift before any action POST", async
       "note mention requests": (policy) => { policy.noteMentionRequestsAllowed = false; },
       "note sole operation": (policy) => { policy.noteCreationSoleOperation = false; }
     } : {}),
-    ...(PDF_UPLOADS_ENABLED ? {
+    ...(PDF_WORKFLOW_ENABLED ? {
       "PDF permission missing": (policy) => { delete policy.pdfUploadAllowed; },
       "PDF sole operation": (policy) => { policy.pdfUploadSoleOperation = false; },
       "PDF readback required": (policy) => { policy.pdfUploadContentReadbackRequired = false; },

@@ -2,6 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
 import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { readLocalPdf } from "./local-pdf.mjs";
+import { pdfReceiptResolutionEnabled } from "./pdf-receipt-resolution-release.mjs";
+import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, assertPdfResolutionPlan,
+  assertPdfResolutionReceipt } from "./pdf-receipt-resolution.mjs";
 import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
 import {
   QUO_SMS_TYPE,
@@ -33,6 +36,8 @@ import {
   assertRunPolicyAttestation,
   scopedOperations
 } from "./scope.mjs";
+
+export const PDF_RECEIPT_RESOLUTION_ENABLED = pdfReceiptResolutionEnabled(EXPECTED_BRIDGE_BUILD, CHANCE_RUN_POLICY);
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -1323,6 +1328,72 @@ export function createOperatorCoordinator({
     return planActionBatch([{ type: PDF_UPLOAD_TYPE, payload }], "assigned");
   }
 
+  function resolutionBoundary(verification) {
+    const identity = verification.whoami.identity;
+    return { bridgeBootId: verification.policy.bridgeBootId,
+      runPolicyId: CHANCE_RUN_POLICY.id, runPolicySha256: CHANCE_RUN_POLICY.sha256,
+      principalHash: sha256([String(identity.type || ""), String(identity.subject || ""),
+        String(identity.email || "").toLowerCase(), String(identity.role || "")].join("|")) };
+  }
+
+  async function planPdfReceiptResolution(input) {
+    const generation = invalidateLocalApprovals();
+    if (!PDF_RECEIPT_RESOLUTION_ENABLED) throw new Error("PDF receipt resolution is built but not activated in this native release.");
+    const request = validatePdfResolutionInput(input);
+    if (PINNED_LEGACY_BATCH_IDS.has(request.batchId)) throw new Error("Historical receipts may never be resolved or replayed by this lane.");
+    const verification = await verifiedBridgeSession();
+    requireCurrentApprovalGeneration(generation);
+    const attestedBoundary = requireReadyForNormalWork(verification);
+    const { batchId, ...resolution } = request;
+    const response = await bridgeRequest("POST", "/ops/action-batch-reconcile", {
+      batchId, resolution, runPolicy: CHANCE_RUN_POLICY, execute: false
+    });
+    requireCurrentApprovalGeneration(generation);
+    assertPdfResolutionPlan(response, request, resolutionBoundary(verification));
+    const expiresAt = Date.parse(response.approvalExpiresAt || "");
+    if (!response.approvalChallenge || !Number.isFinite(expiresAt) || expiresAt <= now()) {
+      throw new Error("The PDF resolution plan omitted its current one-use approval challenge or expiry.");
+    }
+    const post = await verifiedBridgeSession();
+    requireCurrentApprovalGeneration(generation);
+    if (canonical(requireReadyForNormalWork(post)) !== canonical(attestedBoundary)) {
+      throw new Error("The bridge boundary changed while verifying the PDF. No approval was stored.");
+    }
+    const plan = stripApprovalSecrets(response);
+    approvals.set(response.approvalDigest, { kind: PDF_RESOLUTION_KIND, generation, expiresAt,
+      challenge: response.approvalChallenge, request, plan, attestedBoundary: canonical(attestedBoundary) });
+    return plan;
+  }
+
+  async function executePdfReceiptResolution(approvalDigest) {
+    const pending = approvals.get(approvalDigest);
+    if (!PDF_RECEIPT_RESOLUTION_ENABLED || pending?.kind !== PDF_RESOLUTION_KIND) {
+      throw new Error("No unconsumed exact PDF receipt-resolution plan exists. Read the receipt before preparing a fresh plan.");
+    }
+    approvals.delete(approvalDigest);
+    try {
+      if (pending.expiresAt <= now()) throw new Error("The PDF resolution approval expired.");
+      const verification = await verifiedBridgeSession();
+      requireCurrentApprovalGeneration(pending.generation);
+      if (canonical(requireReadyForNormalWork(verification)) !== pending.attestedBoundary) {
+        throw new Error("The bridge boot/build/policy/runtime boundary changed after approval.");
+      }
+      const { batchId, ...resolution } = pending.request;
+      const response = await bridgeRequest("POST", "/ops/action-batch-reconcile", {
+        batchId, resolution, runPolicy: CHANCE_RUN_POLICY, execute: true,
+        approvalDigest, approvalChallenge: pending.challenge
+      });
+      assertPdfResolutionReceipt(response, pending.plan);
+      const post = await verifiedBridgeSession();
+      if (canonical(requireReadyForNormalWork(post)) !== pending.attestedBoundary) {
+        throw new Error("The bridge boundary changed during receipt resolution.");
+      }
+      return stripApprovalSecrets(response);
+    } catch (error) {
+      throw new Error(`${error.message} The local approval was consumed. Read the exact receipt; do not repeat automatically.`);
+    }
+  }
+
   async function executePdfUpload(approvalDigest) {
     const pending = approvals.get(approvalDigest);
     if (!PDF_WORKFLOW_ENABLED || pending?.kind !== "action_batch") throw new Error("No current approved PDF snapshot exists.");
@@ -1376,6 +1447,8 @@ export function createOperatorCoordinator({
     reconcileActionBatch,
     planPdfUpload,
     executePdfUpload,
+    planPdfReceiptResolution,
+    executePdfReceiptResolution,
     planQuoSms,
     executeQuoSms
   });
