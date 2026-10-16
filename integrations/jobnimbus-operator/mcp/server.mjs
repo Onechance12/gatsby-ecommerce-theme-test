@@ -264,21 +264,21 @@ register(
 
 register(
   "bridge_session",
-  "Verify the local plugin, production bridge build, exact 58-file run manifest, and unresolved receipt boundary before HCN/Wave work.",
+  "Verify the local plugin, production bridge build, exact file-scope policy, and unresolved receipt boundary before HCN/Wave work.",
   {},
   () => OPERATOR.verifiedBridgeSession()
 );
 
 register(
   "bridge_restart_verify",
-  "Mandatory first check after a Codex restart or new chat. Verifies the dedicated Mac identity, exact provider-attested bridge commit, six-receipt never-replay historical isolation, JobNimbus action-batch plus single-file Retell claim-filing boundary, pinned 58-file manifest, #2628 exclusion, expiry, and classified receipt boundary. Only the Retell claim-filing call gate may be enabled; every generic send, generic/homeowner/carrier-follow-up call, and HCN action gate remains disabled. The reviewed existing-draft send exception exists only inside the pinned action batch. Recovery is allowed only when every new unresolved batch is reconciliation-eligible and none is hard-blocked; rerun afterward and require ready true.",
+  "Mandatory first check after a Codex restart or new chat. Verifies the dedicated Mac identity, exact provider-attested bridge commit, six-receipt never-replay historical isolation, JobNimbus action-batch plus single-file Retell claim-filing boundary, pinned file-scope policy and assignment owner, #2628 exclusion, expiry, and classified receipt boundary. Only the Retell claim-filing call gate may be enabled; every generic send, generic/homeowner/carrier-follow-up call, and HCN action gate remains disabled. The reviewed existing-draft send exception exists only inside the pinned action batch. Recovery is allowed only when every new unresolved batch is reconciliation-eligible and none is hard-blocked; rerun afterward and require ready true.",
   {},
   () => OPERATOR.restartVerifiedBridgeSession()
 );
 
 register(
   "run_policy_read",
-  "Read the bridge's exact locked 58-file run-policy attestation and unresolved batch boundary. Read-only.",
+  "Read the bridge's exact reviewed file-scope policy and unresolved batch boundary. Read-only; a live-assigned policy pins an owner, not a file count.",
   {},
   () => bridgeRequest("GET", "/ops/run-policy")
 );
@@ -817,7 +817,7 @@ if (QUO_SMS_ENABLED) {
 
 register(
   "action_batch_plan",
-  "Prepare an exact dry-run JobNimbus/Gmail batch under the pinned 58-file Thresher manifest. The wrapper freshly re-attests the exact bridge build, boot, policy, six-receipt historical isolation, runtime, identity, capabilities, and ready receipt boundary before posting. Up to five exact Chance files may contain one contact correction, one forward stage move, and one current-control task each, in that order. Gmail draft creation remains a sole-operation batch and is not a send. A reviewed bridge-created draft may be sent only in a later sole-operation gmail.send_existing_draft batch with exactly {query,draftId} and a new approval. "
+  "Prepare an exact dry-run JobNimbus/Gmail batch under the pinned Thresher file-scope policy. The wrapper freshly re-attests the exact bridge build, boot, policy, six-receipt historical isolation, runtime, identity, capabilities, and ready receipt boundary before posting. Up to five exact Chance files may contain one contact correction, one forward stage move, and one current-control task each, in that order. Gmail draft creation remains a sole-operation batch and is not a send. A reviewed bridge-created draft may be sent only in a later sole-operation gmail.send_existing_draft batch with exactly {query,draftId} and a new approval. "
     + (APPROVED_NOTES_ENABLED || PDF_WORKFLOW_ENABLED
       ? "One exact-file JobNimbus note may be prepared as a sole-operation batch with exactly {query,note}. Only one canonical @RichardR mention request is accepted, bound to Richard R's exact user ID in the displayed plan. All other @ text is blocked. Mention rendering and notification delivery are unverified: preserve mentionsVerified:false and accountingNotified:false. "
       : "JobNimbus notes are not activated and remain blocked. ")

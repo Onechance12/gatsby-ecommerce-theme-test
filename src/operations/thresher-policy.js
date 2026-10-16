@@ -6,6 +6,9 @@ export const CHANCE_OPERATOR_RUN_POLICY_ID = "chance-58-files-v1";
 export const CHANCE_OPERATOR_NOTES_RUN_POLICY_ID = "chance-58-files-notes-v1";
 export const CHANCE_OPERATOR_PDF_RUN_POLICY_ID = "chance-58-files-pdf-v1";
 export const CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID = "chance-58-files-sms-v1";
+// Separately reviewed release: immutable owner/action policy, live file membership.
+// Loading code alone does not activate it or change the installed plugin pins.
+export const CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID = "chance-live-assigned-sms-v1";
 export const CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION = 1;
 export const CHANCE_OPERATOR_RUN_FILE_COUNT = 58;
 
@@ -195,15 +198,18 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("The Chance operator run manifest must be a JSON object.");
   }
-  if (Number(input.schemaVersion) !== CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION) {
-    throw new Error(`The Chance operator run manifest requires schemaVersion ${CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION}.`);
-  }
   const id = String(input.id || "").trim();
+  const liveAssigned = id === CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID;
+  const schemaVersion = liveAssigned ? 2 : CHANCE_OPERATOR_RUN_MANIFEST_SCHEMA_VERSION;
+  if (Number(input.schemaVersion) !== schemaVersion) {
+    throw new Error(`The Chance operator run manifest requires schemaVersion ${schemaVersion}.`);
+  }
   if (![
     CHANCE_OPERATOR_RUN_POLICY_ID,
     CHANCE_OPERATOR_NOTES_RUN_POLICY_ID,
     CHANCE_OPERATOR_PDF_RUN_POLICY_ID,
-    CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+    CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
+    CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID
   ].includes(id)) {
     throw new Error("The Chance operator run manifest id is not a supported reviewed release policy.");
   }
@@ -218,7 +224,7 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
   if (!exactStringSet(input.excludedFileNumbers, CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS)) {
     throw new Error("The Chance operator run manifest must exclude JobNimbus file #2628.");
   }
-  const allowedActionTypes = id === CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID
+  const allowedActionTypes = [CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID, CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID].includes(id)
     ? (exactStringSet(input.allowedActionTypes, CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES)
       ? CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES : null)
     : id === CHANCE_OPERATOR_PDF_RUN_POLICY_ID
@@ -243,6 +249,36 @@ export function loadChanceOperatorRunManifest(raw, options = {}) {
   }
   if (!exactStringSet(input.allowedContactFields, CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS)) {
     throw new Error("The Chance operator run manifest contact fields do not match the locked P0 field allowlist.");
+  }
+  if (liveAssigned) {
+    const assignmentOwnerId = String(input.assignmentOwnerId || "").trim();
+    if (input.assignmentMode !== "live_assigned" || !/^[a-zA-Z0-9_-]{8,100}$/.test(assignmentOwnerId)) {
+      throw new Error("The live-assigned policy must bind one exact assignment owner.");
+    }
+    if (Object.hasOwn(input, "files") || Object.hasOwn(input, "fileCount")) {
+      throw new Error("The live-assigned policy cannot contain a frozen file roster or file count.");
+    }
+    let receiptPredecessor;
+    if (input.receiptPredecessor) {
+      if (String(input.receiptPredecessor.id || "").trim() === CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID) {
+        throw new Error("Receipt migration requires the exact prior fixed manifest, not another live policy.");
+      }
+      receiptPredecessor = loadChanceOperatorRunManifest(input.receiptPredecessor, {
+        now: Date.parse(input.receiptPredecessor.expiresAt) - 1
+      });
+    }
+    const body = {
+      schemaVersion: 2, id, operatorScope: "assigned", assignmentMode: "live_assigned",
+      assignmentOwnerId, expiresAt: new Date(expiresAtMs).toISOString(),
+      excludedFileNumbers: [...CHANCE_OPERATOR_EXCLUDED_FILE_NUMBERS],
+      allowedActionTypes: [...allowedActionTypes],
+      allowedContactFields: [...CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS],
+      ...(receiptPredecessor ? { receiptPredecessor } : {})
+    };
+    return deepFreeze({ ...body, sha256: sha256(body), fileCount: null });
+  }
+  if (input.assignmentMode || input.assignmentOwnerId) {
+    throw new Error("A fixed-manifest policy cannot silently enable live assignment scope.");
   }
   if (!Array.isArray(input.files) || input.files.length !== CHANCE_OPERATOR_RUN_FILE_COUNT) {
     throw new Error(`The Chance operator run manifest must bind exactly ${CHANCE_OPERATOR_RUN_FILE_COUNT} files.`);
@@ -287,6 +323,11 @@ export function chanceOperatorRunManifestSummary(manifest) {
     sha256: manifest.sha256,
     expiresAt: manifest.expiresAt,
     fileCount: manifest.fileCount,
+    ...(manifest.assignmentMode === "live_assigned" ? {
+      assignmentMode: "live_assigned",
+      assignmentOwnerId: manifest.assignmentOwnerId,
+      freshAssignmentRequired: true
+    } : {}),
     excludedFileNumbers: [...manifest.excludedFileNumbers],
     allowedActionTypes: [...manifest.allowedActionTypes],
     allowedContactFields: [...manifest.allowedContactFields],
@@ -332,11 +373,11 @@ export function resolveChanceOperatorRunPolicy(input, manifest) {
   const manifestSha = String(input?.sha256 || "").trim().toLowerCase();
   if (id !== manifest.id || manifestSha !== manifest.sha256) {
     throw new Error(
-      "The Mac JobNimbus plugin is not pinned to the bridge's current 58-file run manifest. Refresh the plugin and start a new chat before preparing actions."
+      "The Mac JobNimbus plugin is not pinned to the bridge's current reviewed file-scope policy. Refresh the plugin and start a new chat before preparing actions."
     );
   }
   if (Date.parse(manifest.expiresAt) <= Date.now()) {
-    throw new Error("The Chance operator run manifest expired. Refresh and review the 58-file roster before preparing actions.");
+    throw new Error("The Chance operator run manifest expired. Refresh and review the file-scope policy before preparing actions.");
   }
   return chanceOperatorRunPolicy(manifest);
 }
@@ -345,6 +386,15 @@ export function chanceManifestFileBinding(manifest, number, fileId) {
   if (!manifest) return null;
   const normalizedNumber = String(number || "").trim().replace(/^#/, "");
   const normalizedId = String(fileId || "").trim();
+  if (manifest.assignmentMode === "live_assigned") {
+    // A valid reference is NOT assignment authorization. Every effect must
+    // separately re-read and validate the exact current contact/owner/active
+    // flags. Receipts retain their immutable references after reassignment.
+    return /^\d+$/.test(normalizedNumber)
+      && /^[a-zA-Z0-9_-]{8,100}$/.test(normalizedId)
+      && !manifest.excludedFileNumbers.includes(normalizedNumber)
+      ? { number: normalizedNumber, fileId: normalizedId } : null;
+  }
   return manifest.files.find((file) => file.number === normalizedNumber && file.fileId === normalizedId) || null;
 }
 

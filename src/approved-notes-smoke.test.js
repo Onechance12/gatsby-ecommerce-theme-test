@@ -166,7 +166,7 @@ test("approved notes reject extra fields, mentions, mixed actions and wrong file
     [operation(), operation("Another note", "#2741")],
     [operation(), { type: "jobnimbus.update_contact", payload: { query: "#2739", fields: { city: "Dallas" } } }],
     [{ ...operation(), payload: { ...operation().payload, mentions: ["accounting"] } }],
-    [operation("@Accounting: payment issued")], [operation("Payment issued", "#2628")],
+    [operation("@Accounting: payment issued")],
     [operation("@RichardR @RichardR: payment issued")], [operation("@richard: payment issued")],
     [operation("email@RichardR")], [operation("@RichardRextra")],
     [operation("Payment issued", "#9999")]
@@ -174,6 +174,9 @@ test("approved notes reject extra fields, mentions, mixed actions and wrong file
     const response = await f.prepare(operations);
     assert.equal(response.status, 400, JSON.stringify(response.body));
   }
+  const excluded = await f.prepare([operation("Payment issued", "#2628")]);
+  assert.equal(excluded.status, 403);
+  assert.match(excluded.body.error, /file-scope policy blocks it/);
   const direct = await f.request("/jobnimbus/create-note", { query: "#2739", note: "No direct route", execute: true });
   assert.equal(direct.status, 403);
   f.state.notes.push({ jnid: "inventory-id", id: "conflicting-id", primary: { id: "contact-chance" }, note: "Some other note", record_type_name: "Note" });

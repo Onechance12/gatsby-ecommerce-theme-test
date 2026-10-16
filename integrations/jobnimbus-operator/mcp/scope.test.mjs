@@ -233,11 +233,11 @@ test("action attestation accepts the compact pinned policy and rejects expiry", 
     () => assertRunPolicyAttestation(attestedResponse({
       expiresAt: new Date(Date.now() - 60_000).toISOString()
     })),
-    /exact live 58-file/i
+    /exact reviewed file-scope/i
   );
   assert.throws(
     () => assertRunPolicyAttestation(attestedResponse({ expiresAt: "invalid" })),
-    /exact live 58-file/i
+    /exact reviewed file-scope/i
   );
 });
 

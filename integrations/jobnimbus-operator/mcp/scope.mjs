@@ -145,7 +145,7 @@ const EXPECTED_RELEASE_GATE_KEYS = Object.freeze([
   "HCN_ACTION_EXECUTION_ENABLED"
 ]);
 
-export const CHANCE_RUN_FILE_COUNT = 58;
+export const CHANCE_RUN_FILE_COUNT = ACTIVE_RELEASE.assignmentMode === "live_assigned" ? null : 58;
 
 export const CHANCE_RUN_EXCLUDED_FILE_NUMBERS = Object.freeze(["2628"]);
 
@@ -231,6 +231,10 @@ export function assertDedicatedMacOperatorIdentity(whoami) {
     )
   ) {
     throw new Error("The bridge did not attest the dedicated authenticated Mac operator identity.");
+  }
+  if (ACTIVE_RELEASE.assignmentMode === "live_assigned"
+    && identity.jobNimbusOwnerId !== ACTIVE_RELEASE.assignmentOwnerId) {
+    throw new Error("The authenticated operator owner differs from the reviewed live-assignment owner.");
   }
   if (
     !plainObject(access)
@@ -550,7 +554,18 @@ export function assertRunPolicyAttestation(
     || !Number.isFinite(expiresAt)
     || expiresAt <= Date.now()
   ) {
-    throw new Error("The bridge did not attest the exact live 58-file run manifest.");
+    throw new Error("The bridge did not attest the exact reviewed file-scope policy.");
+  }
+  if (ACTIVE_RELEASE.assignmentMode === "live_assigned" && (
+    policy.schemaVersion !== 2 || policy.assignmentMode !== "live_assigned"
+    || policy.assignmentOwnerId !== ACTIVE_RELEASE.assignmentOwnerId
+    || policy.freshAssignmentRequired !== true
+  )) {
+    throw new Error("The bridge did not attest the exact reviewed live assignment owner and fresh-assignment requirement.");
+  }
+  if (ACTIVE_RELEASE.assignmentMode !== "live_assigned"
+    && (policy.assignmentMode || policy.assignmentOwnerId || policy.freshAssignmentRequired)) {
+    throw new Error("The fixed-roster plugin cannot silently acquire live-assignment scope.");
   }
 
   const hasFullSurface = Array.isArray(policy.excludedFileNumbers)

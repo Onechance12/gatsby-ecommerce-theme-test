@@ -10,6 +10,7 @@ import {
   CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_QUO_SMS_RUN_POLICY_ID,
+  CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID,
   CHANCE_OPERATOR_RUN_POLICY_ID,
   chanceManifestFileBinding,
   chanceOperatorRunManifestSummary,
@@ -74,6 +75,34 @@ function manifestInput(overrides = {}) {
     ...overrides
   };
 }
+
+test("live assignment pins the owner and action contract, not a changing file count", () => {
+  const { files, ...legacy } = manifestInput();
+  const input = { ...legacy, schemaVersion: 2, id: CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID,
+    assignmentMode: "live_assigned", assignmentOwnerId: "synthetic-owner",
+    allowedActionTypes: [...CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES] };
+  const options = { now: Date.parse("2026-08-23T00:00:00.000Z") };
+  const live = loadChanceOperatorRunManifest(input, options);
+  const summary = chanceOperatorRunManifestSummary(live);
+  assert.equal(summary.fileCount, null);
+  assert.equal(summary.assignmentOwnerId, "synthetic-owner");
+  assert.equal(summary.freshAssignmentRequired, true);
+  assert.equal(summary.quoSmsAllowed, true);
+  assert.equal(live.files, undefined);
+  // Reference validation alone cannot prove ownership or authorize an effect.
+  assert.equal(chanceManifestFileBinding(live, "2804", "synthetic-file-2804").number, "2804");
+  assert.equal(chanceManifestFileBinding(live, "2628", "synthetic-file-2628"), null);
+  assert.equal(chanceManifestFileBinding(live, "2804", "bad"), null);
+  for (const patch of [
+    { files }, { fileCount: 58 }, { assignmentOwnerId: "" }, { assignmentMode: "company" },
+    { schemaVersion: 1 }, { allowedActionTypes: [...input.allowedActionTypes, "gmail.send"] }
+  ]) assert.throws(() => loadChanceOperatorRunManifest({ ...input, ...patch }, options));
+  assert.throws(() => loadChanceOperatorRunManifest(manifestInput({ assignmentMode: "live_assigned" }), options), /silently/);
+  const migrated = loadChanceOperatorRunManifest({ ...input, receiptPredecessor: manifestInput() }, options);
+  assert.equal(migrated.receiptPredecessor.sha256, loadChanceOperatorRunManifest(manifestInput(), options).sha256);
+  assert.notEqual(migrated.sha256, live.sha256);
+  assert.throws(() => loadChanceOperatorRunManifest({ ...input, receiptPredecessor: input }, options), /prior fixed/);
+});
 
 test("loads and pins an exact immutable 58-file run manifest", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-08-23T00:00:00.000Z") });

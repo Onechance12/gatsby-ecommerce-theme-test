@@ -41,6 +41,12 @@ test("Quo SMS candidate stays inactive until exact release pins are reviewed", (
     { bridgeCommit: "" },
     { enabled: "true" }
   ]) assert.throws(() => validateQuoSmsRelease({ ...candidate, ...patch }));
+  const live = { ...candidate, policyId: "chance-live-assigned-sms-v1",
+    assignmentMode: "live_assigned", assignmentOwnerId: "synthetic-owner" };
+  assert.equal(validateQuoSmsRelease(live), true);
+  assert.throws(() => validateQuoSmsRelease({ ...live, assignmentOwnerId: "" }));
+  assert.throws(() => validateQuoSmsRelease({ ...live, assignmentMode: "company" }));
+  assert.throws(() => validateQuoSmsRelease({ ...candidate, assignmentMode: "live_assigned" }));
 });
 
 test("Quo SMS contract rejects hidden authority and attests exact plans and receipts", () => {
@@ -123,7 +129,7 @@ function smsReceipt() {
   };
 }
 
-async function enabledCandidate(t) {
+async function enabledCandidate(t, { live = false } = {}) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "enabled-quo-sms-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const file of [
@@ -144,6 +150,9 @@ async function enabledCandidate(t) {
       .replace("enabled: false", "enabled: true")
       .replace('policySha256: ""', `policySha256: "${"a".repeat(64)}"`)
       .replace('bridgeCommit: ""', `bridgeCommit: "${"b".repeat(40)}"`)
+      .replace('policyId: "chance-58-files-sms-v1",', live
+        ? 'policyId: "chance-live-assigned-sms-v1", assignmentMode: "live_assigned", assignmentOwnerId: "synthetic-owner",'
+        : 'policyId: "chance-58-files-sms-v1",')
   );
   const source = await readFile(new URL("./operator-coordinator.test.mjs", import.meta.url), "utf8");
   const cut = source.indexOf('\ntest("verified session');
@@ -151,7 +160,7 @@ async function enabledCandidate(t) {
   await writeFile(
     path.join(root, "fixtures.mjs"),
     source.slice(0, cut)
-      + `\nconst originalRunPolicy = runPolicy; runPolicy = () => ({...originalRunPolicy(), noteCreationAllowed:true, noteMentionsAllowed:false, noteMentionRequestsAllowed:true, noteCreationSoleOperation:true, pdfUploadAllowed:true, pdfUploadSoleOperation:true, pdfUploadContentReadbackRequired:true, pdfUploadMaxBytes:8388608, quoSmsAllowed:true, quoSmsSoleOperation:true, quoSmsExactSenderRequired:true, quoSmsProviderReadbackRequired:true, quoSmsDuplicateProtectionRequired:true});\nexport {whoamiFixture,sessionFixture,policyFixture};`
+      + `\nconst originalRunPolicy = runPolicy; runPolicy = () => ({...originalRunPolicy(), ${live ? 'schemaVersion:2, assignmentMode:"live_assigned", assignmentOwnerId:"synthetic-owner", freshAssignmentRequired:true,' : ''} noteCreationAllowed:true, noteMentionsAllowed:false, noteMentionRequestsAllowed:true, noteCreationSoleOperation:true, pdfUploadAllowed:true, pdfUploadSoleOperation:true, pdfUploadContentReadbackRequired:true, pdfUploadMaxBytes:8388608, quoSmsAllowed:true, quoSmsSoleOperation:true, quoSmsExactSenderRequired:true, quoSmsProviderReadbackRequired:true, quoSmsDuplicateProtectionRequired:true});\nexport {whoamiFixture,sessionFixture,policyFixture};`
   );
   const fixtures = await import(pathToFileURL(path.join(root, "fixtures.mjs")));
   const scope = await import(pathToFileURL(path.join(root, "scope.mjs")));
@@ -165,6 +174,7 @@ async function enabledCandidate(t) {
     now: Date.parse("2090-01-01T00:00:00.000Z")
   };
   const requests = [];
+  if (live) state.whoami.identity.jobNimbusOwnerId = "synthetic-owner";
   const approvals = new Map();
   const coordinator = createOperatorCoordinator({
     version: "synthetic",
@@ -233,6 +243,25 @@ async function enabledCandidate(t) {
   });
   return { approvals, coordinator, requests, scope, state };
 }
+
+test("reviewed live-assignment plugin binds its owner, not a hardcoded count, and retains one-use approval", async (t) => {
+  const f = await enabledCandidate(t, { live: true });
+  assert.equal(f.scope.CHANCE_RUN_FILE_COUNT, null);
+  const plan = await f.coordinator.planQuoSms(SMS);
+  const result = await f.coordinator.executeQuoSms(plan.approvalDigest);
+  assertQuoSmsReceipt(result.batch.completed[0].receipt, SMS);
+  assert.equal(f.requests.filter((request) => request.body?.execute === true).length, 1);
+  await assert.rejects(f.coordinator.executeQuoSms(plan.approvalDigest), /No current/);
+});
+
+test("live-assignment owner drift blocks execution and consumes approval", async (t) => {
+  const f = await enabledCandidate(t, { live: true });
+  const plan = await f.coordinator.planQuoSms(SMS);
+  f.state.whoami.identity.jobNimbusOwnerId = "another-synthetic-owner";
+  await assert.rejects(f.coordinator.executeQuoSms(plan.approvalDigest), /owner/);
+  assert.equal(f.requests.filter((request) => request.body?.execute === true).length, 0);
+  assert.equal(f.approvals.size, 0);
+});
 
 test("activated Quo SMS plan survives an async host handoff in one persistent coordinator, then executes once", async (t) => {
   const fixture = await enabledCandidate(t);

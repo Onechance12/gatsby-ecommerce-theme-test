@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES, CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES,
+  CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS, loadChanceOperatorRunManifest } from "./operations/thresher-policy.js";
 import { PDF_UPLOAD_TYPE, pdfHash, assertPdfPlan, assertPdfReceipt } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
 
@@ -79,12 +80,18 @@ async function fixture(t, options = {}) {
   await new Promise((resolve) => reserve.listen(0, "127.0.0.1", resolve));
   const port = reserve.address().port;
   await new Promise((resolve) => reserve.close(resolve));
-  const input = { schemaVersion: 1, id: options.old ? "chance-58-files-notes-v1" : "chance-58-files-pdf-v1",
+  let input = { schemaVersion: 1, id: options.old ? "chance-58-files-notes-v1" : "chance-58-files-pdf-v1",
     operatorScope: "assigned", expiresAt: "2099-01-01T00:00:00.000Z",
     files: [...contacts.slice(0, 2).map((r) => ({ number: String(r.number), fileId: r.jnid })),
       ...Array.from({ length: 56 }, (_, i) => ({ number: String(4000 + i), fileId: `fixture-file-${i}` }))],
     excludedFileNumbers: ["2628"], allowedActionTypes: [...(options.old ? CHANCE_OPERATOR_NOTES_ALLOWED_ACTION_TYPES : CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES)],
     allowedContactFields: [...CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS] };
+  if (options.live) {
+    const { files, ...baseInput } = input;
+    input = { ...baseInput, schemaVersion: 2, id: CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID,
+      assignmentMode: "live_assigned", assignmentOwnerId: OWNER,
+      allowedActionTypes: [...CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES] };
+  }
   const manifest = loadChanceOperatorRunManifest(input);
   const runPolicy = { id: manifest.id, sha256: manifest.sha256 };
   const base = `http://127.0.0.1:${api.address().port}`;
@@ -119,6 +126,27 @@ async function fixture(t, options = {}) {
     execute: (operations, plan) => request("/ops/action-batch", { runPolicy, operations, execute: true,
       approvalDigest: plan.approvalDigest, approvalChallenge: plan.approvalChallenge }) };
 }
+
+test("live-assigned PDF uses fresh exact ownership without a frozen file roster", async (t) => {
+  const f = await fixture(t, { live: true });
+  const ops = [operation()];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  const result = await f.execute(ops, plan.body);
+  assert.equal(result.body.mode, "executed", JSON.stringify(result.body));
+  assertPdfReceipt(result.body.batch.completed[0].receipt, ops[0].payload);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [1, 1, 1]);
+});
+
+test("live-assigned PDF rechecks assignment before reserving upload bytes", async (t) => {
+  const f = await fixture(t, { live: true });
+  const ops = [operation()];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  f.contacts[0].owners = [{ id: "another-synthetic-owner" }];
+  assert.notEqual((await f.execute(ops, plan.body)).status, 200);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [0, 0, 0]);
+});
 
 test("PDF capability requires a new manifest; old manifest and direct route remain blocked", async (t) => {
   const f = await fixture(t, { old: true });

@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "bridge": "node src/server.js",
-    "precheck": "node --test src/documents/research-access.test.js src/documents/research-provider.test.js src/documents/research-http.test.js && npm run test:communication-evidence && npm run test:pdf-upload && npm run test:reviewed-claim-packet",
+    "precheck": "node --test src/documents/research-access.test.js src/documents/research-provider.test.js src/documents/research-http.test.js && npm run test:communication-evidence && npm run test:pdf-upload && npm run test:reviewed-claim-packet && npm run test:assigned-roster",
+    "test:assigned-roster": "node --test src/jobnimbus/assigned-roster.test.js src/operations/thresher-policy.test.js src/approved-quo-sms-smoke.test.js integrations/jobnimbus-operator/mcp/quo-sms.test.mjs",
     "test:reviewed-claim-packet": "node --test src/reviewed-claim-packet-contract.test.js",
     "test:communication-evidence": "node --test src/gmail/*.test.js",
     "test:pdf-upload": "node --test src/approved-pdf-smoke.test.js src/jobnimbus/pdf-upload-transport.test.js integrations/jobnimbus-operator/mcp/*.test.mjs",
