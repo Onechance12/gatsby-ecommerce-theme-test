@@ -28,3 +28,19 @@ sides of byte readback, and synthetic HTTP upload/recovery tests whose
 undocumented single-file metadata route returns HTML. Recovery assertions require
 unchanged reserve/PUT/completion counters. No real client data or provider writes
 are used by these tests.
+
+## Exact metadata diagnostics and retained identity
+
+Verification failures now name only static failed-check labels instead of
+collapsing file binding, filename, privacy and size into one opaque error.
+The existing exact-document review returns a typed, allowlisted metadata
+summary for Mac PDF reads. It never returns signed URLs, unrelated provider
+fields, arbitrary error bodies or credentials. This is diagnostic evidence,
+not a successful upload receipt or permission to act on a quarantined file.
+
+When a newly reconciled PDF must be quarantined, retain its already durable
+provider document ID in that quarantine and its minimized receipt. Do not
+backfill a missing historical ID from conversation text, invent provenance,
+remove an existing quarantine, or call reconciliation again on a quarantined
+batch. Missing and false privacy flags remain distinct failures; no coercion,
+default privacy or weaker match rule is introduced.

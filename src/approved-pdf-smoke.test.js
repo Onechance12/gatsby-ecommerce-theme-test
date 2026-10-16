@@ -245,3 +245,32 @@ for (const scenario of ["reserve_timeout", "missing_id", "evil_url", "put_timeou
     assert.equal(f.state.reserves, 1);
   });
 }
+
+test("privacy mismatch keeps its document ID and precise diagnosis; existing quarantine never replays", async (t) => {
+  const f = await fixture(t);
+  const ops = [operation()];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200);
+  f.state.mode = "wrong_privacy";
+  const attempted = await f.execute(ops, plan.body);
+  assert.equal(attempted.body.mode, "partial_failure");
+  const counts = [f.state.reserves, f.state.puts, f.state.completes];
+  const recovered = await f.request("/ops/action-batch-reconcile", { batchId: attempted.body.batch.id });
+  assert.equal(recovered.body.outcome, "unknown_file_quarantined");
+  assert.equal(recovered.body.receipt.manualQuarantine.providerDocumentId, "created-doc-1");
+  assert.match(recovered.body.receipt.manualQuarantine.reason, /privacy_matches/);
+  const detail = await f.request("/ops/action-batch-receipts", { batchId: attempted.body.batch.id });
+  assert.equal(detail.body.receipt.manualQuarantine.providerDocumentId, "created-doc-1");
+  const review = await f.request("/jobnimbus/document-review", { query: "#2739", documentQuery: "created-doc-1" });
+  assert.equal(review.status, 200, JSON.stringify(review.body));
+  assert.deepEqual(review.body.providerMetadata.privacyFields, [{ field: "is_private", valueType: "boolean", value: true }]);
+  assert.equal(review.body.providerMetadata.diagnosticOnly, true);
+  assert.equal(review.body.providerMetadata.receiptResolved, false);
+  f.state.mode = "normal";
+  // Synthetic-only regression: an already quarantined row remains a no-op
+  // even if the provider later appears to match. No runtime retry is added.
+  const blocked = await f.request("/ops/action-batch-reconcile", { batchId: attempted.body.batch.id });
+  assert.equal(blocked.body.mode, "verified_noop");
+  assert.equal(blocked.body.receipt.status, "manual_quarantined");
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+});

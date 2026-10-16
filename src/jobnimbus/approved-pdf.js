@@ -13,15 +13,49 @@ function relatedToOnly(row, fileId) {
 const fileNames = (row) => [row?.name, row?.filename, row?.file_name].filter((v) => v !== undefined);
 const fileSizes = (row) => [row?.size, row?.sizeBytes, row?.size_bytes, row?.file_size].filter((v) => v !== undefined);
 
-export function assertPdfRecord(row, id, fileId, metadata) {
+export function pdfRecordChecks(row, id, fileId, metadata) {
   const names = fileNames(row);
   const privacy = [row?.isPrivate, row?.is_private].filter((v) => v !== undefined);
-  if (recordId(row) !== id || !relatedToOnly(row, fileId) || !names.length || names.some((v) => v !== metadata.filename)
-    || !privacy.length || privacy.some((v) => v !== metadata.isPrivate)
-    || fileSizes(row).some((v) => Number(v) !== metadata.sizeBytes)
-    || [row?.is_deleted, row?.deleted, row?.is_archived, row?.archived].some((v) => [true, 1, "true", "1"].includes(v))) {
-    conflict("Uploaded document metadata does not prove the approved document, client and privacy. Never retry; reconcile the receipt.");
+  return {
+    document_present: Boolean(row && typeof row === "object" && !Array.isArray(row)),
+    document_id: recordId(row) === id,
+    exact_file_binding: relatedToOnly(row, fileId),
+    filename_present: names.length > 0,
+    filename_matches: names.length > 0 && names.every((v) => v === metadata.filename),
+    privacy_present: privacy.length > 0,
+    privacy_matches: privacy.length > 0 && privacy.every((v) => v === metadata.isPrivate),
+    metadata_size_matches: fileSizes(row).every((v) => Number(v) === metadata.sizeBytes),
+    not_deleted_or_archived: ![row?.is_deleted, row?.deleted, row?.is_archived, row?.archived]
+      .some((v) => [true, 1, "true", "1"].includes(v))
+  };
+}
+
+export function assertPdfRecord(row, id, fileId, metadata) {
+  const failures = Object.entries(pdfRecordChecks(row, id, fileId, metadata))
+    .filter(([, passed]) => !passed).map(([name]) => name);
+  if (failures.length) {
+    // Labels only: never echo arbitrary provider bodies, URLs or credentials.
+    conflict(`Uploaded document metadata verification failed: ${failures.join(", ")}. Never retry the upload.`);
   }
+}
+
+// Exact-document read diagnostics only. These facts do not resolve a receipt,
+// relax a guard or grant any action, and never include provider download URLs.
+export function pdfDocumentMetadata(row, fileId) {
+  const fields = (names, valid) => names.filter((field) => Object.hasOwn(row || {}, field)).map((field) => ({
+    field, valueType: row[field] === null ? "null" : typeof row[field],
+    value: valid(row[field]) ? row[field] : null
+  }));
+  return {
+    providerId: recordId(row) || null,
+    exactFileBinding: relatedToOnly(row, fileId),
+    filenameFields: fields(["name", "filename", "file_name"], (v) => typeof v === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9 _().-]{0,154}\.pdf$/i.test(v) && !v.includes("..")),
+    privacyFields: fields(["isPrivate", "is_private"], (v) => typeof v === "boolean"),
+    sizeFields: fields(["size", "sizeBytes", "size_bytes", "file_size"], (v) => Number.isSafeInteger(v) && v >= 0),
+    diagnosticOnly: true,
+    receiptResolved: false
+  };
 }
 
 // Provider I/O is injected; no model calls, background work, memory export, or

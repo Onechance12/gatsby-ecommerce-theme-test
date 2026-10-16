@@ -98,9 +98,9 @@ import {
   validateApprovedNotePayload
 } from "./jobnimbus/approved-note.js";
 import { createLorPdf } from "./documents/lor.js";
-import { createApprovedPdfService } from "./jobnimbus/approved-pdf.js";
+import { createApprovedPdfService, pdfDocumentMetadata } from "./jobnimbus/approved-pdf.js";
 import { createPdfUploadTransport } from "./jobnimbus/pdf-upload-transport.js";
-import { PDF_UPLOAD_TYPE, validatePdfMetadata } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
+import { PDF_UPLOAD_TYPE, validatePdfMetadata, providerId as validPdfProviderId } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
 import { createDocumentResearchService, DOCUMENT_RESEARCH_ROUTES } from "./documents/research-access.js";
 import { createDocumentResearchProvider } from "./documents/research-provider.js";
 import { getBuildInfo } from "./platform/build-info.js";
@@ -7577,6 +7577,9 @@ async function documentReview(input) {
     contentType: downloaded.contentType,
     bytes: downloaded.bytes.length,
     extraction: extracted.extraction,
+    ...(isMacCodexOperatorRequest() && /\.pdf$/i.test(compactDocument(document).name) ? {
+      providerMetadata: pdfDocumentMetadata(document, contact.jnid)
+    } : {}),
     pageCount: extracted.pageCount || null,
     truncated: Boolean(extracted.truncated),
     extractionError: extracted.error || "",
@@ -11885,6 +11888,8 @@ function minimizedActionBatchReceipt(row, options = {}) {
       scope: row.manualQuarantine.scope || "",
       reasonCode: row.manualQuarantine.reasonCode || "",
       reason: redactSensitiveText(String(row.manualQuarantine.reason || "")).slice(0, 500),
+      ...(row.manualQuarantine.type === PDF_UPLOAD_TYPE && validPdfProviderId(row.manualQuarantine.providerDocumentId)
+        ? { providerDocumentId: row.manualQuarantine.providerDocumentId } : {}),
       quarantinedAt: row.manualQuarantine.quarantinedAt || ""
     } : null,
     automaticRetryAllowed: false,
@@ -12006,6 +12011,8 @@ async function actionBatchReconcile(input = {}) {
         scope: fileIds.length === 0 ? "global" : fileIds.length === 1 ? "file" : "files",
         reasonCode,
         reason: redactSensitiveText(error?.message || String(error)),
+        ...(currentDescriptorBound && descriptor.type === PDF_UPLOAD_TYPE && validPdfProviderId(row.current.providerDocumentId)
+          ? { providerDocumentId: row.current.providerDocumentId } : {}),
         quarantinedAt
       };
       row.recovery = {
