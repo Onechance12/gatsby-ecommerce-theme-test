@@ -22,7 +22,7 @@ const operation = (overrides = {}) => ({ type: PDF_UPLOAD_TYPE, payload: {
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "approved-pdf-test-"));
-  const state = { reserves: 0, puts: 0, completes: 0, contactIndexes: 0, records: [], bytes: new Map(), mode: "normal", body: null };
+  const state = { reserves: 0, puts: 0, completes: 0, metadataGets: 0, contactIndexes: 0, records: [], bytes: new Map(), mode: "normal", body: null };
   const contacts = [2739, 2741, 2628].map((number) => ({ number, jnid: `contact-${number}`,
     record_type_name: "Insurance", display_name: "Synthetic Client", owners: [{ id: OWNER }],
     is_active: true, is_archived: false, is_closed: false, is_deleted: false, status_name: "Ready for PA Review" }));
@@ -38,6 +38,9 @@ async function fixture(t, options = {}) {
       const [field, id] = Object.entries(filter.must?.[0]?.term || {})[0] || [];
       let rows = state.records.filter((row) => field === "related.id" && row.related.some((r) => r.id === id));
       if (state.mode === "wrong_inventory") rows = [{ jnid: "other-file-doc", related: [{ id: "other-file" }] }];
+      if (state.mode === "wrong_file") rows = rows.map((row) => ({ ...row, related: [{ id: "contact-2741" }] }));
+      if (state.mode === "wrong_privacy") rows = rows.map((row) => ({ ...row, is_private: true }));
+      if (state.mode === "metadata_timeout" && state.records.length) return req.socket.destroy();
       return json(200, { files: rows.slice(Number(url.searchParams.get("from") || 0)), count: rows.length });
     }
     if (url.pathname === "/files/v1/uploads/url") {
@@ -63,10 +66,13 @@ async function fixture(t, options = {}) {
       if (state.mode === "complete_timeout") return req.socket.destroy();
       return json(200, { data: { jnid: id } });
     }
-    const record = state.records.find((row) => url.pathname === `/files/${row.jnid}`);
-    if (record) return json(200, { ...record,
-      ...(state.mode === "wrong_file" ? { related: [{ id: "contact-2741" }] } : {}),
-      ...(state.mode === "wrong_privacy" ? { is_private: true } : {}) });
+    // The undocumented single-file metadata route must never be used. A
+    // successful upload still cannot be verified through this HTML response.
+    if (/^\/files\/[^/]+$/.test(url.pathname)) {
+      state.metadataGets++;
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end("<html>Not a metadata API</html>");
+    }
     if (url.pathname.startsWith("/download/")) {
       const bytes = state.bytes.get(url.pathname.split("/").at(-1));
       if (!bytes) return json(404, { error: "Fixture missing" });
@@ -136,6 +142,7 @@ test("live-assigned PDF uses fresh exact ownership without a frozen file roster"
   assert.equal(result.body.mode, "executed", JSON.stringify(result.body));
   assertPdfReceipt(result.body.batch.completed[0].receipt, ops[0].payload);
   assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], [1, 1, 1]);
+  assert.equal(f.state.metadataGets, 0);
 });
 
 test("live-assigned PDF rechecks assignment before reserving upload bytes", async (t) => {
@@ -212,7 +219,7 @@ test("fresh inventory or ownership changes invalidate approval before reservatio
   assert.equal(f.state.reserves, 0);
 });
 
-for (const scenario of ["reserve_timeout", "missing_id", "evil_url", "put_timeout", "complete_timeout", "wrong_file", "wrong_bytes", "wrong_privacy", "receipt_failure", "provider_id_failure"]) {
+for (const scenario of ["reserve_timeout", "missing_id", "evil_url", "put_timeout", "complete_timeout", "metadata_timeout", "wrong_file", "wrong_bytes", "wrong_privacy", "receipt_failure", "provider_id_failure"]) {
   test(`PDF ${scenario}: fail-stop and read-only recovery, never reupload`, async (t) => {
     const f = await fixture(t, { failLedgerAt: scenario === "receipt_failure" ? 4 : scenario === "provider_id_failure" ? 3 : 0 });
     const ops = [operation()];
@@ -226,7 +233,7 @@ for (const scenario of ["reserve_timeout", "missing_id", "evil_url", "put_timeou
     f.state.mode = "normal";
     const recovered = await f.request("/ops/action-batch-reconcile", { batchId: result.body.batch.id });
     assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
-    if (["complete_timeout", "wrong_file", "wrong_bytes", "wrong_privacy", "receipt_failure"].includes(scenario)) {
+    if (["complete_timeout", "metadata_timeout", "wrong_file", "wrong_bytes", "wrong_privacy", "receipt_failure"].includes(scenario)) {
       assert.equal(recovered.body.outcome, "applied_verified", JSON.stringify(recovered.body));
       assertPdfReceipt(recovered.body.receipt.completed[0].receipt, ops[0].payload);
     } else {
@@ -234,6 +241,7 @@ for (const scenario of ["reserve_timeout", "missing_id", "evil_url", "put_timeou
     }
     assert.notEqual((await f.execute(ops, plan.body)).body.mode, "executed");
     assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], before);
+    assert.equal(f.state.metadataGets, 0);
     assert.equal(f.state.reserves, 1);
   });
 }

@@ -27,6 +27,18 @@ export function assertPdfRecord(row, id, fileId, metadata) {
 // Provider I/O is injected; no model calls, background work, memory export, or
 // legacy upload route. Only the action coordinator invokes the write method.
 export function createApprovedPdfService(io) {
+  async function inventory(fileId) {
+    const rows = await io.listFiles(fileId);
+    if (!Array.isArray(rows) || rows.length > 5000) conflict("Exact-file document inventory is incomplete.");
+    const ids = new Set();
+    for (const row of rows) {
+      const id = recordId(row);
+      if (!id || ids.has(id) || !relatedToOnly(row, fileId)) conflict("Exact-file document inventory is ambiguous.");
+      ids.add(id);
+    }
+    return { rows, ids };
+  }
+
   async function prepare(input, expectedFileId = "") {
     let parsed;
     try { parsed = validatePdfPayload(input, { scoped: true }); }
@@ -34,13 +46,8 @@ export function createApprovedPdfService(io) {
     const { metadata } = parsed;
     const file = await io.resolveFile(input.query, expectedFileId);
     if (!providerId(file.id) || String(file.number) !== input.query.replace(/^#/, "")) conflict("PDF target is not the exact requested file.");
-    const rows = await io.listFiles(file.id);
-    if (!Array.isArray(rows) || rows.length > 5000) conflict("Exact-file document inventory is incomplete.");
-    const ids = new Set();
+    const { rows, ids } = await inventory(file.id);
     for (const row of rows) {
-      const id = recordId(row);
-      if (!id || ids.has(id) || !relatedToOnly(row, file.id)) conflict("Exact-file document inventory is ambiguous.");
-      ids.add(id);
       if (fileNames(row).some((name) => String(name).toLowerCase() === metadata.filename.toLowerCase())) {
         conflict("A document with this filename already exists. Review it; upload never overwrites or creates a same-name duplicate.");
       }
@@ -57,13 +64,17 @@ export function createApprovedPdfService(io) {
   }
 
   async function verify(id, fileId, metadata) {
-    assertPdfRecord(await io.readDocument(id), id, fileId, metadata);
+    // JobNimbus documents metadata via GET /api1/files, not /api1/files/:id.
+    // Use a complete, exact-file inventory on both sides of the byte download.
+    const before = await inventory(fileId);
+    assertPdfRecord(before.rows.find((row) => recordId(row) === id), id, fileId, metadata);
     const bytes = await io.readBytes(id);
     if (bytes.length !== metadata.sizeBytes || pdfHash(bytes) !== metadata.sha256) {
       conflict("Provider download differs from the approved PDF bytes. Never retry; reconcile the receipt.");
     }
     // Re-read after download so moved/renamed documents do not get a receipt.
-    assertPdfRecord(await io.readDocument(id), id, fileId, metadata);
+    const after = await inventory(fileId);
+    assertPdfRecord(after.rows.find((row) => recordId(row) === id), id, fileId, metadata);
   }
 
   async function execute(input, prepared, recordProviderDocumentId) {

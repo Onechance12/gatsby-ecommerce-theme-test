@@ -8288,8 +8288,7 @@ function approvedPdfService() {
       }
       return compactContact(contact);
     },
-    listFiles: (id) => listRelated("/files", id, 5000),
-    readDocument: (id) => jobNimbus(`/files/${encodeURIComponent(id)}`, { approvedPdf: true }),
+    listFiles: (id) => listRelated("/files", id, 5000, { requireComplete: true }),
     wasUploaded: async (fileId, sha256) => (await readActionBatchLedger()).some((row) =>
       (row.completed || []).some((item) => item.type === PDF_UPLOAD_TYPE
         && item.receipt?.fileId === fileId && item.receipt?.sha256 === sha256))
