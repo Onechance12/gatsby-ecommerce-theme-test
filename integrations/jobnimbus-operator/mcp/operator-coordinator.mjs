@@ -930,7 +930,7 @@ export function createOperatorCoordinator({
           ? "HARD STOP: one or more durable receipts are hard-blocked. Read their sanitized details, do not reconcile them, and do not plan or execute normal work."
         : requiresRecovery
           ? "RECOVERY ONLY: read and manually reconcile every listed batch, then rerun bridge_restart_verify and require ready:true. Do not plan or retry actions yet."
-          : "The local plugin and remote bridge agree on the exact build, runtime, and 58-file run manifest."
+          : "The local plugin and remote bridge agree on the exact build, runtime, and reviewed file-scope policy."
     };
   }
 
@@ -1110,7 +1110,7 @@ export function createOperatorCoordinator({
 
   async function planActionBatch(operations, operatorScope = "assigned") {
     if (operatorScope !== "assigned") {
-      throw new Error("Company-scope mutations are disabled during the locked Chance 58-file run.");
+      throw new Error("Company-scope mutations are disabled in the Chance-assigned operator lane.");
     }
 
     // There is only one current plan in this MCP process. Starting another

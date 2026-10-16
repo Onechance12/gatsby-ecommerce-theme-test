@@ -3682,7 +3682,7 @@ async function assertMacOperatorClaimPlanningReady() {
   const expiresAtMs = Date.parse(expiresAt);
   if (Number.isFinite(expiresAtMs) && expiresAtMs > Date.now()) return;
   const error = new Error(
-    "The Chance operator run manifest expired. Refresh and review the 58-file roster before configuring, preparing, or placing a claim call."
+    "The Chance operator file-scope policy expired. Refresh and review the assignment policy before configuring, preparing, or placing a claim call."
   );
   error.statusCode = 409;
   throw error;
@@ -12489,7 +12489,7 @@ function actionBatchRunPolicy(input = {}) {
     operatorCompanyScopeActive()
     && (REQUIRE_CHANCE_RUN_POLICY || CHANCE_OPERATOR_RUN_MANIFEST)
   ) {
-    badRequest("Company-scope action batches are disabled during the locked Chance 58-file run. Read-only exact-file company review remains available.");
+    badRequest("Company-scope action batches are disabled in the Chance-assigned operator lane. Read-only exact-file company review remains available.");
   }
   if (!input.runPolicy && !REQUIRE_CHANCE_RUN_POLICY) return null;
   try {
@@ -14427,7 +14427,7 @@ async function operatorBatchScope(operations, plans, options = {}) {
         badRequest(`JobNimbus file #${file.number} is excluded from the ${runPolicy.id} Chance work-file run.`);
       }
       if (!chanceManifestFileBinding(runPolicy.manifest, file.number, file.id)) {
-        badRequest(`JobNimbus file #${file.number || file.id} is not bound to the current ${runPolicy.id} 58-file manifest.`);
+        badRequest(`JobNimbus file #${file.number || file.id} is not bound to the current ${runPolicy.id} file-scope policy.`);
       }
     }
     for (const [index, operation] of operations.entries()) {
@@ -20137,7 +20137,7 @@ const OPENAPI = {
     "/ops/run-policy": {
       get: {
         operationId: "readChanceRunPolicy",
-        description: "Read-only attestation for the exact 58-file Mac operator manifest, bridge boot, and unresolved batch boundary.",
+        description: "Read-only attestation for the exact Mac operator file-scope policy, bridge boot, and unresolved batch boundary.",
         responses: { "200": { description: "Locked Chance run-policy attestation." } }
       }
     },
