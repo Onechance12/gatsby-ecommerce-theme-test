@@ -135,6 +135,8 @@ async function enabledCandidate(t, { live = false } = {}) {
   for (const file of [
     "scope.mjs",
     "operator-coordinator.mjs",
+    "pdf-receipt-resolution.mjs",
+    "pdf-receipt-resolution-release.mjs",
     "reviewed-claim-packet.mjs",
     "approved-note-release.mjs",
     "approved-note-plan.mjs",
@@ -143,16 +145,16 @@ async function enabledCandidate(t, { live = false } = {}) {
     "local-pdf.mjs",
     "quo-sms-contract.mjs"
   ]) await copyFile(new URL(`./${file}`, import.meta.url), path.join(root, file));
+  const inactiveResolution = await readFile(new URL("./pdf-receipt-resolution-release.mjs", import.meta.url), "utf8");
+  await writeFile(path.join(root, "pdf-receipt-resolution-release.mjs"), inactiveResolution.replace(/enabled: (?:true|false)/, "enabled: false"));
   const release = await readFile(new URL("./quo-sms-release.mjs", import.meta.url), "utf8");
+  const testRelease = { enabled: true, policyId: live ? "chance-live-assigned-sms-v1" : "chance-58-files-sms-v1",
+    policySha256: "a".repeat(64), bridgeCommit: "b".repeat(40),
+    ...(live ? { assignmentMode: "live_assigned", assignmentOwnerId: "synthetic-owner" } : {}) };
   await writeFile(
     path.join(root, "quo-sms-release.mjs"),
-    release
-      .replace("enabled: false", "enabled: true")
-      .replace('policySha256: ""', `policySha256: "${"a".repeat(64)}"`)
-      .replace('bridgeCommit: ""', `bridgeCommit: "${"b".repeat(40)}"`)
-      .replace('policyId: "chance-58-files-sms-v1",', live
-        ? 'policyId: "chance-live-assigned-sms-v1", assignmentMode: "live_assigned", assignmentOwnerId: "synthetic-owner",'
-        : 'policyId: "chance-58-files-sms-v1",')
+    release.replace(/export const QUO_SMS_RELEASE = Object.freeze\(\{[\s\S]*?\}\);/,
+      `export const QUO_SMS_RELEASE = Object.freeze(${JSON.stringify(testRelease)});`)
   );
   const source = await readFile(new URL("./operator-coordinator.test.mjs", import.meta.url), "utf8");
   const cut = source.indexOf('\ntest("verified session');

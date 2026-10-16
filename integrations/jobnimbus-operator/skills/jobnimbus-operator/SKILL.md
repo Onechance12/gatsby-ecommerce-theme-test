@@ -5,6 +5,16 @@ description: Use the Mac JobNimbus Operator for HCN/Wave evidence, exact-file Gm
 
 # JobNimbus Operator
 
+## Existing-PDF receipt disposition — inactive candidate
+
+After a separately approved versioned activation, use
+[PDF receipt resolution](references/pdf-receipt-resolution.md) when Chance
+chooses to accept an existing verified PDF's normal JobNimbus access instead
+of the original private-upload request. This is a new exact approval, not
+another reconciliation attempt. Preserve the original quarantine and its
+unknown provenance; no provider access, PDF, upload or email is changed.
+If the dedicated native tools or exact release attestation are missing, stop.
+
 ## Exact Quo SMS — inactive candidate
 
 This source adds `quo_sms_plan` and `quo_sms_execute`, but they are absent unless

@@ -136,5 +136,32 @@ export function createApprovedPdfService(io) {
     await verify(id, intent.fileId, metadata);
     return { applied: true, externalId: id };
   }
-  return { prepare, execute, reconcile };
+
+  // Read-only evidence for a NEW human-approved disposition. This does not
+  // reinterpret the old upload approval or reserve/PUT/complete a document.
+  async function verifyResolution(intent, id) {
+    const metadata = { ...validatePdfMetadata(intent.reconciliation), isPrivate: false };
+    if (intent.reconciliation.isPrivate !== true || !providerId(id)
+      || intent.reconciliation.beforeIds.includes(id)) conflict("PDF resolution is not an eligible new nonprivate candidate.");
+    const check = (snapshot) => {
+      const sameName = snapshot.rows.filter((row) => fileNames(row).some((name) =>
+        typeof name === "string" && name.toLowerCase() === metadata.filename.toLowerCase()));
+      if (sameName.length !== 1 || recordId(sameName[0]) !== id) conflict("The PDF resolution candidate is not unique.");
+      assertPdfRecord(sameName[0], id, intent.fileId, metadata);
+      const sizes = fileSizes(sameName[0]);
+      if (!sizes.length || !sizes.every((size) => Number.isSafeInteger(size) && size === metadata.sizeBytes)) {
+        conflict("The PDF resolution candidate lacks strict size metadata.");
+      }
+    };
+    const query = `#${intent.fileNumber}`;
+    const file = await io.resolveFile(query, intent.fileId);
+    check(await inventory(intent.fileId));
+    const bytes = await io.readBytes(id);
+    if (bytes.length !== metadata.sizeBytes || pdfHash(bytes) !== metadata.sha256) conflict("PDF resolution bytes differ from the original approved PDF.");
+    check(await inventory(intent.fileId));
+    const after = await io.resolveFile(query, intent.fileId);
+    if (after.id !== file.id || String(after.number) !== String(file.number)) conflict("PDF resolution file binding changed.");
+    return file;
+  }
+  return { prepare, execute, reconcile, verifyResolution };
 }

@@ -44,3 +44,33 @@ backfill a missing historical ID from conversation text, invent provenance,
 remove an existing quarantine, or call reconciliation again on a quarantined
 batch. Missing and false privacy flags remain distinct failures; no coercion,
 default privacy or weaker match rule is introduced.
+
+## New approval-gated disposition of an existing nonprivate PDF
+
+The inactive native candidate adds a separate plan/execute workflow over the
+existing receipt-reconciliation capability. It does not repeat ordinary
+reconciliation, change the eight provider-action policy, or introduce a direct
+provider effect route. Activation requires a new installed version with exact
+build/current-live-policy pins. The approval kind is distinct from upload,
+ordinary action batches and claim calls; all share one local approval slot.
+
+Only an original private, single-PDF, current-policy file quarantine may be
+considered. Fresh bounded complete inventories and guarded byte download must
+prove the exact file, unique new candidate, strict name/privacy/size and SHA-256;
+active assignment is checked twice. The only accepted difference is explicit
+nonprivate access, reviewed in the new approval. A missing historical reservation
+ID is disclosed as a newly human-selected live candidate, never backfilled.
+
+Execution consumes its new challenge, repeats all provider reads, and atomically
+appends a separately hashed resolution to the unchanged original row. It changes
+no original status, intent, approval, quarantine, timestamps or recovery outcome.
+Structural/audit validation of the complete resolution releases only this
+resource lock. The original upload never becomes replayable. Another quarantine,
+global hold, changed source/proof, duplicate, owner change or uncertain storage
+stops without release. Receipt readback exposes the validated resolution; unknown
+responses are inspected, never retried automatically.
+
+Synthetic tests verify unchanged provider reserve/PUT/complete counters, preserved
+historical fields, old missing-ID handling, cross-channel approval rejection,
+one-use approval, storage failure, changed bytes/metadata/assignment, overlapping
+holds, malformed/forged resolution, and native restart/build/policy/runtime drift.

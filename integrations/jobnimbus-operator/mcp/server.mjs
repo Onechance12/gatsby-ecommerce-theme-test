@@ -12,7 +12,7 @@ import { APPROVED_NOTES_ENABLED } from "./approved-note-release.mjs";
 import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
 import { QUO_SMS_TYPE } from "./quo-sms-contract.mjs";
-import { createOperatorCoordinator } from "./operator-coordinator.mjs";
+import { createOperatorCoordinator, PDF_RECEIPT_RESOLUTION_ENABLED } from "./operator-coordinator.mjs";
 import {
   PACKET_REVIEW_SOURCES, PACKET_REVIEW_METHODS, PACKET_REVIEW_FACT_KEYS, CLAIM_STOP_SIGNAL_CODES
 } from "./reviewed-claim-packet.mjs";
@@ -779,6 +779,21 @@ const operationSchema = z.object({
     });
   }
 });
+
+if (PDF_RECEIPT_RESOLUTION_ENABLED) {
+  register(
+    "pdf_receipt_resolution_plan",
+    "Verify one exact current-policy PDF quarantine for a new human-approved acceptance of existing normal JobNimbus access. Read-only provider checks; no upload, access change, draft or email. Show the original private request, actual nonprivate setting, exact PDF bytes, source receipt hash, identity provenance, expiry and approvalDigest. This is not another reconciliation attempt or upload approval.",
+    { batchId: z.string().uuid(), query: z.string().regex(/^#?\d+$/), documentId: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/), acceptedIsPrivate: z.literal(false) },
+    (input) => OPERATOR.planPdfReceiptResolution(input)
+  );
+  register(
+    "pdf_receipt_resolution_execute",
+    "Only after Chance explicitly approves the immediately preceding exact resolution plan, reverify its PDF and append one internal audited disposition. Changes no provider document/access and sends nothing. Original quarantine, intent, privacy request and approval remain unchanged and never replayable. Call directly with the digest in the same native process; restart/newer plan invalidates it. Uncertain outcome: read the receipt, never retry automatically.",
+    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/) },
+    ({ approvalDigest }) => OPERATOR.executePdfReceiptResolution(approvalDigest)
+  );
+}
 
 if (PDF_WORKFLOW_ENABLED) {
   register(

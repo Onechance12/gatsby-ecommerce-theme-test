@@ -101,6 +101,8 @@ import { createLorPdf } from "./documents/lor.js";
 import { createApprovedPdfService, pdfDocumentMetadata } from "./jobnimbus/approved-pdf.js";
 import { createPdfUploadTransport } from "./jobnimbus/pdf-upload-transport.js";
 import { PDF_UPLOAD_TYPE, validatePdfMetadata, providerId as validPdfProviderId } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
+import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, pdfResolutionSource, pdfResolutionProof,
+  pdfResolutionDigest, resolutionHash, validPdfReceiptResolution } from "../integrations/jobnimbus-operator/mcp/pdf-receipt-resolution.mjs";
 import { createDocumentResearchService, DOCUMENT_RESEARCH_ROUTES } from "./documents/research-access.js";
 import { createDocumentResearchProvider } from "./documents/research-provider.js";
 import { getBuildInfo } from "./platform/build-info.js";
@@ -8293,7 +8295,9 @@ function approvedPdfService() {
     },
     listFiles: (id) => listRelated("/files", id, 5000, { requireComplete: true }),
     wasUploaded: async (fileId, sha256) => (await readActionBatchLedger()).some((row) =>
-      (row.completed || []).some((item) => item.type === PDF_UPLOAD_TYPE
+      (validPdfReceiptResolution(row) && row.pdfReceiptResolution.proof.fileId === fileId
+        && row.pdfReceiptResolution.proof.acceptedMetadata.sha256 === sha256)
+      || (row.completed || []).some((item) => item.type === PDF_UPLOAD_TYPE
         && item.receipt?.fileId === fileId && item.receipt?.sha256 === sha256))
   });
 }
@@ -11892,6 +11896,11 @@ function minimizedActionBatchReceipt(row, options = {}) {
         ? { providerDocumentId: row.manualQuarantine.providerDocumentId } : {}),
       quarantinedAt: row.manualQuarantine.quarantinedAt || ""
     } : null,
+    ...(row.pdfReceiptResolution ? {
+      pdfReceiptResolution: validPdfReceiptResolution(row) ? row.pdfReceiptResolution : null,
+      pdfReceiptResolutionValid: validPdfReceiptResolution(row),
+      fileHoldReleased: pdfReceiptResolutionReleasesLock(row)
+    } : {}),
     automaticRetryAllowed: false,
     freshApprovalRequired: !["completed", "completed_pending_verification", "manual_quarantined"].includes(String(row.status || ""))
   };
@@ -11950,6 +11959,7 @@ async function actionBatchReconcile(input = {}) {
     throw error;
   }
   assertOperatorReceiptBoundaryReady();
+  if (Object.hasOwn(input, "resolution")) return processPdfReceiptResolution(input);
   const batchId = required(input.batchId, "batchId");
   return withActionBatchMutation(async () => {
     const ledger = await readActionBatchLedger();
@@ -12178,6 +12188,81 @@ async function actionBatchReconcile(input = {}) {
   });
 }
 
+// This is a NEW approval-gated receipt-only disposition, not another attempt
+// to reconcile/replay the quarantined action. It has no provider effect path.
+async function processPdfReceiptResolution(input) {
+  const allowed = input.execute === true
+    ? ["batchId", "resolution", "runPolicy", "execute", "approvalDigest", "approvalChallenge"]
+    : ["batchId", "resolution", "runPolicy", "execute"];
+  if (Object.keys(input).length !== allowed.length || allowed.some((key) => !Object.hasOwn(input, key))
+    || typeof input.execute !== "boolean") badRequest("PDF resolution accepts only its fixed plan/execute fields.");
+  let request;
+  try { request = validatePdfResolutionInput({ batchId: input.batchId, ...input.resolution }); }
+  catch { badRequest("An exact PDF receipt-resolution request is required; normal team access must be explicitly accepted."); }
+  if (Object.hasOwn(input.resolution || {}, "batchId")) badRequest("The source batch ID must not be overridden.");
+  const runPolicy = actionBatchRunPolicy(input);
+  if (!runPolicy?.enforced || runPolicy.id !== CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID
+    || !runPolicy.allowedActionTypes.includes(PDF_UPLOAD_TYPE)) {
+    conflictError("PDF receipt resolution requires the unchanged current live-assigned PDF policy.");
+  }
+  return withActionBatchMutation(async () => {
+    const policy = await operatorRunPolicy();
+    if (policy.receipts.unresolvedCount !== 0 || policy.receipts.hardBlockedCount !== 0
+      || (policy.legacyIsolation.configured && !policy.legacyIsolation.valid)) {
+      conflictError("Resolve the attested global receipt boundary before planning a PDF disposition.");
+    }
+    const ledger = await readActionBatchLedger();
+    const principalHash = actionApprovalIdentityHash();
+    const row = ledger.find((item) => item.id === request.batchId && item.principalHash === principalHash);
+    if (!row || row.runPolicyId !== runPolicy.id || row.runPolicySha256 !== runPolicy.sha256
+      || resolveChanceLegacyHistoricalIsolation(ledger).isolatedIds.has(request.batchId)) {
+      conflictError("The source PDF quarantine is not an eligible current-policy receipt owned by this operator.");
+    }
+    let source, proof;
+    try { source = pdfResolutionSource(row); proof = pdfResolutionProof(row, request); }
+    catch { conflictError("The exact original single-PDF quarantine is not eligible for this disposition. Preserve the hold and history."); }
+    const boundary = { bridgeBootId: BRIDGE_BOOT_ID, runPolicyId: runPolicy.id, runPolicySha256: runPolicy.sha256, principalHash };
+    const scope = { mode: PDF_RESOLUTION_KIND, runPolicyId: runPolicy.id, runPolicySha256: runPolicy.sha256,
+      runPolicyExpiresAt: runPolicy.expiresAt, fileCount: 1, files: [{ id: proof.fileId, number: proof.fileNumber,
+        operationIndexes: [0], operationTypes: [PDF_RESOLUTION_KIND] }] };
+    // A second quarantine on this file is not waived by resolving this one.
+    const otherBlock = findUnresolvedBatchOverlap(ledger.filter((item) => item.id !== row.id), scope,
+      { allowLegacyIsolation: true });
+    if (otherBlock) throwUnresolvedBatchOverlap(otherBlock);
+    const approvalDigest = pdfResolutionDigest(proof, boundary);
+    let approval;
+    if (input.execute) {
+      requireApprovalDigest(input.approvalDigest, approvalDigest, "PDF receipt resolution");
+      approval = await consumeActionApprovalChallenge(input.approvalChallenge, approvalDigest, PDF_RESOLUTION_KIND, scope);
+    }
+    // Complete exact-file inventory on both sides of guarded byte readback,
+    // strict metadata, unique new candidate, plus fresh owner checks twice.
+    const file = await approvedPdfService().verifyResolution(source.intent, request.documentId);
+    if (!input.execute) {
+      approval = await issueActionApprovalChallenge(approvalDigest, 1, scope, PDF_RESOLUTION_KIND);
+      return { mode: "pdf_resolution_plan", file, proof, boundary, displayComplete: true,
+        approvalDigest, approvalChallenge: approval.challenge, approvalExpiresAt: approval.expiresAt,
+        instruction: "Show Chance the original private request, observed normal team access, exact PDF proof and identity provenance. Approval resolves only this receipt hold; it changes no provider access, uploads nothing and creates/sends no email." };
+    }
+    const resolvedAt = new Date().toISOString();
+    const resolution = { id: randomUUID(), kind: PDF_RESOLUTION_KIND, proof, boundary, approvalDigest,
+      approvalId: approval.id, resolvedAt };
+    resolution.resolutionSha256 = resolutionHash(resolution);
+    // Append one audited resolution. Every original field, including status,
+    // manualQuarantine, recovery, original intent and approval, stays intact.
+    row.pdfReceiptResolution = resolution;
+    if (!validPdfReceiptResolution(row)) conflictError("PDF resolution failed its immutable audit validation; the hold remains.");
+    await writeActionBatchLedger(ledger);
+    const readback = (await readActionBatchLedger()).find((item) => item.id === row.id);
+    if (!pdfReceiptResolutionReleasesLock(readback)
+      || readback.pdfReceiptResolution.resolutionSha256 !== resolution.resolutionSha256) {
+      conflictError("PDF disposition storage readback is unproven. Read the exact receipt; never repeat automatically.");
+    }
+    return { mode: "pdf_resolution_verified", resolution: readback.pdfReceiptResolution, fileHoldReleased: true,
+      originalReceiptStatus: readback.status, originalUploadReplayAllowed: false, providerWrites: false };
+  });
+}
+
 async function processActionBatch(input = {}) {
   assertOperatorReceiptBoundaryReady();
   const runPolicy = actionBatchRunPolicy(input);
@@ -12358,6 +12443,7 @@ function findUnresolvedBatchOverlap(ledger, batchScope, options = {}) {
       options.allowLegacyIsolation === true
       && legacyIsolation.isolatedIds.has(String(row?.id || ""))
     ) return false;
+    if (pdfReceiptResolutionReleasesLock(row)) return false;
     const status = String(row.status || "");
     const blocks = [
       "in_progress",
@@ -14655,7 +14741,16 @@ function receiptFileReferenceAllowed(row, file) {
     && Boolean(chanceManifestFileBinding(policy.receiptPredecessor, file.number, file.id));
 }
 
+function pdfReceiptResolutionReleasesLock(row) {
+  return validPdfReceiptResolution(row)
+    && row.runPolicyId === CHANCE_OPERATOR_RUN_MANIFEST?.id
+    && row.runPolicySha256 === CHANCE_OPERATOR_RUN_MANIFEST?.sha256
+    && validatedActionBatchFileScope(row).length === 1
+    && validatedActionBatchFileScope(row).every((file) => receiptFileReferenceAllowed(row, file));
+}
+
 function actionBatchResourceLockScope(row) {
+  if (pdfReceiptResolutionReleasesLock(row)) return { global: false, files: [] };
   const files = validatedActionBatchFileScope(row);
   if (!files.length) return { global: true, files: [] };
 
@@ -16522,7 +16617,7 @@ async function issueActionApprovalChallenge(
     }
     const challenge = randomBytes(32).toString("base64url");
     const normalizedKind = String(approvalKind || "").trim();
-    if (!["action_batch", "claim_filing_call"].includes(normalizedKind)) {
+    if (!["action_batch", "claim_filing_call", PDF_RESOLUTION_KIND].includes(normalizedKind)) {
       throw new TypeError("Unsupported approval challenge kind.");
     }
     const normalizedTtl = Math.max(1, Math.min(Number(ttlSeconds || 0), 3600));

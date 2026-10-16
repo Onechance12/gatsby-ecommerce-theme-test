@@ -93,9 +93,11 @@ test("plan refuses every materially altered display; receipts require verified b
 async function enabledCandidate(t) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "enabled-pdf-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const file of ["scope.mjs", "operator-coordinator.mjs", "reviewed-claim-packet.mjs", "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs", "quo-sms-release.mjs", "quo-sms-contract.mjs"]) {
+  for (const file of ["scope.mjs", "operator-coordinator.mjs", "pdf-receipt-resolution.mjs", "pdf-receipt-resolution-release.mjs", "reviewed-claim-packet.mjs", "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs", "quo-sms-release.mjs", "quo-sms-contract.mjs"]) {
     await copyFile(new URL(`./${file}`, import.meta.url), path.join(root, file));
   }
+  const inactiveResolution = await readFile(new URL("./pdf-receipt-resolution-release.mjs", import.meta.url), "utf8");
+  await writeFile(path.join(root, "pdf-receipt-resolution-release.mjs"), inactiveResolution.replace(/enabled: (?:true|false)/, "enabled: false"));
   const release = await readFile(new URL("./pdf-upload-release.mjs", import.meta.url), "utf8");
   await writeFile(path.join(root, "pdf-upload-release.mjs"), release.replace("enabled: false", "enabled: true")
     .replace('policySha256: ""', `policySha256: "${"a".repeat(64)}"`).replace('bridgeCommit: ""', `bridgeCommit: "${"b".repeat(40)}"`));
