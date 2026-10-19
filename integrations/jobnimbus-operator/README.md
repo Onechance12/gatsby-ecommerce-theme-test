@@ -1,5 +1,35 @@
 # JobNimbus Operator for Mac
 
+## Read-only PDF diagnosis and focused instruction candidate (2026-10-19)
+
+The native `pdf_receipt_diagnose` tool separates troubleshooting from approval.
+It accepts only an exact batch/file/document triple and uses the existing
+read-only receipt route with fresh current-policy/identity/build attestation.
+It reports original/observed privacy, exact metadata and byte proof, or precise
+allowlisted URL-rejection causes and fixed host categories with a hostname hash.
+No signed URL, raw hostname, provider body or credential is returned.
+
+The diagnostic creates/consumes no approval, changes no ledger or provider state,
+releases no hold and never resumes an upload. Tests prove the original receipt
+and approval store remain byte-for-byte unchanged, an existing native approval
+remains usable, unsafe response fields fail closed, and wrong-file/authority
+overrides are refused. Trust destinations, duplicate guards and action policy
+are not expanded. The same classifier powers actual transport enforcement and
+diagnostic output, so different URL causes are no longer collapsed into one label.
+When a receipt/plan already supplies an immutable file ID, PDF checks fresh-read
+that exact record rather than repeatedly enumerating the contact index. Identity,
+number, Insurance type, live owner and active/open eligibility are still checked.
+
+The skill entrypoint now routes to mode-specific references rather than loading
+all calling/reporting/payload procedures for every request. The detailed approval,
+recovery, runtime and effect restrictions remain in linked references and code.
+
+This candidate is built/tested locally, not installed or deployed. A coordinated
+versioned release must retain the existing policy, owner, expiry, eight actions,
+#2628 exclusion, historical fingerprints and independent connection boundaries.
+Development approval does not deploy or activate the candidate. No client effect
+is authorized by tool maintenance or installation.
+
 ## PDF verifier transport maintenance (2026-10-19)
 
 The bridge retains PDF download authentication only across redirects within the

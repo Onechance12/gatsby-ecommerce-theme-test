@@ -7,6 +7,27 @@ export const providerId = (id) => typeof id === "string" && /^[A-Za-z0-9_-]{8,10
 export const exactKeys = (value, keys) => Boolean(value && Object.getPrototypeOf(value) === Object.prototype
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)));
 
+export const PDF_TRANSPORT_REASONS = Object.freeze(["untrusted_destination", "invalid_redirect", "redirect_not_allowed", "redirect_limit",
+  "http_status", "timeout", "network_failure", "read_failure", "missing_body", "body_too_large", "invalid_provider_id", "invalid_reservation"]);
+export const PDF_URL_REJECTIONS = Object.freeze(["malformed_url", "embedded_credentials", "fragment", "insecure_protocol", "non_default_port", "disallowed_hostname"]);
+export const PDF_HOST_CATEGORIES = Object.freeze(["jobnimbus_app", "jobnimbus_api", "jobnimbus_api3", "jobnimbus_files", "jobnimbus_other",
+  "s3_standard", "s3_dualstack", "s3_accelerate", "aws_other", "cloudfront", "loopback", "other"]);
+
+// Shared by the bridge and native wrapper: only fixed labels, bounded numbers
+// and a one-way hostname fingerprint, never a signed URL or arbitrary hostname.
+export function safePdfTransportDiagnostic(value = {}) {
+  return {
+    reason: PDF_TRANSPORT_REASONS.includes(value.reason) ? value.reason : "network_failure",
+    operation: ["read", "put", "reserve", "complete"].includes(value.operation) ? value.operation : "read",
+    destination: ["jobnimbus", "storage"].includes(value.destination) ? value.destination : "untrusted",
+    ...(Number.isInteger(value.hop) && value.hop >= 0 && value.hop <= 3 ? { hop: value.hop } : {}),
+    ...(Number.isInteger(value.upstreamStatus) && value.upstreamStatus >= 100 && value.upstreamStatus <= 599 ? { upstreamStatus: value.upstreamStatus } : {}),
+    ...(PDF_URL_REJECTIONS.includes(value.urlRejection) ? { urlRejection: value.urlRejection } : {}),
+    ...(PDF_HOST_CATEGORIES.includes(value.hostCategory) ? { hostCategory: value.hostCategory } : {}),
+    ...(typeof value.hostFingerprint === "string" && /^[a-f0-9]{64}$/.test(value.hostFingerprint) ? { hostFingerprint: value.hostFingerprint } : {})
+  };
+}
+
 export function validatePdfMetadata(value) {
   if (!value || typeof value.filename !== "string"
     || !/^[A-Za-z0-9][A-Za-z0-9 _().-]{0,154}\.pdf$/i.test(value.filename)

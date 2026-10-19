@@ -7,9 +7,28 @@ const serverUrl = new URL("./server.mjs", import.meta.url);
 const coordinatorUrl = new URL("./operator-coordinator.mjs", import.meta.url);
 const scopeUrl = new URL("./scope.mjs", import.meta.url);
 
+// Validate the reachable instruction contract, not a requirement to paste all
+// modes into the entrypoint. Every preserved guard must still be discoverable.
+async function readSkillContract() {
+  const entry = await readFile(skillUrl, "utf8");
+  const paths = [...new Set([...entry.matchAll(/\]\((references\/[a-z-]+\.md)\)/g)].map(match => match[1]))];
+  return [entry, ...await Promise.all(paths.map(relative => readFile(new URL(relative, skillUrl), "utf8")))].join("\n");
+}
+
+test("the focused entrypoint is small and every task mode is linked to maintained instructions", async () => {
+  const entry = await readFile(skillUrl, "utf8");
+  assert.ok(entry.length < 6000);
+  for (const name of ["session-and-approvals", "action-payloads", "pdf-uploads-and-notes", "pdf-receipt-resolution", "quo-sms", "retell-claim-filing", "management-reports"]) {
+    assert.ok(entry.includes(`references/${name}.md`));
+  }
+  assert.match(entry, /Source code is not an\s+activation/);
+  assert.match(entry, /Diagnosis creates\/consumes no approval/);
+  assert.match(await readSkillContract(), /raw.*send.*(?:blocked|unavailable|impossible)/is);
+});
+
 test("evidence repair guidance distinguishes proof-scoped reads, existing tasks and the unreleased boundary", async () => {
   const [skill, workflow, readme, server] = await Promise.all([
-    readFile(skillUrl, "utf8"),
+    readSkillContract(),
     readFile(new URL("../skills/jobnimbus-operator/references/evidence-review.md", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(serverUrl, "utf8")
@@ -27,7 +46,7 @@ test("evidence repair guidance distinguishes proof-scoped reads, existing tasks 
 });
 
 test("status payload documentation uses reference-level provider evidence", async () => {
-  const skill = await readFile(skillUrl, "utf8");
+  const skill = await readSkillContract();
   const statusSection = skill.match(
     /`jobnimbus\.update_status`:[\s\S]*?`jobnimbus\.ensure_current_task`:/
   )?.[0] || "";
@@ -39,7 +58,7 @@ test("status payload documentation uses reference-level provider evidence", asyn
 });
 
 test("status evidence documentation pins only provider-verifiable sources", async () => {
-  const skill = await readFile(skillUrl, "utf8");
+  const skill = await readSkillContract();
   const statusSection = skill.match(
     /`jobnimbus\.update_status`:[\s\S]*?`jobnimbus\.ensure_current_task`:/
   )?.[0] || "";
@@ -77,7 +96,7 @@ test("status evidence documentation pins only provider-verifiable sources", asyn
 });
 
 test("status evidence documentation pins exact provider-record eligibility", async () => {
-  const skill = await readFile(skillUrl, "utf8");
+  const skill = await readSkillContract();
   const statusSection = skill.match(
     /`jobnimbus\.update_status`:[\s\S]*?`jobnimbus\.ensure_current_task`:/
   )?.[0] || "";
@@ -111,7 +130,7 @@ test("Retell candidate documents complete history separately from preview and ac
 
 test("manual reconciliation tool is exact-batch and never an automatic retry", async () => {
   const [skill, server, coordinator] = await Promise.all([
-    readFile(skillUrl, "utf8"),
+    readSkillContract(),
     readFile(serverUrl, "utf8"),
     readFile(coordinatorUrl, "utf8")
   ]);
@@ -131,7 +150,7 @@ test("manual reconciliation tool is exact-batch and never an automatic retry", a
 
 test("plugin documentation pins build, dual lanes, runtime gates, and fresh action attestation", async () => {
   const [skill, readme, coordinator, scope, server] = await Promise.all([
-    readFile(skillUrl, "utf8"),
+    readSkillContract(),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(coordinatorUrl, "utf8"),
     readFile(scopeUrl, "utf8"),
@@ -172,7 +191,7 @@ test("plugin documentation pins build, dual lanes, runtime gates, and fresh acti
 
 test("Retell documentation and server expose only the approval-gated single-file claim lane", async () => {
   const [skill, readme, coordinator, server] = await Promise.all([
-    readFile(skillUrl, "utf8"),
+    readSkillContract(),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(coordinatorUrl, "utf8"),
     readFile(serverUrl, "utf8")
@@ -209,7 +228,7 @@ test("Retell documentation and server expose only the approval-gated single-file
 });
 
 test("startup permits only enumerated receipt recovery before full readiness", async () => {
-  const skill = await readFile(skillUrl, "utf8");
+  const skill = await readSkillContract();
 
   assert.match(skill, /Do not initially require `ready:true`/i);
   assert.match(skill, /`recoveryBoundaryAttested:true`/);

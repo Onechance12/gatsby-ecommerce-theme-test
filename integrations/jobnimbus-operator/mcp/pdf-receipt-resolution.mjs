@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PDF_UPLOAD_TYPE, exactKeys, providerId, validatePdfMetadata } from "./pdf-upload-contract.mjs";
+import { PDF_UPLOAD_TYPE, exactKeys, providerId, validatePdfMetadata, safePdfTransportDiagnostic } from "./pdf-upload-contract.mjs";
 
 export const PDF_RESOLUTION_KIND = "pdf_receipt_resolution";
 export const PDF_RESOLUTION_DISPOSITION = "accept_existing_nonprivate_pdf";
@@ -18,6 +18,45 @@ export function validatePdfResolutionInput(input) {
     || input.query.replace(/^#/, "") === "2628" || !providerId(input.documentId)
     || input.acceptedIsPrivate !== false) fail();
   return { ...input, query: `#${input.query.replace(/^#/, "")}` };
+}
+
+export function validatePdfDiagnosticInput(input) {
+  if (!exactKeys(input, ["batchId", "query", "documentId"])) fail();
+  const { acceptedIsPrivate, ...request } = validatePdfResolutionInput({ ...input, acceptedIsPrivate: false });
+  return request;
+}
+
+export const PDF_DIAGNOSTIC_CHECKS = Object.freeze(["document_present", "document_id", "exact_file_binding", "filename_present",
+  "filename_matches", "privacy_present", "privacy_matches", "metadata_size_matches", "not_deleted_or_archived",
+  "unique_candidate", "strict_size", "privacy_boolean"]);
+
+export function assertPdfDiagnostic(response, input) {
+  const request = validatePdfDiagnosticInput(input);
+  const keys = ["mode", "batchId", "fileId", "fileNumber", "documentId", "sourceRowSha256", "sourceIntentDigest",
+    "identityProvenance", "originalMetadata", "observedIsPrivate", "metadataChecks", "download", "readOnly",
+    "providerWrites", "receiptWrites", "approvalRequired", "fileHoldReleased", "originalUploadReplayAllowed"];
+  const download = response?.download;
+  const checks = response?.metadataChecks;
+  if (!exactKeys(response, keys) || response.mode !== "pdf_receipt_diagnostic" || response.batchId !== request.batchId
+    || response.documentId !== request.documentId || response.fileNumber !== request.query.slice(1) || !providerId(response.fileId)
+    || typeof response.sourceRowSha256 !== "string" || !SHA.test(response.sourceRowSha256)
+    || typeof response.sourceIntentDigest !== "string" || !SHA.test(response.sourceIntentDigest)
+    || !["preserved_reservation_id", "human_selected_live_candidate_no_durable_reservation_id"].includes(response.identityProvenance)
+    || ![true, false, null].includes(response.observedIsPrivate) || response.readOnly !== true
+    || ["providerWrites", "receiptWrites", "approvalRequired", "fileHoldReleased", "originalUploadReplayAllowed"].some((key) => response[key] !== false)
+    || !exactKeys(checks, PDF_DIAGNOSTIC_CHECKS) || Object.values(checks).some((value) => typeof value !== "boolean")
+    || !exactKeys(download, ["status", "contentVerified", "diagnostic"])
+    || !["not_attempted", "verified", "blocked", "bytes_mismatch"].includes(download.status)
+    || download.contentVerified !== (download.status === "verified")) fail();
+  const metadata = validatePdfMetadata(response.originalMetadata);
+  if (metadata.isPrivate !== true || typeof metadata.sha256 !== "string" || canonical(metadata) !== canonical(response.originalMetadata)) fail();
+  if (download.status === "blocked") {
+    if (!download.diagnostic || download.diagnostic.operation !== "read"
+      || canonical(download.diagnostic) !== canonical(safePdfTransportDiagnostic(download.diagnostic))) fail();
+  } else if (download.diagnostic !== null) fail();
+  const metadataReady = Object.entries(checks).every(([key, passed]) => key === "privacy_matches" || passed);
+  if ((download.status === "not_attempted") === metadataReady
+    || checks.privacy_matches !== (response.observedIsPrivate === metadata.isPrivate)) fail();
 }
 
 // The original receipt is never rewritten, completed, resumed or replayed.

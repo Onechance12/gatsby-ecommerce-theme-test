@@ -101,7 +101,7 @@ import { createLorPdf } from "./documents/lor.js";
 import { createApprovedPdfService, pdfDocumentMetadata } from "./jobnimbus/approved-pdf.js";
 import { createPdfUploadTransport, PdfProviderError } from "./jobnimbus/pdf-upload-transport.js";
 import { PDF_UPLOAD_TYPE, validatePdfMetadata, providerId as validPdfProviderId } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
-import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, pdfResolutionSource, pdfResolutionProof,
+import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, validatePdfDiagnosticInput, assertPdfDiagnostic, pdfResolutionSource, pdfResolutionProof,
   pdfResolutionDigest, resolutionHash, validPdfReceiptResolution } from "../integrations/jobnimbus-operator/mcp/pdf-receipt-resolution.mjs";
 import { createDocumentResearchService, DOCUMENT_RESEARCH_ROUTES } from "./documents/research-access.js";
 import { createDocumentResearchProvider } from "./documents/research-provider.js";
@@ -8271,7 +8271,8 @@ function approvedPdfService() {
     ...transport,
     resolveFile: async (query, expectedFileId) => {
       const number = query.replace(/^#/, "");
-      if (CHANCE_OPERATOR_RUN_MANIFEST?.assignmentMode === "live_assigned") {
+      const liveAssigned = CHANCE_OPERATOR_RUN_MANIFEST?.assignmentMode === "live_assigned";
+      if (liveAssigned && !expectedFileId) {
         const { contact } = await findChanceContact(query, { expectedFileId });
         assertOperatorContactScope(contact);
         if (String(contact.number || contact.recid) !== number) {
@@ -8279,19 +8280,20 @@ function approvedPdfService() {
         }
         return compactContact(contact);
       }
-      const binding = CHANCE_OPERATOR_RUN_MANIFEST?.files.find((row) => row.number === number);
-      if (!binding || (expectedFileId && binding.fileId !== expectedFileId)) {
+      const binding = liveAssigned ? { fileId: expectedFileId }
+        : CHANCE_OPERATOR_RUN_MANIFEST?.files.find((row) => row.number === number);
+      if (!binding || !validPdfProviderId(binding.fileId) || (expectedFileId && binding.fileId !== expectedFileId)) {
         conflictError("PDF target is not bound to the exact approved manifest file.");
       }
-      // Numeric upload queries already have an immutable ID binding. Read just
-      // that record, never re-enumerate the company contact index for an upload.
+      // A receipt/plan already binds the exact ID. Fresh-read only that record;
+      // scope assertion still rechecks live ownership, Insurance type and state.
       const contact = await jobNimbus(`/contacts/${encodeURIComponent(binding.fileId)}`, { approvedPdf: true });
       assertOperatorContactScope(contact);
       if (!isExplicitlyOpenActive(contact)
         || String(contact.jnid || contact.id || "") !== binding.fileId
         || (contact.jnid !== undefined && contact.id !== undefined && contact.jnid !== contact.id)
         || String(contact.number) !== number
-        || !chanceManifestFileBinding(CHANCE_OPERATOR_RUN_MANIFEST, contact.number, binding.fileId)) {
+        || (!liveAssigned && !chanceManifestFileBinding(CHANCE_OPERATOR_RUN_MANIFEST, contact.number, binding.fileId))) {
         conflictError("PDF upload target must be an active exact assigned manifest file.");
       }
       return compactContact(contact);
@@ -11915,6 +11917,7 @@ async function actionBatchReceipts(input = {}) {
     error.statusCode = 403;
     throw error;
   }
+  if (Object.hasOwn(input, "pdfDiagnostic")) return diagnosePdfReceipt(input);
   const batchId = String(input.batchId || "").trim();
   const fileNumber = String(input.fileNumber || "").trim().replace(/^#/, "");
   if (fileNumber && !/^\d+$/.test(fileNumber)) badRequest("fileNumber must be an exact numeric JobNimbus number.");
@@ -11953,6 +11956,43 @@ async function actionBatchReceipts(input = {}) {
     count: rows.length,
     receipts: rows.map((row) => minimizedActionBatchReceipt(row))
   };
+}
+
+async function diagnosePdfReceipt(input) {
+  if (Object.keys(input).sort().join(",") !== "batchId,pdfDiagnostic,runPolicy") badRequest("PDF diagnosis accepts only its exact receipt, candidate and pinned policy.");
+  if (Object.keys(input.pdfDiagnostic || {}).sort().join(",") !== "documentId,query") badRequest("PDF diagnosis accepts only an exact file and document ID.");
+  let request;
+  try { request = validatePdfDiagnosticInput({ batchId: input.batchId, ...input.pdfDiagnostic }); }
+  catch { badRequest("An exact PDF diagnostic request is required."); }
+  assertOperatorReceiptBoundaryReady();
+  const runPolicy = actionBatchRunPolicy(input);
+  if (!runPolicy?.enforced || runPolicy.id !== CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID
+    || !runPolicy.allowedActionTypes.includes(PDF_UPLOAD_TYPE)) conflictError("PDF diagnosis requires the current live-assigned PDF policy.");
+  const policy = await operatorRunPolicy();
+  if (policy.receipts.unresolvedCount !== 0 || policy.receipts.hardBlockedCount !== 0
+    || (policy.legacyIsolation.configured && !policy.legacyIsolation.valid)) conflictError("The global receipt boundary is not ready for diagnosis.");
+  const ledger = await readActionBatchLedger();
+  const row = ledger.find((item) => item.id === request.batchId && item.principalHash === actionApprovalIdentityHash());
+  if (!row || row.runPolicyId !== runPolicy.id || row.runPolicySha256 !== runPolicy.sha256
+    || resolveChanceLegacyHistoricalIsolation(ledger).isolatedIds.has(request.batchId)) conflictError("The PDF diagnostic receipt is not owned by this current-policy operator.");
+  let source;
+  try {
+    source = pdfResolutionSource(row);
+    const preservedId = source.original.manualQuarantine.providerDocumentId;
+    if (row.pdfReceiptResolution || source.file.number !== request.query.slice(1)
+      || source.intent.reconciliation.beforeIds.includes(request.documentId)
+      || (preservedId && preservedId !== request.documentId)) throw new Error();
+  } catch { conflictError("The diagnostic requires an unchanged exact single-PDF quarantine and candidate. No hold was changed."); }
+  const findings = await approvedPdfService().diagnose(source.intent, request.documentId);
+  const current = (await readActionBatchLedger()).find((item) => item.id === row.id);
+  if (current?.pdfReceiptResolution || pdfResolutionSource(current).sourceRowSha256 !== source.sourceRowSha256) conflictError("The source receipt changed during diagnosis. No result may be used as approval.");
+  const result = { mode: "pdf_receipt_diagnostic", batchId: row.id, fileId: source.file.id, fileNumber: source.file.number,
+    documentId: request.documentId, sourceRowSha256: source.sourceRowSha256, sourceIntentDigest: source.intent.intentDigest,
+    identityProvenance: source.original.manualQuarantine.providerDocumentId ? "preserved_reservation_id" : "human_selected_live_candidate_no_durable_reservation_id",
+    originalMetadata: source.metadata, ...findings, readOnly: true, providerWrites: false, receiptWrites: false,
+    approvalRequired: false, fileHoldReleased: false, originalUploadReplayAllowed: false };
+  assertPdfDiagnostic(result, request);
+  return result;
 }
 
 async function actionBatchReconcile(input = {}) {

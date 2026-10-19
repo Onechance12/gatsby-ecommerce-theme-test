@@ -782,6 +782,12 @@ const operationSchema = z.object({
 
 if (PDF_RECEIPT_RESOLUTION_ENABLED) {
   register(
+    "pdf_receipt_diagnose",
+    "Diagnose one exact PDF quarantine without creating or consuming an approval. Reports fresh metadata, original versus observed privacy, exact-byte verification or a safe specific download rejection. No upload, access change, receipt update, hold release, draft or send. Use for troubleshooting before a resolution plan; do not automatically repeat unchanged failed checks.",
+    { batchId: z.string().uuid(), query: z.string().regex(/^#?\d+$/), documentId: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/) },
+    (input) => OPERATOR.diagnosePdfReceipt(input)
+  );
+  register(
     "pdf_receipt_resolution_plan",
     "Verify one exact current-policy PDF quarantine for a new human-approved acceptance of existing normal JobNimbus access. Read-only provider checks; no upload, access change, draft or email. Show the original private request, actual nonprivate setting, exact PDF bytes, source receipt hash, identity provenance, expiry and approvalDigest. This is not another reconciliation attempt or upload approval.",
     { batchId: z.string().uuid(), query: z.string().regex(/^#?\d+$/), documentId: z.string().regex(/^[A-Za-z0-9_-]{8,100}$/), acceptedIsPrivate: z.literal(false) },

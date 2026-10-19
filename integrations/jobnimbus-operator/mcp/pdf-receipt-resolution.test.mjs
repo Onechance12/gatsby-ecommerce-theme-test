@@ -6,7 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, pdfResolutionSource, pdfResolutionProof,
   pdfResolutionDigest, resolutionHash, validPdfReceiptResolution, assertPdfResolutionPlan,
-  assertPdfResolutionReceipt } from "./pdf-receipt-resolution.mjs";
+  assertPdfResolutionReceipt, validatePdfDiagnosticInput, assertPdfDiagnostic, PDF_DIAGNOSTIC_CHECKS } from "./pdf-receipt-resolution.mjs";
 import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { PDF_RECEIPT_RESOLUTION_ENABLED, createOperatorCoordinator } from "./operator-coordinator.mjs";
 import { validatePdfReceiptResolutionRelease } from "./pdf-receipt-resolution-release.mjs";
@@ -47,9 +47,40 @@ function receipt(prepared = plan()) {
     originalReceiptStatus: "manual_quarantined", originalUploadReplayAllowed: false };
 }
 
+const DIAGNOSTIC_REQUEST = { batchId: BATCH, query: REQUEST.query, documentId: REQUEST.documentId };
+function diagnosticResponse() {
+  const row = sourceRow();
+  const source = pdfResolutionSource(row);
+  return { mode: "pdf_receipt_diagnostic", batchId: BATCH, fileId: source.file.id, fileNumber: source.file.number,
+    documentId: REQUEST.documentId, sourceRowSha256: source.sourceRowSha256, sourceIntentDigest: source.intent.intentDigest,
+    identityProvenance: "human_selected_live_candidate_no_durable_reservation_id", originalMetadata: source.metadata,
+    observedIsPrivate: false, metadataChecks: Object.fromEntries(PDF_DIAGNOSTIC_CHECKS.map((key) => [key, key !== "privacy_matches"])),
+    download: { status: "blocked", contentVerified: false, diagnostic: { reason: "untrusted_destination", operation: "read", destination: "untrusted",
+      hop: 1, urlRejection: "disallowed_hostname", hostCategory: "jobnimbus_api3", hostFingerprint: "f".repeat(64) } },
+    readOnly: true, providerWrites: false, receiptWrites: false, approvalRequired: false, fileHoldReleased: false, originalUploadReplayAllowed: false };
+}
+
+test("PDF diagnosis input has no approval, privacy-acceptance or execution authority", () => {
+  assert.deepEqual(validatePdfDiagnosticInput(DIAGNOSTIC_REQUEST), DIAGNOSTIC_REQUEST);
+  for (const patch of [{ acceptedIsPrivate: false }, { execute: true }, { operatorScope: "company" }, { query: "#2628" }, { documentId: "bad" }]) {
+    assert.throws(() => validatePdfDiagnosticInput({ ...DIAGNOSTIC_REQUEST, ...patch }));
+  }
+  assertPdfDiagnostic(diagnosticResponse(), DIAGNOSTIC_REQUEST);
+  for (const mutate of [
+    (r) => { r.fileHoldReleased = true; }, (r) => { r.approvalRequired = true; }, (r) => { r.providerWrites = true; },
+    (r) => { r.receiptWrites = true; }, (r) => { r.approvalDigest = "a".repeat(64); },
+    (r) => { r.download.contentVerified = true; }, (r) => { r.fileNumber = "990002"; },
+    (r) => { r.download.diagnostic.url = "https://private.example/?token=secret"; },
+    (r) => { r.download.diagnostic.hostCategory = "private.example"; },
+    (r) => { r.download.diagnostic.operation = "put"; },
+    (r) => { r.metadataChecks.privacy_matches = true; }
+  ]) { const result = diagnosticResponse(); mutate(result); assert.throws(() => assertPdfDiagnostic(result, DIAGNOSTIC_REQUEST)); }
+});
+
 test("resolution activation stays independent; inactive candidate cannot connect or execute", async () => {
   const coordinator = createOperatorCoordinator({ version: "synthetic", bridgeRequest: () => { throw new Error("MUST NOT CONNECT"); } });
   if (!PDF_RECEIPT_RESOLUTION_ENABLED) await assert.rejects(coordinator.planPdfReceiptResolution(REQUEST), /not activated/);
+  if (!PDF_RECEIPT_RESOLUTION_ENABLED) await assert.rejects(coordinator.diagnosePdfReceipt(DIAGNOSTIC_REQUEST), /not activated/);
   await assert.rejects(coordinator.executePdfReceiptResolution("unknown"), /No unconsumed/);
 });
 
@@ -156,13 +187,18 @@ async function enabled(t) {
   const fixtures = await import(pathToFileURL(path.join(root, "fixtures.mjs")));
   const { createOperatorCoordinator: create } = await import(pathToFileURL(path.join(root, "operator-coordinator.mjs")));
   const state = { whoami: fixtures.whoamiFixture(), session: fixtures.sessionFixture(), policy: fixtures.policyFixture(),
-    now: Date.parse("2090-01-01T00:00:00Z"), mutatePlan: null, mutateReceipt: null, failExecute: false };
+    now: Date.parse("2090-01-01T00:00:00Z"), mutatePlan: null, mutateReceipt: null, mutateDiagnostic: null, failExecute: false };
   state.whoami.identity.jobNimbusOwnerId = "synthetic-owner";
   const requests = [], approvals = new Map();
   let prepared;
   const coordinator = create({ version: "synthetic", approvals, now: () => state.now, bridgeRequest: async (method, route, body) => {
     requests.push({ method, route, body: structuredClone(body) });
     if (method === "GET") return structuredClone(route === "/auth/whoami" ? state.whoami : route === "/api/v1/session" ? state.session : state.policy);
+    if (route === "/ops/action-batch-receipts") {
+      assert.deepEqual(body, { batchId: BATCH, pdfDiagnostic: { query: REQUEST.query, documentId: REQUEST.documentId },
+        runPolicy: { id: "chance-live-assigned-sms-v1", sha256: "a".repeat(64) } });
+      const result = diagnosticResponse(); state.mutateDiagnostic?.(result); return structuredClone(result);
+    }
     assert.equal(route, "/ops/action-batch-reconcile");
     if (!body.execute) {
       const row = sourceRow();
@@ -195,6 +231,26 @@ test("native recovery retains hidden challenge, exact boundary and one-use appro
   assert.equal(f.requests.filter((r) => r.body?.execute).length, 1);
   assert.equal(f.approvals.size, 0);
   await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest), /No unconsumed/);
+});
+
+test("native PDF diagnosis preserves the pending approval and uses only the read-only receipt route", async (t) => {
+  const f = await enabled(t);
+  const prepared = await f.coordinator.planPdfReceiptResolution(REQUEST);
+  const before = [...f.approvals.keys()];
+  const result = await f.coordinator.diagnosePdfReceipt(DIAGNOSTIC_REQUEST);
+  assertPdfDiagnostic(result, DIAGNOSTIC_REQUEST);
+  assert.deepEqual([...f.approvals.keys()], before);
+  assert.equal(f.requests.filter((r) => r.route === "/ops/action-batch-receipts").length, 1);
+  assert.equal(f.requests.filter((r) => r.body?.execute === true).length, 0);
+  await f.coordinator.executePdfReceiptResolution(prepared.approvalDigest);
+});
+
+test("native PDF diagnosis rejects hostile or authority-bearing response fields", async (t) => {
+  const f = await enabled(t);
+  f.state.mutateDiagnostic = (result) => { result.download.diagnostic.url = "https://private.example/?secret=unsafe"; };
+  await assert.rejects(f.coordinator.diagnosePdfReceipt(DIAGNOSTIC_REQUEST), /incomplete, changed/);
+  assert.equal(f.approvals.size, 0);
+  assert.equal(f.requests.filter((r) => r.body?.execute).length, 0);
 });
 
 for (const scenario of ["restart", "newer_plan", "expired", "boot", "build", "policy", "runtime", "bad_receipt", "unknown"]) {
