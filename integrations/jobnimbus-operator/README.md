@@ -1,5 +1,30 @@
 # JobNimbus Operator for Mac
 
+## PDF verifier transport maintenance (2026-10-19)
+
+The bridge retains PDF download authentication only across redirects within the
+same trusted JobNimbus origin. Every cross-origin hop strips it permanently;
+storage redirects cannot restore it. The existing host allowlist, four-request
+bound, deadline, byte limits, metadata/hash proof and no-retry rules remain.
+PUT requests still never follow redirects.
+
+Fail-closed HTTP 409 responses now contain only fixed failure categories,
+operation/destination categories, bounded hop numbers and safe upstream HTTP
+status. Structured bridge logs contain the same minimized diagnostic. They
+never contain provider bodies, signed URLs, credentials or raw exception text.
+Synthetic tests cover redirect authentication, credential stripping, safe
+diagnostics and unchanged receipts after a read-only verification failure.
+
+Chance approved repair/deployment and a coordinated versioned Operator release,
+not a client effect. Pin the provider-attested deployed commit in a new package;
+never edit a running cache or bypass exact-build checks. Keep the live-assigned
+policy/hash/owner/actions/expiry, #2628 exclusion, historical receipt hashes,
+file quarantines and all approval gates unchanged. After fresh attestation,
+an exact read-only verification pilot may check the repaired path. Upload,
+access changes, receipt disposition, draft creation and sending each remain
+separately approval-gated. A reproduced redirect defect is not proof that it
+caused every live verification failure; use the new diagnostics if one remains.
+
 ## Inactive exact Quo SMS candidate (2026-10-14)
 
 `mcp/quo-sms-release.mjs` defaults **disabled**. This source adds a dedicated

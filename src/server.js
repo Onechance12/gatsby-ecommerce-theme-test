@@ -99,7 +99,7 @@ import {
 } from "./jobnimbus/approved-note.js";
 import { createLorPdf } from "./documents/lor.js";
 import { createApprovedPdfService, pdfDocumentMetadata } from "./jobnimbus/approved-pdf.js";
-import { createPdfUploadTransport } from "./jobnimbus/pdf-upload-transport.js";
+import { createPdfUploadTransport, PdfProviderError } from "./jobnimbus/pdf-upload-transport.js";
 import { PDF_UPLOAD_TYPE, validatePdfMetadata, providerId as validPdfProviderId } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
 import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, pdfResolutionSource, pdfResolutionProof,
   pdfResolutionDigest, resolutionHash, validPdfReceiptResolution } from "../integrations/jobnimbus-operator/mcp/pdf-receipt-resolution.mjs";
@@ -908,6 +908,9 @@ const server = createServer(async (req, res) => {
         : {}
     );
   } catch (error) {
+    if (error instanceof PdfProviderError) {
+      console.warn(JSON.stringify({ type: "pdf_provider_failure", ...error.diagnostic }));
+    }
     const retryAfterSeconds = Number(error?.retryAfterSeconds);
     send(
       res,
