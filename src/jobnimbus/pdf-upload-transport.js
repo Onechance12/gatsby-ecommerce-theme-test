@@ -1,24 +1,11 @@
 import { fetchBoundedJson } from "../http/bounded-json.js";
-import { PDF_MAX_BYTES, providerId } from "../../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
-
-const DIAGNOSTIC_REASONS = new Set([
-  "untrusted_destination", "invalid_redirect", "redirect_not_allowed", "redirect_limit",
-  "http_status", "timeout", "network_failure", "read_failure", "missing_body",
-  "body_too_large", "invalid_provider_id", "invalid_reservation"
-]);
+import { PDF_MAX_BYTES, providerId, pdfHash, safePdfTransportDiagnostic } from "../../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
 
 // Only fixed categories and bounded numbers can leave this transport. Never attach
 // a provider response, signed URL, credential, client content or raw exception.
 export class PdfProviderError extends Error {
   constructor(reason, context = {}) {
-    const diagnostic = Object.freeze({
-      reason: DIAGNOSTIC_REASONS.has(reason) ? reason : "network_failure",
-      operation: ["read", "put", "reserve", "complete"].includes(context.operation) ? context.operation : "read",
-      destination: ["jobnimbus", "storage"].includes(context.destination) ? context.destination : "untrusted",
-      ...(Number.isInteger(context.hop) && context.hop >= 0 && context.hop <= 3 ? { hop: context.hop } : {}),
-      ...(Number.isInteger(context.upstreamStatus) && context.upstreamStatus >= 100 && context.upstreamStatus <= 599
-        ? { upstreamStatus: context.upstreamStatus } : {})
-    });
+    const diagnostic = Object.freeze(safePdfTransportDiagnostic({ ...context, reason }));
     super(`PDF provider request failed [${Object.entries(diagnostic).map(([key, value]) => `${key}=${value}`).join("; ")}]; inspect the durable receipt before any retry.`);
     this.name = "PdfProviderError";
     this.statusCode = 409;
@@ -27,15 +14,32 @@ export class PdfProviderError extends Error {
 }
 const fail = (reason, context) => { throw new PdfProviderError(reason, context); };
 const destinationCategory = (url) => ["app.jobnimbus.com", "api.jobnimbus.com"].includes(url.hostname) ? "jobnimbus" : "storage";
-export function trustedPdfStorageUrl(value, { allowLoopback = false } = {}) {
-  let url;
-  try { url = new URL(value); } catch { return false; }
-  if (url.username || url.password || url.hash) return false;
-  if (allowLoopback && url.protocol === "http:" && url.hostname === "127.0.0.1") return true;
-  return url.protocol === "https:" && (!url.port || url.port === "443")
-    && (/^(?:[a-z0-9-]+\.)*s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(url.hostname)
-      || url.hostname === "app.jobnimbus.com" || url.hostname === "api.jobnimbus.com");
+const standardS3Host = (host) => /^(?:[a-z0-9-]+\.)*s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(host);
+function hostCategory(host) {
+  const known = { "app.jobnimbus.com": "jobnimbus_app", "api.jobnimbus.com": "jobnimbus_api", "api3.jobnimbus.com": "jobnimbus_api3", "files.jobnimbus.com": "jobnimbus_files" };
+  if (Object.hasOwn(known, host)) return known[host];
+  if (host.endsWith(".jobnimbus.com")) return "jobnimbus_other";
+  if (standardS3Host(host)) return "s3_standard";
+  if (/^(?:[a-z0-9-]+\.)*s3\.dualstack\.[a-z0-9-]+\.amazonaws\.com$/.test(host)) return "s3_dualstack";
+  if (/^(?:[a-z0-9-]+\.)*s3-accelerate(?:\.dualstack)?\.amazonaws\.com$/.test(host)) return "s3_accelerate";
+  if (host.endsWith(".amazonaws.com")) return "aws_other";
+  if (host.endsWith(".cloudfront.net")) return "cloudfront";
+  return host === "127.0.0.1" ? "loopback" : "other";
 }
+export function pdfStorageUrlPolicy(value, { allowLoopback = false } = {}) {
+  let url;
+  try { url = new URL(value); } catch { return { allowed: false, urlRejection: "malformed_url" }; }
+  const diagnostic = { hostCategory: hostCategory(url.hostname), hostFingerprint: pdfHash(url.hostname) };
+  const reject = (urlRejection) => ({ allowed: false, ...diagnostic, urlRejection });
+  if (url.username || url.password) return reject("embedded_credentials");
+  if (url.hash) return reject("fragment");
+  if (allowLoopback && url.protocol === "http:" && url.hostname === "127.0.0.1") return { allowed: true, ...diagnostic };
+  if (url.protocol !== "https:") return reject("insecure_protocol");
+  if (url.port && url.port !== "443") return reject("non_default_port");
+  if (!standardS3Host(url.hostname) && !["app.jobnimbus.com", "api.jobnimbus.com"].includes(url.hostname)) return reject("disallowed_hostname");
+  return { allowed: true, ...diagnostic };
+}
+export const trustedPdfStorageUrl = (value, options) => pdfStorageUrlPolicy(value, options).allowed;
 
 export function createPdfUploadTransport({ apiKey, fileApiBase = "https://api.jobnimbus.com", fileBase = "https://app.jobnimbus.com/files", fetchImpl = fetch, allowLoopback = false }) {
   const permittedBase = (value, expected) => value === expected || (allowLoopback && (() => {
@@ -57,7 +61,8 @@ export function createPdfUploadTransport({ apiKey, fileApiBase = "https://api.jo
       let headers = options.headers;
       for (let hops = 0; hops < 4; hops++) {
         context = { operation: context.operation, hop: hops };
-        if (!trustedPdfStorageUrl(current, { allowLoopback })) fail("untrusted_destination", context);
+        const policy = pdfStorageUrlPolicy(current, { allowLoopback });
+        if (!policy.allowed) fail("untrusted_destination", { ...context, ...policy });
         const currentUrl = new URL(current);
         context.destination = destinationCategory(currentUrl);
         phase = "request";

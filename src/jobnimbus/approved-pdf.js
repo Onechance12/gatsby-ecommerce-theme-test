@@ -1,4 +1,5 @@
 import { validatePdfPayload, validatePdfMetadata, pdfProviderBody, pdfHash, providerId } from "../../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
+import { PdfProviderError } from "./pdf-upload-transport.js";
 
 const conflict = (message) => { const error = new Error(message); error.statusCode = 409; throw error; };
 const recordId = (row) => {
@@ -137,6 +138,48 @@ export function createApprovedPdfService(io) {
     return { applied: true, externalId: id };
   }
 
+  // A diagnostic is not a disposition plan: it makes no approval challenge,
+  // accepts no privacy change and has no reserve/PUT/complete or ledger path.
+  async function diagnose(intent, id) {
+    const metadata = validatePdfMetadata(intent.reconciliation);
+    if (!providerId(id) || intent.reconciliation.beforeIds.includes(id)) conflict("The PDF diagnostic requires one new exact candidate, not an upload retry.");
+    const query = `#${intent.fileNumber}`;
+    const file = await io.resolveFile(query, intent.fileId);
+    const before = await inventory(intent.fileId);
+    const row = before.rows.find((item) => recordId(item) === id);
+    const privacy = [row?.isPrivate, row?.is_private].filter((value) => value !== undefined);
+    const observedIsPrivate = privacy.length && privacy.every((value) => typeof value === "boolean" && value === privacy[0]) ? privacy[0] : null;
+    const sizes = fileSizes(row);
+    const metadataChecks = { ...pdfRecordChecks(row, id, intent.fileId, metadata),
+      unique_candidate: before.rows.filter((item) => fileNames(item).some((name) => typeof name === "string"
+        && name.toLowerCase() === metadata.filename.toLowerCase())).length === 1,
+      strict_size: sizes.length > 0 && sizes.every((size) => Number.isSafeInteger(size) && size === metadata.sizeBytes),
+      privacy_boolean: observedIsPrivate !== null };
+    const download = { status: "not_attempted", contentVerified: false, diagnostic: null };
+    if (Object.entries(metadataChecks).every(([key, passed]) => key === "privacy_matches" || passed)) {
+      try {
+        const bytes = await io.readBytes(id);
+        download.contentVerified = bytes.length === metadata.sizeBytes && pdfHash(bytes) === metadata.sha256;
+        download.status = download.contentVerified ? "verified" : "bytes_mismatch";
+      } catch (error) {
+        if (!(error instanceof PdfProviderError)) conflict("PDF diagnostic download was unavailable. No approval, receipt or provider state changed.");
+        download.status = "blocked";
+        download.diagnostic = error.diagnostic;
+      }
+    }
+    const after = await inventory(intent.fileId);
+    const afterRow = after.rows.find((item) => recordId(item) === id);
+    if (JSON.stringify(pdfRecordChecks(afterRow, id, intent.fileId, metadata)) !== JSON.stringify(pdfRecordChecks(row, id, intent.fileId, metadata))
+      || JSON.stringify(pdfDocumentMetadata(afterRow, intent.fileId))
+      !== JSON.stringify(pdfDocumentMetadata(row, intent.fileId))
+      || after.rows.filter((item) => fileNames(item).some((name) => typeof name === "string"
+        && name.toLowerCase() === metadata.filename.toLowerCase())).length !== before.rows.filter((item) => fileNames(item).some((name) => typeof name === "string"
+        && name.toLowerCase() === metadata.filename.toLowerCase())).length) conflict("The PDF diagnostic candidate changed during review. The hold remains.");
+    const current = await io.resolveFile(query, intent.fileId);
+    if (current.id !== file.id || String(current.number) !== String(file.number)) conflict("The PDF diagnostic file binding changed.");
+    return { observedIsPrivate, metadataChecks, download };
+  }
+
   // Read-only evidence for a NEW human-approved disposition. This does not
   // reinterpret the old upload approval or reserve/PUT/complete a document.
   async function verifyResolution(intent, id) {
@@ -163,5 +206,5 @@ export function createApprovedPdfService(io) {
     if (after.id !== file.id || String(after.number) !== String(file.number)) conflict("PDF resolution file binding changed.");
     return file;
   }
-  return { prepare, execute, reconcile, verifyResolution };
+  return { prepare, execute, reconcile, verifyResolution, diagnose };
 }

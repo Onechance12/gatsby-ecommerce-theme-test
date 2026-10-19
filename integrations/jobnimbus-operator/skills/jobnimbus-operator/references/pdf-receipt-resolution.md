@@ -1,7 +1,38 @@
 # Accepting an existing PDF's normal access
 
-Use only the separately activated, exact-build-pinned native
-`pdf_receipt_resolution_plan` and `pdf_receipt_resolution_execute` workflow.
+Use only the separately activated, exact-build-pinned native PDF tools.
+Diagnosis and approval are different modes; never use an approval plan as a
+repeated troubleshooting probe.
+
+## Read-only diagnosis
+
+For an in-scope request to investigate one existing PDF quarantine, call
+`pdf_receipt_diagnose` with exactly `{batchId,query,documentId}` after the normal
+session is attested. This requires no privacy acceptance or client-action
+approval. It creates/consumes no approval, performs no provider or receipt write,
+releases no hold, and never reuploads or retries the original action.
+
+The result separates original versus observed privacy, exact-file metadata,
+downloaded-byte verification and a blocked transport. A blocked download reports
+the specific rule: malformed URL, embedded credentials, fragment, insecure
+protocol, nondefault port or disallowed hostname. Known host families are fixed
+categories, and unknown hosts have only a one-way hostname fingerprint. Neither
+is permission to contact a new host. No signed URL, query/path, credential,
+provider body or raw exception should be printed or requested.
+
+Reuse the as-of diagnostic unless a relevant artifact, configuration or provider
+condition changed, or Chance explicitly requests a new check. Do not repeatedly
+run an unchanged failing diagnosis or resolution plan. A policy rejection does
+not prove a failed upload, missing PDF, wrong hostname or broken login.
+
+Metadata/hash verification is not approval to accept a privacy discrepancy.
+If a disposition is still needed, proceed to the separate plan below and obtain
+its exact approval. Software troubleshooting approval authorizes no client effect.
+
+## Receipt disposition
+
+Use `pdf_receipt_resolution_plan` and `pdf_receipt_resolution_execute` only for
+the new exact acceptance described below.
 This narrow lane resolves one current-policy, single-PDF, file-scoped
 quarantine after a new human approval. It does not change JobNimbus access,
 upload, reserve, complete, replace, delete or send anything. Development or

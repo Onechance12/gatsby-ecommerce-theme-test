@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createPdfUploadTransport, trustedPdfStorageUrl, PdfProviderError } from "./pdf-upload-transport.js";
+import { createPdfUploadTransport, trustedPdfStorageUrl, pdfStorageUrlPolicy, PdfProviderError } from "./pdf-upload-transport.js";
 import { PDF_MAX_BYTES } from "../../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
 
 test("upload transport permits only HTTPS provider/storage URLs and no embedded credentials", () => {
@@ -113,6 +113,42 @@ test("diagnostic construction cannot emit unreviewed strings or unsafe numbers",
   safeFailure("network_failure")(error);
   assert.deepEqual(error.diagnostic, { reason: "network_failure", operation: "read", destination: "untrusted" });
   assert.equal(Object.isFrozen(error.diagnostic), true);
+});
+
+test("destination diagnosis separates URL causes and known host families without expanding trust", () => {
+  for (const [url, reason, category] of [
+    ["not a URL", "malformed_url", undefined],
+    ["https://private:fixture-secret@app.jobnimbus.com/file", "embedded_credentials", "jobnimbus_app"],
+    ["https://app.jobnimbus.com/file#private", "fragment", "jobnimbus_app"],
+    ["http://app.jobnimbus.com/file", "insecure_protocol", "jobnimbus_app"],
+    ["https://app.jobnimbus.com:8443/file", "non_default_port", "jobnimbus_app"],
+    ["https://api3.jobnimbus.com/file", "disallowed_hostname", "jobnimbus_api3"],
+    ["https://files.jobnimbus.com/file", "disallowed_hostname", "jobnimbus_files"],
+    ["https://bucket.s3.dualstack.us-east-1.amazonaws.com/private?signature=fixture-secret", "disallowed_hostname", "s3_dualstack"],
+    ["https://distribution.cloudfront.net/private?signature=fixture-secret", "disallowed_hostname", "cloudfront"],
+    ["https://private.evil.example/file", "disallowed_hostname", "other"]
+  ]) {
+    const policy = pdfStorageUrlPolicy(url);
+    assert.equal(policy.allowed, false);
+    assert.equal(policy.urlRejection, reason);
+    assert.equal(policy.hostCategory, category);
+    assert.equal(trustedPdfStorageUrl(url), false);
+    for (const secret of ["fixture-secret", "private", "signature", "evil.example", "https://"]) assert.equal(JSON.stringify(policy).includes(secret), false);
+  }
+  assert.equal(pdfStorageUrlPolicy("https://app.jobnimbus.com/one?token=first").hostFingerprint,
+    pdfStorageUrlPolicy("https://app.jobnimbus.com/two?token=second").hostFingerprint);
+});
+
+test("blocked redirect diagnostics preserve the specific cause without requesting the rejected destination", async () => {
+  let calls = 0;
+  const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async () => {
+    calls++;
+    return new Response(null, { status: 302, headers: { location: "https://bucket.s3.dualstack.us-east-1.amazonaws.com/private?signature=fixture-secret" } });
+  } });
+  await assert.rejects(transport.readBytes("provider-doc-1"), safeFailure("untrusted_destination", {
+    urlRejection: "disallowed_hostname", hostCategory: "s3_dualstack", hop: 1
+  }));
+  assert.equal(calls, 1);
 });
 
 test("provider redirects to untrusted destinations stop without a second request", async () => {

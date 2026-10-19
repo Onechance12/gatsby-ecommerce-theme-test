@@ -10,7 +10,7 @@ import { CHANCE_OPERATOR_PDF_ALLOWED_ACTION_TYPES, CHANCE_OPERATOR_NOTES_ALLOWED
   CHANCE_OPERATOR_LIVE_ASSIGNED_POLICY_ID, CHANCE_OPERATOR_QUO_SMS_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS, loadChanceOperatorRunManifest } from "./operations/thresher-policy.js";
 import { PDF_UPLOAD_TYPE, pdfHash, assertPdfPlan, assertPdfReceipt } from "../integrations/jobnimbus-operator/mcp/pdf-upload-contract.mjs";
-import { pdfResolutionSource, validPdfReceiptResolution, assertPdfResolutionReceipt } from "../integrations/jobnimbus-operator/mcp/pdf-receipt-resolution.mjs";
+import { pdfResolutionSource, validPdfReceiptResolution, assertPdfResolutionReceipt, assertPdfDiagnostic } from "../integrations/jobnimbus-operator/mcp/pdf-receipt-resolution.mjs";
 
 // Synthetic bytes only. This tests immutable transport/approval, not PDF layout.
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n");
@@ -75,6 +75,10 @@ async function fixture(t, options = {}) {
       return res.end("<html>Not a metadata API</html>");
     }
     if (url.pathname.startsWith("/download/")) {
+      if (state.mode === "download_untrusted") {
+        res.writeHead(302, { location: "https://api3.jobnimbus.com/private?signature=fixture-secret" });
+        return res.end();
+      }
       if (state.mode === "download_http_failure") return json(403, { error: "private provider body https://private.example/?signature=fixture-secret" });
       const bytes = state.bytes.get(url.pathname.split("/").at(-1));
       if (!bytes) return json(404, { error: "Fixture missing" });
@@ -164,12 +168,79 @@ async function privateMismatch(t, options = {}) {
   f.state.mode = "normal";
   const actualPath = path.join(f.root, "bridge", "action-batches.json");
   return { ...f, batchId, ops, uploadPlan: plan.body, ledgerPath: actualPath,
+    diagnose: (overrides = {}) => f.request("/ops/action-batch-receipts", {
+      batchId, runPolicy: f.runPolicy, pdfDiagnostic: { query: "#2739", documentId: "created-doc-1" }, ...overrides
+    }),
     resolution: { query: "#2739", documentId: "created-doc-1", acceptedIsPrivate: false },
     recovery: (resolution, approval) => f.request("/ops/action-batch-reconcile", {
       batchId, resolution, runPolicy: f.runPolicy, execute: Boolean(approval),
       ...(approval ? { approvalDigest: approval.approvalDigest, approvalChallenge: approval.approvalChallenge } : {})
     }) };
 }
+
+test("PDF diagnosis separates privacy from byte verification without changing the receipt or creating an approval", async (t) => {
+  const f = await privateMismatch(t);
+  const indexesBefore = f.state.contactIndexes;
+  const before = await readFile(f.ledgerPath, "utf8");
+  const approvalsPath = path.join(f.root, "bridge", "action-approvals.json");
+  const approvalsBefore = await readFile(approvalsPath, "utf8");
+  const counts = [f.state.reserves, f.state.puts, f.state.completes];
+  const result = await f.diagnose();
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assertPdfDiagnostic(result.body, { batchId: f.batchId, query: "#2739", documentId: "created-doc-1" });
+  assert.equal(result.body.originalMetadata.isPrivate, true);
+  assert.equal(result.body.observedIsPrivate, false);
+  assert.equal(result.body.metadataChecks.privacy_matches, false);
+  assert.equal(result.body.download.contentVerified, true);
+  assert.equal(result.body.approvalRequired, false);
+  assert.equal(result.body.fileHoldReleased, false);
+  assert.equal(result.body.approvalDigest, undefined);
+  assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+  assert.equal(await readFile(approvalsPath, "utf8"), approvalsBefore);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+  assert.equal(f.state.contactIndexes, indexesBefore, "An exact receipt diagnosis must not re-enumerate the client book");
+});
+
+test("PDF diagnosis reports a precise blocked redirect without retry, signed URL disclosure or receipt writes", async (t) => {
+  const f = await privateMismatch(t);
+  const before = await readFile(f.ledgerPath, "utf8");
+  const counts = [f.state.reserves, f.state.puts, f.state.completes];
+  f.state.mode = "download_untrusted";
+  const result = await f.diagnose();
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assertPdfDiagnostic(result.body, { batchId: f.batchId, query: "#2739", documentId: "created-doc-1" });
+  assert.equal(result.body.download.status, "blocked");
+  assert.equal(result.body.download.diagnostic.urlRejection, "disallowed_hostname");
+  assert.equal(result.body.download.diagnostic.hostCategory, "jobnimbus_api3");
+  assert.equal(result.body.download.diagnostic.hop, 1);
+  for (const secret of ["signature", "fixture-secret", "https://", "private?"]) assert.equal(JSON.stringify(result.body).includes(secret), false);
+  assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+});
+
+test("PDF diagnosis rejects wrong file, candidate authority overrides and policy before provider download", async (t) => {
+  const f = await privateMismatch(t);
+  const before = await readFile(f.ledgerPath, "utf8");
+  const counts = [f.state.reserves, f.state.puts, f.state.completes];
+  for (const patch of [
+    { pdfDiagnostic: { query: "#2741", documentId: "created-doc-1" } },
+    { pdfDiagnostic: { query: "#2628", documentId: "created-doc-1" } },
+    { pdfDiagnostic: { query: "#2739", documentId: "created-doc-1", acceptedIsPrivate: false } },
+    { execute: true }, { runPolicy: { ...f.runPolicy, sha256: "f".repeat(64) } }
+  ]) assert.ok([400, 409].includes((await f.diagnose(patch)).status));
+  assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+});
+
+test("PDF diagnosis refuses a document deleted during byte readback and leaves all history unchanged", async (t) => {
+  const f = await privateMismatch(t);
+  const before = await readFile(f.ledgerPath, "utf8");
+  f.state.afterDownload = () => { f.state.records[0].is_deleted = true; };
+  const result = await f.diagnose();
+  assert.equal(result.status, 409);
+  assert.match(result.body.error, /candidate changed/);
+  assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+});
 
 test("read-only PDF resolution exposes safe transport diagnostics without releasing or modifying a receipt", async (t) => {
   const f = await privateMismatch(t);

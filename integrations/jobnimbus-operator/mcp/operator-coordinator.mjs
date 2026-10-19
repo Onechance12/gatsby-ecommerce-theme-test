@@ -4,7 +4,7 @@ import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { readLocalPdf } from "./local-pdf.mjs";
 import { pdfReceiptResolutionEnabled } from "./pdf-receipt-resolution-release.mjs";
 import { PDF_RESOLUTION_KIND, validatePdfResolutionInput, assertPdfResolutionPlan,
-  assertPdfResolutionReceipt } from "./pdf-receipt-resolution.mjs";
+  assertPdfResolutionReceipt, validatePdfDiagnosticInput, assertPdfDiagnostic } from "./pdf-receipt-resolution.mjs";
 import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
 import {
   QUO_SMS_TYPE,
@@ -1336,6 +1336,22 @@ export function createOperatorCoordinator({
         String(identity.email || "").toLowerCase(), String(identity.role || "")].join("|")) };
   }
 
+  async function diagnosePdfReceipt(input) {
+    if (!PDF_RECEIPT_RESOLUTION_ENABLED) throw new Error("PDF diagnosis is not activated in this native release.");
+    const request = validatePdfDiagnosticInput(input);
+    if (PINNED_LEGACY_BATCH_IDS.has(request.batchId)) throw new Error("Historical receipts cannot use this PDF diagnostic lane.");
+    const before = requireReadyForNormalWork(await verifiedBridgeSession());
+    const { batchId, ...pdfDiagnostic } = request;
+    const result = await bridgeRequest("POST", "/ops/action-batch-receipts", { batchId, pdfDiagnostic, runPolicy: CHANCE_RUN_POLICY });
+    assertPdfDiagnostic(result, request);
+    if (canonical(requireReadyForNormalWork(await verifiedBridgeSession())) !== canonical(before)) {
+      throw new Error("The bridge boundary changed during read-only diagnosis. No approval or receipt was changed.");
+    }
+    // Deliberately no approval invalidation, challenge, plan, reconciliation,
+    // reserve, upload, disposition or write path.
+    return result;
+  }
+
   async function planPdfReceiptResolution(input) {
     const generation = invalidateLocalApprovals();
     if (!PDF_RECEIPT_RESOLUTION_ENABLED) throw new Error("PDF receipt resolution is built but not activated in this native release.");
@@ -1447,6 +1463,7 @@ export function createOperatorCoordinator({
     reconcileActionBatch,
     planPdfUpload,
     executePdfUpload,
+    diagnosePdfReceipt,
     planPdfReceiptResolution,
     executePdfReceiptResolution,
     planQuoSms,
