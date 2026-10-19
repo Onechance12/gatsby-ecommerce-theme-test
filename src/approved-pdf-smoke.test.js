@@ -75,6 +75,7 @@ async function fixture(t, options = {}) {
       return res.end("<html>Not a metadata API</html>");
     }
     if (url.pathname.startsWith("/download/")) {
+      if (state.mode === "download_http_failure") return json(403, { error: "private provider body https://private.example/?signature=fixture-secret" });
       const bytes = state.bytes.get(url.pathname.split("/").at(-1));
       if (!bytes) return json(404, { error: "Fixture missing" });
       state.afterDownload?.();
@@ -129,7 +130,7 @@ async function fixture(t, options = {}) {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
     return { status: result.status, body: await result.json() };
   };
-  return { state, root, contacts, request, runPolicy,
+  return { state, root, contacts, request, runPolicy, logs: () => logs,
     prepare: (operations) => request("/ops/action-batch", { runPolicy, operations, execute: false }),
     execute: (operations, plan) => request("/ops/action-batch", { runPolicy, operations, execute: true,
       approvalDigest: plan.approvalDigest, approvalChallenge: plan.approvalChallenge }) };
@@ -169,6 +170,29 @@ async function privateMismatch(t, options = {}) {
       ...(approval ? { approvalDigest: approval.approvalDigest, approvalChallenge: approval.approvalChallenge } : {})
     }) };
 }
+
+test("read-only PDF resolution exposes safe transport diagnostics without releasing or modifying a receipt", async (t) => {
+  const f = await privateMismatch(t);
+  const before = await readFile(f.ledgerPath, "utf8");
+  const counts = [f.state.reserves, f.state.puts, f.state.completes];
+  f.state.mode = "download_http_failure";
+  const result = await f.recovery(f.resolution);
+  assert.equal(result.status, 409);
+  assert.match(result.body.error, /reason=http_status/);
+  assert.match(result.body.error, /operation=read/);
+  assert.match(result.body.error, /upstreamStatus=403/);
+  assert.equal(await readFile(f.ledgerPath, "utf8"), before);
+  assert.deepEqual([f.state.reserves, f.state.puts, f.state.completes], counts);
+  for (let i = 0; i < 20 && !f.logs().includes('"type":"pdf_provider_failure"'); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const diagnostic = f.logs().split("\n").find((line) => line.includes('"type":"pdf_provider_failure"'));
+  assert.deepEqual(JSON.parse(diagnostic), { type: "pdf_provider_failure", reason: "http_status", operation: "read", destination: "storage", hop: 0, upstreamStatus: 403 });
+  for (const secret of ["private provider body", "private.example", "signature=fixture-secret"]) {
+    assert.equal(JSON.stringify(result.body).includes(secret), false);
+    assert.equal(diagnostic.includes(secret), false);
+  }
+});
 
 test("new exact approval accepts only existing nonprivate PDF and preserves every original receipt field", async (t) => {
   const f = await privateMismatch(t);
