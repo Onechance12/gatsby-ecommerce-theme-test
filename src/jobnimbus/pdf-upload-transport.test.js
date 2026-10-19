@@ -15,6 +15,74 @@ test("upload transport permits only HTTPS provider/storage URLs and no embedded 
   assert.throws(() => createPdfUploadTransport({ apiKey: "fixture", fileApiBase: "https://app.jobnimbus.com" }));
 });
 
+test("the exact files host is allowed for reads only, with unchanged URL restrictions", () => {
+  const url = "https://files.jobnimbus.com/file?signature=fixture-secret";
+  assert.equal(pdfStorageUrlPolicy(url, { operation: "read" }).allowed, true);
+  assert.equal(pdfStorageUrlPolicy(url, { operation: "read" }).hostCategory, "jobnimbus_files");
+  for (const operation of [undefined, "put", "reserve", "complete", "GET"]) {
+    assert.equal(pdfStorageUrlPolicy(url, { operation }).allowed, false, String(operation));
+    assert.equal(trustedPdfStorageUrl(url, { operation }), false, String(operation));
+  }
+  for (const rejected of [
+    "http://files.jobnimbus.com/file", "https://files.jobnimbus.com:8443/file",
+    "https://user:secret@files.jobnimbus.com/file", "https://files.jobnimbus.com/file#fragment",
+    "https://files.jobnimbus.com.evil.example/file", "https://other.files.jobnimbus.com/file",
+    "https://api3.jobnimbus.com/file", "https://other.jobnimbus.com/file"
+  ]) assert.equal(pdfStorageUrlPolicy(rejected, { operation: "read" }).allowed, false, rejected);
+});
+
+test("PDF reads follow the exact files host without forwarding or restoring credentials", async () => {
+  const calls = [];
+  const targets = ["https://files.jobnimbus.com/file?signature=fixture-secret", "/file?signature=next", "https://bucket.s3.amazonaws.com/file"];
+  const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return calls.length <= targets.length
+      ? new Response(null, { status: 302, headers: { location: targets[calls.length - 1] } })
+      : new Response("verified bytes");
+  } });
+  assert.equal((await transport.readBytes("provider-doc-1")).toString(), "verified bytes");
+  assert.deepEqual(calls.map(({ options }) => options.headers.authorization), ["Bearer fixture-secret", undefined, undefined, undefined]);
+  assert.ok(calls.every(({ options }) => options.method === "GET" && options.redirect === "manual"));
+});
+
+test("files-host PUTs fail before any request and cannot be accepted from a reservation", async () => {
+  let calls = 0;
+  const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async () => {
+    calls++;
+    return Response.json({ data: { jnid: "provider-doc-1", url: "https://files.jobnimbus.com/upload" } });
+  } });
+  await assert.rejects(transport.put("https://files.jobnimbus.com/upload", Buffer.from("pdf")), safeFailure("untrusted_destination", { operation: "put" }));
+  assert.equal(calls, 0);
+  await assert.rejects(transport.reserve({ filename: "test.pdf" }), safeFailure("invalid_reservation", { operation: "reserve" }));
+  assert.equal(calls, 1);
+});
+
+test("a permitted files-host read cannot redirect to a new untrusted host", async () => {
+  let calls = 0;
+  const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async () => {
+    calls++;
+    return new Response(null, { status: 302, headers: { location: calls === 1
+      ? "https://files.jobnimbus.com/file?signature=fixture-secret" : "https://hostile.example/private" } });
+  } });
+  await assert.rejects(transport.readBytes("provider-doc-1"), safeFailure("untrusted_destination", { operation: "read", hop: 2, urlRejection: "disallowed_hostname" }));
+  assert.equal(calls, 2);
+});
+
+test("files-host reads retain byte limits and safe HTTP failure diagnostics", async () => {
+  for (const oversized of [false, true]) {
+    let calls = 0;
+    const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async () => {
+      calls++;
+      if (calls === 1) return new Response(null, { status: 302, headers: { location: "https://files.jobnimbus.com/private?signature=fixture-secret" } });
+      return oversized ? new Response(Buffer.alloc(PDF_MAX_BYTES + 1)) : new Response("hostile private body", { status: 403 });
+    } });
+    await assert.rejects(transport.readBytes("provider-doc-1"), safeFailure(oversized ? "body_too_large" : "http_status", {
+      operation: "read", destination: "storage", hop: 1, ...(oversized ? {} : { upstreamStatus: 403 })
+    }));
+    assert.equal(calls, 2);
+  }
+});
+
 test("authenticated PDF download follows bounded safe redirects without forwarding bearer", async () => {
   const calls = [];
   const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async (url, options) => {
@@ -41,7 +109,7 @@ test("same-origin JobNimbus redirects retain authentication until the storage ho
 });
 
 test("cross-origin JobNimbus and storage round-trips never restore stripped credentials", async () => {
-  for (const target of ["https://api.jobnimbus.com/files/id", "https://bucket.s3.amazonaws.com/file"]) {
+  for (const target of ["https://api.jobnimbus.com/files/id", "https://bucket.s3.amazonaws.com/file", "https://files.jobnimbus.com/file"]) {
     const calls = [];
     const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async (url, options) => {
       calls.push({ url, options });
@@ -99,13 +167,15 @@ test("missing or malformed redirect locations, bodies and invalid IDs fail close
 });
 
 test("PUT redirects are rejected with no follow-up request", async () => {
-  let calls = 0;
-  const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async () => {
-    calls++;
-    return new Response(null, { status: 307, headers: { location: "https://app.jobnimbus.com/files/private" } });
-  } });
-  await assert.rejects(transport.put("https://bucket.s3.amazonaws.com/file", Buffer.from("pdf")), safeFailure("redirect_not_allowed", { operation: "put", destination: "storage" }));
-  assert.equal(calls, 1);
+  for (const location of ["https://app.jobnimbus.com/files/private", "https://files.jobnimbus.com/private"]) {
+    let calls = 0;
+    const transport = createPdfUploadTransport({ apiKey: "fixture-secret", fetchImpl: async () => {
+      calls++;
+      return new Response(null, { status: 307, headers: { location } });
+    } });
+    await assert.rejects(transport.put("https://bucket.s3.amazonaws.com/file", Buffer.from("pdf")), safeFailure("redirect_not_allowed", { operation: "put", destination: "storage" }));
+    assert.equal(calls, 1);
+  }
 });
 
 test("diagnostic construction cannot emit unreviewed strings or unsafe numbers", () => {

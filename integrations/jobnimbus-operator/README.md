@@ -1,5 +1,17 @@
 # JobNimbus Operator for Mac
 
+## Approved exact-host PDF download repair (2026-10-19)
+
+The PDF transport permits HTTPS `files.jobnimbus.com` only for read requests.
+Reservation validation and PUT destinations retain their previous allowlist;
+PUT redirects remain forbidden. All cross-origin redirects strip the bearer
+permanently, including redirects back to an authenticated provider origin.
+Credentials in URLs, fragments, nondefault ports, other JobNimbus subdomains,
+lookalike hosts and untrusted onward redirects remain blocked. Existing byte,
+deadline and redirect bounds still apply. No wildcard domain or credential
+forwarding exception is added. This repair changes no client access, receipt,
+hold, upload, draft or send and requires a matching versioned release pin.
+
 ## Read-only PDF diagnosis and focused instruction candidate (2026-10-19)
 
 The native `pdf_receipt_diagnose` tool separates troubleshooting from approval.

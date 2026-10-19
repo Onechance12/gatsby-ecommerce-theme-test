@@ -26,7 +26,7 @@ function hostCategory(host) {
   if (host.endsWith(".cloudfront.net")) return "cloudfront";
   return host === "127.0.0.1" ? "loopback" : "other";
 }
-export function pdfStorageUrlPolicy(value, { allowLoopback = false } = {}) {
+export function pdfStorageUrlPolicy(value, { allowLoopback = false, operation = "put" } = {}) {
   let url;
   try { url = new URL(value); } catch { return { allowed: false, urlRejection: "malformed_url" }; }
   const diagnostic = { hostCategory: hostCategory(url.hostname), hostFingerprint: pdfHash(url.hostname) };
@@ -36,7 +36,10 @@ export function pdfStorageUrlPolicy(value, { allowLoopback = false } = {}) {
   if (allowLoopback && url.protocol === "http:" && url.hostname === "127.0.0.1") return { allowed: true, ...diagnostic };
   if (url.protocol !== "https:") return reject("insecure_protocol");
   if (url.port && url.port !== "443") return reject("non_default_port");
-  if (!standardS3Host(url.hostname) && !["app.jobnimbus.com", "api.jobnimbus.com"].includes(url.hostname)) return reject("disallowed_hostname");
+  // The provider's file-download redirect is read-only. Reservation/PUT trust
+  // stays unchanged, and this cross-origin hop never receives the bearer.
+  const fileDownload = operation === "read" && url.hostname === "files.jobnimbus.com";
+  if (!fileDownload && !standardS3Host(url.hostname) && !["app.jobnimbus.com", "api.jobnimbus.com"].includes(url.hostname)) return reject("disallowed_hostname");
   return { allowed: true, ...diagnostic };
 }
 export const trustedPdfStorageUrl = (value, options) => pdfStorageUrlPolicy(value, options).allowed;
@@ -61,7 +64,7 @@ export function createPdfUploadTransport({ apiKey, fileApiBase = "https://api.jo
       let headers = options.headers;
       for (let hops = 0; hops < 4; hops++) {
         context = { operation: context.operation, hop: hops };
-        const policy = pdfStorageUrlPolicy(current, { allowLoopback });
+        const policy = pdfStorageUrlPolicy(current, { allowLoopback, operation: context.operation });
         if (!policy.allowed) fail("untrusted_destination", { ...context, ...policy });
         const currentUrl = new URL(current);
         context.destination = destinationCategory(currentUrl);
