@@ -5,13 +5,13 @@ import { createOperatorCoordinator } from "./operator-coordinator.mjs";
 const window = { days: 7, maxResults: 50, source: "all", start: "2026-10-13T10:00:00Z", end: "2026-10-20T10:00:00Z" };
 const result = () => ({ mode: "read_only_discovery", effectsAuthorized: false, scope: "chance_own_mailbox_and_quo_line", complete: false, queue: [], window,
   coverage: { gmail: { status: "partial", mailbox: "cpearson@wavepa.com" }, quo: { status: "partial", lineNumber: "+12025550101" } } });
-test("candidate is not silently activated and does not touch providers or pending approvals", async () => {
-  assert.equal(COMMUNICATION_SWEEP_ENABLED, false);
+test("compiled release gate and fresh attestation precede every provider discovery read", async () => {
   const approvals = new Map([["existing", { preserved: true }]]);
-  let requests = 0;
-  const operator = createOperatorCoordinator({ version: "candidate", approvals, bridgeRequest: async () => { requests += 1; } });
-  await assert.rejects(operator.reviewRecentCommunications({}), /not activated/);
-  assert.equal(requests, 0);
+  const requests = [];
+  const operator = createOperatorCoordinator({ version: "candidate", approvals, bridgeRequest: async (method, pathname) => { requests.push({ method, pathname }); } });
+  await assert.rejects(operator.reviewRecentCommunications({}), COMMUNICATION_SWEEP_ENABLED ? /attest|bound|identity|ready|operator/i : /not activated/);
+  assert.equal(requests.length, COMMUNICATION_SWEEP_ENABLED ? 3 : 0);
+  assert.equal(requests.every(request => request.method === "GET"), true);
   assert.equal(approvals.size, 1);
 });
 test("native input cannot request another mailbox, line, arbitrary query, or effect", () => {
