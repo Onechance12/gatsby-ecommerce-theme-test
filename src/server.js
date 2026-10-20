@@ -42,6 +42,7 @@ import {
   readQuoHistory,
   readQuoHistoryStrict,
   readQuoInbox,
+  readOperatorQuoActivity,
   readQuoTextReceipt,
   readQuoTranscript,
   sendQuoText
@@ -109,6 +110,8 @@ import { getBuildInfo } from "./platform/build-info.js";
 import { buildPhotoCandidateCatalog, createPhotoReviewPdf, isPhotoMetadata } from "./documents/photo-review.js";
 import { localDateKey, selectTodaysInspectionTasks } from "./operations/inspection-discovery.js";
 import { buildCommunicationRecoveryQueue } from "./operations/communication-recovery.js";
+import { communicationsWindow, buildRecentCommunicationsReview } from "./operations/recent-communications.js";
+import { readRecentGmailActivity } from "./gmail/recent-activity.js";
 import {
   CHANCE_OPERATOR_ALLOWED_ACTION_TYPES,
   CHANCE_OPERATOR_ALLOWED_CONTACT_FIELDS,
@@ -734,6 +737,7 @@ const routes = new Map([
   ["POST /memory/file-actions", memoryFileActions],
   ["POST /memory/persistence-check", memoryPersistenceCheck],
   ["POST /ops/start-session", startThresherOperationalSession],
+  ["POST /ops/recent-communications", reviewRecentOperatorCommunications],
   ["POST /ops/recover-scheduling-communications", recoverSchedulingCommunications],
   ["POST /ops/review-chance-files", reviewChanceFiles],
   ["GET /ops/run-policy", operatorRunPolicy],
@@ -10926,6 +10930,42 @@ async function startThresherOperationalSession(input = {}) {
   };
 }
 
+async function reviewRecentOperatorCommunications(input = {}) {
+  if (!isMacCodexOperatorRequest() || process.env.ALLOW_OPERATOR_COMMUNICATION_SWEEP !== "true") {
+    const error = new Error("Recent communications discovery is not activated for this identity.");
+    error.statusCode = 403;
+    throw error;
+  }
+  let window;
+  try { window = communicationsWindow(input); }
+  catch { badRequest("Recent communications accepts only days (1-30), maxResults (1-100), and source (all/quo/gmail)."); }
+  await assertMacOperatorNormalWorkReady();
+  if (!(Date.parse(CHANCE_OPERATOR_RUN_MANIFEST?.expiresAt || "") > Date.now())) {
+    const error = new Error("The operator file-scope policy must be current before communications discovery.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const index = await hcnCachedContactIndex({ maxRecords: 5000 });
+  if (!index.complete) badRequest("A complete file identity index is required before communications discovery.");
+  const contacts = index.rows.filter(isInsuranceFile);
+  const inventory = contacts.map(compactContact);
+  const files = contacts.filter(contact => assignedTo(contact, CHANCE_OWNER_ID) && isOpenActive(contact) && chanceOperatorContactAllowed(contact)).map(compactContact);
+  const line = window.source === "gmail" ? null : await authorizedQuoLine();
+  const requests = [
+    window.source === "quo" ? Promise.resolve({ items: [], coverage: { status: "not_requested", complete: false } })
+      : readRecentGmailActivity({ readJson: endpoint => gmailApi(endpoint), compact: compactGmailFullMessage, mailbox: CHANCE_GOOGLE_EMAIL, window }),
+    window.source === "gmail" ? Promise.resolve({ items: [], coverage: { status: "not_requested", complete: false } })
+      : readOperatorQuoActivity(quoConfig(), { lineNumber: line.number, window })
+  ];
+  const results = await Promise.allSettled(requests);
+  const source = result => result.status === "fulfilled" ? result.value
+    : { items: [], coverage: { status: "unavailable", complete: false, limitationCodes: ["provider_read_unavailable"] } };
+  const gmail = source(results[0]), quo = source(results[1]);
+  return { generatedAt: new Date().toISOString(), window, scope: "chance_own_mailbox_and_quo_line",
+    ...buildRecentCommunicationsReview({ items: [...gmail.items, ...quo.items], files, inventory,
+      maxResults: window.maxResults, coverage: { gmail: gmail.coverage, quo: quo.coverage } }) };
+}
+
 async function recoverSchedulingCommunications(input = {}) {
   const identity = await authWhoAmI();
   return startCommunicationRecoveryReview(input, identity);
@@ -19760,6 +19800,14 @@ const OPENAPI = {
           maxPerSection: { type: "integer", minimum: 1, maximum: 25, default: 25, description: "Maximum verified records to render in each brain section." }
         }
       },
+      RecentCommunicationsRequest: {
+        type: "object", additionalProperties: false,
+        properties: {
+          days: { type: "integer", minimum: 1, maximum: 30, default: 7 },
+          maxResults: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+          source: { type: "string", enum: ["all", "quo", "gmail"], default: "all" }
+        }
+      },
       OperationalSessionRequest: {
         type: "object",
         properties: {
@@ -20247,6 +20295,14 @@ const OPENAPI = {
         operationId: "startThresherOperationalSession",
         requestBody: jsonBody("OperationalSessionRequest"),
         responses: { "200": { description: "Read-only operational router. focus=communications scans inbound Gmail plus every Quo team line first and matches scheduling/callback evidence to active Chance files while preserving unmatched unknown-number items. focus=today_inspections resolves exact files from active JobNimbus inspection tasks due today. focus=priority ranks the active backlog and deep-reviews one file." } }
+      }
+    },
+    "/ops/recent-communications": {
+      post: {
+        operationId: "reviewRecentOperatorCommunications",
+        description: "Separately activated, read-only discovery on the dedicated Mac operator's own Quo line and verified Chance Gmail mailbox. Unknown callers remain discovery leads. Exact-file reads and all effect approvals remain separate.",
+        requestBody: jsonBody("RecentCommunicationsRequest"),
+        responses: { "200": { description: "Prioritized bounded activity and explicit source coverage. Does not mark messages read, send, call, persist client memory, or update JobNimbus." } }
       }
     },
     "/ops/recover-scheduling-communications": {

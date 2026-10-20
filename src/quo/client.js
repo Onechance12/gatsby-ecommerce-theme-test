@@ -6,10 +6,16 @@
 
 import { createHash } from "node:crypto";
 import { BoundedJsonProviderError, fetchBoundedJson } from "../http/bounded-json.js";
+import { readRecentQuoActivity } from "./recent-activity.js";
 
 const MIN_REQUEST_INTERVAL_MS = 140;
 let requestQueue = Promise.resolve();
 let nextRequestAt = 0;
+
+export async function readOperatorQuoActivity(config, input) {
+  requireConfigured(config);
+  return readRecentQuoActivity({ ...input, readJson: endpoint => requestStrict(config, "GET", endpoint) });
+}
 
 export async function listQuoNumbers(config) {
   requireConfigured(config);

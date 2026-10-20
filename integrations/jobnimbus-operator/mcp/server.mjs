@@ -13,6 +13,7 @@ import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
 import { QUO_SMS_TYPE } from "./quo-sms-contract.mjs";
 import { createOperatorCoordinator, PDF_RECEIPT_RESOLUTION_ENABLED } from "./operator-coordinator.mjs";
+import { COMMUNICATION_SWEEP_ENABLED } from "./communications-sweep-release.mjs";
 import {
   PACKET_REVIEW_SOURCES, PACKET_REVIEW_METHODS, PACKET_REVIEW_FACT_KEYS, CLAIM_STOP_SIGNAL_CODES
 } from "./reviewed-claim-packet.mjs";
@@ -368,6 +369,12 @@ register(
     })
   )
 );
+
+if (COMMUNICATION_SWEEP_ENABLED) {
+  register("communications_sweep", "Read recent calls, missed calls, voicemails, texts and Gmail incoming/sent/draft activity on Chance's own configured line and mailbox, then propose exact-file matches. Read-only discovery; not a full claim review or authorization for any effect. Preserve all coverage gaps and unidentified callers.",
+    z.object({ days: z.number().int().min(1).max(30).optional(), maxResults: z.number().int().min(1).max(100).optional(), source: z.enum(["all", "quo", "gmail"]).optional() }).strict(),
+    input => OPERATOR.reviewRecentCommunications(input));
+}
 
 register(
   "ops_start_session",

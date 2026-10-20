@@ -117,6 +117,7 @@ test("the coordinator never stores or executes an altered note display", async (
   const source = await readFile(new URL("./operator-coordinator.mjs", import.meta.url), "utf8");
   const { createOperatorCoordinator } = await import(url(source
     .replace('"./scope.mjs"', JSON.stringify(scopeUrl))
+    .replace('"./communications-sweep-release.mjs"', JSON.stringify(new URL("./communications-sweep-release.mjs", import.meta.url).href))
     .replace('"./pdf-receipt-resolution.mjs"', JSON.stringify(new URL("./pdf-receipt-resolution.mjs", import.meta.url).href))
     .replace('"./pdf-receipt-resolution-release.mjs"', JSON.stringify(url('export const pdfReceiptResolutionEnabled = () => false;')))
     .replace('"./pdf-upload-contract.mjs"', JSON.stringify(new URL("./pdf-upload-contract.mjs", import.meta.url).href))

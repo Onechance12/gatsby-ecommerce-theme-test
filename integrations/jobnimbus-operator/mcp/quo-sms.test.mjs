@@ -134,6 +134,7 @@ async function enabledCandidate(t, { live = false } = {}) {
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const file of [
     "scope.mjs",
+    "communications-sweep-release.mjs",
     "operator-coordinator.mjs",
     "pdf-receipt-resolution.mjs",
     "pdf-receipt-resolution-release.mjs",
