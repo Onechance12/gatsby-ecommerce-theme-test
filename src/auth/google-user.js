@@ -286,6 +286,13 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (pathname === "/ops/recent-communications") {
+    return route === "POST /ops/recent-communications"
+      && process.env.ALLOW_OPERATOR_COMMUNICATION_SWEEP === "true"
+      && identity.type === "codex_operator_token"
+      && identity.role === "codex_operator"
+      && identity.subject === "codex-mac-operator";
+  }
   if (identity.type === "document_research_token") {
     return identity.subject === "codex-document-research"
       && identity.role === "document_research"

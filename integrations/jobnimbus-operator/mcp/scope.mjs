@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { COMMUNICATION_SWEEP_ENABLED } from "./communications-sweep-release.mjs";
 import {
   APPROVED_NOTE_RELEASE,
   APPROVED_NOTES_ENABLED as LEGACY_NOTES_ENABLED,
@@ -75,6 +76,7 @@ export const EXPECTED_OPERATOR_CAPABILITIES = Object.freeze([
   "operations.action_batch.process",
   "operations.action_batch_receipts.read",
   "operations.action_batch_receipts.reconcile",
+  ...(COMMUNICATION_SWEEP_ENABLED ? ["operations.communications.review"] : []),
   "operations.files.review",
   "operations.run_policy.read",
   "operations.session.start",

@@ -168,7 +168,7 @@ test("native display and completion validation reject altered proof, privacy, pr
 async function enabled(t) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "enabled-pdf-resolution-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const name of ["scope.mjs", "operator-coordinator.mjs", "pdf-receipt-resolution.mjs", "reviewed-claim-packet.mjs",
+  for (const name of ["scope.mjs", "communications-sweep-release.mjs", "operator-coordinator.mjs", "pdf-receipt-resolution.mjs", "reviewed-claim-packet.mjs",
     "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-release.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs", "quo-sms-contract.mjs"]) {
     await copyFile(new URL(`./${name}`, import.meta.url), path.join(root, name));
   }

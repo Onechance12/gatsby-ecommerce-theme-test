@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { COMMUNICATION_SWEEP_ENABLED, COMMUNICATION_SWEEP_ROUTE, readAttestedCommunications } from "./communications-sweep-release.mjs";
 import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
 import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { readLocalPdf } from "./local-pdf.mjs";
@@ -1450,7 +1451,20 @@ export function createOperatorCoordinator({
     return executeActionBatch(approvalDigest, operations, "assigned");
   }
 
+  async function reviewRecentCommunications(input = {}) {
+    if (!COMMUNICATION_SWEEP_ENABLED) throw new Error("Communications sweep is built but not activated. A reviewed coordinated release is required.");
+    return readAttestedCommunications({ input, canonical,
+      verify: async () => {
+        const verification = await verifiedBridgeSession();
+        return { ready: verification.ready, boundary: requireReadyForNormalWork(verification),
+          lineNumber: verification.approvalBoundary?.operatorIdentity?.quoLine?.number };
+      },
+      read: request => bridgeRequest("POST", COMMUNICATION_SWEEP_ROUTE, request)
+    });
+  }
+
   return Object.freeze({
+    reviewRecentCommunications,
     verifiedBridgeSession,
     restartVerifiedBridgeSession,
     readClaimFilingConfiguration,

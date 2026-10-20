@@ -1,6 +1,6 @@
 ---
 name: jobnimbus-operator
-description: Use the Mac JobNimbus Operator for HCN/Wave evidence, exact-file Gmail and Quo review, read-only all-adjuster 3x10 gap reports, scheduling, documents, approved JobNimbus notes and action batches, reviewed-draft Gmail delivery, approval-gated exact Quo SMS when activated, and single-file Retell claim filing.
+description: Use the Mac JobNimbus Operator for HCN/Wave evidence, activated own-inbox Quo/Gmail communications sweeps, exact-file review, read-only 3x10 gap reports, documents, approved JobNimbus/Gmail actions, exact Quo SMS, and single-file Retell claim filing.
 ---
 
 # JobNimbus Operator
@@ -50,6 +50,9 @@ Before any effect, load session/approval rules plus the relevant mode:
 
 - Exact-file evidence and bounded communications:
   [evidence review](references/evidence-review.md).
+- Latest missed calls, unknown callers, voicemails or recent email/activity:
+  [recent communications](references/recent-communications.md). Use the
+  separately activated read-only discovery tool before exact-file matching.
 - Contact/status/current-task or Gmail draft/send payloads:
   [action contracts](references/action-payloads.md).
 - PDF upload or approved JobNimbus note:
@@ -66,7 +69,9 @@ Before any effect, load session/approval rules plus the relevant mode:
 
 ## Invariants
 
-Resolve an exact file before communications. Report all-assigned Insurance,
+Resolve an exact file before exact-file communication reads and effects. The
+separately activated own-inbox sweep may discover incoming evidence first;
+matches remain leads until exact-file review. Report all-assigned Insurance,
 active/open, returned counts and coverage separately; never assume a 58-file
 book. Current eligibility comes from the attested release: live ownership when
 that policy is active, an exact roster only for a legacy fixed-file release.

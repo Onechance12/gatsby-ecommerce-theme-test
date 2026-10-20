@@ -42,6 +42,7 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("memory.file_actions.read", "POST /memory/file-actions"),
   capability("memory.persistence.probe", "POST /memory/persistence-check"),
   capability("operations.session.start", "POST /ops/start-session"),
+  capability("operations.communications.review", "POST /ops/recent-communications"),
   capability("operations.scheduling.recover", "POST /ops/recover-scheduling-communications"),
   capability("operations.files.review", "POST /ops/review-chance-files"),
   capability("operations.run_policy.read", "GET /ops/run-policy"),

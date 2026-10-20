@@ -80,7 +80,8 @@ test("Google roles are normalized to named capabilities without wildcard authori
       .filter(({ route }) => !route.includes(" /hcn/"))
       .map(({ name }) => name)
   ).size;
-  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 6);
+  // The own-inbox discovery route belongs exclusively to the gated Mac identity.
+  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 7);
   assert.equal(chance.authorizedCapabilities.includes("gmail.drafts.send"), true);
   assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), false);
   assert.equal(chance.authorizedCapabilities.includes("retell.agent.configure"), false);
