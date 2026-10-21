@@ -553,12 +553,31 @@ ranking. Its request body may contain only:
 
 ```json
 {
-  "limitPerAdjuster": 10
+  "limitPerAdjuster": 10,
+  "workflowScope": "all_active"
 }
 ```
 
 `limitPerAdjuster` defaults to `10` and must be an integer from `1` through
-`10`. Browser access requires an explicitly provisioned HCN management role
+`10`. `workflowScope` defaults to `all_active`: every active Insurance contact
+assigned to exactly one configured adjuster is eligible, regardless of board
+or workflow status. `estimating_board` is an optional, explicitly limited
+six-status view, not the full portfolio. A complete contact-index census runs
+before either filter. It reports assigned, active, inactive/closed, ambiguous,
+unknown, and excluded counts. Missing state/assignment/type is not silently
+treated as inactive or another adjuster's work. The counts reconcile to the
+index; shared files are counted once globally but in each matching adjuster's
+assigned total. All eligible histories are read before selecting ten results.
+Repeated index identities, incomplete pages, and exceeded bounds fail closed.
+
+The owner's meeting transcript confirms the operational standard: finish the
+whole assigned-file sweep, handle short actions during it when authorized,
+and reserve the ten-slot action list for files needing more attention. This
+activity-gap report is an input to that process, not proof the sweep or its
+actions happened. The separate urgent-task workflow can incorporate verified
+communications; this report cannot claim that coverage or priority judgment.
+
+Browser access requires an explicitly provisioned HCN management role
 (`chance`, `administrator`, or `manager`), the exact console origin, the
 session CSRF value, and the `hcn.management_sweep.read` capability. The
 dedicated HP Codex operator is the existing operational bearer-token exception: its immutable
@@ -599,7 +618,11 @@ synthetic example shows the exact shape:
 The bounded-read defaults are `HCN_MANAGEMENT_MAX_FILES=300`,
 `HCN_MANAGEMENT_ACTIVITY_MAX_RECORDS=1000`, and
 `HCN_MANAGEMENT_READ_CONCURRENCY=4`, with a shared
-`HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET=750`. They are safety limits, not pagination
+request budget default of `4 * HCN_MANAGEMENT_MAX_FILES + 10` (1210 at the
+300-file default). Each file needs two activity joins and an upload read;
+the default adds one extra history page per file and ten index pages. Explicit
+configured budgets still win, the hard request ceiling remains 2500, and
+read concurrency is unchanged. They are safety limits, not pagination
 shortcuts: exceeding a bound fails the report instead of returning an
 apparently complete ranking. Review and test any limit change as a release
 change.
@@ -612,7 +635,9 @@ records for notes/comments, task lifecycle work, contact/status/field changes,
 uploads, documents/photos/forms/estimates, and supported communications reset
 the gap. Mutable task-object timestamps do not. Reminders, drafts, file views,
 queued/pending records, and system/automation/import/sync activity do not reset
-the gap. The sweep also does not inspect or infer the meaning of a note body; it
+the gap, including an ordinary Note/Recorded row with explicit automation
+metadata. Unmarked automation cannot be ruled out. The sweep also does not
+inspect or infer the meaning of a note body; it
 ranks the latest eligible JobNimbus activity metadata it can verify. The source
 does not prove a human actor for every generic activity record, so the report
 must not be described as a human-attribution audit.

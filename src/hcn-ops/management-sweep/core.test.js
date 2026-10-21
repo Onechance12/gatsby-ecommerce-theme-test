@@ -280,6 +280,24 @@ test('input file and event order do not affect output', () => {
   assert.deepEqual(reversedFiles, ordered);
 });
 
+test('top-ten selection happens after every file in a 540-file portfolio is ranked', () => {
+  const files = [ADJUSTER_A, ADJUSTER_B, ADJUSTER_C].flatMap((adjusterRef, index) =>
+    Array.from({ length: 180 }, (_, i) => exactFile(index * 180 + i + 1, {
+      assignedAdjusterRef: adjusterRef,
+      activeSince: isoDaysAgo(600),
+      sources: [source('jobnimbus')],
+      events: [event(index * 180 + i + 1, 'note_substantive', isoDaysAgo(i + 1))],
+    })),
+  );
+  const result = buildManagementSweep(input(files, { requiredSources: ['jobnimbus'], rankingMode: 'activity_only' }));
+  assert.equal(result.summary.eligibleFileCount, 540);
+  assert.equal(result.summary.returnedAcrossAdjusters, 30);
+  for (const group of result.adjusters) {
+    assert.equal(group.eligibleCount, 180);
+    assert.deepEqual(group.items.map(row => row.gaps.operationalActivity.days), [180, 179, 178, 177, 176, 175, 174, 173, 172, 171]);
+  }
+});
+
 test('excludes inactive and unconfigured-owner files and explains shortages', () => {
   const eligible = exactFile(400, {
     assignedAdjusterRef: ADJUSTER_A,

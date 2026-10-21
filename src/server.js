@@ -593,7 +593,9 @@ const HCN_MANAGEMENT_READ_CONCURRENCY = Math.min(
   8
 );
 const HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET = Math.min(
-  positiveIntegerEnv("HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET", 750),
+  // Two activity joins plus uploads per file, one extra page per file, and
+  // ten index pages. Explicit operator budgets and the hard ceiling still win.
+  positiveIntegerEnv("HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET", HCN_MANAGEMENT_MAX_FILES * 4 + 10),
   2500
 );
 const HCN_CLOSED_BENCHMARK_MAX_FILES = 500;
@@ -5216,7 +5218,8 @@ async function readHcnManagementSweep(input = {}) {
 
   const requestedAt = new Date().toISOString();
   const snapshot = await loadHcnManagementJobNimbusSnapshot({
-    requestedAt
+    requestedAt,
+    workflowScope: request.workflowScope
   });
   const generatedAt = snapshot.checkedAt;
   const references = HCN_REFERENCE_CONFIGURATION.requireFactory();
@@ -5267,7 +5270,8 @@ async function readHcnManagementSweep(input = {}) {
       statusCode: file.statusCode,
       stageCode: file.stageCode,
       eventSummary: file.eventSummary,
-      documentSummary: file.documentSummary
+      documentSummary: file.documentSummary,
+      latestEvent: (eventsByProviderFileId.get(file.providerFileId) || [])[0]
     });
     return {
       fileRef,
@@ -5309,6 +5313,13 @@ async function readHcnManagementSweep(input = {}) {
   );
   const ambiguousOwnerCount =
     snapshot.data.excluded.ambiguousOwner || 0;
+  const unresolvedCensusCount = snapshot.data.excluded.unknownFileType
+    + snapshot.data.excluded.unknownOwner + snapshot.data.excluded.unknownActivityState;
+  const { adjusters: portfolioGroups, ...portfolio } = snapshot.data.census;
+  const portfolioByAdjusterRef = new Map(portfolioGroups.map(({ ownerId, ...counts }) => [
+    adjustersByOwner.get(ownerId).adjusterRef, counts
+  ]));
+  const exclusions = hcnManagementSweepExclusions(snapshot.data.excluded, sweep.exclusions);
   const unsupportedActivityRecordCount =
     snapshot.data.files.reduce(
       (total, file) =>
@@ -5329,6 +5340,7 @@ async function readHcnManagementSweep(input = {}) {
   const countedDocumentCount = snapshot.data.files.reduce((n, file) => n + Number(file.documentSummary?.counted || 0), 0);
   const completenessStatus =
     ambiguousOwnerCount > 0
+    || unresolvedCensusCount > 0
     || unsupportedActivityRecordCount > 0
     || ambiguousActivityReferenceCount > 0
     || uncertainDocumentCount > 0
@@ -5338,8 +5350,11 @@ async function readHcnManagementSweep(input = {}) {
   const completenessDetails = [];
   if (ambiguousOwnerCount > 0) {
     completenessDetails.push(
-      "one or more active insurance files had ambiguous configured ownership and were excluded"
+      "one or more assigned insurance files had ambiguous configured ownership and were excluded"
     );
+  }
+  if (unresolvedCensusCount > 0) {
+    completenessDetails.push(`${unresolvedCensusCount} index records had unknown file type, assignment, or active state and were not treated as safely outside scope`);
   }
   if (unsupportedActivityRecordCount > 0) {
     completenessDetails.push(
@@ -5375,14 +5390,20 @@ async function readHcnManagementSweep(input = {}) {
     authority: sweep.authority,
     criteria: {
       ...sweep.criteria,
-      workflowScope: "estimating_board",
-      includedStatusCodes: [
-        ...HCN_MANAGEMENT_ESTIMATING_STATUS_CODES
-      ],
-      filterOrder: "workflow_status_before_activity_ranking"
+      workflowScope: request.workflowScope,
+      includedStatusCodes: request.workflowScope === "estimating_board"
+        ? [...HCN_MANAGEMENT_ESTIMATING_STATUS_CODES] : [],
+      filterOrder: "complete_index_census_then_scope_then_all_histories_then_top_n",
+      activityBasis: "supported_jobnimbus_activity_and_upload_creation",
+      automationPolicy: "exclude_explicit_automation_metadata_not_just_record_type",
+      reviewBoundary: "triage_report_not_completed_operational_sweep"
     },
+    portfolio: { ...portfolio, indexComplete: true, historyReadFileCount: snapshot.data.files.length },
     summary: {
       ...sweep.summary,
+      exclusionCount: exclusions.reduce((sum, row) => sum + row.count, 0),
+      ambiguousOwnerCount,
+      unresolvedCensusCount,
       unsupportedActivityRecordCount,
       ambiguousActivityReferenceCount,
       countedDocumentCount,
@@ -5432,6 +5453,7 @@ async function readHcnManagementSweep(input = {}) {
       returnedCount: group.returnedCount,
       requestedCount: group.requestedCount,
       shortage: group.shortage,
+      portfolio: portfolioByAdjusterRef.get(group.adjusterRef),
       items: group.items.map((item) =>
         projectHcnManagementSweepItem(item, displayByFileRef)
       )
@@ -5439,10 +5461,7 @@ async function readHcnManagementSweep(input = {}) {
     companyWorst: sweep.companyWorst.map((item) =>
       projectHcnManagementSweepItem(item, displayByFileRef)
     ),
-    exclusions: hcnManagementSweepExclusions(
-      snapshot.data.excluded,
-      sweep.exclusions
-    )
+    exclusions
   };
   if (Date.now() >= Date.parse(snapshot.validUntil)) {
     throw hcnManagementSourceUnavailable(
@@ -5457,10 +5476,10 @@ function validateHcnManagementSweepInput(input) {
     !input
     || typeof input !== "object"
     || Array.isArray(input)
-    || Object.keys(input).some((key) => key !== "limitPerAdjuster")
+    || Object.keys(input).some((key) => !["limitPerAdjuster", "workflowScope"].includes(key))
   ) {
     badRequest(
-      "Management sweep input may contain only limitPerAdjuster."
+      "Management sweep input may contain only limitPerAdjuster and workflowScope."
     );
   }
   const limitPerAdjuster =
@@ -5472,7 +5491,11 @@ function validateHcnManagementSweepInput(input) {
   ) {
     badRequest("limitPerAdjuster must be an integer from 1 to 10.");
   }
-  return { limitPerAdjuster };
+  const workflowScope = input.workflowScope ?? "all_active";
+  if (!["all_active", "estimating_board"].includes(workflowScope)) {
+    badRequest("workflowScope must be all_active or estimating_board.");
+  }
+  return { limitPerAdjuster, workflowScope };
 }
 
 function hcnManagementAdjusterRef(references, ownerId) {
@@ -5561,7 +5584,7 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
     stageCode: display.stageCode,
     lastTouch: lastAt
       ? {
-          summary: "Latest counted JobNimbus work activity",
+          summary: `Latest counted JobNimbus activity: ${display.latestEvent?.kind || "supported activity"}`,
           at: lastAt,
           source: "jobnimbus"
         }
@@ -5584,7 +5607,7 @@ function projectHcnManagementSweepItem(item, displayByFileRef) {
         hasEvidenceIssues
           ? "All JobNimbus activity pages were read, but "
             + `${evidenceIssues.join("; ")}; upload metadata was also checked. Gmail, Quo, and calendar were not evaluated.`
-          : "All JobNimbus activity and upload pages were read; ranking uses verified work and upload creation times. Gmail, Quo, and calendar were not evaluated."
+          : "All JobNimbus activity and upload pages were read. Explicit automation markers are excluded; unmarked automation cannot be ruled out. Activity is not proof of claim progress. Gmail, Quo, and calendar were not evaluated."
     },
     eventSummary: display.eventSummary,
     documentSummary
@@ -5601,7 +5624,7 @@ function hcnManagementSweepExclusions(providerExclusions, coreExclusions) {
     [
       "Inactive insurance files",
       providerExclusions.inactive,
-      "Not active at the time of the fresh sweep."
+      "Assigned to one configured adjuster but explicitly inactive, archived, closed, or deleted."
     ],
     [
       "Owners outside the configured three adjusters",
@@ -5612,6 +5635,21 @@ function hcnManagementSweepExclusions(providerExclusions, coreExclusions) {
       "Ambiguous configured ownership",
       providerExclusions.ambiguousOwner,
       "Matched more than one configured adjuster and was excluded rather than guessed."
+    ],
+    [
+      "Unknown file type",
+      providerExclusions.unknownFileType,
+      "Index record did not provide a usable Insurance/non-Insurance type. Not assumed outside scope."
+    ],
+    [
+      "Unknown assignment",
+      providerExclusions.unknownOwner,
+      "Insurance record lacked usable assignment metadata. Not assumed to belong to another adjuster."
+    ],
+    [
+      "Unknown active state",
+      providerExclusions.unknownActivityState,
+      "Single-owner assigned Insurance record lacked unambiguous active-state flags. Not assumed inactive."
     ],
     [
       "Outside the Estimating board",
@@ -17436,7 +17474,8 @@ async function loadHcnJobNimbusIndex({
 }
 
 async function loadHcnManagementJobNimbusSnapshot({
-  requestedAt
+  requestedAt,
+  workflowScope = "all_active"
 } = {}) {
   if (HCN_MANAGEMENT_ADJUSTERS.ready !== true) {
     const error = new Error(
@@ -17452,9 +17491,10 @@ async function loadHcnManagementJobNimbusSnapshot({
   };
   let index;
   try {
-    index = await hcnCachedContactIndex({
+    index = await listHcnResourceComplete("/contacts", {
       maxRecords: 5000,
-      requestBudget: providerReadBudget
+      requestBudget: providerReadBudget,
+      rejectDuplicateContactIds: true
     });
   } catch (error) {
     if (error?.code === "hcn_management_source_unavailable") throw error;
@@ -17480,7 +17520,7 @@ async function loadHcnManagementJobNimbusSnapshot({
       ...freshness
     }, {
       adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters,
-      workflowScope: "estimating_board"
+      workflowScope
     });
   } catch {
     throw hcnManagementSourceUnavailable(
@@ -17489,7 +17529,7 @@ async function loadHcnManagementJobNimbusSnapshot({
   }
   if (initial.data.files.length > HCN_MANAGEMENT_MAX_FILES) {
     const error = new Error(
-      "The management sweep eligible-file bound was exceeded."
+      `The full management scope contains ${initial.data.files.length} eligible files, exceeding the configured ${HCN_MANAGEMENT_MAX_FILES}-file read bound. No truncated top-ten report was produced.`
     );
     error.code = "hcn_management_scope_changed";
     error.statusCode = 409;
@@ -17570,7 +17610,7 @@ async function loadHcnManagementJobNimbusSnapshot({
           ...freshness
         }, {
           adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters,
-          workflowScope: "estimating_board"
+          workflowScope
         });
         const accepted = mapped.data.events.filter((event) =>
           HCN_MANAGEMENT_VERIFIED_ACTIVITY_CLASSES.has(
@@ -17663,6 +17703,7 @@ async function loadHcnManagementJobNimbusSnapshot({
       events,
       openTasks: [],
       excluded: initial.data.excluded,
+      census: initial.data.census,
       diagnostics: {
         ...initial.data.diagnostics,
         perFileActivityReads: initial.data.files.length,
@@ -18386,7 +18427,8 @@ async function listHcnResourceComplete(
     maxRecords,
     relatedContactId = "",
     contactReferenceField = "related.id",
-    requestBudget = null
+    requestBudget = null,
+    rejectDuplicateContactIds = false
   } = {}
 ) {
   const maximum = Number(maxRecords);
@@ -18412,6 +18454,7 @@ async function listHcnResourceComplete(
       })
     : "";
   const rows = [];
+  const contactIds = new Set();
   let offset = 0;
   while (offset < maximum) {
     const size = Math.min(500, maximum - offset);
@@ -18445,7 +18488,9 @@ async function listHcnResourceComplete(
       && batch.some(
         (item) => {
           const id = String(item?.jnid || item?.id || "");
-          return !id
+          const duplicate = rejectDuplicateContactIds && contactIds.has(id);
+          contactIds.add(id);
+          return duplicate || !id
             || id.length > 512
             || /[\s\x00-\x1f\x7f]/.test(id);
         }
@@ -25882,9 +25927,10 @@ const OPENAPI = {
     }),
     "/integrations/jobrolo/v1/management-sweep": jobroloHcnReadOpenApi({
       operationId: "readJobroloHcnManagementSweep",
-      description: "Fresh read-only JobNimbus activity-gap report for exactly the server-configured management adjusters and six Estimating-board statuses. Gmail, Quo, and calendar are not evaluated by this report.",
+      description: "Fresh read-only JobNimbus activity-gap report for exactly the server-configured management adjusters. Default all_active includes all workflow statuses, with a complete contact-index census before ranking. Optional estimating_board is an explicitly limited view. Gmail, Quo, and calendar are not evaluated; generating a report is not a completed operational sweep.",
       inputSchema: openApiStrictObject({
-        limitPerAdjuster: { type: "integer", minimum: 1, maximum: 10, default: 10 }
+        limitPerAdjuster: { type: "integer", minimum: 1, maximum: 10, default: 10 },
+        workflowScope: { type: "string", enum: ["all_active", "estimating_board"], default: "all_active" }
       })
     }),
     "/integrations/jobrolo-import/v1/catalog": jobroloImportReadOpenApi({
@@ -26033,7 +26079,7 @@ const OPENAPI = {
       post: {
         operationId: "readHcnManagementSweep",
         security: [{ hcnBrowserSession: [] }],
-        description: "Management-authorized fresh, read-only ranking of the longest verified JobNimbus activity gaps for exactly three configured adjusters. The fixed server-side scope is the six-status JobNimbus Estimating board; appraisal, legal, production, refile, and other workflows are excluded before ranking. The report uses complete per-file JobNimbus activity reads, exposes explicit exclusions, and does not claim company-wide Gmail, Quo, or calendar coverage.",
+        description: "Management-authorized fresh, read-only activity-gap ranking for exactly three server-configured adjusters. Default all_active includes all workflow statuses, including appraisal, legal, production and refile. A complete contact-index census precedes complete eligible-file history reads and top-ten selection. Optional estimating_board explicitly limits statuses. Unknowns and exclusions are counted, not silently omitted. No Gmail, Quo or calendar review or completed operational sweep is implied.",
         requestBody: {
           required: true,
           content: {
@@ -26047,7 +26093,8 @@ const OPENAPI = {
                     minimum: 1,
                     maximum: 10,
                     default: 10
-                  }
+                  },
+                  workflowScope: { type: "string", enum: ["all_active", "estimating_board"], default: "all_active" }
                 }
               }
             }
@@ -26055,7 +26102,7 @@ const OPENAPI = {
         },
         responses: {
           "200": {
-            description: "Fresh ephemeral six-status Estimating-board activity-gap report with three adjuster groups and a company-wide ranking."
+            description: "Fresh ephemeral activity-gap report with complete population accounting, three configured adjuster groups, and a ranking across those groups."
           },
           "400": { description: "Strict request validation failed." },
           "401": { description: "HCN browser session required." },

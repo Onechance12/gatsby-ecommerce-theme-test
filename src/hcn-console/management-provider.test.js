@@ -76,10 +76,70 @@ test("management provider emits only active files owned by one configured adjust
   assert.deepEqual(result.data.excluded, {
     inactive: 1,
     nonInsurance: 1,
+    unknownFileType: 0,
+    unknownOwner: 0,
+    unknownActivityState: 0,
     unconfiguredOwner: 1,
     ambiguousOwner: 1,
     outsideWorkflowStatus: 0
   });
+});
+
+test("default census includes the whole assigned portfolio before activity and top-ten selection", () => {
+  const contacts = Array.from({ length: 540 }, (_, i) => contact(`file_${i}`, ADJUSTERS[i % 3].ownerId, {
+    number: `SYN-${i}`, status_name: ["Appraisal Interest", "Legal", "Ready for Production", "Refile", "On Hold", "Submitted"][i % 6]
+  }));
+  contacts.push(
+    contact("closed", "owner_a", { is_closed: true }),
+    contact("unknown", "owner_b", { is_active: undefined }),
+    contact("conflict", "owner_b", { isActive: false }),
+    contact("ambiguous", "owner_c", { owners: [{ id: "owner_a" }, { id: "owner_c" }] }),
+    contact("unassigned", "owner_a", { owners: [] }),
+    contact("bad_owner", "owner_a", { owners: [{}] }),
+    contact("missing_owner", "owner_a", { owners: null }),
+    contact("retail", "owner_a", { record_type_name: "Retail" }),
+    contact("unknown_type", "owner_a", { record_type_name: undefined })
+  );
+  const result = mapManagementJobNimbusEnvelope(envelope({ contacts }), { adjusters: ADJUSTERS });
+  const c = result.data.census;
+  assert.equal(result.data.files.length, 540);
+  assert.equal(c.scannedContactCount, 549);
+  assert.equal(c.insuranceContactCount, 547);
+  assert.equal(c.assignedInsuranceCount, 544);
+  assert.equal(c.singleAssignedCount, 543);
+  assert.equal(c.activeFileCount, 540);
+  assert.equal(c.inactiveFileCount, 1);
+  assert.equal(c.unknownActivityStateCount, 2);
+  assert.equal(c.ambiguousOwnerCount, 1);
+  assert.equal(c.unknownOwnerCount, 2);
+  assert.equal(c.outsideConfiguredOwnerCount, 1);
+  assert.equal(c.outsideWorkflowStatusCount, 0);
+  assert.deepEqual(c.adjusters.map(g => [g.assignedInsuranceCount, g.activeFileCount]), [[182, 180], [182, 180], [181, 180]]);
+  assert.equal(c.scannedContactCount, result.data.files.length + Object.values(result.data.excluded).reduce((a, b) => a + b, 0));
+  assert.equal(c.assignedInsuranceCount, c.singleAssignedCount + c.ambiguousOwnerCount);
+  assert.equal(c.singleAssignedCount, c.activeFileCount + c.inactiveFileCount + c.unknownActivityStateCount);
+  const filtered = mapManagementJobNimbusEnvelope(envelope({ contacts }), { adjusters: ADJUSTERS, workflowScope: "estimating_board" });
+  assert.equal(filtered.data.census.assignedInsuranceCount, c.assignedInsuranceCount);
+  assert.equal(filtered.data.census.activeFileCount, 540);
+  assert.equal(filtered.data.files.length, 90);
+  assert.equal(filtered.data.excluded.outsideWorkflowStatus, 450);
+});
+
+test("duplicate index rows are rejected even when they would not enter the ranked population", () => {
+  const row = contact("duplicate_closed", "owner_other", { is_active: false });
+  assert.throws(() => mapManagementJobNimbusEnvelope(envelope({ contacts: [row, row] }), { adjusters: ADJUSTERS }), /duplicate JobNimbus file in index/);
+});
+
+test("automation metadata on ordinary notes cannot reset the gap clock", () => {
+  const markers = [{ is_automated: true }, { automated: "true" }, { is_system: 1 },
+    { source_type: "integration" }, { origin: "Zapier" }, { created_by_name: "System Automation" },
+    { actor_type: "system" }, { is_imported: true }];
+  const result = mapManagementJobNimbusEnvelope(envelope({ activities: markers.map((marker, index) => ({
+    jnid: `synthetic_auto_${index}`, related: [{ id: "file_a" }], record_type_name: "Note",
+    status_name: "Recorded", date_created: NOW, created_by: "owner_a", ...marker
+  })) }), { adjusters: ADJUSTERS });
+  assert.equal(result.data.events.length, markers.length);
+  assert.ok(result.data.events.every(event => event.classification === "noise"));
 });
 
 test("estimating-board scope filters the fixed six statuses before ranking evidence", () => {
