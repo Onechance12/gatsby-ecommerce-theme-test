@@ -3274,6 +3274,25 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   await waitForServer(child, bridgePort);
 
   const managementHealthResponse = await fetch(`${origin}/health`);
+  let managementDiagnosticOutput = "";
+  child.stderr.on("data", chunk => { managementDiagnosticOutput += chunk.toString("utf8"); });
+  async function reportFailureDiagnostic(response) {
+    const id = response.headers.get("x-hcn-report-diagnostic-id");
+    assert.match(id, /^report_diag_[a-f0-9]{32}$/);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const events = managementDiagnosticOutput.split("\n").flatMap(line => {
+        try { const row = JSON.parse(line); return row.diagnosticId === id ? [row] : []; }
+        catch { return []; }
+      });
+      if (events.length) {
+        assert.equal(events.length, 1, "one terminal diagnostic per failed request");
+        assert.doesNotMatch(JSON.stringify(events[0]), /jn-fixture|fixture-chance-owner|@example\.test|hcn-jobnimbus-api-key|2145551212/);
+        return events[0];
+      }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.fail("missing report failure diagnostic");
+  }
   assert.equal(managementHealthResponse.status, 200);
   const managementHealth = await managementHealthResponse.json();
   assert.deepEqual(managementHealth.hcnConsole.managementSweep, {
@@ -4754,6 +4773,9 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   serveWrongManagementReferenceField = false;
   assert.equal(wrongReferenceFieldResponse.status, 503);
+  const wrongReferenceDiagnostic = await reportFailureDiagnostic(wrongReferenceFieldResponse);
+  assert.equal(wrongReferenceDiagnostic.reason, "reference_mismatch");
+  assert.match(wrongReferenceDiagnostic.stage, /^activity_(primary|related)_read$/);
   assert.equal(
     (await wrongReferenceFieldResponse.json()).error,
     "One or more JobNimbus activity histories are unavailable."
@@ -4961,6 +4983,12 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   const duplicatePageResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: "{}" });
   repeatContactIndexPage = false;
   assert.equal(duplicatePageResponse.status, 503);
+  const duplicateDiagnostic = await reportFailureDiagnostic(duplicatePageResponse);
+  assert.equal(duplicateDiagnostic.stage, "index_read");
+  assert.equal(duplicateDiagnostic.reason, "duplicate_contact_id");
+  assert.equal(duplicateDiagnostic.counters.indexPages, 2);
+  assert.equal(duplicateDiagnostic.counters.indexRecords, 500);
+  assert.equal(duplicateDiagnostic.counters.historiesStarted, 0);
   assert.equal(hcnManagementActivityFilters.length, historiesBeforeDuplicate, "bad index must fail before exact-file reads");
   allContacts.splice(0, 500);
   thirdOwnerContact.is_active = true;
@@ -4994,6 +5022,11 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   );
   allContacts.pop();
   assert.equal(budgetExceededResponse.status, 503);
+  const budgetDiagnostic = await reportFailureDiagnostic(budgetExceededResponse);
+  assert.equal(budgetDiagnostic.reason, "budget_exceeded");
+  assert.equal(budgetDiagnostic.counters.providerReadLimit, 10);
+  assert.equal(budgetDiagnostic.counters.providerReads, 10);
+  assert.equal(budgetDiagnostic.customerDataIncluded, false);
   assert.equal(
     (await budgetExceededResponse.json()).error,
     "The JobNimbus management provider-read budget was exceeded."

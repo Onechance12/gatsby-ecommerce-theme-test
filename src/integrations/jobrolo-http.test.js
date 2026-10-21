@@ -165,6 +165,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   let sharedPhoneTexts = null;
   let freshAssignedPhoneOverride = null;
   let withdrawOwnQuoLine = false;
+  let failManagementIndex = false;
   const provider = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://provider.invalid");
     providerCalls.push(url.pathname);
@@ -274,6 +275,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
       });
     }
     if (req.method === "GET" && url.pathname === "/contacts") {
+      if (failManagementIndex) return json(res, 429, { error: "PRIVATE_SYNTHETIC_PROVIDER_DETAIL" });
       return json(res, 200, {
         contacts: [
           assignedContact,
@@ -1126,6 +1128,41 @@ test("signed adapter fixes principal scope and requires both approval gates for 
   );
   assert.equal(managementSweep.body.authority.exactApprovalRequired, false);
   assert.equal(providerWrites.length, 0);
+
+  // Exercise the signed Jobrolo route, not just the diagnostic helper.
+  const writesBeforeDiagnostic = providerWrites.length;
+  const smsWritesBeforeDiagnostic = quoProviderWrites.length;
+  failManagementIndex = true;
+  const unavailableSweep = await signedPost(origin, "/integrations/jobrolo/v1/management-sweep", {
+    requestId: `request_${"d8".repeat(16)}`,
+    sessionRef,
+    nonce: `nonce_${"d9".repeat(16)}`,
+    input: { limitPerAdjuster: 10 }
+  });
+  failManagementIndex = false;
+  assert.equal(unavailableSweep.response.status, 503);
+  assert.equal(unavailableSweep.body.error, "The JobNimbus management file index is unavailable.");
+  const diagnosticId = unavailableSweep.response.headers.get("x-hcn-report-diagnostic-id");
+  assert.match(diagnosticId, /^report_diag_[a-f0-9]{32}$/);
+  let diagnosticEvents = [];
+  for (let attempt = 0; attempt < 50 && !diagnosticEvents.length; attempt += 1) {
+    diagnosticEvents = output.split("\n").flatMap(line => {
+      try { const row = JSON.parse(line); return row.diagnosticId === diagnosticId ? [row] : []; }
+      catch { return []; }
+    });
+    if (!diagnosticEvents.length) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(diagnosticEvents.length, 1);
+  const diagnostic = diagnosticEvents[0];
+  assert.equal(diagnostic.transport, "jobrolo");
+  assert.equal(diagnostic.stage, "index_read");
+  assert.equal(diagnostic.reason, "provider_http_status");
+  assert.equal(diagnostic.upstreamStatus, 429);
+  assert.equal(diagnostic.counters.providerReads, 1);
+  assert.equal(diagnostic.counters.historiesStarted, 0);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /PRIVATE_|assigned-file|chance@|fixture-key/);
+  assert.equal(providerWrites.length, writesBeforeDiagnostic);
+  assert.equal(quoProviderWrites.length, smsWritesBeforeDiagnostic);
 
   const concurrentTurns = await Promise.all([
     signedPost(origin, "/integrations/jobrolo/v1/assistant/turn", {

@@ -46,24 +46,24 @@ export async function fetchBoundedJson(
       signal: controller.signal
     });
     if (!response || typeof response.ok !== "boolean") {
-      throw providerFailure(errorCode);
+      throw providerFailure(errorCode, 502, "invalid_response");
     }
     if (!response.ok) {
       await response.body?.cancel?.().catch(() => {});
-      throw providerFailure(errorCode, Number(response.status) || 502);
+      throw providerFailure(errorCode, Number(response.status) || 502, "http_status");
     }
     const contentType = String(
       response.headers?.get?.("content-type") || ""
     ).toLowerCase();
     if (!contentType.includes("application/json")) {
       await response.body?.cancel?.().catch(() => {});
-      throw providerFailure(errorCode);
+      throw providerFailure(errorCode, 502, "content_type");
     }
     return await readBoundedJson(response, maxBytes, errorCode);
   } catch (error) {
     if (error instanceof BoundedJsonProviderError) throw error;
     if (controller.signal.aborted) {
-      throw providerFailure(errorCode, 504);
+      throw providerFailure(errorCode, 504, "timeout");
     }
     throw providerFailure(errorCode);
   } finally {
@@ -72,18 +72,19 @@ export async function fetchBoundedJson(
 }
 
 export class BoundedJsonProviderError extends Error {
-  constructor(code, statusCode = 502) {
+  constructor(code, statusCode = 502, failureKind = "transport") {
     super("Provider request failed.");
     this.name = "BoundedJsonProviderError";
     this.code = code;
     this.statusCode = statusCode;
+    this.failureKind = failureKind;
   }
 }
 
 async function readBoundedJson(response, maxBytes, errorCode) {
   const body = response.body;
   if (!body || typeof body.getReader !== "function") {
-    throw providerFailure(errorCode);
+    throw providerFailure(errorCode, 502, "missing_body");
   }
   const reader = body.getReader();
   const chunks = [];
@@ -96,7 +97,7 @@ async function readBoundedJson(response, maxBytes, errorCode) {
       total += chunk.length;
       if (total > maxBytes) {
         await reader.cancel().catch(() => {});
-        throw providerFailure(errorCode, 502);
+        throw providerFailure(errorCode, 502, "size_limit");
       }
       chunks.push(chunk);
     }
@@ -108,17 +109,17 @@ async function readBoundedJson(response, maxBytes, errorCode) {
   try {
     parsed = JSON.parse(Buffer.concat(chunks, total).toString("utf8"));
   } catch {
-    throw providerFailure(errorCode);
+    throw providerFailure(errorCode, 502, "invalid_json");
   }
   if (
     parsed === null
     || (typeof parsed !== "object" && !Array.isArray(parsed))
   ) {
-    throw providerFailure(errorCode);
+    throw providerFailure(errorCode, 502, "invalid_json_shape");
   }
   return parsed;
 }
 
-function providerFailure(code, statusCode = 502) {
-  return new BoundedJsonProviderError(code, statusCode);
+function providerFailure(code, statusCode = 502, failureKind = "transport") {
+  return new BoundedJsonProviderError(code, statusCode, failureKind);
 }

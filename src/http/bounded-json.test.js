@@ -42,6 +42,7 @@ test("provider failures expose only a stable code and status", async () => {
       assert.ok(error instanceof BoundedJsonProviderError);
       assert.equal(error.code, "FIXTURE_PROVIDER_FAILED");
       assert.equal(error.statusCode, 403);
+      assert.equal(error.failureKind, "http_status");
       assert.doesNotMatch(error.message, /secret|provider-secret-body/i);
       assert.doesNotMatch(JSON.stringify(error), /provider-secret-body/i);
       return true;
@@ -99,6 +100,7 @@ test("provider requests have a bounded deadline", async () => {
       error instanceof BoundedJsonProviderError
       && error.code === "FIXTURE_PROVIDER_FAILED"
       && error.statusCode === 504
+      && error.failureKind === "timeout"
   );
 });
 
@@ -107,6 +109,7 @@ test("HTTP, redirect, oversize, and timeout failures redact provider details", a
   const cases = [
     {
       name: "HTTP",
+      expectedKind: "http_status",
       expectedStatus: 404,
       run: () =>
         fetchBoundedJson(
@@ -122,6 +125,7 @@ test("HTTP, redirect, oversize, and timeout failures redact provider details", a
     },
     {
       name: "redirect",
+      expectedKind: "transport",
       expectedStatus: 502,
       run: () =>
         fetchBoundedJson(
@@ -136,6 +140,7 @@ test("HTTP, redirect, oversize, and timeout failures redact provider details", a
     },
     {
       name: "oversize",
+      expectedKind: "size_limit",
       expectedStatus: 502,
       run: () =>
         fetchBoundedJson(
@@ -150,6 +155,7 @@ test("HTTP, redirect, oversize, and timeout failures redact provider details", a
     },
     {
       name: "timeout",
+      expectedKind: "timeout",
       expectedStatus: 504,
       run: () =>
         fetchBoundedJson(
@@ -181,6 +187,7 @@ test("HTTP, redirect, oversize, and timeout failures redact provider details", a
         );
         assert.equal(error.code, "ADVERSARIAL_PROVIDER_FAILED");
         assert.equal(error.statusCode, scenario.expectedStatus);
+        assert.equal(error.failureKind, scenario.expectedKind);
         assert.equal(error.message, "Provider request failed.");
         assert.doesNotMatch(String(error), /SECRET-ADVERSARIAL/i);
         assert.doesNotMatch(JSON.stringify(error), /SECRET-ADVERSARIAL/i);
