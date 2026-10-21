@@ -6,6 +6,8 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
+import { createManagementReportDiagnostics, managementReportTransport,
+  markManagementFailure } from "./hcn-console/management-diagnostics.js";
 
 import {
   HCN_JOBROLO_GOOGLE_START, HCN_JOBROLO_GOOGLE_RETURN, HCN_JOBROLO_GOOGLE_COOKIE,
@@ -1452,9 +1454,16 @@ await hydrateHcnIdentityPins();
 const server = createServer(async (req, res) => {
   const requestStartedAt = Date.now();
   let requestPathname = "";
+  let managementDiagnostics = null;
   try {
     const url = new URL(req.url, "http://localhost");
     requestPathname = url.pathname;
+    managementDiagnostics = createManagementReportDiagnostics(
+      managementReportTransport(req.method, requestPathname)
+    );
+    if (managementDiagnostics) {
+      res.setHeader("x-hcn-report-diagnostic-id", managementDiagnostics.diagnosticId);
+    }
     if (HCN_CONSOLE_ENABLED && req.method === "GET"
       && url.pathname === HCN_JOBROLO_QUO_START) {
       return jobroloQuoStart(req, res, url);
@@ -1597,7 +1606,7 @@ const server = createServer(async (req, res) => {
       const authentication =
         await authenticateJobroloHcnPrincipal(verified, capability);
       const result = await REQUEST_CONTEXT.run(
-        authentication,
+        { ...authentication, managementDiagnostics },
         () => integrationHandler(verified.input)
       );
       return send(
@@ -1662,7 +1671,8 @@ const server = createServer(async (req, res) => {
     const result = await REQUEST_CONTEXT.run(
       {
         ...(authentication || { identity }),
-        operatorScope
+        operatorScope,
+        managementDiagnostics
       },
       () => handler(body)
     );
@@ -1692,6 +1702,11 @@ const server = createServer(async (req, res) => {
     );
   } catch (error) {
     const statusCode = hcnAssistantFailureStatus(error?.statusCode);
+    if (managementDiagnostics) {
+      console.error(JSON.stringify(managementDiagnostics.failureEvent(
+        error, statusCode, Date.now() - requestStartedAt
+      )));
+    }
     if (
       req.method === "POST"
       && requestPathname === "/hcn/api/v1/assistant/turns"
@@ -4945,10 +4960,18 @@ function projectHcnCommunicationSweep(result) {
 }
 
 async function hcnReadManagementSweep(input = {}) {
-  assertHcnManagementSession();
-  return withHcnReadAdmission(
-    () => readHcnManagementSweep(input)
-  );
+  await observeManagementStage("authorization", () => assertHcnManagementSession());
+  return observeManagementStage("admission", () => withHcnReadAdmission(
+    () => observeManagementStage("report_assembly", () => readHcnManagementSweep(input))
+  ));
+}
+
+function currentManagementDiagnostics() {
+  return REQUEST_CONTEXT.getStore()?.managementDiagnostics;
+}
+
+function observeManagementStage(stage, work) {
+  return currentManagementDiagnostics()?.observe(stage, work) ?? work();
 }
 
 function hcnManagementReportSession() {
@@ -5300,7 +5323,9 @@ async function readHcnManagementSweep(input = {}) {
       limitPerAdjuster: request.limitPerAdjuster,
       rankingMode: "activity_only"
     });
-  } catch {
+  } catch (error) {
+    currentManagementDiagnostics()?.capture("report_normalize",
+      markManagementFailure(error, "normalization_failed"));
     throw hcnManagementSourceUnavailable(
       "The normalized JobNimbus activity report is unavailable."
     );
@@ -5464,6 +5489,8 @@ async function readHcnManagementSweep(input = {}) {
     exclusions
   };
   if (Date.now() >= Date.parse(snapshot.validUntil)) {
+    currentManagementDiagnostics()?.capture("freshness",
+      markManagementFailure(new Error(), "freshness_expired"));
     throw hcnManagementSourceUnavailable(
       "The JobNimbus management sweep expired before it could be returned."
     );
@@ -17483,19 +17510,29 @@ async function loadHcnManagementJobNimbusSnapshot({
     );
     error.code = "hcn_management_sweep_unconfigured";
     error.statusCode = 503;
+    currentManagementDiagnostics()?.capture("authorization",
+      markManagementFailure(error, "not_configured"));
     throw error;
   }
   const providerReadBudget = {
     maximum: HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET,
     used: 0
   };
+  const diagnostic = currentManagementDiagnostics();
+  diagnostic?.set("providerReadLimit", providerReadBudget.maximum);
+  diagnostic?.set("providerReads", 0);
+  diagnostic?.set("fileLimit", HCN_MANAGEMENT_MAX_FILES);
+  diagnostic?.set("indexPages", 0);
+  diagnostic?.set("indexRecords", 0);
+  diagnostic?.set("historiesStarted", 0);
+  diagnostic?.set("historiesCompleted", 0);
   let index;
   try {
-    index = await listHcnResourceComplete("/contacts", {
+    index = await observeManagementStage("index_read", () => listHcnResourceComplete("/contacts", {
       maxRecords: 5000,
       requestBudget: providerReadBudget,
       rejectDuplicateContactIds: true
-    });
+    }));
   } catch (error) {
     if (error?.code === "hcn_management_source_unavailable") throw error;
     throw hcnManagementSourceUnavailable(
@@ -17503,6 +17540,8 @@ async function loadHcnManagementJobNimbusSnapshot({
     );
   }
   if (!index.complete) {
+    diagnostic?.capture("index_read",
+      markManagementFailure(new Error(), "incomplete_index"));
     throw hcnManagementSourceUnavailable(
       "The JobNimbus file index is incomplete."
     );
@@ -17522,17 +17561,21 @@ async function loadHcnManagementJobNimbusSnapshot({
       adjusters: HCN_MANAGEMENT_ADJUSTERS.adjusters,
       workflowScope
     });
-  } catch {
+  } catch (error) {
+    diagnostic?.capture("index_normalize",
+      markManagementFailure(error, "normalization_failed"));
     throw hcnManagementSourceUnavailable(
       "The JobNimbus management file index is unavailable."
     );
   }
+  diagnostic?.set("eligibleFiles", initial.data.files.length);
   if (initial.data.files.length > HCN_MANAGEMENT_MAX_FILES) {
     const error = new Error(
       `The full management scope contains ${initial.data.files.length} eligible files, exceeding the configured ${HCN_MANAGEMENT_MAX_FILES}-file read bound. No truncated top-ten report was produced.`
     );
     error.code = "hcn_management_scope_changed";
     error.statusCode = 409;
+    diagnostic?.capture("scope_bound", markManagementFailure(error, "scope_bound"));
     throw error;
   }
 
@@ -17549,12 +17592,13 @@ async function loadHcnManagementJobNimbusSnapshot({
     initial.data.files,
     HCN_MANAGEMENT_READ_CONCURRENCY,
     async (file) => {
+      diagnostic?.increment("historiesStarted");
       let result;
       let documents;
       try {
         [result, documents] = await Promise.all([
           listHcnExactFileActivitiesComplete(file.providerFileId, { requestBudget: providerReadBudget }),
-          listHcnResourceComplete("/files", { maxRecords: 5000, relatedContactId: file.providerFileId, requestBudget: providerReadBudget })
+          observeManagementStage("document_read", () => listHcnResourceComplete("/files", { maxRecords: 5000, relatedContactId: file.providerFileId, requestBudget: providerReadBudget }))
         ]);
       } catch (error) {
         if (error?.code === "hcn_management_source_unavailable") throw error;
@@ -17563,6 +17607,8 @@ async function loadHcnManagementJobNimbusSnapshot({
         );
       }
       if (!result.complete || !documents.complete) {
+        diagnostic?.capture("history_normalize",
+          markManagementFailure(new Error(), "incomplete_history"));
         throw hcnManagementSourceUnavailable(
           "One or more JobNimbus activity or document histories are incomplete."
         );
@@ -17578,6 +17624,8 @@ async function loadHcnManagementJobNimbusSnapshot({
         if (
           !managementReferences.includes(file.providerFileId)
         ) {
+          diagnostic?.capture("history_normalize",
+            markManagementFailure(new Error(), "reference_mismatch"));
           throw hcnManagementSourceUnavailable(
             "One or more JobNimbus activities have ambiguous file scope."
           );
@@ -17590,6 +17638,8 @@ async function loadHcnManagementJobNimbusSnapshot({
       }
       const contact = contactsById.get(file.providerFileId);
       if (!contact) {
+        diagnostic?.capture("history_normalize",
+          markManagementFailure(new Error(), "scope_changed"));
         throw hcnManagementSourceUnavailable(
           "The JobNimbus management file index changed during the sweep."
         );
@@ -17630,6 +17680,7 @@ async function loadHcnManagementJobNimbusSnapshot({
           }
           return latest;
         }, null);
+        diagnostic?.increment("historiesCompleted");
         return {
           providerFileId: file.providerFileId,
           latestEvent,
@@ -17655,7 +17706,9 @@ async function loadHcnManagementJobNimbusSnapshot({
             ignoredUnfreshEventCount: 0
           }
         };
-      } catch {
+      } catch (error) {
+        diagnostic?.capture("history_normalize",
+          markManagementFailure(error, "normalization_failed"));
         throw hcnManagementSourceUnavailable(
           "One or more JobNimbus activity histories are unavailable."
         );
@@ -17673,6 +17726,8 @@ async function loadHcnManagementJobNimbusSnapshot({
   );
   const completedAt = new Date().toISOString();
   if (Date.parse(completedAt) >= Date.parse(freshness.validUntil)) {
+    diagnostic?.capture("freshness",
+      markManagementFailure(new Error(), "freshness_expired"));
     throw hcnManagementSourceUnavailable(
       "The JobNimbus management sweep exceeded its fresh-evidence window."
     );
@@ -18455,10 +18510,13 @@ async function listHcnResourceComplete(
     : "";
   const rows = [];
   const contactIds = new Set();
+  const isContactIndex = endpoint.split("?", 1)[0] === "/contacts";
+  let contactRejectionReason = "invalid_contact_id";
   let offset = 0;
   while (offset < maximum) {
     const size = Math.min(500, maximum - offset);
     consumeHcnProviderReadBudget(requestBudget);
+    if (isContactIndex) currentManagementDiagnostics()?.increment("indexPages");
     const payload = await hcnJobNimbus(
       hcnPagedEndpoint(endpoint, {
         size,
@@ -18471,7 +18529,7 @@ async function listHcnResourceComplete(
       endpoint.replace(/^\//, "").split("?")[0]
     );
     if (batch.length > size) {
-      throw new Error("JobNimbus pagination is unavailable.");
+      throw markManagementFailure(new Error("JobNimbus pagination is unavailable."), "pagination_shape");
     }
     if (
       batch.some(
@@ -18481,14 +18539,15 @@ async function listHcnResourceComplete(
           || Array.isArray(item)
       )
     ) {
-      throw new Error("JobNimbus pagination is unavailable.");
+      throw markManagementFailure(new Error("JobNimbus pagination is unavailable."), "pagination_shape");
     }
     if (
-      endpoint.split("?", 1)[0] === "/contacts"
+      isContactIndex
       && batch.some(
         (item) => {
           const id = String(item?.jnid || item?.id || "");
           const duplicate = rejectDuplicateContactIds && contactIds.has(id);
+          if (duplicate) contactRejectionReason = "duplicate_contact_id";
           contactIds.add(id);
           return duplicate || !id
             || id.length > 512
@@ -18496,7 +18555,7 @@ async function listHcnResourceComplete(
         }
       )
     ) {
-      throw new Error("JobNimbus pagination is unavailable.");
+      throw markManagementFailure(new Error("JobNimbus pagination is unavailable."), contactRejectionReason);
     }
     if (
       relatedId
@@ -18509,9 +18568,10 @@ async function listHcnResourceComplete(
           )
       )
     ) {
-      throw new Error("JobNimbus exact-file pagination is unavailable.");
+      throw markManagementFailure(new Error("JobNimbus exact-file pagination is unavailable."), "reference_mismatch");
     }
     rows.push(...batch);
+    if (isContactIndex) currentManagementDiagnostics()?.set("indexRecords", rows.length);
     if (batch.length < size) {
       return {
         rows,
@@ -18522,6 +18582,7 @@ async function listHcnResourceComplete(
   }
 
   consumeHcnProviderReadBudget(requestBudget);
+  if (isContactIndex) currentManagementDiagnostics()?.increment("indexPages");
   const probe = unwrapHcnList(
     await hcnJobNimbus(
       hcnPagedEndpoint(endpoint, {
@@ -18545,10 +18606,10 @@ async function listHcnExactFileActivitiesComplete(
     requestBudget = null
   } = {}
 ) {
-  const result = await listHcnExactFileActivitiesWindow(providerFileId, {
+  const result = await observeManagementStage("activity_merge", () => listHcnExactFileActivitiesWindow(providerFileId, {
     maxRecords,
     requestBudget
-  });
+  }));
   if (!result.complete) {
     return {
       rows: [],
@@ -18567,18 +18628,18 @@ async function listHcnExactFileActivitiesWindow(
 ) {
   const id = hcnProviderFileId(providerFileId);
   const [primary, related] = await Promise.all([
-    listHcnResourceComplete("/activities", {
+    observeManagementStage("activity_primary_read", () => listHcnResourceComplete("/activities", {
       maxRecords,
       relatedContactId: id,
       contactReferenceField: "primary.id",
       requestBudget
-    }),
-    listHcnResourceComplete("/activities", {
+    })),
+    observeManagementStage("activity_related_read", () => listHcnResourceComplete("/activities", {
       maxRecords,
       relatedContactId: id,
       contactReferenceField: "related.id",
       requestBudget
-    })
+    }))
   ]);
   const unique = new Map();
   for (const [referenceField, rows] of [
@@ -18592,9 +18653,9 @@ async function listHcnExactFileActivitiesWindow(
         || Array.isArray(activity)
         || !referencesContactField(activity, referenceField, id)
       ) {
-        throw new Error(
+        throw markManagementFailure(new Error(
           "JobNimbus exact-file activity scope is unavailable."
-        );
+        ), "reference_mismatch");
       }
       const activityId = hcnProviderFileId(
         String(activity.jnid || activity.id || "")
@@ -18602,9 +18663,9 @@ async function listHcnExactFileActivitiesWindow(
       const fingerprint = hcnProviderRecordFingerprint(activity);
       const existing = unique.get(activityId);
       if (existing && existing.fingerprint !== fingerprint) {
-        throw new Error(
+        throw markManagementFailure(new Error(
           "JobNimbus exact-file activity provenance is inconsistent."
-        );
+        ), "inconsistent_activity");
       }
       if (existing) {
         existing.referenceFields.add(referenceField);
@@ -18685,11 +18746,12 @@ function consumeHcnProviderReadBudget(budget) {
     || budget.used < 0
     || budget.used >= budget.maximum
   ) {
-    throw hcnManagementSourceUnavailable(
+    throw markManagementFailure(hcnManagementSourceUnavailable(
       "The JobNimbus management provider-read budget was exceeded."
-    );
+    ), "budget_exceeded");
   }
   budget.used += 1;
+  currentManagementDiagnostics()?.set("providerReads", budget.used);
 }
 
 async function mapWithBoundedConcurrency(items, concurrency, worker) {
@@ -18737,7 +18799,7 @@ function unwrapHcnList(payload, name) {
     || typeof payload !== "object"
     || Array.isArray(payload)
   ) {
-    throw new Error("JobNimbus pagination is unavailable.");
+    throw markManagementFailure(new Error("JobNimbus pagination is unavailable."), "pagination_shape");
   }
   const candidates = [
     name,
@@ -18762,7 +18824,7 @@ function unwrapHcnList(payload, name) {
     present.length !== 1
     || !Array.isArray(payload[present[0]])
   ) {
-    throw new Error("JobNimbus pagination is unavailable.");
+    throw markManagementFailure(new Error("JobNimbus pagination is unavailable."), "pagination_shape");
   }
   return payload[present[0]];
 }
