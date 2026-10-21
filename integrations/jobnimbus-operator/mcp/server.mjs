@@ -179,7 +179,7 @@ const server = new McpServer({
 // manifest, approvals, and production bridge build pins are not broadened.
 const MANAGEMENT_REPORT = createInstalledManagementReportClient();
 register("management_report_status", "Verify the separate HCN read-only three-adjuster report connection and exact deployed build. No Google login, client effects, or operational credential fallback.", z.object({}).strict(), () => MANAGEMENT_REPORT.verifySession());
-register("management_gap_report", "Run a fresh read-only 3x10 JobNimbus activity-gap report for the three configured adjusters on the Estimating board. Preserves evidence warnings; Gmail and Quo are not evaluated. No customer writes, messages, calls, or AI-model spend.", z.object({}).strict(), () => MANAGEMENT_REPORT.runReport());
+register("management_gap_report", "Run the separate read-only 3x10 JobNimbus activity-gap report for three configured adjusters. Preserve returned workflow scope, portfolio counts and coverage warnings; an Estimating-only legacy report is not a full portfolio. Top ten is the output limit, not the scan limit. No Gmail/Quo review, completed operational sweep, customer writes, messages, calls, or AI-model spend.", z.object({}).strict(), () => MANAGEMENT_REPORT.runReport());
 
 // An absent locally installed research pin leaves the operational tool surface
 // unchanged. No research credential, directory, or provider is touched here.

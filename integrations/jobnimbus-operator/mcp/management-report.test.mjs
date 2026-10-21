@@ -44,3 +44,45 @@ test("malformed release data is never echoed in diagnostics", async () => {
     return true;
   });
 });
+
+function fullPortfolioReport() {
+  const r = report();
+  const counts = { assignedInsuranceCount: 1, singleAssignedCount: 1, ambiguousOwnerCount: 0,
+    activeFileCount: 1, inactiveFileCount: 0, unknownActivityStateCount: 0, outsideWorkflowStatusCount: 0, eligibleFileCount: 1 };
+  r.criteria.workflowScope = "all_active";
+  r.portfolio = { ...counts, assignedInsuranceCount: 3, singleAssignedCount: 3, activeFileCount: 3, eligibleFileCount: 3,
+    scannedContactCount: 5, insuranceContactCount: 4, nonInsuranceCount: 1, unknownFileTypeCount: 0, unknownOwnerCount: 0,
+    outsideConfiguredOwnerCount: 1, historyReadFileCount: 3, indexComplete: true };
+  r.summary = { eligibleFileCount: 3, inputFileCount: 3, exclusionCount: 2, returnedAcrossAdjusters: 3 };
+  r.exclusions = [{ label: "Other owner", count: 1 }, { label: "Non-Insurance", count: 1 }];
+  r.completeness = { status: "complete", summary: "Synthetic complete index and histories." };
+  r.adjusters.forEach((g, i) => { g.portfolio = { ...counts }; g.items[0].fileRef = `subject_${String(i + 1).repeat(32)}`; });
+  return r;
+}
+
+test("full-portfolio report reconciles census without changing routes or build attestation", async () => {
+  const r = fullPortfolioReport(), calls = [];
+  const c = createManagementReportClient({ expectedCommit: sha, now: () => now, request: async (m, path) => {
+    calls.push([m, path]); return m === "GET" ? session() : r;
+  } });
+  assert.equal(await c.runReport(), r);
+  assert.deepEqual(calls.map(([m]) => m), ["GET", "POST", "GET"]);
+  assert.equal(r.portfolio.scannedContactCount, 5);
+});
+
+test("full-portfolio labels require a complete reconciling census and honest uncertainty", async () => {
+  const changes = [r => { delete r.portfolio; }, r => { r.portfolio.scannedContactCount = 3; },
+    r => { r.portfolio.historyReadFileCount = 1; }, r => { r.summary.exclusionCount = 0; },
+    r => { r.adjusters[0].portfolio.activeFileCount = 9; }, r => { delete r.adjusters[0].portfolio; },
+    r => { r.adjusters[1].items[0].fileRef = r.adjusters[0].items[0].fileRef; },
+    r => { r.portfolio.nonInsuranceCount = 0; r.portfolio.unknownFileTypeCount = 1; },
+    r => { r.portfolio.indexComplete = false; }];
+  for (const change of changes) {
+    const r = fullPortfolioReport(); change(r); let posts = 0;
+    const c = createManagementReportClient({ expectedCommit: sha, now: () => now, request: async m => {
+      if (m === "GET") return session(); posts++; return r;
+    } });
+    await assert.rejects(c.runReport(), /portfolio census/);
+    assert.equal(posts, 1);
+  }
+});

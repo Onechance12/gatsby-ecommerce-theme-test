@@ -362,8 +362,12 @@ the operational bridge. They use a separate Keychain credential, service
 `com.wavepa.hcn-management-report`, account `codex-mac-management-report`, with
 only two allowed routes and an exact provider-attested build pin. No browser
 login, HP credential, shared token, model call, or client write is involved.
-The report returns up to ten active Estimating-board files per configured
-adjuster, ranked by verified JobNimbus work activity. Preserve evidence and
+The report returns up to ten files per configured adjuster after reading all
+eligible histories. `all_active` requires a reconciled complete-index census
+and includes all active Insurance workflow statuses. Older `estimating_board`
+results remain explicitly limited, not a total caseload. This compatibility
+change alone neither deploys the report engine nor changes its exact build pin.
+Rank by supported JobNimbus work activity. Preserve evidence and
 ownership exclusions; do not substitute days in status or imply Gmail/Quo were
 reviewed. The ordinary Mac operator's broad-company restrictions are unchanged.
 
