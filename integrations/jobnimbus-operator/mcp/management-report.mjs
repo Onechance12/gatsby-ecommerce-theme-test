@@ -62,7 +62,7 @@ export function createManagementReportClient({ request, expectedCommit = MANAGEM
       || !Number.isFinite(Date.parse(r.checkedAt)) || Date.parse(r.checkedAt) > now() + 30_000
       || Date.parse(r.checkedAt) < now() - 15 * 60_000 || !(Date.parse(r.validUntil) > now())
       || !Array.isArray(r.adjusters) || r.adjusters.length !== 3
-      || r.criteria?.workflowScope !== "estimating_board") {
+      || !["all_active", "estimating_board"].includes(r.criteria?.workflowScope)) {
       throw new Error("The report is stale, incomplete, or not the expected three-adjuster activity report. No automatic retry.");
     }
     const seen = new Set();
@@ -83,10 +83,46 @@ export function createManagementReportClient({ request, expectedCommit = MANAGEM
     if (r.summary?.eligibleFileCount !== r.adjusters.reduce((n, g) => n + g.eligibleCount, 0)) {
       throw new Error("Report totals do not reconcile.");
     }
+    verifyPortfolioCensus(r);
     await verifySession();
     return r;
   }
   return { verifySession, runReport };
+}
+
+function verifyPortfolioCensus(report) {
+  const p = report.portfolio;
+  // Old, explicitly filtered reports remain readable during a staged rollout.
+  // They never acquire a full-portfolio label or fabricated census here.
+  if (!p && report.criteria.workflowScope === "estimating_board") return;
+  const groupKeys = ["assignedInsuranceCount", "singleAssignedCount", "ambiguousOwnerCount",
+    "activeFileCount", "inactiveFileCount", "unknownActivityStateCount", "outsideWorkflowStatusCount", "eligibleFileCount"];
+  const indexKeys = ["scannedContactCount", "insuranceContactCount", "nonInsuranceCount", "unknownFileTypeCount",
+    "unknownOwnerCount", "outsideConfiguredOwnerCount", "historyReadFileCount"];
+  const numbers = (value, keys) => value && keys.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0);
+  const groupValid = g => numbers(g, groupKeys)
+    && g.assignedInsuranceCount === g.singleAssignedCount + g.ambiguousOwnerCount
+    && g.singleAssignedCount === g.activeFileCount + g.inactiveFileCount + g.unknownActivityStateCount
+    && g.activeFileCount === g.outsideWorkflowStatusCount + g.eligibleFileCount;
+  const fail = () => { throw new Error("Report portfolio census, histories, and exclusions do not reconcile. No automatic retry."); };
+  if (!groupValid(p) || !numbers(p, indexKeys) || p.indexComplete !== true
+    || p.scannedContactCount !== p.insuranceContactCount + p.nonInsuranceCount + p.unknownFileTypeCount
+    || p.insuranceContactCount !== p.assignedInsuranceCount + p.unknownOwnerCount + p.outsideConfiguredOwnerCount
+    || p.eligibleFileCount !== report.summary.eligibleFileCount || p.historyReadFileCount !== p.eligibleFileCount
+    || report.summary.inputFileCount !== p.eligibleFileCount
+    || (report.criteria.workflowScope === "all_active" && p.outsideWorkflowStatusCount !== 0)
+    || !Array.isArray(report.exclusions) || !report.exclusions.every(row => numbers(row, ["count"]))
+    || report.summary.exclusionCount !== report.exclusions.reduce((n, row) => n + row.count, 0)
+    || p.scannedContactCount !== p.eligibleFileCount + report.summary.exclusionCount
+    || report.adjusters.some(g => !groupValid(g.portfolio) || g.eligibleCount !== g.portfolio.eligibleFileCount)
+    || ["singleAssignedCount", "activeFileCount", "inactiveFileCount", "unknownActivityStateCount", "outsideWorkflowStatusCount", "eligibleFileCount"]
+      .some(key => report.adjusters.reduce((sum, g) => sum + g.portfolio[key], 0) !== p[key])
+    || report.summary.returnedAcrossAdjusters !== report.adjusters.reduce((sum, g) => sum + g.returnedCount, 0)
+    || (p.ambiguousOwnerCount + p.unknownFileTypeCount + p.unknownOwnerCount + p.unknownActivityStateCount > 0
+      && report.completeness?.status !== "partial")) fail();
+  const items = report.adjusters.flatMap(g => g.items);
+  if (items.some(item => !/^subject_[a-f0-9]{32}$/.test(item.fileRef))
+    || new Set(items.map(item => item.fileRef)).size !== items.length) fail();
 }
 
 export function createInstalledManagementReportClient() {
