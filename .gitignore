@@ -1,7 +1,8 @@
 .env
 .env.*
 !.env.example
-node_modules/
+node_modules
+.audit/
 npm-debug.log*
 .DS_Store
 

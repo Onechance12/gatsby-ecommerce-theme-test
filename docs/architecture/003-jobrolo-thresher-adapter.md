@@ -37,10 +37,13 @@ JobNimbus files, linked Gmail mailbox, and available Quo team lines. Proposed
 matches are evidence candidates only and never authorize an action. The Quo
 phone-history route reads available team lines only after the requested phone
 resolves to exactly one fresh, active JobNimbus file assigned to that same
-principal. The management sweep has a different, immutable server-side scope:
-exactly the configured management adjusters and the six Estimating-board
-statuses. It ranks complete JobNimbus activity reads only and explicitly does
-not claim Gmail, Quo, or calendar coverage.
+principal. The management sweep has a separate server-configured owner scope:
+exactly three configured management adjusters. Its default `all_active` view
+includes every active Insurance-contact workflow status; `estimating_board`
+is an explicitly limited optional view. Complete-index counts reconcile
+assigned, active, inactive/closed, ambiguous and unknown records before all
+eligible histories are read and the top ten selected. It ranks JobNimbus
+activity only, not Gmail/Quo/calendar evidence or completed operational sweeps.
 
 The employee exact-file reader is narrower than that all-line phone-history
 route: it derives only the employee's authorized work line. Phone/email/name

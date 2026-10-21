@@ -86,6 +86,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     stage_name: "Carrier Review",
     mobile_phone: QUO_CLIENT_PHONE,
     is_active: true,
+    date_created: "2026-06-01T12:00:00.000Z",
     date_updated: 1785261000
   };
   const assignedContactB = {
@@ -98,6 +99,7 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     stage_name: "Carrier Review",
     mobile_phone: "+12145550198",
     is_active: true,
+    date_created: "2026-06-02T12:00:00.000Z",
     date_updated: 1785260900
   };
   const archivedDuplicateContact = {

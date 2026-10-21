@@ -243,22 +243,61 @@ export function mapManagementJobNimbusEnvelope(input, {
 
   const files = [];
   const providerIds = new Set();
+  const indexedIds = new Set();
   const excluded = {
     inactive: 0,
     nonInsurance: 0,
+    unknownFileType: 0,
+    unknownOwner: 0,
+    unknownActivityState: 0,
     unconfiguredOwner: 0,
     ambiguousOwner: 0,
     outsideWorkflowStatus: 0
   };
+  const portfolioCounts = () => ({
+    assignedInsuranceCount: 0,
+    singleAssignedCount: 0,
+    ambiguousOwnerCount: 0,
+    activeFileCount: 0,
+    inactiveFileCount: 0,
+    unknownActivityStateCount: 0,
+    outsideWorkflowStatusCount: 0,
+    eligibleFileCount: 0
+  });
+  const census = {
+    ...portfolioCounts(),
+    scannedContactCount: contacts.length,
+    insuranceContactCount: 0,
+    nonInsuranceCount: 0,
+    unknownFileTypeCount: 0,
+    unknownOwnerCount: 0,
+    outsideConfiguredOwnerCount: 0,
+    adjusters: configured.map(({ ownerId }) => ({ ownerId, ...portfolioCounts() }))
+  };
+  const countByOwner = new Map(census.adjusters.map((group) => [group.ownerId, group]));
 
   for (const contact of contacts) {
     if (!isPlainObject(contact)) fail("invalid JobNimbus contact");
-    if (!isInsuranceFile(contact)) {
-      excluded.nonInsurance += 1;
+    const providerFileId = providerId(
+      field(contact, ["jnid", "id", "contact_id", "contactId"]), "file"
+    );
+    if (indexedIds.has(providerFileId)) fail("duplicate JobNimbus file in index");
+    indexedIds.add(providerFileId);
+    const fileType = field(contact, ["record_type_name", "recordTypeName", "file_type_name", "fileTypeName"]);
+    if (typeof fileType !== "string" || !fileType.trim()) {
+      excluded.unknownFileType++;
+      census.unknownFileTypeCount++;
       continue;
     }
-    if (!isActiveFile(contact)) {
-      excluded.inactive += 1;
+    if (!isInsuranceFile(contact)) {
+      excluded.nonInsurance += 1;
+      census.nonInsuranceCount++;
+      continue;
+    }
+    census.insuranceContactCount++;
+    if (!hasKnownAssignment(contact)) {
+      excluded.unknownOwner++;
+      census.unknownOwnerCount++;
       continue;
     }
     const matchingOwners = configured.filter((adjuster) =>
@@ -266,12 +305,30 @@ export function mapManagementJobNimbusEnvelope(input, {
     );
     if (matchingOwners.length === 0) {
       excluded.unconfiguredOwner += 1;
+      census.outsideConfiguredOwnerCount++;
       continue;
     }
+    census.assignedInsuranceCount++;
+    for (const owner of matchingOwners) countByOwner.get(owner.ownerId).assignedInsuranceCount++;
     if (matchingOwners.length !== 1) {
       excluded.ambiguousOwner += 1;
+      census.ambiguousOwnerCount++;
+      for (const owner of matchingOwners) countByOwner.get(owner.ownerId).ambiguousOwnerCount++;
       continue;
     }
+    const groupCounts = countByOwner.get(matchingOwners[0].ownerId);
+    census.singleAssignedCount++;
+    groupCounts.singleAssignedCount++;
+    const activityState = fileActivityState(contact);
+    if (activityState !== "active") {
+      const key = activityState === "inactive" ? "inactiveFileCount" : "unknownActivityStateCount";
+      census[key]++;
+      groupCounts[key]++;
+      excluded[activityState === "inactive" ? "inactive" : "unknownActivityState"]++;
+      continue;
+    }
+    census.activeFileCount++;
+    groupCounts.activeFileCount++;
 
     const statusCode =
       code(field(contact, ["status_name", "statusName", "status"]))
@@ -281,16 +338,12 @@ export function mapManagementJobNimbusEnvelope(input, {
       && !ESTIMATING_STATUS_CODES.has(statusCode)
     ) {
       excluded.outsideWorkflowStatus += 1;
+      census.outsideWorkflowStatusCount++;
+      groupCounts.outsideWorkflowStatusCount++;
       continue;
     }
-
-    const providerFileId = providerId(
-      field(contact, ["jnid", "id", "contact_id", "contactId"]),
-      "file"
-    );
-    if (providerIds.has(providerFileId)) {
-      fail("duplicate JobNimbus file");
-    }
+    census.eligibleFileCount++;
+    groupCounts.eligibleFileCount++;
     providerIds.add(providerFileId);
     const jobNumber = boundedText(
       field(contact, [
@@ -386,6 +439,7 @@ export function mapManagementJobNimbusEnvelope(input, {
       events,
       openTasks,
       excluded,
+      census,
       diagnostics: {
         ignoredUnrelatedActivities,
         ignoredUnrelatedTasks,
@@ -443,7 +497,8 @@ function mapActivity(activity, providerFileId, adjusters) {
     state,
     occurredAt,
     actorAdjusterId,
-    classification: classifyActivity(kind, state)
+    classification: managementActivityHasAutomationMarker(activity)
+      ? "noise" : classifyActivity(kind, state)
   };
 }
 
@@ -623,26 +678,48 @@ function isInsuranceFile(contact) {
   ).trim().toLocaleLowerCase("en-US") === "insurance";
 }
 
-function isActiveFile(contact) {
+function fileActivityState(contact) {
   const activeKeys = ["is_active", "isActive", "active"];
-  if (
-    !activeKeys.some(
-      (key) =>
-        Object.prototype.hasOwnProperty.call(contact, key)
-        && contact[key] === true
-    )
-  ) {
-    return false;
-  }
-  if (activeKeys.some((key) => contact[key] === false)) return false;
-  return ![
+  const flags = activeKeys.filter((key) => Object.hasOwn(contact, key)).map((key) => contact[key]);
+  const inactiveFlags = [
     "is_archived",
     "isArchived",
     "archived",
     "is_closed",
     "isClosed",
-    "closed"
-  ].some((key) => contact[key] === true);
+    "closed",
+    "is_deleted",
+    "deleted"
+  ].filter((key) => Object.hasOwn(contact, key)).map((key) => contact[key]);
+  if (inactiveFlags.some((value) => value === true)) return "inactive";
+  if (!flags.length || [...flags, ...inactiveFlags].some((value) => typeof value !== "boolean")
+    || new Set(flags).size !== 1) return "unknown";
+  return flags[0] ? "active" : "inactive";
+}
+
+function hasKnownAssignment(contact) {
+  const keys = ["owners", "owner_ids", "ownerIds", "assigned_to", "assignedTo", "assignees"];
+  const present = keys.filter((key) => Object.hasOwn(contact, key));
+  const known = (value) => {
+    if (Array.isArray(value)) return value.every(known);
+    if (typeof value === "string" || typeof value === "number") return PROVIDER_ID.test(String(value));
+    if (!isPlainObject(value)) return false;
+    const ids = ["id", "jnid", "user_id", "userId", "owner_id", "ownerId"]
+      .filter((key) => Object.hasOwn(value, key)).map((key) => value[key]);
+    return ids.length > 0 && ids.every((id) =>
+      (typeof id === "string" || typeof id === "number") && PROVIDER_ID.test(String(id)));
+  };
+  return present.length > 0 && present.every((key) => known(contact[key]));
+}
+
+// Explicit provider metadata only; do not classify private note text, infer
+// human authorship from an owner ID, or let normal Note/Recorded hide automation.
+export function managementActivityHasAutomationMarker(record) {
+  if (["is_automated", "automated", "is_system", "system_generated", "is_imported"]
+    .some((key) => [true, 1, "true", "1"].includes(record?.[key]))) return true;
+  return ["source_type", "origin", "created_by_name", "actor_type", "created_by_type"]
+    .some((key) => typeof record?.[key] === "string"
+      && /\b(system|automated|automation|import|imported|sync|synced|zapier|integration)\b/i.test(record[key]));
 }
 
 function assignmentOwnerIds(record) {

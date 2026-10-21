@@ -1,5 +1,7 @@
 // File uploads do not always create an /activities row in JobNimbus. Use the
 // provider's creation timestamp, never a filename date or mutable update time.
+import { managementActivityHasAutomationMarker } from "./management-provider.js";
+
 export function managementDocumentActivities(documents, { fileId, knownFileIds, asOf }) {
   if (!Array.isArray(documents) || documents.length > 5000) throw new Error("Invalid document collection");
   const events = [];
@@ -20,7 +22,8 @@ export function managementDocumentActivities(documents, { fileId, knownFileIds, 
     if (links.size !== 1) { summary.ambiguous++; continue; }
     const marker = [doc.source_type, doc.origin, doc.status_name, doc.created_by_name]
       .map(value => typeof value === "string" ? value.toLowerCase() : "").join(" ");
-    if (["is_deleted", "deleted", "is_archived", "is_automated", "automated", "is_system"].some(k => doc[k] === true)
+    if (managementActivityHasAutomationMarker(doc)
+      || ["is_deleted", "deleted", "is_archived"].some(k => doc[k] === true)
       || doc.is_active === false || /\b(system|automated|automation|import|imported|sync|synced|zapier|draft|pending)\b/.test(marker)) {
       summary.excluded++; continue;
     }

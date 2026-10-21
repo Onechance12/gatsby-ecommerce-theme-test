@@ -2511,6 +2511,8 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     unconfiguredOwnerContact
   ];
   let serveUnknownContactsWrapper = false;
+  let repeatContactIndexPage = false;
+  const managementIndexPages = [];
   let ambiguousManagementReferenceId = "";
   let managementActivityOverride = null;
   let managementDocumentOverride = null;
@@ -2759,11 +2761,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     if (url.pathname === "/contacts" && req.method === "GET") {
       assert.equal(req.headers.authorization, "Bearer hcn-jobnimbus-api-key");
       hcnProviderRequests.push(`jobnimbus:${url.pathname}`);
+      const size = Number(url.searchParams.get("size") || 500);
+      const offset = Number(url.searchParams.get("from") || 0);
+      managementIndexPages.push({ size, offset });
+      const page = allContacts.slice(repeatContactIndexPage ? 0 : offset, (repeatContactIndexPage ? 0 : offset) + size);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(
         serveUnknownContactsWrapper
-          ? { unknownWrapper: allContacts }
-          : { contacts: allContacts }
+          ? { unknownWrapper: page }
+          : { contacts: page }
       ));
       return;
     }
@@ -2914,6 +2920,7 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
                   : "2026-07-25T14:00:00.000Z"
             ),
           actor_role: "adjuster",
+          is_automated: activityOverride.is_automated,
           note: "Fresh synthetic carrier activity"
         }]
       }));
@@ -4575,22 +4582,15 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(managementSweep.criteria.rankingMode, "activity_only");
   assert.equal(
     managementSweep.criteria.workflowScope,
-    "estimating_board"
+    "all_active"
   );
   assert.equal(
     managementSweep.criteria.filterOrder,
-    "workflow_status_before_activity_ranking"
+    "complete_index_census_then_scope_then_all_histories_then_top_n"
   );
   assert.deepEqual(
     managementSweep.criteria.includedStatusCodes,
-    [
-      "photo_file_estimate_needed",
-      "ready_for_pa_review",
-      "submitted_awaiting_confirmation",
-      "submitted",
-      "hot_final_negotiation",
-      "estimating_finalized_awaiting_acv"
-    ]
+    []
   );
   assert.equal(managementSweep.adjusters.length, 3);
   assert.deepEqual(
@@ -4620,6 +4620,13 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     ]
   );
   assert.equal(managementSweep.companyWorst.length, 3);
+  assert.equal(managementSweep.portfolio.scannedContactCount, 6);
+  assert.equal(managementSweep.portfolio.assignedInsuranceCount, 4);
+  assert.equal(managementSweep.portfolio.activeFileCount, 3);
+  assert.equal(managementSweep.portfolio.inactiveFileCount, 1);
+  assert.equal(managementSweep.portfolio.historyReadFileCount, 3);
+  assert.equal(managementSweep.summary.exclusionCount, 3);
+  assert.deepEqual(managementSweep.adjusters.map(g => g.portfolio.assignedInsuranceCount), [2, 1, 1]);
   assert.deepEqual(
     managementSweep.adjusters.flatMap(
       (adjuster) => adjuster.items.map((item) => item.eventSummary)
@@ -4644,6 +4651,9 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     0
   );
   assert.equal(managementSweep.completeness.status, "complete");
+  if (process.env.HCN_MANAGEMENT_SYNTHETIC_REPORT_OUTPUT) {
+    await writeFile(process.env.HCN_MANAGEMENT_SYNTHETIC_REPORT_OUTPUT, JSON.stringify(managementSweep), { flag: "wx", mode: 0o600 });
+  }
   assert.deepEqual(
     managementSweep.sourceHealth.map((source) => [
       source.key,
@@ -4910,6 +4920,58 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
     chanceManagementItem.lastTouch.summary,
     "No counted JobNimbus work activity was found; gap starts at file creation"
   );
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  // Exercise the real HTTP path: no implicit Estimating gate; output limits
+  // follow complete history reads, and the census survives an explicit filter.
+  const originalStatuses = [activeContact, otherOwnerContact, thirdOwnerContact].map(c => c.status_name);
+  [activeContact, otherOwnerContact, thirdOwnerContact].forEach((c, i) => { c.status_name = ["Appraisal Interest", "Legal", "Ready for Production"][i]; });
+  const allStatusesResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: "{}" });
+  assert.equal(allStatusesResponse.status, 200);
+  const allStatuses = await allStatusesResponse.json();
+  assert.equal(allStatuses.portfolio.activeFileCount, 3);
+  assert.deepEqual(allStatuses.adjusters.flatMap(g => g.items.map(i => i.status.code)), ["appraisal_interest", "legal", "ready_for_production"]);
+  const filteredResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: JSON.stringify({ workflowScope: "estimating_board" }) });
+  assert.equal(filteredResponse.status, 200);
+  const filtered = await filteredResponse.json();
+  assert.equal(filtered.portfolio.assignedInsuranceCount, 4);
+  assert.equal(filtered.portfolio.activeFileCount, 3);
+  assert.equal(filtered.portfolio.outsideWorkflowStatusCount, 3);
+  assert.equal(filtered.summary.eligibleFileCount, 0);
+  assert.equal(filtered.summary.exclusionCount, 6);
+  [activeContact, otherOwnerContact, thirdOwnerContact].forEach((c, i) => { c.status_name = originalStatuses[i]; });
+
+  // Eligible files are on page two. Remain inside this fixture's intentionally
+  // small read budget; the existing budget-exhaustion test below is unchanged.
+  allContacts.unshift(...Array.from({ length: 500 }, (_, i) => ({ ...inactiveChanceContact, jnid: `synthetic-index-${i}`, number: `SYN-${i}` })));
+  thirdOwnerContact.is_active = false;
+  managementIndexPages.length = 0;
+  const pagedResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: "{}" });
+  assert.equal(pagedResponse.status, 200);
+  const paged = await pagedResponse.json();
+  assert.deepEqual(managementIndexPages.map(page => page.offset), [0, 500]);
+  assert.equal(paged.portfolio.scannedContactCount, 506);
+  assert.equal(paged.portfolio.assignedInsuranceCount, 504);
+  assert.equal(paged.portfolio.activeFileCount, 2);
+  assert.equal(paged.portfolio.inactiveFileCount, 502);
+  assert.equal(paged.portfolio.historyReadFileCount, 2);
+  assert.equal(paged.summary.exclusionCount, 504);
+  const historiesBeforeDuplicate = hcnManagementActivityFilters.length;
+  repeatContactIndexPage = true;
+  const duplicatePageResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: "{}" });
+  repeatContactIndexPage = false;
+  assert.equal(duplicatePageResponse.status, 503);
+  assert.equal(hcnManagementActivityFilters.length, historiesBeforeDuplicate, "bad index must fail before exact-file reads");
+  allContacts.splice(0, 500);
+  thirdOwnerContact.is_active = true;
+
+  managementActivityOverride = { record_type_name: "Note", status_name: "Recorded", is_automated: true, date_created: "2026-07-29T10:00:00.000Z" };
+  const automatedResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, { method: "POST", headers: reportHeaders, body: "{}" });
+  managementActivityOverride = null;
+  assert.equal(automatedResponse.status, 200);
+  const automated = await automatedResponse.json();
+  assert.equal(automated.adjusters[0].items[0].eventSummary.noiseCount, 1);
+  assert.equal(automated.adjusters[0].items[0].gaps.operationalActivity.lastAt, null);
   assert.equal(jobNimbusMutationRequests.length, 0);
 
   allContacts.push({
