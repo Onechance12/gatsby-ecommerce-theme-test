@@ -92,6 +92,7 @@ import { createGmailAttachmentReferences } from "./gmail/attachment-reference.js
 import { findOutboundReservationConflict } from "./gmail/reservation-policy.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { assignedRoster, liveAssignedContactAllowed } from "./jobnimbus/assigned-roster.js";
+import { contactWithWorkflowClosure } from "./jobnimbus/workflow-closure.js";
 import {
   approvedNoteCreatedId,
   approvedNoteIntentMatches,
@@ -15175,6 +15176,11 @@ async function hcnGmailApi(endpoint, options = {}) {
 
 async function jobNimbus(endpoint, options = {}) {
   if (!API_KEY) badRequest("JOBNIMBUS_API_KEY is not configured.");
+  if (String(options.method || "GET").toUpperCase() !== "GET") {
+    // A post-write scope/readback must not reuse pre-write workflow evidence.
+    const context = currentRequestAuthentication();
+    if (context) delete context.jobNimbusWorkflowClosure;
+  }
   if (isHcnRestrictedEffectRequest() || options.approvedNote === true || options.approvedPdf === true) {
     return fetchBoundedJson(
       fetch,
@@ -15211,7 +15217,39 @@ async function jobNimbus(endpoint, options = {}) {
     error.statusCode = response.status;
     throw error;
   }
-  return json;
+  return hydrateOperatorWorkflowClosure(endpoint, options, json);
+}
+
+async function hydrateOperatorWorkflowClosure(endpoint, options, payload) {
+  if (String(options.method || "GET").toUpperCase() !== "GET"
+    || !/^\/contacts(?:\?|\/|$)/.test(endpoint)
+    || !isMacCodexOperatorRequest() || operatorCompanyScopeActive()
+    || CHANCE_OPERATOR_RUN_MANIFEST?.assignmentMode !== "live_assigned") return payload;
+  const single = /^\/contacts\/[^/?]+(?:\?.*)?$/.test(endpoint);
+  const contacts = single ? [payload] : unwrapList(payload, "contacts");
+  const needsClosure = (contact) => contact && typeof contact === "object"
+    && !Array.isArray(contact) && !Object.hasOwn(contact, "is_closed")
+    // This is permission to look up an omitted flag, never permission to act.
+    && liveAssignedContactAllowed({ ...contact, is_closed: false }, CHANCE_OWNER_ID);
+  if (!contacts.some(needsClosure)) return payload;
+  const context = currentRequestAuthentication();
+  if (!context) return payload;
+  if (!context.jobNimbusWorkflowClosure) {
+    context.jobNimbusWorkflowClosure = fetchBoundedJson(fetch,
+      `${API_BASE}/account/settings?field=workflows`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${API_KEY}`, accept: "application/json" }
+      }, { timeoutMs: 15_000, maxBytes: 2 * 1024 * 1024,
+        errorCode: "JOBNIMBUS_WORKFLOW_CLOSURE_UNAVAILABLE" }
+    ).catch(() => null);
+  }
+  const settings = await context.jobNimbusWorkflowClosure;
+  const hydrate = (contact) => needsClosure(contact)
+    ? contactWithWorkflowClosure(contact, settings) : contact;
+  if (single) return hydrate(payload);
+  if (Array.isArray(payload)) return payload.map(hydrate);
+  const key = Object.keys(payload || {}).find((key) => payload[key] === contacts);
+  return key ? { ...payload, [key]: contacts.map(hydrate) } : payload;
 }
 
 async function jobNimbusFileApi(endpoint, options = {}) {

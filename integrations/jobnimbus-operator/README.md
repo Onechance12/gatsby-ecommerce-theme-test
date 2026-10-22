@@ -1,5 +1,28 @@
 # JobNimbus Operator for Mac
 
+## Omitted contact closure verification repair (2026-10-22)
+
+A successful partial contact update can be followed by a JobNimbus read that
+omits `is_closed`. The live-assignment guard correctly refuses an unknown
+closure state, but previously could not recover the provider's workflow value.
+
+For an otherwise eligible live-assigned contact with an absent closure field,
+the bridge now reads only `GET /account/settings?field=workflows`. It requires
+one active contact workflow and one active, nonarchived status, matched by both
+provider IDs and names, with an explicit valid closure flag. The returned
+contact carries the derived flag and `closureVerification` provenance; no
+derived field or workflow setting is written to JobNimbus. An existing contact
+closure value, including an invalid one, is never overridden. Missing, duplicate,
+mismatched, closed, archived or unavailable metadata stays blocked.
+
+Workflow evidence is cached only inside the current authenticated request and
+discarded before every provider write, so post-write verification rereads it.
+Synthetic HTTP regressions cover successful readback after a partial update,
+closure changes before execution and after a write, unavailable metadata,
+unchanged ownership/exclusion checks, and retention of uncertain receipts.
+The owner/action policy, permissions, effect gates and historical receipts do
+not change. Deployment requires a coordinated versioned Operator build pin.
+
 ## Authoritative Retell model contract repair (2026-10-22)
 
 The deployed c7501 bridge rejects the current provider's `model_config` and
