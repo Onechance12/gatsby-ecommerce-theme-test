@@ -248,7 +248,7 @@ services:
       - key: HCN_MANAGEMENT_READ_CONCURRENCY
         value: "4"
       - key: HCN_MANAGEMENT_PROVIDER_REQUEST_BUDGET
-        value: "750"
+        value: "2000"
       - key: ACTION_BATCH_STORE_PATH
         value: /var/data/hcn-operations/platform/action-batches.json
       - key: ACTION_APPROVAL_STORE_PATH
