@@ -55,6 +55,8 @@ async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "approved-quo-sms-test-"));
   const state = {
     posts: 0,
+    contactPuts: 0,
+    workflowReads: 0,
     messages: [],
     mode: "normal",
     body: null
@@ -95,6 +97,15 @@ async function fixture(t, options = {}) {
       owners: [{ id: OWNER }]
     }
   ];
+  if (options.workflowClosure) {
+    Object.assign(contacts[0], { record_type: 1, status: 375 });
+    delete contacts[0].is_closed;
+    state.workflowSettings = { workflows: [{
+      id: 1, name: "Insurance", object_type: "contact", is_active: true,
+      status: [{ id: 375, name: "Ready for PA Review", is_closed: false,
+        is_active: true, is_archived: false }]
+    }] };
+  }
   const provider = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const json = (status, body) => {
@@ -106,11 +117,25 @@ async function fixture(t, options = {}) {
       for await (const chunk of req) chunks.push(chunk);
       return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
     };
+    if (url.pathname === "/jn/account/settings" && req.method === "GET") {
+      state.workflowReads += 1;
+      assert.equal(url.searchParams.get("field"), "workflows");
+      if (state.workflowUnavailable) return json(503, { error: "provider-secret-must-not-leak" });
+      return json(200, state.workflowSettings || {});
+    }
     if (url.pathname === "/jn/contacts") {
       return json(200, { contacts, count: contacts.length });
     }
     const contact = contacts.find((row) => url.pathname === `/jn/contacts/${row.jnid}`);
-    if (contact) return json(200, contact);
+    if (contact) {
+      if (req.method === "PUT") {
+        state.contactPuts += 1;
+        Object.assign(contact, await readBody());
+        if (options.workflowClosure) delete contact.is_closed;
+        if (state.closeWorkflowAfterWrite) state.workflowSettings.workflows[0].status[0].is_closed = true;
+      }
+      return json(200, contact);
+    }
     if (url.pathname === "/quo/v1/phone-numbers") {
       return json(200, { data: [{ id: "PN_synthetic", name: "Synthetic Sender", number: FROM }] });
     }
@@ -331,6 +356,66 @@ test("live policy blocks changed ownership, inactivity, exclusion and generic se
   assert.notEqual((await f.prepare(ops)).status, 200);
   assert.notEqual((await f.prepare([operation({ query: "#2628", to: "+12025550104" })])).status, 200);
   assert.equal((await f.request("/quo/send", { query: "#990001", to: TO, content: TEXT, execute: true })).status, 403);
+  assert.equal(f.state.posts, 0);
+});
+
+test("live policy recovers an omitted provider closure flag without writing or overriding ownership", async (t) => {
+  const f = await fixture(t, { live: true, workflowClosure: true });
+  const ops = [{ type: "jobnimbus.update_contact", payload: {
+    query: "#990001", fields: { email: "synthetic-client@example.test" }
+  } }];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  assert.equal(f.state.contactPuts, 0);
+  assert.equal(f.contacts[0].is_closed, undefined);
+  const readsBeforeExecute = f.state.workflowReads;
+  const executed = await f.execute(ops, plan.body);
+  assert.equal(executed.status, 200, JSON.stringify(executed.body));
+  assert.equal(executed.body.mode, "executed");
+  assert.equal(executed.body.batch.status, "completed");
+  assert.equal(executed.body.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(f.state.contactPuts, 1);
+  assert.ok(f.state.workflowReads >= readsBeforeExecute + 2,
+    "execution and post-write readback each require fresh workflow settings");
+  assert.equal(f.contacts[0].is_closed, undefined, "closure evidence must never be written to the provider");
+  assert.equal(f.state.posts, 0);
+  f.contacts[0].owners = [{ id: "other-synthetic-owner" }];
+  assert.equal((await f.prepare(ops)).status, 400);
+  assert.equal(f.state.contactPuts, 1);
+});
+
+test("closure or unavailable workflow evidence after approval blocks the provider write", async (t) => {
+  const f = await fixture(t, { live: true, workflowClosure: true });
+  const ops = [{ type: "jobnimbus.update_contact", payload: {
+    query: "#990001", fields: { email: "synthetic-client@example.test" }
+  } }];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  f.state.workflowSettings.workflows[0].status[0].is_closed = true;
+  assert.notEqual((await f.execute(ops, plan.body)).status, 200);
+  assert.equal(f.state.contactPuts, 0);
+  f.state.workflowSettings.workflows[0].status[0].is_closed = false;
+  f.state.workflowUnavailable = true;
+  const blocked = await f.prepare(ops);
+  assert.notEqual(blocked.status, 200);
+  assert.ok(!JSON.stringify(blocked.body).includes("provider-secret-must-not-leak"));
+  assert.equal(f.state.contactPuts, 0);
+  assert.equal(f.state.posts, 0);
+});
+
+test("post-write closure changes retain the partial-failure receipt instead of reusing pre-write metadata", async (t) => {
+  const f = await fixture(t, { live: true, workflowClosure: true });
+  const ops = [{ type: "jobnimbus.update_contact", payload: {
+    query: "#990001", fields: { email: "synthetic-client@example.test" }
+  } }];
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  f.state.closeWorkflowAfterWrite = true;
+  const executed = await f.execute(ops, plan.body);
+  assert.equal(executed.body.mode, "partial_failure", JSON.stringify(executed.body));
+  assert.equal(executed.body.batch.current.status, "reconciliation_required");
+  assert.equal(executed.body.batch.completed.length, 0);
+  assert.equal(f.state.contactPuts, 1);
   assert.equal(f.state.posts, 0);
 });
 
