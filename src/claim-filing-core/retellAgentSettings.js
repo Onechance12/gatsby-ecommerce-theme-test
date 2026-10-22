@@ -8,7 +8,7 @@ export const RETELL_CLAIM_LLM_SETTINGS = Object.freeze({
   begin_message: "",
   start_speaker: "user",
   begin_after_user_silence_ms: null,
-  model: "gpt-4.1",
+  model: "gpt-6.1-sol",
   s2s_model: null,
   model_temperature: 0,
   model_high_priority: false,
@@ -18,7 +18,7 @@ export const RETELL_CLAIM_LLM_SETTINGS = Object.freeze({
   // backup:null clears any inherited fallback when publishing a fresh draft.
   model_config: Object.freeze({
     type: "cascading",
-    primary: Object.freeze({ model: "gpt-4.1", tier: "standard" }),
+    primary: Object.freeze({ model: "gpt-6.1-sol", tier: "standard" }),
     backup: null,
     temperature: 0
   }),
@@ -150,7 +150,7 @@ export const RETELL_CLAIM_AGENT_SETTINGS = Object.freeze({
   opt_in_signed_url: true,
   signed_url_expiration_ms: 3600000,
 
-  post_call_analysis_model: "gpt-4.1-mini",
+  post_call_analysis_model: "gpt-6.1-sol",
   timezone: "America/Chicago"
 });
 

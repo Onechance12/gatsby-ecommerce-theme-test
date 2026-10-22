@@ -7605,13 +7605,13 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       assert.equal(url.searchParams.get("version"), "5");
       assert.equal(body.begin_message, "");
       assert.equal(body.start_speaker, "user");
-      assert.equal(body.model, "gpt-4.1");
+      assert.equal(body.model, "gpt-6.1-sol");
       assert.equal(body.s2s_model, null);
       assert.equal(body.model_temperature, 0);
       assert.equal(body.model_high_priority, false);
       assert.equal(body.model_ultrafast, false);
       assert.deepEqual(body.model_config, {
-        type: "cascading", primary: { model: "gpt-4.1", tier: "standard" },
+        type: "cascading", primary: { model: "gpt-6.1-sol", tier: "standard" },
         backup: null, temperature: 0
       });
       assert.equal(body.tool_call_strict_mode, true);
@@ -7639,6 +7639,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       agentUpdateCount += 1;
       assert.equal(url.searchParams.get("version"), "8");
       assert.equal(body.response_engine.version, 5);
+      assert.equal(body.post_call_analysis_model, "gpt-6.1-sol");
       assert.equal(body.timezone, "America/Chicago");
       assert.equal(body.responsiveness, 0.55);
       assert.equal(body.interruption_sensitivity, 0.35);
