@@ -2047,6 +2047,164 @@ test("Retell configuration, result, and callbacks are attested read-only paths e
   assert.equal(h.requests.some((request) => request.pathname === "/claim-filing/writeback"), false);
 });
 
+test("Retell configuration diagnostics name failed checks without accepting unsafe configurations", async (t) => {
+  const trueFields = {
+    agentConfigured: "agent_configured",
+    fromNumberConfigured: "from_number_configured",
+    callbackWebhookAvailable: "callback_webhook_available",
+    guardedEndCredentialConfigured: "guarded_end_credential_configured",
+    guardedEndCredentialIsolated: "guarded_end_credential_isolated",
+    inboundWebhookCredentialConfigured: "inbound_webhook_credential_configured",
+    inboundWebhookCredentialIsolated: "inbound_webhook_credential_isolated",
+    inboundFallbackAgentUnset: "inbound_fallback_agent_unset",
+    phoneNumberMatches: "phone_number_matches",
+    inboundWebhookUrlMatches: "inbound_webhook_url_matches",
+    inboundAgentRoutingMatches: "inbound_agent_routing_matches",
+    guardedEndAuthorizationMatches: "guarded_end_authorization_matches",
+    dtmfPressDigitAvailable: "dtmf_press_digit_available",
+    guardedEndCallAvailable: "guarded_end_call_available",
+    promptMatches: "prompt_matches",
+    toolsMatch: "tools_match",
+    analysisSchemaMatches: "analysis_schema_matches",
+    timezoneMatches: "timezone_matches",
+    agentPublished: "agent_published",
+    llmPublished: "llm_published",
+    writebackRequiresSeparateApproval: "writeback_requires_separate_approval"
+  };
+  const cases = [
+    ...Object.entries(trueFields).flatMap(([field, code]) => [
+      [field, false, code], [field, undefined, code], [field, "true", code]
+    ]),
+    ["mode", "provider-secret", "mode"],
+    ["callbackPacketRestoration", "provider-secret", "callback_packet_restoration"],
+    ["inboundWebhookAuthentication", "provider-secret", "inbound_webhook_authentication"],
+    ["expectedPhoneConfigDigest", "provider-secret", "expected_phone_config_digest"],
+    ["livePhoneConfigDigest", "5".repeat(64), "live_phone_config_digest"],
+    ["agentVersion", null, "agent_version"],
+    ["agentVersion", -1, "agent_version"],
+    ["agentVersion", "3", "agent_version"],
+    ["llmVersion", undefined, "llm_version"],
+    ["llmVersion", -1, "llm_version"],
+    ["llmVersion", 1.5, "llm_version"],
+    ["agentConfigDigest", "provider-secret", "agent_config_digest"],
+    ["expectedConfigDigest", "provider-secret", "expected_config_digest"],
+    ["liveConfigDigest", "5".repeat(64), "live_config_digest"],
+    ["approvalModel", "provider-secret", "approval_model"],
+    ["automaticJobNimbusWriteback", true, "automatic_jobnimbus_writeback_disabled"],
+    ["automaticJobNimbusWriteback", undefined, "automatic_jobnimbus_writeback_disabled"]
+  ];
+  for (const [field, value, code] of cases) {
+    await t.test(`${field}=${String(value)}`, async () => {
+      const h = harness();
+      h.state.claimConfiguration[field] = value;
+      h.state.claimConfiguration.instruction = "private-instruction";
+      h.state.claimConfiguration.configurationMismatches = ["private-mismatch"];
+      const check = error => {
+        assert.match(error.message, new RegExp(`attestations: .*\\b${code}\\b`));
+        assert.doesNotMatch(error.message, /provider-secret|private-instruction|private-mismatch/);
+        return true;
+      };
+      await assert.rejects(h.coordinator.readClaimFilingConfiguration(), check);
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), check);
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+      assert.equal(h.approvals.size, 0);
+    });
+  }
+});
+
+test("Retell diagnostics report multiple failures and preserve execution approval consumption", async () => {
+  const h = harness();
+  const plan = await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
+  h.state.claimConfiguration.promptMatches = false;
+  h.state.claimConfiguration.toolsMatch = false;
+  h.state.claimConfiguration.inboundAgentRoutingMatches = false;
+  await assert.rejects(
+    h.coordinator.executeClaimFilingCall(plan.approvalId, plan.planDigest, plan.approvedInput),
+    /attestations: inbound_agent_routing_matches, prompt_matches, tools_match\..*approval was consumed/
+  );
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
+test("Retell readiness remains inspectable read-only and cannot echo bridge instructions into errors", async () => {
+  const h = harness();
+  h.state.claimConfiguration.ready = false;
+  h.state.claimConfiguration.instruction = "private-instruction https://private.invalid/?token=secret";
+  assert.equal((await h.coordinator.readClaimFilingConfiguration()).ready, false);
+  await assert.rejects(h.coordinator.readClaimFilingConfiguration({ requireReady: true }), error => {
+    assert.match(error.message, /not ready: ready must be true/);
+    assert.doesNotMatch(error.message, /private-instruction|private.invalid|secret/);
+    return true;
+  });
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+});
+
+test("Retell missing configuration still fails closed with bounded check names", async () => {
+  const h = harness();
+  h.state.claimConfiguration = null;
+  await assert.rejects(h.coordinator.readClaimFilingConfiguration(), error => {
+    assert.match(error.message, /attestations: mode, agent_configured/);
+    assert.ok(error.message.length < 1200);
+    assert.equal(error instanceof TypeError, false);
+    return true;
+  });
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+});
+
+test("Retell aggregate mismatch reports fixed configuration groups without leaking provider mismatch details", async () => {
+  const h = harness();
+  Object.assign(h.state.claimConfiguration, {
+    ready: false,
+    liveConfigDigest: "5".repeat(64),
+    llmSettingsMatch: false,
+    agentSettingsMatch: true,
+    voiceConfigurationMatches: false,
+    retainedAgentConfigurationMatches: false,
+    publicationReceiptMatches: false,
+    instruction: "secret-provider-instruction",
+    configurationMismatches: ["retained_agent_configuration:private-provider-value"]
+  });
+  await assert.rejects(h.coordinator.readClaimFilingConfiguration(), error => {
+    assert.match(error.message, /attestations: live_config_digest\./);
+    assert.match(error.message, /Failed configuration groups: llm_settings, voice_configuration, retained_agent_configuration, publication_receipt\./);
+    assert.doesNotMatch(error.message, /secret-provider|private-provider|agent_settings/);
+    return true;
+  });
+  h.state.claimConfiguration.liveConfigDigest = h.state.claimConfiguration.expectedConfigDigest;
+  await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), /not ready.*Failed configuration groups: llm_settings/);
+  assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+  assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+  assert.equal(h.approvals.size, 0);
+});
+
+test("Retell retained model diagnostics recognize only exact documented values without authorizing them", async (t) => {
+  const expected = { type: "cascading", primary: { model: "gpt-4.1", tier: "standard" }, temperature: 0 };
+  for (const [model, code] of [
+    [expected, "model_config_standard_no_backup_omitted"],
+    [{ ...expected, backup: null }, "model_config_standard_no_backup_null"],
+    [{ ...expected, backup: { model: "gpt-4.1", tier: "standard", kick_in_timeout_ms: 30150 } }, "model_config_standard_backup_30150"],
+    [{ ...expected, private: "provider-secret" }, "model_config_requires_review"],
+    [{ ...expected, primary: { model: "provider-secret", tier: "standard" } }, "model_config_requires_review"],
+    [null, "model_config_requires_review"]
+  ]) {
+    await t.test(code, async () => {
+      const h = harness();
+      Object.assign(h.state.claimConfiguration, {
+        ready: false, liveConfigDigest: "5".repeat(64), retainedLlmConfigurationMatches: false,
+        retainedLlmConfiguration: { model_config: model, model_ultrafast: false, "provider-secret": "provider-secret" }
+      });
+      await assert.rejects(h.coordinator.planClaimFilingCall(CLAIM_INPUT), error => {
+        assert.match(error.message, new RegExp(`Known retained LLM values: model_ultrafast_false, ${code}\\.`));
+        assert.doesNotMatch(error.message, /provider-secret/);
+        return true;
+      });
+      assert.equal(claimPosts(h, "/claim-filing/prepare").length, 0);
+      assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
+    });
+  }
+});
+
 function reviewedPacketInput() {
   const input = structuredClone(CLAIM_INPUT);
   input.reviewMode = "reviewed_packet";

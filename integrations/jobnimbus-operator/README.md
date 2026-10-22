@@ -1,5 +1,59 @@
 # JobNimbus Operator for Mac
 
+## Authoritative Retell model contract repair (2026-10-22)
+
+The deployed c7501 bridge rejects the current provider's `model_config` and
+`model_ultrafast` fields as unreviewed retained LLM configuration. Read-only
+diagnosis confirmed the recognized live values are cascading GPT-4.1, standard
+tier, temperature zero, no backup, and ultrafast false. The aggregate configuration
+digest and saved publication proof therefore differ even though prompt, tools,
+voice, callback routing and the older model controls match.
+
+The claim settings now explicitly pin the authoritative model selector and the
+ultrafast flag. Publication sends `backup:null` to clear inherited fallbacks.
+Attestation equates only null and omitted backup with no backup; every other
+model setting, nested extension, changed tier/temperature and non-null backup
+remains part of the strict digest. Unknown top-level fields remain retained and
+blocked. This follows [Retell's current model update contract](https://docs.retellai.com/api-references/update-retell-llm).
+
+Synthetic HTTP regressions reproduce the provider's omitted-backup readback,
+reject authoritative model/backup/extra-field drift even when legacy model
+fields match, and verify explicit clearing during the existing dedicated,
+digest-approved publication workflow. Existing receipt tampering, immutable
+published-base, callback, identity, wrong-file and one-use approval checks remain.
+
+Production rollout still requires the reviewed bridge deployment and a matching
+versioned Operator package with all operational/management/research boundaries,
+policy/owner/hash/expiry, eight actions, exclusions and historical fingerprints
+preserved. Then prepare and approve the exact fresh Retell publication preview
+using the dedicated one-route publisher. Do not edit or manufacture a publication
+receipt: the existing publish/readback workflow must create the signed proof.
+Require fresh native attestation and claim-agent `ready:true` afterward. No
+claim call, retry, client communication or CRM update is authorized by this repair.
+
+## Retell configuration failure diagnostics (2026-10-22)
+
+Configuration verification now identifies each failed safety check using fixed
+names instead of one generic missing-attestation error. The same checks remain
+mandatory for read-only verification, call preparation and execution. Diagnostics
+never echo provider values, credentials, webhook URLs, arbitrary mismatch strings
+or bridge instructions into errors. Execution failures still consume the local
+approval before any call POST; incomplete or conflicting communications still
+block the ordinary full-evidence path.
+
+`node scripts/verify-release.mjs --retell` checks the operational boundary and
+then the claim-agent configuration through a fresh native MCP process. It never
+reads a client file, prepares a claim, calls a carrier or publishes an agent.
+The default verifier retains its separate management-status check.
+
+Release this wrapper-only fix in a new versioned Operator package, preserving
+the current operational and management build pins, owner, policy hash/expiry,
+actions, exclusions, historical receipt fingerprints and all provider gates.
+No bridge deployment or Retell prompt publication is needed for diagnostics.
+Installing this package does not repair the live Retell configuration by itself;
+use its failed-check names to prepare the exact underlying repair. Verify which
+package the native session loaded before reporting that its tools were updated.
+
 ## Approved exact-host PDF download repair (2026-10-19)
 
 The PDF transport permits HTTPS `files.jobnimbus.com` only for read requests.

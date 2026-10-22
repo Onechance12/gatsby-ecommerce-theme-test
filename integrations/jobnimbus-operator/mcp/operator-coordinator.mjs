@@ -673,52 +673,95 @@ function exactFileNumber(value) {
 }
 
 function assertClaimFilingConfiguration(response, { requireReady = false } = {}) {
-  if (
-    response?.mode !== "read_only"
-    || response?.agentConfigured !== true
-    || response?.fromNumberConfigured !== true
-    || response?.callbackWebhookAvailable !== true
-    || response?.callbackPacketRestoration !== "full_approved_packet"
-    || response?.guardedEndCredentialConfigured !== true
-    || response?.guardedEndCredentialIsolated !== true
-    || response?.inboundWebhookCredentialConfigured !== true
-    || response?.inboundWebhookCredentialIsolated !== true
-    || response?.inboundWebhookAuthentication
-      !== "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp"
-    || response?.inboundFallbackAgentUnset !== true
-    || response?.phoneNumberMatches !== true
-    || response?.inboundWebhookUrlMatches !== true
-    || response?.inboundAgentRoutingMatches !== true
-    || !/^[a-f0-9]{64}$/.test(String(response?.expectedPhoneConfigDigest || ""))
-    || response?.livePhoneConfigDigest !== response?.expectedPhoneConfigDigest
-    || response?.guardedEndAuthorizationMatches !== true
-    || response?.dtmfPressDigitAvailable !== true
-    || response?.guardedEndCallAvailable !== true
-    || response?.promptMatches !== true
-    || response?.toolsMatch !== true
-    || response?.analysisSchemaMatches !== true
-    || response?.timezoneMatches !== true
-    || response?.agentPublished !== true
-    || response?.llmPublished !== true
-    || !Number.isInteger(response?.agentVersion)
-    || response.agentVersion < 0
-    || !Number.isInteger(response?.llmVersion)
-    || response.llmVersion < 0
-    || !SHA256.test(String(response?.agentConfigDigest || ""))
-    || !SHA256.test(String(response?.expectedConfigDigest || ""))
-    || response?.liveConfigDigest !== response?.expectedConfigDigest
-    || response?.approvalModel
-      !== "fresh_single_file_digest_plus_short_lived_identity_bound_single_use_challenge"
-    || response?.writebackRequiresSeparateApproval !== true
-    || response?.automaticJobNimbusWriteback !== false
-  ) {
-    throw new Error("The live Retell claim-filing configuration omitted a required safety attestation.");
+  // Report only fixed check names. Never echo the bridge instruction, provider
+  // values, URLs, headers, tokens, or arbitrary configuration mismatch strings.
+  // The same assertions gate read-only verification, preparation and execution.
+  const failedChecks = [
+    [response?.mode !== "read_only", "mode"],
+    [response?.agentConfigured !== true, "agent_configured"],
+    [response?.fromNumberConfigured !== true, "from_number_configured"],
+    [response?.callbackWebhookAvailable !== true, "callback_webhook_available"],
+    [response?.callbackPacketRestoration !== "full_approved_packet", "callback_packet_restoration"],
+    [response?.guardedEndCredentialConfigured !== true, "guarded_end_credential_configured"],
+    [response?.guardedEndCredentialIsolated !== true, "guarded_end_credential_isolated"],
+    [response?.inboundWebhookCredentialConfigured !== true, "inbound_webhook_credential_configured"],
+    [response?.inboundWebhookCredentialIsolated !== true, "inbound_webhook_credential_isolated"],
+    [response?.inboundWebhookAuthentication
+      !== "dedicated_url_token_plus_retell_hmac_sha256_raw_body_timestamp", "inbound_webhook_authentication"],
+    [response?.inboundFallbackAgentUnset !== true, "inbound_fallback_agent_unset"],
+    [response?.phoneNumberMatches !== true, "phone_number_matches"],
+    [response?.inboundWebhookUrlMatches !== true, "inbound_webhook_url_matches"],
+    [response?.inboundAgentRoutingMatches !== true, "inbound_agent_routing_matches"],
+    [!SHA256.test(String(response?.expectedPhoneConfigDigest || "")), "expected_phone_config_digest"],
+    [response?.livePhoneConfigDigest !== response?.expectedPhoneConfigDigest, "live_phone_config_digest"],
+    [response?.guardedEndAuthorizationMatches !== true, "guarded_end_authorization_matches"],
+    [response?.dtmfPressDigitAvailable !== true, "dtmf_press_digit_available"],
+    [response?.guardedEndCallAvailable !== true, "guarded_end_call_available"],
+    [response?.promptMatches !== true, "prompt_matches"],
+    [response?.toolsMatch !== true, "tools_match"],
+    [response?.analysisSchemaMatches !== true, "analysis_schema_matches"],
+    [response?.timezoneMatches !== true, "timezone_matches"],
+    [response?.agentPublished !== true, "agent_published"],
+    [response?.llmPublished !== true, "llm_published"],
+    [!Number.isInteger(response?.agentVersion) || response.agentVersion < 0, "agent_version"],
+    [!Number.isInteger(response?.llmVersion) || response.llmVersion < 0, "llm_version"],
+    [!SHA256.test(String(response?.agentConfigDigest || "")), "agent_config_digest"],
+    [!SHA256.test(String(response?.expectedConfigDigest || "")), "expected_config_digest"],
+    [response?.liveConfigDigest !== response?.expectedConfigDigest, "live_config_digest"],
+    [response?.approvalModel
+      !== "fresh_single_file_digest_plus_short_lived_identity_bound_single_use_challenge", "approval_model"],
+    [response?.writebackRequiresSeparateApproval !== true, "writeback_requires_separate_approval"],
+    [response?.automaticJobNimbusWriteback !== false, "automatic_jobnimbus_writeback_disabled"]
+  ].filter(([failed]) => failed).map(([, name]) => name);
+  // These bridge checks explain an aggregate digest/readiness mismatch. They
+  // add diagnostic context only; readiness and all existing assertions above
+  // remain mandatory before preparing or executing a call.
+  const mismatchGroups = [
+    [response?.llmSettingsMatch, "llm_settings"],
+    [response?.isTransferLlmMatch, "transfer_llm"],
+    [response?.agentSettingsMatch, "agent_settings"],
+    [response?.voiceConfigurationMatches, "voice_configuration"],
+    [response?.retainedAgentConfigurationMatches, "retained_agent_configuration"],
+    [response?.retainedLlmConfigurationMatches, "retained_llm_configuration"],
+    [response?.agentIdentityMatches, "agent_identity"],
+    [response?.llmIdentityMatches, "llm_identity"],
+    [response?.publicationReceiptMatches, "publication_receipt"]
+  ].filter(([matches]) => matches === false).map(([, name]) => name);
+  const mismatchDetail = mismatchGroups.length
+    ? ` Failed configuration groups: ${mismatchGroups.join(", ")}.`
+    : "";
+  const retainedLlm = response?.retainedLlmConfiguration;
+  const retainedDetails = [];
+  if (retainedLlm && typeof retainedLlm === "object" && !Array.isArray(retainedLlm)) {
+    if (Object.hasOwn(retainedLlm, "model_ultrafast")) {
+      retainedDetails.push(retainedLlm.model_ultrafast === false
+        ? "model_ultrafast_false" : "model_ultrafast_requires_review");
+    }
+    if (Object.hasOwn(retainedLlm, "model_config")) {
+      const expectedModel = {
+        type: "cascading", primary: { model: "gpt-4.1", tier: "standard" }, temperature: 0
+      };
+      const variants = [
+        [expectedModel, "model_config_standard_no_backup_omitted"],
+        [{ ...expectedModel, backup: null }, "model_config_standard_no_backup_null"],
+        [{ ...expectedModel, backup: {
+          model: "gpt-4.1", tier: "standard", kick_in_timeout_ms: 30150
+        } }, "model_config_standard_backup_30150"]
+      ];
+      retainedDetails.push(variants.find(([value]) => canonical(value) === canonical(retainedLlm.model_config))?.[1]
+        || "model_config_requires_review");
+    }
+  }
+  const retainedDetail = retainedDetails.length
+    ? ` Known retained LLM values: ${retainedDetails.join(", ")}.`
+    : "";
+  if (failedChecks.length) {
+    throw new Error(
+      `The live Retell claim-filing configuration failed required safety attestations: ${failedChecks.join(", ")}.${mismatchDetail}${retainedDetail}`
+    );
   }
   if (requireReady && response.ready !== true) {
-    const instruction = String(response?.instruction || "").trim();
-    throw new Error(
-      `The live Retell claim-filing agent is not ready${instruction ? `: ${instruction}` : "."}`
-    );
+    throw new Error(`The live Retell claim-filing agent is not ready: ready must be true.${mismatchDetail} Run read-only configuration verification for details.`);
   }
   return response;
 }
