@@ -21,6 +21,13 @@ test("claim LLM waits for the carrier and pins deterministic tool behavior", () 
     s2s_model: null,
     model_temperature: 0,
     model_high_priority: false,
+    model_ultrafast: false,
+    model_config: {
+      type: "cascading",
+      primary: { model: "gpt-4.1", tier: "standard" },
+      backup: null,
+      temperature: 0
+    },
     tool_call_strict_mode: true,
     states: [],
     starting_state: null,
@@ -29,6 +36,44 @@ test("claim LLM waits for the carrier and pins deterministic tool behavior", () 
     kb_config: { top_k: 3, filter_score: 0.6 },
     default_dynamic_variables: {}
   });
+});
+
+test("current Retell model selection accepts null/omitted no-backup readback without inheriting a fallback", () => {
+  const expected = buildRetellClaimLlmSettings();
+  assert.equal(expected.model_config.backup, null);
+  const live = structuredClone(expected);
+  delete live.model_config.backup;
+  assert.deepEqual(normalizeRetellClaimLlmSettings(live), normalizeRetellClaimLlmSettings(expected));
+  assert.equal(Object.hasOwn(expected.model_config, "backup"), true);
+  assert.equal(Object.hasOwn(live.model_config, "backup"), false);
+  const copy = buildRetellClaimLlmSettings();
+  copy.model_config.primary.model = "changed";
+  assert.equal(buildRetellClaimLlmSettings().model_config.primary.model, "gpt-4.1");
+});
+
+test("authoritative model drift fails even when every deprecated model field still matches", () => {
+  const llm = buildRetellClaimLlmSettings();
+  const agent = { ...buildRetellClaimAgentSettings(), ...buildRetellClaimVoiceSettings() };
+  for (const mutate of [
+    config => { config.primary.model = "different-model"; },
+    config => { config.primary.tier = "ultrafast"; },
+    config => { config.temperature = 0.5; },
+    config => { config.backup = { model: "gpt-4.1", tier: "standard", kick_in_timeout_ms: 30150 }; },
+    config => { config.primary.unreviewed_setting = true; },
+    config => { config.unreviewed_setting = true; },
+    config => { delete config.primary; }
+  ]) {
+    const changed = structuredClone(llm);
+    mutate(changed.model_config);
+    assert.ok(retellClaimSettingsMismatches({ llm: changed, agent }).includes("llm.model_config"));
+    assert.equal(changed.model, "gpt-4.1");
+    assert.equal(changed.model_temperature, 0);
+  }
+  const missing = structuredClone(llm);
+  delete missing.model_config;
+  assert.ok(retellClaimSettingsMismatches({ llm: missing, agent }).includes("llm.model_config"));
+  const ultrafast = { ...llm, model_ultrafast: true };
+  assert.ok(retellClaimSettingsMismatches({ llm: ultrafast, agent }).includes("llm.model_ultrafast"));
 });
 
 test("claim runtime is tuned for carrier holds, accurate entities, and no native IVR hangup", () => {

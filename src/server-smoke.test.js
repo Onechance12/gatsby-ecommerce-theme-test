@@ -2415,6 +2415,7 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   let retellCreateCount = 0;
   let retellStopCount = 0;
   let retellAgentVersion = 7;
+  let retellModelDrift = null;
   const fakeRetell = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${fakeRetellPort}`);
     const chunks = [];
@@ -2435,7 +2436,10 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
       };
     } else if (req.method === "GET" && url.pathname === "/get-retell-llm/fixture-claim-llm") {
       assert.equal(url.searchParams.get("version"), "5");
-      payload = { ...expectedLlm, llm_id: "fixture-claim-llm", version: 5, is_published: true };
+      payload = { ...structuredClone(expectedLlm), llm_id: "fixture-claim-llm", version: 5, is_published: true };
+      // Current Retell reads omit an explicitly cleared backup selector.
+      delete payload.model_config.backup;
+      if (retellModelDrift) retellModelDrift(payload);
     } else if (
       req.method === "GET"
       && url.pathname.startsWith("/get-phone-number/")
@@ -2602,8 +2606,31 @@ test("Mac Operator Retell claim filing is single-file, exact-approved, isolated,
   assert.equal(config.dtmfPressDigitAvailable, true);
   assert.equal(config.writebackRequiresSeparateApproval, true);
   assert.equal(config.automaticJobNimbusWriteback, false);
+  assert.equal(config.llmSettingsMatch, true);
+  assert.equal(config.retainedLlmConfigurationMatches, true);
+  assert.deepEqual(config.retainedLlmConfiguration, {});
   assert.equal(JSON.stringify(config).includes(guardedToken), false);
   assert.equal(JSON.stringify(config).includes(inboundToken), false);
+
+  for (const mutate of [
+    llm => { llm.model_config.primary.model = "different-model"; },
+    llm => { llm.model_config.backup = { model: "gpt-4.1", tier: "standard", kick_in_timeout_ms: 30150 }; },
+    llm => { llm.model_config.unreviewed_setting = true; },
+    llm => { llm.model_ultrafast = true; },
+    llm => { llm.unreviewed_provider_setting = true; }
+  ]) {
+    retellModelDrift = mutate;
+    const response = await fetch(`${publicBaseUrl}/claim-filing/configuration`, {
+      method: "POST", headers: macHeaders, body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const mismatch = await response.json();
+    assert.equal(mismatch.ready, false);
+    assert.equal(mismatch.expectedConfigDigest === mismatch.liveConfigDigest, false);
+    assert.equal(mismatch.publicationReceiptMatches, false);
+    assert.equal(retellCreateCount, 0);
+  }
+  retellModelDrift = null;
 
   const publicationReceiptPath = path.join(
     memoryRoot,
@@ -7582,6 +7609,11 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
       assert.equal(body.s2s_model, null);
       assert.equal(body.model_temperature, 0);
       assert.equal(body.model_high_priority, false);
+      assert.equal(body.model_ultrafast, false);
+      assert.deepEqual(body.model_config, {
+        type: "cascading", primary: { model: "gpt-4.1", tier: "standard" },
+        backup: null, temperature: 0
+      });
       assert.equal(body.tool_call_strict_mode, true);
       assert.deepEqual(body.states, []);
       assert.equal(body.starting_state, null);
@@ -7601,6 +7633,7 @@ test("claim-agent configuration publishes the guarded prompt and exact callback 
         version: 5,
         is_published: false
       };
+      delete draftLlmState.model_config.backup;
       payload = structuredClone(draftLlmState);
     } else if (req.method === "PATCH" && url.pathname === "/update-agent/fixture-claim-config-agent") {
       agentUpdateCount += 1;

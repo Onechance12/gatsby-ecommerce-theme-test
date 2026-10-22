@@ -12,6 +12,16 @@ export const RETELL_CLAIM_LLM_SETTINGS = Object.freeze({
   s2s_model: null,
   model_temperature: 0,
   model_high_priority: false,
+  model_ultrafast: false,
+  // Retell's current API makes model_config authoritative over the legacy
+  // model/temperature/priority fields. Pin the effective model explicitly.
+  // backup:null clears any inherited fallback when publishing a fresh draft.
+  model_config: Object.freeze({
+    type: "cascading",
+    primary: Object.freeze({ model: "gpt-4.1", tier: "standard" }),
+    backup: null,
+    temperature: 0
+  }),
   tool_call_strict_mode: true,
 
   // This is intentionally one reviewed prompt with two reviewed tools. Clear
@@ -161,10 +171,19 @@ export const RETELL_CLAIM_AGENT_ATTESTED_FIELDS = Object.freeze(
 );
 
 export function normalizeRetellClaimLlmSettings(llm = {}) {
-  return Object.fromEntries(Object.keys(RETELL_CLAIM_LLM_SETTINGS).map((field) => [
+  const attested = Object.fromEntries(Object.keys(RETELL_CLAIM_LLM_SETTINGS).map((field) => [
     field,
     llm?.[field] ?? null
   ]));
+  // Retell omits backup after it is cleared with null. These two documented
+  // no-backup shapes are equivalent; retain every other key and value so new
+  // settings, model/tier changes and unexpected fallbacks still fail closed.
+  if (attested.model_config && typeof attested.model_config === "object"
+    && !Array.isArray(attested.model_config) && attested.model_config.backup === null) {
+    attested.model_config = structuredClone(attested.model_config);
+    delete attested.model_config.backup;
+  }
+  return attested;
 }
 
 export function normalizeRetellClaimAgentSettings(agent = {}) {
