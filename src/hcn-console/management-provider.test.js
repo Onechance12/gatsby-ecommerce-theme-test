@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHcnReferenceFactory } from "../hcn-ops/references.js";
+import { projectManagementCoverageExceptions, summarizeUnsupportedManagementActivities } from "./management-exceptions.js";
 
 import {
   HCN_MANAGEMENT_ESTIMATING_STATUS_CODES,
@@ -83,6 +85,87 @@ test("management provider emits only active files owned by one configured adjust
     ambiguousOwner: 1,
     outsideWorkflowStatus: 0
   });
+});
+
+test("shared-owner exception metadata preserves scope and stops before active-state admission", () => {
+  const shared = contact("synthetic_shared", "owner_a", {
+    owners: [{ id: "owner_a" }, { id: "owner_b" }, { id: "outside_owner" }],
+    number: {}, display_name: {}, notes: "private body must not project"
+  });
+  Object.defineProperty(shared, "is_active", { get() { throw new Error("must not inspect active state"); } });
+  const result = mapManagementJobNimbusEnvelope(envelope({ contacts: [shared,
+    contact("outside_shared", "outside_owner", { owners: [{ id: "outside_owner" }, { id: "outside_second" }] }),
+    contact("retail_shared", "owner_a", { record_type_name: "Retail", owners: [{ id: "owner_a" }, { id: "owner_b" }] })
+  ] }), { adjusters: ADJUSTERS });
+  assert.equal(result.data.files.length, 0);
+  assert.equal(result.data.excluded.ambiguousOwner, 1);
+  assert.deepEqual(result.data.ownershipExceptions, [{
+    providerFileId: "synthetic_shared", jobNumber: null, displayName: "Unnamed file", matchingOwnerIds: ["owner_a", "owner_b"]
+  }]);
+  assert.equal(result.data.census.activeFileCount, 0);
+  const projected = projectManagementCoverageExceptions(result.data, projectionOptions());
+  assert.equal(projected.ownership.totalCount, 1);
+  assert.equal(projected.ownership.truncated, false);
+  assert.deepEqual(projected.ownership.items[0].adjusterRefs, ["adjuster_0", "adjuster_1"]);
+  assert.equal(projected.ownership.items[0].activityState, "not_evaluated");
+  assert.doesNotMatch(JSON.stringify(projected), /synthetic_shared|outside_|private body|owner_a|owner_b/);
+});
+
+function projectionOptions() {
+  return {
+    references: createHcnReferenceFactory({ hmacKey: Buffer.alloc(32, 1), tenantId: "tenant_0123456789abcdef" }),
+    adjusters: ADJUSTERS.map((owner, i) => ({ ...owner, adjusterRef: `adjuster_${i}` }))
+  };
+}
+
+test("unsupported groups identify normalized type/state without changing activity classifications", () => {
+  const activities = [
+    ["a", "Email", "Draft"], ["b", "Email", "Draft"],
+    ["c", "Custom Activity", "New"], ["d", "Note", "Recorded"],
+    ["e", "Contact Updated", "Recorded"], ["f", "Photo Deleted", "Recorded"],
+    ["g", "Note", "Recorded"]
+  ].map(([id, type, state], i) => ({
+    jnid: `synthetic_event_${id}`, related: [{ id: "file_a" }], record_type_name: type, status_name: state,
+    date_created: `2026-07-2${i + 1}T12:00:00.000Z`, note: "DO NOT PROJECT BODY", ...(id === "g" ? { is_automated: true } : {})
+  }));
+  const result = mapManagementJobNimbusEnvelope(envelope({ activities }), { adjusters: ADJUSTERS });
+  const original = JSON.stringify(result.data.events);
+  const summary = summarizeUnsupportedManagementActivities(result.data.events);
+  assert.deepEqual(result.data.events.map(e => e.classification), ["unsupported", "unsupported", "unsupported", "operational", "operational", "operational", "noise"]);
+  assert.equal(summary.totalRecordCount, 3);
+  assert.equal(summary.totalGroupCount, 2);
+  assert.deepEqual(summary.items.map(({ kind, state, count }) => ({ kind, state, count })), [
+    { kind: "custom_activity", state: "new", count: 1 }, { kind: "email", state: "draft", count: 2 }
+  ]);
+  const projected = projectManagementCoverageExceptions({ ...result.data, files: [{ ...result.data.files[0],
+    unsupportedActivities: summary, eventSummary: { unsupportedEventCount: 3 }
+  }] }, projectionOptions());
+  assert.equal(projected.unsupportedActivities.totalRecordCount, 3);
+  assert.equal(projected.unsupportedActivities.returnedGroupCount, 2);
+  assert.equal(projected.unsupportedActivities.items[1].latestAt, "2026-07-22T12:00:00.000Z");
+  assert.match(projected.unsupportedActivities.items[1].evidenceRef, /^ref_[a-f0-9]{32}$/);
+  assert.doesNotMatch(JSON.stringify(projected), /synthetic_event|file_a|owner_a|DO NOT PROJECT BODY/);
+  assert.equal(JSON.stringify(result.data.events), original);
+});
+
+test("exception detail limits never truncate census counts or silently hide omitted types", () => {
+  const result = mapManagementJobNimbusEnvelope(envelope({ contacts: Array.from({ length: 105 }, (_, i) =>
+    contact(`shared_${i}`, "owner_a", { owners: [{ id: "owner_a" }, { id: "owner_b" }] }))
+  }), { adjusters: ADJUSTERS });
+  const events = Array.from({ length: 105 }, (_, i) => ({ classification: "unsupported", kind: `custom_${i}`, state: "recorded",
+    occurredAt: NOW, evidenceId: `synthetic_${i}` }));
+  const summary = summarizeUnsupportedManagementActivities(events);
+  const output = projectManagementCoverageExceptions({ ...result.data, files: [{ providerFileId: "file_a", displayName: "Synthetic",
+    jobNumber: "SYN-1", assignedAdjusterId: "owner_a", unsupportedActivities: summary, eventSummary: { unsupportedEventCount: 105 }
+  }] }, projectionOptions());
+  assert.equal(output.ownership.totalCount, 105);
+  assert.equal(output.ownership.returnedCount, 100);
+  assert.equal(output.ownership.truncated, true);
+  assert.equal(output.unsupportedActivities.totalRecordCount, 105);
+  assert.equal(output.unsupportedActivities.totalGroupCount, 105);
+  assert.equal(output.unsupportedActivities.returnedGroupCount, 100);
+  assert.equal(output.unsupportedActivities.truncated, true);
+  assert.equal(result.data.files.length, 0);
 });
 
 test("default census includes the whole assigned portfolio before activity and top-ten selection", () => {

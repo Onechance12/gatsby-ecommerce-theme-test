@@ -154,6 +154,10 @@ import { readReleaseGates } from "./platform/release-gates.js";
 import { getBuildInfo } from "./platform/build-info.js";
 import { managementDocumentActivities } from "./hcn-console/management-documents.js";
 import {
+  projectManagementCoverageExceptions,
+  summarizeUnsupportedManagementActivities
+} from "./hcn-console/management-exceptions.js";
+import {
   createManagementReportAuthenticator,
   isManagementReportIdentity,
   MANAGEMENT_REPORT_ROUTES,
@@ -5486,7 +5490,8 @@ async function readHcnManagementSweep(input = {}) {
     companyWorst: sweep.companyWorst.map((item) =>
       projectHcnManagementSweepItem(item, displayByFileRef)
     ),
-    exclusions
+    exclusions,
+    coverageExceptions: projectManagementCoverageExceptions(snapshot.data, { references, adjusters })
   };
   if (Date.now() >= Date.parse(snapshot.validUntil)) {
     currentManagementDiagnostics()?.capture("freshness",
@@ -17685,6 +17690,7 @@ async function loadHcnManagementJobNimbusSnapshot({
           providerFileId: file.providerFileId,
           latestEvent,
           documentSummary: documentEvidence.summary,
+          unsupportedActivities: summarizeUnsupportedManagementActivities(mapped.data.events),
           eventSummary: {
             fetchedEventCount: result.rows.length,
             acceptedEventCount: accepted.length,
@@ -17742,6 +17748,7 @@ async function loadHcnManagementJobNimbusSnapshot({
       files: initial.data.files.map((file) => ({
         ...file,
         documentSummary: evidenceByProviderFileId.get(file.providerFileId)?.documentSummary,
+        unsupportedActivities: evidenceByProviderFileId.get(file.providerFileId)?.unsupportedActivities,
         eventSummary:
           evidenceByProviderFileId.get(file.providerFileId)?.eventSummary
           || {
@@ -17758,6 +17765,7 @@ async function loadHcnManagementJobNimbusSnapshot({
       events,
       openTasks: [],
       excluded: initial.data.excluded,
+      ownershipExceptions: initial.data.ownershipExceptions,
       census: initial.data.census,
       diagnostics: {
         ...initial.data.diagnostics,
