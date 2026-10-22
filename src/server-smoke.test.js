@@ -4914,6 +4914,17 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(unsupportedManagementSweepResponse.status, 200);
   const unsupportedManagementSweep =
     await unsupportedManagementSweepResponse.json();
+  const unsupportedDetails = unsupportedManagementSweep.coverageExceptions.unsupportedActivities;
+  assert.equal(unsupportedDetails.totalRecordCount, 1);
+  assert.equal(unsupportedDetails.totalGroupCount, 1);
+  assert.equal(unsupportedDetails.returnedGroupCount, 1);
+  assert.equal(unsupportedDetails.truncated, false);
+  assert.equal(unsupportedDetails.items[0].kind, "email");
+  assert.equal(unsupportedDetails.items[0].state, "draft");
+  assert.equal(unsupportedDetails.items[0].count, 1);
+  assert.match(unsupportedDetails.items[0].evidenceRef, /^ref_[a-f0-9]{32}$/);
+  assert.equal(unsupportedDetails.items[0].fileRef, unsupportedManagementSweep.adjusters[0].items[0].fileRef);
+  assert.doesNotMatch(JSON.stringify(unsupportedDetails), /jn-fixture|fixture-chance-owner|Fresh synthetic carrier activity|2145551212/);
   assert.equal(unsupportedManagementSweep.completeness.status, "partial");
   assert.equal(
     unsupportedManagementSweep.sourceHealth[0].status,
@@ -4945,6 +4956,27 @@ test("HCN console uses a cookie-bound Google session for isolated fresh read-onl
   assert.equal(jobNimbusMutationRequests.length, 0);
 
   // Exercise the real HTTP path: no implicit Estimating gate; output limits
+  const sharedContact = { ...activeContact, jnid: "synthetic-shared-exception", number: "SYN-SHARED",
+    display_name: "Synthetic Shared File", owners: [{ id: chanceOwnerId }, { id: otherOwnerId }] };
+  allContacts.push(sharedContact);
+  const sharedReadsBefore = hcnProviderRequests.length;
+  const sharedResponse = await fetch(`${origin}/hcn/api/v1/management-sweep`, {
+    method: "POST", headers: reportHeaders, body: JSON.stringify({ limitPerAdjuster: 10 })
+  });
+  allContacts.pop();
+  assert.equal(sharedResponse.status, 200);
+  const sharedReport = await sharedResponse.json();
+  assert.equal(sharedReport.summary.ambiguousOwnerCount, 1);
+  assert.equal(sharedReport.portfolio.historyReadFileCount, unsupportedManagementSweep.portfolio.historyReadFileCount);
+  assert.equal(sharedReport.coverageExceptions.ownership.totalCount, 1);
+  assert.equal(sharedReport.coverageExceptions.ownership.items[0].display.jobNumber, "SYN-SHARED");
+  assert.equal(sharedReport.coverageExceptions.ownership.items[0].activityState, "not_evaluated");
+  assert.deepEqual(sharedReport.coverageExceptions.ownership.items[0].adjusterRefs, sharedReport.adjusters.slice(0, 2).map(g => g.adjusterRef));
+  assert.equal(hcnProviderRequests.slice(sharedReadsBefore).some(request => request.includes(sharedContact.jnid)), false);
+  assert.doesNotMatch(JSON.stringify(sharedReport), /synthetic-shared-exception|fixture-chance-owner|fixture-other-owner|2145551212/);
+  assert.equal(jobNimbusMutationRequests.length, 0);
+
+  // Output limits
   // follow complete history reads, and the census survives an explicit filter.
   const originalStatuses = [activeContact, otherOwnerContact, thirdOwnerContact].map(c => c.status_name);
   [activeContact, otherOwnerContact, thirdOwnerContact].forEach((c, i) => { c.status_name = ["Appraisal Interest", "Legal", "Ready for Production"][i]; });

@@ -6,6 +6,8 @@
  * reads a Brain, or emits raw notes/tasks.
  */
 
+import { MANAGEMENT_EXCEPTION_DETAIL_LIMIT } from "./management-exceptions.js";
+
 export const HCN_MANAGEMENT_PROVIDER_LIMITS = Object.freeze({
   maximumContacts: 5000,
   maximumActivities: 5000,
@@ -242,6 +244,7 @@ export function mapManagementJobNimbusEnvelope(input, {
   );
 
   const files = [];
+  const ownershipExceptions = [];
   const providerIds = new Set();
   const indexedIds = new Set();
   const excluded = {
@@ -314,6 +317,22 @@ export function mapManagementJobNimbusEnvelope(input, {
       excluded.ambiguousOwner += 1;
       census.ambiguousOwnerCount++;
       for (const owner of matchingOwners) countByOwner.get(owner.ownerId).ambiguousOwnerCount++;
+      if (ownershipExceptions.length < MANAGEMENT_EXCEPTION_DETAIL_LIMIT) {
+        // Optional display metadata must not turn a previously excluded record
+        // into a census failure or inspect later eligibility predicates.
+        let displayName = "Unnamed file";
+        let jobNumber = null;
+        try { displayName = contactDisplayName(contact); } catch { /* keep safe fallback */ }
+        try {
+          const number = boundedText(field(contact, ["number", "recid", "job_number", "jobNumber", "file_number", "fileNumber"]), 64);
+          if (SAFE_JOB_NUMBER.test(number)) jobNumber = number;
+        } catch { /* keep safe fallback */ }
+        ownershipExceptions.push({
+          providerFileId,
+          displayName, jobNumber,
+          matchingOwnerIds: matchingOwners.map(owner => owner.ownerId)
+        });
+      }
       continue;
     }
     const groupCounts = countByOwner.get(matchingOwners[0].ownerId);
@@ -436,6 +455,7 @@ export function mapManagementJobNimbusEnvelope(input, {
     data: {
       complete: true,
       files,
+      ownershipExceptions,
       events,
       openTasks,
       excluded,

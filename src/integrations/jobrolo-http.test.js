@@ -1122,6 +1122,10 @@ test("signed adapter fixes principal scope and requires both approval gates for 
     "hcn.console.management-sweep.v1"
   );
   assert.equal(managementSweep.body.result.adjusters.length, 3);
+  assert.deepEqual(managementSweep.body.result.coverageExceptions, {
+    ownership: { totalCount: 0, returnedCount: 0, truncated: false, items: [] },
+    unsupportedActivities: { totalRecordCount: 0, totalGroupCount: 0, returnedGroupCount: 0, truncated: false, items: [] }
+  });
   assert.equal(
     managementSweep.body.authority.fileScope,
     "configured_management_adjusters"
