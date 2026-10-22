@@ -12,19 +12,19 @@ import {
   RETELL_CLAIM_AGENT_ATTESTED_FIELDS
 } from "./retellAgentSettings.js";
 
-test("claim LLM waits for the carrier and pins deterministic tool behavior", () => {
+test("claim LLM waits for the carrier and pins GPT-6.1 Sol with strict tool behavior", () => {
   assert.deepEqual(buildRetellClaimLlmSettings(), {
     begin_message: "",
     start_speaker: "user",
     begin_after_user_silence_ms: null,
-    model: "gpt-4.1",
+    model: "gpt-6.1-sol",
     s2s_model: null,
     model_temperature: 0,
     model_high_priority: false,
     model_ultrafast: false,
     model_config: {
       type: "cascading",
-      primary: { model: "gpt-4.1", tier: "standard" },
+      primary: { model: "gpt-6.1-sol", tier: "standard" },
       backup: null,
       temperature: 0
     },
@@ -48,7 +48,7 @@ test("current Retell model selection accepts null/omitted no-backup readback wit
   assert.equal(Object.hasOwn(live.model_config, "backup"), false);
   const copy = buildRetellClaimLlmSettings();
   copy.model_config.primary.model = "changed";
-  assert.equal(buildRetellClaimLlmSettings().model_config.primary.model, "gpt-4.1");
+  assert.equal(buildRetellClaimLlmSettings().model_config.primary.model, "gpt-6.1-sol");
 });
 
 test("authoritative model drift fails even when every deprecated model field still matches", () => {
@@ -66,7 +66,7 @@ test("authoritative model drift fails even when every deprecated model field sti
     const changed = structuredClone(llm);
     mutate(changed.model_config);
     assert.ok(retellClaimSettingsMismatches({ llm: changed, agent }).includes("llm.model_config"));
-    assert.equal(changed.model, "gpt-4.1");
+    assert.equal(changed.model, "gpt-6.1-sol");
     assert.equal(changed.model_temperature, 0);
   }
   const missing = structuredClone(llm);
@@ -79,6 +79,7 @@ test("authoritative model drift fails even when every deprecated model field sti
 test("claim runtime is tuned for carrier holds, accurate entities, and no native IVR hangup", () => {
   const settings = buildRetellClaimAgentSettings();
   assert.equal(settings.agent_name, "Wave Public Adjusting - Carrier Claim Call");
+  assert.equal(settings.post_call_analysis_model, "gpt-6.1-sol");
   assert.equal(settings.stt_mode, "accurate");
   assert.equal(settings.responsiveness, 0.55);
   assert.equal(settings.interruption_sensitivity, 0.35);
