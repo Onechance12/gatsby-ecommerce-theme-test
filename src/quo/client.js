@@ -407,6 +407,7 @@ export async function sendQuoText(config, input = {}) {
 }
 
 export async function readQuoTextReceipt(config, input = {}) {
+  requireConfigured(config);
   const id = String(input.id || "").trim();
   const from = toE164(input.from || "");
   const to = toE164(input.to || "");
@@ -422,22 +423,36 @@ export async function readQuoTextReceipt(config, input = {}) {
     || !Number.isSafeInteger(characterCount) || characterCount < 1 || characterCount > 1600) {
     throw new Error("Quo text readback requires the exact approved content hash and character count.");
   }
-  const history = await readQuoHistoryStrict(config, {
-    phone: to,
-    maxResults: 50,
-    maxPages: 10
-  });
-  if (history.completeness.complete !== true) {
+  // Delivery proof is for one durable message ID, not a conversation-history
+  // sweep. Unrelated call records must never prevent exact SMS reconciliation.
+  let inventory;
+  try {
+    inventory = await listQuoNumbersStrict(config, { maxPages: 10 });
+  } catch (error) {
+    if (error instanceof QuoHistoryEvidenceError) throw error;
+    throw quoHistoryProviderFailure({ stage: "line_inventory", reason: "provider_read", cause: error });
+  }
+  const senderLines = inventory.numbers.filter((line) => line.number === from);
+  if (inventory.incompleteReasons.length || senderLines.length !== 1) {
     const error = new Error("Quo text readback is incomplete. The send outcome requires reconciliation and must never be retried automatically.");
     error.statusCode = 409;
     throw error;
   }
-  const matches = history.timeline.filter((item) => (
-    item.type === "text" && item.id === id
-  ));
-  const item = matches.length === 1 ? matches[0] : null;
+  let payload;
+  try {
+    payload = await requestStrict(config, "GET", `/messages/${encodeURIComponent(id)}`);
+  } catch (error) {
+    throw quoHistoryProviderFailure({ stage: "messages", reason: "provider_read", cause: error });
+  }
+  const row = payload?.data;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw quoHistoryProviderFailure({ stage: "messages", reason: "invalid_response" });
+  }
+  const line = senderLines[0];
+  const item = strictTimelineItem(row, line, { [line.id]: line.name }, "messages", to);
   if (
-    !item
+    row.id !== id
+    || item.id !== id
     || String(item.direction || "").toLowerCase() !== "outgoing"
     || item.lineNumber !== from
     || item.from !== from

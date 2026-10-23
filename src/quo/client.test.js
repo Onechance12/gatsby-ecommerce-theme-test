@@ -953,18 +953,20 @@ test("Quo live send resolves the configured number to its PN line id", async () 
 
 test("Quo SMS readback proves exact provider id, addressing, content hash and status", async () => {
   const originalFetch = globalThis.fetch;
+  const requests = [];
   const content = "Synthetic inspection scheduling message — reply with a convenient time. Saturday at 11:00 or 12:00 also works.";
   const contentSha256 = (await import("node:crypto"))
     .createHash("sha256").update(content, "utf8").digest("hex");
   globalThis.fetch = async (url) => {
     const parsed = new URL(String(url));
+    requests.push(parsed.pathname);
     if (parsed.pathname.endsWith("/phone-numbers")) {
       return jsonResponse(200, {
         data: [{ id: "PN_synthetic", name: "Synthetic Sender", number: "+12025550101" }]
       });
     }
-    if (parsed.pathname.endsWith("/messages")) {
-      return jsonResponse(200, { data: [{
+    if (parsed.pathname.endsWith("/messages/MSG_exact")) {
+      return jsonResponse(200, { data: {
         id: "MSG_exact",
         phoneNumberId: "PN_synthetic",
         conversationId: "CONV_exact",
@@ -974,9 +976,8 @@ test("Quo SMS readback proves exact provider id, addressing, content hash and st
         status: "queued",
         createdAt: "2026-10-14T14:00:00Z",
         content
-      }] });
+      } });
     }
-    if (parsed.pathname.endsWith("/calls")) return jsonResponse(200, { data: [] });
     return jsonResponse(404, { message: "not found" });
   };
   try {
@@ -1011,6 +1012,10 @@ test("Quo SMS readback proves exact provider id, addressing, content hash and st
       contentSha256: "0".repeat(64),
       characterCount: content.length
     }), /never retry/i);
+    assert.deepEqual(requests, [
+      "/v1/phone-numbers", "/v1/messages/MSG_exact",
+      "/v1/phone-numbers", "/v1/messages/MSG_exact"
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

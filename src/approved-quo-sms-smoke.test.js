@@ -57,6 +57,8 @@ async function fixture(t, options = {}) {
     posts: 0,
     contactPuts: 0,
     workflowReads: 0,
+    callReads: 0,
+    messageByIdReads: 0,
     messages: [],
     mode: "normal",
     body: null
@@ -170,6 +172,17 @@ async function fixture(t, options = {}) {
         }
       });
     }
+    if (url.pathname.startsWith("/quo/v1/messages/") && req.method === "GET") {
+      state.messageByIdReads += 1;
+      if (state.mode === "restricted_readback") return json(403, { error: "restricted" });
+      const id = decodeURIComponent(url.pathname.slice("/quo/v1/messages/".length));
+      const message = state.messages.find((item) => item.id === id);
+      if (!message) return json(404, { error: "message not found" });
+      return json(200, { data: {
+        ...message,
+        ...(state.mode === "wrong_readback" ? { content: "Wrong content" } : {})
+      } });
+    }
     if (url.pathname === "/quo/v1/messages" && req.method === "GET") {
       if (state.mode === "restricted_readback") return json(403, { error: "restricted" });
       const rows = state.messages.map((message) => ({
@@ -178,7 +191,13 @@ async function fixture(t, options = {}) {
       }));
       return json(200, { data: rows });
     }
-    if (url.pathname === "/quo/v1/calls") return json(200, { data: [] });
+    if (url.pathname === "/quo/v1/calls") {
+      state.callReads += 1;
+      return json(200, { data: state.mismatchedCalls ? [{
+        id: "CALL_unrelated", phoneNumberId: "PN_unrelated",
+        participants: ["+12025550199"], direction: "incoming"
+      }] : [] });
+    }
     return json(404, { error: "Fixture route missing" });
   });
   await new Promise((resolve) => provider.listen(0, "127.0.0.1", resolve));
@@ -557,11 +576,16 @@ test(`${live ? "Live-assigned" : "Fixed-roster"} Quo SMS uncertain readback reco
   assert.equal(fixtureState.state.posts, 1);
 
   fixtureState.state.mode = "normal";
+  fixtureState.state.mismatchedCalls = true;
+  const priorCallReads = fixtureState.state.callReads;
+  const priorMessageReads = fixtureState.state.messageByIdReads;
   const reconciled = await fixtureState.request("/ops/action-batch-reconcile", {
     batchId: result.body.batch.id
   });
   assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body));
   assert.equal(reconciled.body.outcome, "applied_verified");
+  assert.equal(fixtureState.state.callReads, priorCallReads);
+  assert.equal(fixtureState.state.messageByIdReads, priorMessageReads + 1);
   assertQuoSmsReceipt(
     reconciled.body.receipt.completed[0].receipt,
     pluginOperation().payload
