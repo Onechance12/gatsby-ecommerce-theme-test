@@ -90,6 +90,7 @@ import {
 } from "./scheduling/availability.js";
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { createGmailAttachmentReferences } from "./gmail/attachment-reference.js";
+import { claimSearchVariants, createClaimIdentifierMatcher, emptyGmailWithheldReasonCounts, gmailCorrelationDecision } from "./gmail/file-correlation.js";
 import { findOutboundReservationConflict } from "./gmail/reservation-policy.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { assignedRoster, liveAssignedContactAllowed } from "./jobnimbus/assigned-roster.js";
@@ -8547,6 +8548,7 @@ async function gmailSearch(input) {
   const completeReview = Boolean(operatorFile && input.completeReview === true);
   const readLimit = completeReview ? 250 : limit;
   const hydrated = [];
+  const withheldReasonCounts = operatorFile ? emptyGmailWithheldReasonCounts() : null;
   const seenMessages = new Set();
   const seenTokens = new Set();
   let scanned = 0;
@@ -8581,8 +8583,11 @@ async function gmailSearch(input) {
         if (String(message?.id || "") !== String(row.id)) throw new Error("Gmail returned a different message than the exact search result.");
         if (completeReview && !String(message?.threadId || "").trim()) throw new Error("Gmail did not return a thread binding for a complete exact-file message review.");
         const compact = compactGmailFullMessage(message);
-        if (!gmailMessageMatchesFile(compact, operatorFile)) {
-          if (completeReview && gmailMessageProvesOtherFile(compact, operatorFile)) excludedOtherFileMessages += 1;
+        const correlation = gmailMessageFileCorrelation(compact, operatorFile);
+        const decision = gmailCorrelationDecision(correlation);
+        if (decision !== "matched") {
+          if (completeReview && gmailMessageProvesOtherFile(compact, operatorFile, correlation)) excludedOtherFileMessages += 1;
+          else withheldReasonCounts[decision] += 1;
           continue;
         }
       }
@@ -8594,7 +8599,7 @@ async function gmailSearch(input) {
   } while (hasMore && scanned < readLimit && pagesRead < 20);
   const coverage = gmailReadCoverage({
     scanned, returned: hydrated.length, limit: readLimit, hasMore,
-    excludedOtherFileMessages,
+    excludedOtherFileMessages, withheldReasonCounts,
     windowDays: operatorFile ? clamp(Number(input.communicationDays || 365), 1, 3650) : null
   });
   if (completeReview) {
@@ -8628,8 +8633,14 @@ async function gmailThread(input) {
   if (operatorFile && String(thread.id || "") !== threadId) operatorScopeError("Gmail returned a different thread than the requested exact thread.");
   const completeReview = Boolean(operatorFile && input.completeReview === true);
   const candidates = Array.isArray(thread.messages) ? thread.messages.map((message) => compactGmailFullMessage(message, completeReview)) : [];
+  const withheldReasonCounts = operatorFile ? emptyGmailWithheldReasonCounts() : null;
   const matched = operatorFile
-    ? candidates.filter((message) => gmailMessageMatchesFile(message, operatorFile))
+    ? candidates.filter((message) => {
+      const decision = gmailCorrelationDecision(gmailMessageFileCorrelation(message, operatorFile));
+      if (decision === "matched") return true;
+      withheldReasonCounts[decision] += 1;
+      return false;
+    })
     : candidates;
   if (operatorFile && !matched.length) {
     operatorScopeError(`That Gmail thread is not exclusively correlated to the resolved ${operatorFileDescription()}.`);
@@ -8657,6 +8668,7 @@ async function gmailThread(input) {
     coverage: gmailReadCoverage({
       scanned: candidates.length,
       returned: messages.length,
+      withheldReasonCounts,
       omitted: matched.length - messages.length,
       truncated: messages.filter((message) => message.bodyTruncated).length
     })
@@ -8928,10 +8940,7 @@ function gmailMessageFileCorrelation(message, file) {
     ...(Array.isArray(message.attachments) ? message.attachments.map((row) => row.filename) : [])
   ].map((value) => String(value || "")).join("\n");
   const claimNumber = String(file.claimNumber || "").trim();
-  const claimIdentifiers = new Set(
-    (content.match(/[A-Za-z0-9]+(?:[-_.#/][A-Za-z0-9]+)*/g) || [])
-      .map((value) => hcnNormalizeCorrelationClaim(value))
-  );
+  const claimIdentifiers = createClaimIdentifierMatcher(content);
   const exactFileRefs = communicationJobNimbusFileRefs(content);
   const policyProperty = file[GMAIL_FILE_POLICY_PROPERTY];
   const propertyMatch = policyProperty
@@ -8959,7 +8968,7 @@ function gmailMessageFileCorrelation(message, file) {
   // An explicit second file reference remains ambiguous even when that file
   // is absent from the index. Do not disclose its unknown provider identifier.
   if (policyProperty && [...exactFileRefs].some((id) => id !== String(file.id || ""))) {
-    return { complete: true, targetMatch: false, conflictingFileIds: [] };
+    return { complete: true, targetMatch: false, conflictingFileIds: [], conflictingFileReference: true };
   }
   const conflictingFileIds = [];
   for (const contact of companyContacts) {
@@ -9003,14 +9012,10 @@ function gmailMessageFileCorrelation(message, file) {
 }
 
 function gmailMessageMatchesFile(message, file) {
-  const correlation = gmailMessageFileCorrelation(message, file);
-  return correlation.complete
-    && correlation.targetMatch
-    && correlation.conflictingFileIds.length === 0;
+  return gmailCorrelationDecision(gmailMessageFileCorrelation(message, file)) === "matched";
 }
 
-function gmailMessageProvesOtherFile(message, file) {
-  const correlation = gmailMessageFileCorrelation(message, file);
+function gmailMessageProvesOtherFile(message, file, correlation = gmailMessageFileCorrelation(message, file)) {
   if (!correlation.complete || correlation.targetMatch || !correlation.conflictingFileIds.length) return false;
   const content = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.content || "";
   const words = ` ${communicationWords(content)} `;
@@ -9021,7 +9026,8 @@ function gmailMessageProvesOtherFile(message, file) {
   // A known other-file hit is excludable only when there is no target-file
   // indicator, even a weaker property/policy/name indicator. Mixed or unknown
   // messages remain withheld and block claim admission, never silently dropped.
-  if (communicationIdentifierPresent(content, file.claimNumber)
+  if (createClaimIdentifierMatcher(content).has(hcnNormalizeCorrelationClaim(file.claimNumber))
+    || communicationIdentifierPresent(content, file.claimNumber)
     || communicationIdentifierPresent(content, file.policyNumber)
     || (file.email && contentEmails.has(String(file.email).toLowerCase()))
     || (street && words.includes(` ${street} `)) || (name && words.includes(` ${name} `))) return false;
@@ -9030,13 +9036,16 @@ function gmailMessageProvesOtherFile(message, file) {
   return !refs.has(String(file.id)) && [...refs].every((id) => knownIds.has(id));
 }
 
-function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, windowDays = null, truncated = 0, omitted = 0, excludedOtherFileMessages = 0 }) {
+function gmailReadCoverage({ scanned, returned, limit = null, hasMore = false, windowDays = null, truncated = 0, omitted = 0, excludedOtherFileMessages = 0, withheldReasonCounts = null }) {
   const withheldMessages = Math.max(0, scanned - returned - omitted - excludedOtherFileMessages);
   return {
     complete: !hasMore && !withheldMessages && !windowDays && !truncated && !omitted,
     scannedMessages: scanned,
     returnedMessages: returned,
     withheldMessages,
+    // Aggregate fixed categories only: no hidden message IDs, subjects, senders,
+    // client identifiers or raw provider rejection text cross this boundary.
+    ...(withheldReasonCounts ? { correlationDiagnosticVersion: 1, withheldReasonCounts } : {}),
     ...(omitted ? { omittedMessages: omitted } : {}),
     readLimit: limit,
     hasMore,
@@ -16422,14 +16431,16 @@ function isOperationalDocumentMetadata(document) {
 function buildFileGmailQuery(file, requestedDays) {
   const days = clamp(Number(requestedDays || 365), 1, 3650);
   const addressLine = String(file.address || "").split(",")[0].trim();
-  const terms = [...new Set([
+  const baseTerms = [
     file.claimNumber,
     file.policyNumber,
     file.email,
     file.name,
     addressLine,
     file.number ? `#${file.number}` : ""
-  ].map((value) => String(value || "").trim()).filter((value) => value.length >= 4))].slice(0, 6);
+  ];
+  const terms = [...new Set([...baseTerms, ...claimSearchVariants(file.claimNumber)]
+    .map((value) => String(value || "").trim()).filter((value) => value.length >= 4))].slice(0, 8);
   if (!terms.length) return `newer_than:${days}d`;
   const group = terms.map((term) => `"${term.replace(/["{}]/g, " ")}"`).join(" ");
   return `{${group}} newer_than:${days}d`;

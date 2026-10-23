@@ -4892,6 +4892,104 @@ test("Codex Gmail claim coverage distinguishes bounded complete searches from wi
   }
 });
 
+test("Gmail formatting repair returns equivalent claims and reason-only search/thread diagnostics", async (t) => {
+  const make = (id, body, subject = "Carrier update") => ({
+    id, threadId: "formatting-thread", snippet: body.slice(0, 100), labelIds: ["INBOX"],
+    payload: { mimeType: "text/plain", headers: [
+      { name: "From", value: "carrier@example.test" },
+      { name: "To", value: "operator@example.test" },
+      { name: "Subject", value: subject }
+    ], body: { data: Buffer.from(body).toString("base64url") } }
+  });
+  const accepted = ["ABC-123", "ABC123", "AB-C1-23", "ABC 123", "ABC\u2011123", "Claim#ABC123"]
+    .map((claim, index) => make(`formatted-${index}`, `Status for ${claim}`));
+  const hidden = [
+    make("private-unknown", "PRIVATE-CONTENT Thank you. We received the update."),
+    make("private-prefix", "PRIVATE-CONTENT XABC123"),
+    make("private-mixed", "PRIVATE-CONTENT ABC 123 and COMP\u2011321"),
+    make("private-late-conflict", `ABC123 ${"x ".repeat(7000)} PRIVATE-CONTENT Claim#COMP321`),
+    make("private-weak-target", "PRIVATE-CONTENT ABC\n123 plus COMP-321"),
+    make("private-bcc", "PRIVATE-CONTENT ABC123")
+  ];
+  hidden.at(-1).payload.headers.push({ name: "Bcc", value: "company-client@example.test" });
+  const other = make("private-other", "PRIVATE-CONTENT COMP 321");
+  const messages = [...accepted, ...hidden, other];
+  const h = await startCommunicationRepairBridge(t, 19490, 19491, {
+    companyOther: true, gmailMessages: messages,
+    gmailSearchMessages: messages.map(({ id, threadId }) => ({ id, threadId })),
+    gmailThreads: [{ id: "formatting-thread", messages }]
+  });
+  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true, limit: 25 });
+  assert.equal(response.status, 200);
+  const search = await response.json();
+  assert.deepEqual(search.messages.map(row => row.id), accepted.map(row => row.id));
+  assert.match(search.query, /"ABC-123"/);
+  assert.match(search.query, /"ABC123"/);
+  assert.equal(search.coverage.scannedMessages, messages.length);
+  assert.equal(search.coverage.excludedOtherFileMessages, 1);
+  assert.equal(search.coverage.withheldMessages, hidden.length);
+  assert.equal(search.coverage.correlationDiagnosticVersion, 1);
+  assert.deepEqual(search.coverage.withheldReasonCounts, {
+    incomplete_correlation_index: 0, conflicting_file_evidence: 4, missing_unique_target_evidence: 2
+  });
+  assert.equal(search.coverage.scopeVerificationComplete, false);
+  assert.equal(search.coverage.complete, false);
+  assert.doesNotMatch(JSON.stringify(search), /private-|PRIVATE-CONTENT|COMP.?321|company-client/);
+
+  const threadResponse = await h.post("/gmail/thread", { fileQuery: "2739", threadId: "formatting-thread", completeReview: true });
+  assert.equal(threadResponse.status, 200);
+  const thread = await threadResponse.json();
+  assert.deepEqual(thread.messages.map(row => row.id), accepted.map(row => row.id));
+  assert.equal(thread.coverage.withheldMessages, hidden.length + 1);
+  assert.deepEqual(thread.coverage.withheldReasonCounts, {
+    incomplete_correlation_index: 0, conflicting_file_evidence: 5, missing_unique_target_evidence: 2
+  });
+  assert.equal(thread.coverage.complete, false);
+  assert.doesNotMatch(JSON.stringify(thread), /private-|PRIVATE-CONTENT|COMP.?321|company-client/);
+  assert.equal(h.fixture.getGmailDraftCreateCount(), 0);
+  assert.equal(h.fixture.getGmailSendCount(), 0);
+  assert.equal(h.fixture.getContactUpdateCount(), 0);
+  assert.equal(h.fixture.getCompanyNoteCreateCount(), 0);
+});
+
+test("Gmail formatting repair keeps malformed correlation inventory withheld without leaking fields", async (t) => {
+  const message = communicationRepairMessage("incomplete");
+  const h = await startCommunicationRepairBridge(t, 19492, 19493, {
+    companyOther: true, companyOtherEmail: { value: "private-malformed@example.test" },
+    gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }]
+  });
+  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true });
+  assert.equal(response.status, 200);
+  const search = await response.json();
+  assert.equal(search.count, 0);
+  assert.equal(search.coverage.withheldMessages, 1);
+  assert.deepEqual(search.coverage.withheldReasonCounts, {
+    incomplete_correlation_index: 1, conflicting_file_evidence: 0, missing_unique_target_evidence: 0
+  });
+  assert.equal(search.coverage.scopeVerificationComplete, false);
+  assert.doesNotMatch(JSON.stringify(search), /private-malformed|repair-message-incomplete/);
+});
+
+test("Gmail formatting repair cannot bypass company-wide claim uniqueness", async (t) => {
+  const message = communicationRepairMessage("collision", "Claim#ABC123");
+  message.payload.headers = message.payload.headers.filter(row => row.name !== "To");
+  const h = await startCommunicationRepairBridge(t, 19494, 19495, {
+    companyOther: true, companyOtherClaimNumber: "AB C123",
+    gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }]
+  });
+  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true });
+  assert.equal(response.status, 200);
+  const search = await response.json();
+  assert.equal(search.count, 0);
+  assert.equal(search.coverage.withheldMessages, 1);
+  assert.equal(search.coverage.excludedOtherFileMessages, 0);
+  assert.deepEqual(search.coverage.withheldReasonCounts, {
+    incomplete_correlation_index: 0, conflicting_file_evidence: 1, missing_unique_target_evidence: 0
+  });
+  assert.equal(search.coverage.scopeVerificationComplete, false);
+  assert.doesNotMatch(JSON.stringify(search), /contact-company-other|repair-message-collision/);
+});
+
 test("Gmail exact-file reads admit shared carrier routing and withhold conflicting or identifierless thread messages", async (t) => {
   const bridgePort = 19124;
   const fakeApiPort = 19125;
