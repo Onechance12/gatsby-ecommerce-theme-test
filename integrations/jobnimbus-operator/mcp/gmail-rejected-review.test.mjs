@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, copyFile, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createOperatorCoordinator } from "./operator-coordinator.mjs";
 import { GMAIL_REJECTED_REVIEW_ENABLED, readAttestedRejectedGmail, validateRejectedReviewInput } from "./gmail-rejected-review-release.mjs";
 
@@ -12,6 +16,26 @@ const evidence = () => ({ mode: "rejected_email_inspection", readOnly: true, ver
   mailbox: reference.binding.mailbox, decision: reference.decision, observedAt: new Date().toISOString(),
   sourceChanged: false, originalRejectionUnchanged: true, correlationAudit: { readOnly: true, changesAdmission: false },
   message: { id: reference.messageId, threadId: reference.threadId, bodyTruncated: false, attachmentBodiesReviewed: false, attachments: [] } });
+
+test("both compiled inspection states preserve the sorted exact capability contract", async t => {
+  for (const enabled of [false, true]) {
+    const directory = await mkdtemp(path.join(tmpdir(), "operator-synthetic-inspection-capabilities-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    for (const name of ["scope.mjs", "communications-sweep-release.mjs", "approved-note-release.mjs",
+      "pdf-upload-release.mjs", "pdf-upload-contract.mjs", "quo-sms-release.mjs", "quo-sms-contract.mjs"]) {
+      await copyFile(new URL(name, import.meta.url), path.join(directory, name));
+    }
+    const source = await readFile(new URL("./gmail-rejected-review-release.mjs", import.meta.url), "utf8");
+    await writeFile(path.join(directory, "gmail-rejected-review-release.mjs"),
+      source.replace(/GMAIL_REJECTED_REVIEW_ENABLED = (?:true|false)/, "GMAIL_REJECTED_REVIEW_ENABLED = " + enabled));
+    const scope = await import(pathToFileURL(path.join(directory, "scope.mjs")));
+    const capabilities = scope.EXPECTED_OPERATOR_CAPABILITIES;
+    assert.deepEqual([...capabilities], [...capabilities].sort());
+    assert.equal(capabilities.includes("gmail.rejected_candidates.review"), enabled);
+    assert.equal(new Set(capabilities).size, capabilities.length);
+    assert.equal(capabilities.some(value => value.includes(".send")), false);
+  }
+});
 
 test("inactive coordinator stops before bridge reads and exposes no approval/effect", async () => {
   const requests = [];
