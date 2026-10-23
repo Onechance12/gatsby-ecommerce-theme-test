@@ -1,5 +1,28 @@
 # JobNimbus Operator for Mac
 
+## Modern workflow stage closure verification (2026-10-23)
+
+Current JobNimbus workflow statuses may omit `is_closed` as well as the contact
+record. They instead carry the provider's built-in `stage`. The first closure
+fallback therefore still blocked these records even with an exact active
+workflow/status match.
+
+The fallback now accepts a known in-progress provider stage only after the
+existing ID/name, active and nonarchived checks. `Lead`, `Estimating`, `Sold`,
+`In Production` and `Accounts Receivable` qualify; `Completed` and `Lost`
+remain closed, while `None`, missing, malformed and unknown stages remain
+unverified. Explicit closure flags are never replaced, and contradictions
+between a workflow flag and stage are rejected. Provenance identifies the
+`workflow_stage` basis and exact stage. No provider field or setting is changed.
+JobNimbus documents its fixed stages in [What Are Stages?](https://support.jobnimbus.com/what-are-stages).
+
+Read-only runtime diagnostics inspected workflow configuration only. The revised
+mapper was also tested against the live configuration using a synthetic record,
+proving the `Estimating` mapping and closed/unknown/owner/archive/exclusion
+denials without reading or writing a customer record. The final exact-file
+native check still requires the coordinated deployed bridge/package pin.
+Existing approval-continuity, action policy, ownership and receipt rules remain.
+
 ## Local approval-continuity repair candidate (2026-10-22)
 
 Not installed or deployed. Pending approvals use an encrypted Mac cache and a

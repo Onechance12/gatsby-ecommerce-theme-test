@@ -22,20 +22,42 @@ export function contactWithWorkflowClosure(contact, settings) {
     && numericId(row.id) === statusId);
   if (statuses.length !== 1) return contact;
   const status = statuses[0];
-  const closed = flag(status.is_closed);
-  if (name(status.name) !== statusName || closed === null
+  const closure = workflowStatusClosure(status);
+  if (name(status.name) !== statusName || !closure
     || flag(status.is_active) !== true || flag(status.is_archived) !== false) return contact;
   return {
     ...contact,
-    is_closed: closed,
+    is_closed: closure.closed,
     closureVerification: {
       schemaVersion: 1,
       source: "jobnimbus_workflow_status",
       workflowId,
       statusId,
-      isClosed: closed
+      isClosed: closure.closed,
+      basis: closure.basis,
+      ...(closure.stage ? { workflowStage: closure.stage } : {})
     }
   };
+}
+
+// Current JobNimbus workflows use built-in stage names instead of the older
+// is_closed field. Never infer openness from a custom status name or from an
+// absent/unknown/None stage. Existing explicit flags remain authoritative, and
+// contradictory explicit flag/stage evidence is rejected rather than merged.
+function workflowStatusClosure(status) {
+  const stage = typeof status.stage === "string" ? status.stage.trim() : "";
+  const openStages = ["Lead", "Estimating", "Sold", "In Production", "Accounts Receivable"];
+  const closedStages = ["Completed", "Lost"];
+  const fromStage = openStages.includes(stage) ? false
+    : closedStages.includes(stage) ? true : null;
+  if (Object.hasOwn(status, "is_closed")) {
+    const closed = flag(status.is_closed);
+    if (closed === null || (Object.hasOwn(status, "stage")
+      && (fromStage === null || fromStage !== closed))) return null;
+    return { closed, basis: "explicit_closed_flag" };
+  }
+  return fromStage === null ? null
+    : { closed: fromStage, basis: "workflow_stage", stage };
 }
 
 function record(value) {
