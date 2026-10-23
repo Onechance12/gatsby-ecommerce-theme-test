@@ -500,7 +500,7 @@ function syncClaimGmailSearchCounts(review) {
   gmail.coverage.search.returnedMessages = gmail.messages.length;
 }
 
-function harness() {
+function harness(options = {}) {
   const state = {
     now: NOW,
     whoami: whoamiFixture(),
@@ -519,7 +519,7 @@ function harness() {
     mutateClaimResponse: null
   };
   const requests = [];
-  const approvals = new Map();
+  const approvals = options.approvals || new Map();
   const bridgeRequest = async (method, pathname, body) => {
     requests.push({ method, pathname, body: structuredClone(body) });
     if (method === "GET" && pathname === "/auth/whoami") {
@@ -595,7 +595,7 @@ function harness() {
         mode: "dry_run",
         approvalDigest: "digest-1",
         approvalChallenge: "secret-one-use-challenge",
-        approvalExpiresAt: FUTURE,
+        approvalExpiresAt: new Date(state.now + 900000).toISOString(),
         displayComplete: true,
         runPolicy: structuredClone(state.policy.runPolicy),
         plan: [{ index: 0, type: OPERATIONS[0].type }]
@@ -738,11 +738,12 @@ function harness() {
     state,
     requests,
     approvals,
+    bridgeRequest,
     coordinator: createOperatorCoordinator({
       bridgeRequest,
       version: "test-plugin",
       approvals,
-      now: () => state.now,
+      now: options.now || (() => state.now),
       newApprovalId: () => CLAIM_APPROVAL_ID
     })
   };
@@ -1117,7 +1118,7 @@ test("reconciliation freshly attests one exact eligible nonhistorical receipt", 
       /historical attention.*never eligible/i
     );
     assert.equal(h.requests.length, 0);
-    assert.equal(h.approvals.size, 0);
+    assert.equal(h.approvals.size, 1);
   });
 
   await t.test("normal ready session cannot reconcile", async () => {
@@ -1171,7 +1172,7 @@ test("reconciliation freshly attests one exact eligible nonhistorical receipt", 
     assert.equal(reconcilePosts(h).length, 0);
   });
 
-  await t.test("eligible recovery re-attests then posts once and clears stale plans", async () => {
+  await t.test("eligible recovery re-attests then posts once without discarding unrelated plans", async () => {
     const h = harness();
     enterRecovery(h);
     h.approvals.set("old-plan", { challenge: "must-clear" });
@@ -1183,7 +1184,7 @@ test("reconciliation freshly attests one exact eligible nonhistorical receipt", 
       h.requests.slice(0, 3).map(({ method, pathname }) => `${method} ${pathname}`).sort(),
       ["GET /api/v1/session", "GET /auth/whoami", "GET /ops/run-policy"].sort()
     );
-    assert.equal(h.approvals.size, 0);
+    assert.equal(h.approvals.size, 1);
   });
 });
 
@@ -1205,17 +1206,18 @@ test("happy plan stores the full attested boundary and strips the local challeng
   assert.deepEqual(boundary.historicalAttention.batchIds, [...HISTORICAL_IDS].sort());
 });
 
-test("starting any newer planning attempt invalidates the prior local approval", async () => {
+test("failed planning preserves an unrelated approval; execution still detects drift", async () => {
   const h = harness();
   await h.coordinator.planActionBatch(OPERATIONS);
   assert.equal(h.approvals.has("digest-1"), true);
   h.state.session.build.attested = false;
   await assert.rejects(h.coordinator.planActionBatch(OPERATIONS), /not ready for normal work/i);
-  assert.equal(h.approvals.size, 0);
+  assert.equal(h.approvals.size, 1);
   await assert.rejects(
-    h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned"),
-    /No unconsumed local approval plan/i
+    h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned", h.approvals.get("digest-1")?.approvalId),
+    /not ready for normal work/i
   );
+  assert.equal(h.approvals.size, 0);
   assert.equal(actionPosts(h).length, 1);
 });
 
@@ -1242,7 +1244,7 @@ test("execute consumes approval and performs no execute POST after boot, build, 
       await h.coordinator.planActionBatch(OPERATIONS);
       mutate(h.state);
       await assert.rejects(
-        h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned"),
+        h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned", h.approvals.get("digest-1")?.approvalId),
         /(?:boundary changed|not ready for normal work).*local approval was consumed/i
       );
       assert.equal(actionPosts(h).length, 1);
@@ -1264,11 +1266,11 @@ test("execute performs no execute POST when receipts make the re-attested sessio
     reconciliationEligibleBatchIds: [RECOVERY_ID]
   };
   await assert.rejects(
-    h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned"),
-    /not ready for normal work.*local approval was consumed/i
+    h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned", h.approvals.get("digest-1")?.approvalId),
+    /Receipt recovery blocks execution.*approval is retained/i
   );
   assert.equal(actionPosts(h).length, 1);
-  assert.equal(h.approvals.size, 0);
+  assert.equal(h.approvals.size, 1);
 });
 
 test("execute never reports success from an incomplete or ambiguous receipt", async (t) => {
@@ -1303,7 +1305,7 @@ test("execute never reports success from an incomplete or ambiguous receipt", as
       await h.coordinator.planActionBatch(OPERATIONS);
       h.state.mutateExecutionResponse = mutate;
       await assert.rejects(
-        h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned"),
+        h.coordinator.executeActionBatch("digest-1", OPERATIONS, "assigned", h.approvals.get("digest-1")?.approvalId),
         /execution receipt|provider readback|terminal execution.*local approval was consumed/i
       );
       assert.equal(actionPosts(h).length, 2);
@@ -1318,7 +1320,8 @@ test("happy execute re-attests unchanged boundary and posts the hidden challenge
   const response = await h.coordinator.executeActionBatch(
     "digest-1",
     OPERATIONS,
-    "assigned"
+    "assigned",
+    h.approvals.get("digest-1")?.approvalId
   );
   assert.equal(response.mode, "executed");
   const posts = actionPosts(h);
@@ -1349,7 +1352,8 @@ test("existing-draft send approval survives an async host handoff, then executes
   const response = await h.coordinator.executeActionBatch(
     plan.approvalDigest,
     SEND_OPERATIONS,
-    "assigned"
+    "assigned",
+    h.approvals.get(plan.approvalDigest)?.approvalId
   );
   assert.equal(response.mode, "executed");
   assert.equal(response.batch.completed[0].receipt.externalId, "sent-message-1");
@@ -1369,7 +1373,7 @@ test("existing-draft send approval is consumed when the draft id changes", async
     h.coordinator.executeActionBatch("digest-1", [{
       ...SEND_OPERATIONS[0],
       payload: { ...SEND_OPERATIONS[0].payload, draftId: "different-draft" }
-    }], "assigned"),
+    }], "assigned", h.approvals.get("digest-1")?.approvalId),
     /differ from the reviewed plan.*approval was consumed/i
   );
   assert.equal(actionPosts(h).length, 1);
@@ -1682,7 +1686,7 @@ test("Retell plan rejects excluded, nonnumeric, batched, unsupported, and contro
       h.approvals.set("old", { challenge: "must-clear" });
       await assert.rejects(h.coordinator.planClaimFilingCall(input), pattern);
       assert.equal(h.requests.length, 0);
-      assert.equal(h.approvals.size, 0);
+      assert.equal(h.approvals.size, 1);
     });
   }
 });
@@ -1778,7 +1782,7 @@ test("Retell execution consumes local approval before exact-input validation", a
   assert.equal(h.approvals.size, 0);
   await assert.rejects(
     h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
-    /No unconsumed local Retell approval plan/i
+    /No unconsumed local approval plan/i
   );
 });
 
@@ -1789,7 +1793,7 @@ test("Retell execution fails closed before calling on bridge or live-agent drift
     h.state.policy.bridgeBootId = "boot-2";
     await assert.rejects(
       h.coordinator.executeClaimFilingCall(CLAIM_APPROVAL_ID, CLAIM_PLAN_DIGEST, CLAIM_INPUT),
-      /boundary changed.*Nothing was called.*approval was consumed/i
+      /boundary changed.*Nothing was executed.*approval was consumed/i
     );
     assert.equal(claimPosts(h, "/claim-filing/call").length, 0);
   });
@@ -1995,21 +1999,19 @@ test("happy Retell execution posts the exact approved input and hidden challenge
   assert.equal(h.requests.some((request) => request.pathname === "/claim-filing/writeback"), false);
 });
 
-test("new action or Retell planning and restart invalidate the other lane's local approval", async () => {
+test("unrelated action and Retell plans survive a non-revoking restart check", async () => {
   const h = harness();
   await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
   assert.equal(h.approvals.has(CLAIM_APPROVAL_ID), true);
   await h.coordinator.planActionBatch(OPERATIONS);
-  assert.equal(h.approvals.has(CLAIM_APPROVAL_ID), false);
+  assert.equal(h.approvals.has(CLAIM_APPROVAL_ID), true);
   assert.equal(h.approvals.has("digest-1"), true);
-  await h.coordinator.planClaimFilingCall(CLAIM_INPUT);
-  assert.equal(h.approvals.has("digest-1"), false);
   assert.equal(h.approvals.has(CLAIM_APPROVAL_ID), true);
   await h.coordinator.restartVerifiedBridgeSession();
-  assert.equal(h.approvals.size, 0);
+  assert.equal(h.approvals.size, 2);
 });
 
-test("a newer cross-lane plan prevents an older in-flight Retell plan from becoming approvable", async () => {
+test("independent cross-lane planning does not discard an in-flight plan", async () => {
   const h = harness();
   let releasePrepare;
   let markPrepareEntered;
@@ -2025,8 +2027,8 @@ test("a newer cross-lane plan prevents an older in-flight Retell plan from becom
   await h.coordinator.planActionBatch(OPERATIONS);
   releasePrepare();
 
-  await assert.rejects(olderRetellPlan, /newer plan.*superseded/i);
-  assert.equal(h.approvals.has(CLAIM_APPROVAL_ID), false);
+  await olderRetellPlan;
+  assert.equal(h.approvals.has(CLAIM_APPROVAL_ID), true);
   assert.equal(h.approvals.has("digest-1"), true);
 });
 

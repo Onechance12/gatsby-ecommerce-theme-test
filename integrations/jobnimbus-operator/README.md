@@ -1,5 +1,61 @@
 # JobNimbus Operator for Mac
 
+## Local approval-continuity repair candidate (2026-10-22)
+
+Not installed or deployed. Pending approvals use an encrypted Mac cache and a
+unique public approval ID as well as the exact digest. Same-package/credential
+MCP reconnects and unrelated file/action plans preserve them. Same-file/action
+replacement, expiry, changed content or attested boundary still blocks execution.
+The bridge now supersedes only overlapping server-resolved file/action scopes
+for the assigned Mac identity; unknown/legacy scopes and other interfaces retain
+the conservative behavior. No permission, policy or recipient gate is broadened.
+
+Local claim-before-POST is atomic across processes. The durable states distinguish
+pending, executing, verified, unknown and invalid; no ambiguous outcome is ever
+restored to pending. A temporary attestation-read outage makes no execution POST
+and retains the same unexpired approval for a later explicit attempt. Replanning
+identical content creates a new approval ID and needs fresh human approval.
+
+The cache uses AES-256-GCM with a domain/version-separated key derived from the
+already-held transport credential, private owned paths, atomic fsynced writes and
+per-plan locks. It adds no Keychain lookup or credential setup. Claiming removes
+the stored challenge and payload before POST; expiry scrubs payload on access,
+not by a promised timed deletion job. Interrupted locks fail closed for that
+exact plan and are never stolen automatically. Credential/package rotations use
+isolated namespaces and cannot resume old plans. Never manually copy approval
+secrets or clear unknown tombstones to retry.
+
+Synthetic validation includes actual coordinator calls through MCP stdio across
+separate process lifetimes and concurrent clients, plus bridge HTTP fixtures.
+This is not proof of the installed Codex app's native connection lifecycle.
+Run `npm run test:approval-continuity` from the repository root with both the
+root and `integrations/jobnimbus-operator` declared dependencies available.
+The tests use generated synthetic fixtures and block harness network access;
+they never load the installed server or read a credential. Serial test-file
+execution avoids the existing HTTP fixture's short startup deadline under load.
+Release requires separate approval for a coordinated bridge deployment and a new
+versioned Operator package pinned to its provider-attested commit; preserve every
+current policy, owner, expiry, exclusion, action, runtime and historical receipt
+pin. Do not edit the installed cache or execute a customer plan as a smoke test.
+The session/approval reference is the current workflow; older release sections
+below describe their historical behavior where it differs.
+
+Local verification on the unchanged deployment base `d6eb0790`:
+
+- `npm run test:approval-continuity`: 567 tests, 563 passed, four optional
+  research tests skipped, zero failures. Includes 13 encrypted-store/MCP
+  lifecycle tests, plus exact-file HTTP approval and one-use regressions.
+- Six focused `src/server-smoke.test.js` tests passed: unchanged batch digest,
+  concurrent same-file reservation, reviewed-draft/SENT readback, current and
+  predecessor draft provenance, post-approval draft changes, and old-draft
+  follow-up/cleanup with completed-send duplicate protection.
+- Operator skill validation, server syntax checks and `git diff --check` passed.
+- Earlier combined runs hit local test-server startup deadlines, not provider
+  assertions. Final serial reruns above passed; the note fixture now has a
+  bounded 15-second startup deadline and 500-ms health-request timeout.
+- No installed package, release pin, production configuration, customer
+  action, receipt disposition, source commit/push or deployment was changed.
+
 ## Omitted contact closure verification repair (2026-10-22)
 
 A successful partial contact update can be followed by a JobNimbus read that
@@ -171,10 +227,9 @@ incomplete history, mismatched readback, restart window, or receipt-write
 failure becomes reconciliation-only and is never automatically resent. An
 unprovable outcome quarantines that exact file. Message text is kept out of
 durable action/outbound ledgers; the approval plan necessarily displays it.
-The hidden approval challenge lives only in the current MCP process. Separate
-user turns can complete the plan only when the native host routes both turns to
-that same persistent process. A new chat/worker or process restart cannot resume
-the plan and must produce a fresh plan for fresh approval.
+The hidden approval challenge is retained by the encrypted local approval store.
+Execution requires the exact public approval ID and digest, fresh attestation,
+and explicit human approval; see the current session/approval reference.
 
 Development verification uses only local synthetic JobNimbus/Quo providers.
 It covers changed text/sender/recipient, generic-route denial with the global
@@ -397,7 +452,7 @@ After an app restart or in every new chat, run `bridge_restart_verify` before an
 
 If `ready:false` is caused only by enumerated unresolved action receipts, the response exposes `recoveryBoundaryAttested:true` and `recoveryAllowed:true`: receipt reads, attested Retell configuration/result/callback reads, and reconciliation may use that boundary, but planning and execution may not. Read each exact receipt and reconcile only every listed reconciliation-eligible nonhistorical batch, then rerun `bridge_restart_verify`. Hard-blocked receipts stop work and are never reconciled. Reconciliation never resumes or retries an action or call.
 
-Calling `bridge_restart_verify`, starting any newer action-batch plan, or starting any newer Retell call plan clears every pending local approval across both lanes. Approval challenges live only in the current MCP process; a restart or new chat always requires a fresh plan and approval.
+Read-only `bridge_restart_verify`, unrelated plans and unchanged same-Mac reconnects preserve pending approvals. Exact replacement, changed boundary or expiry still blocks them; only the explicit current plan's ID/digest may execute.
 
 The credential is intentionally absent from files and environment configuration.
 

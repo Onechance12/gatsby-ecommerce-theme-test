@@ -19,10 +19,11 @@ Once activated and fully attested:
    ID or a remote URL is not a local path; transfer through an authorized file
    route first. Never paste base64 or credentials into chat.
 3. Show the complete client/file binding, filename, privacy, size, SHA-256,
-   expiry and `approvalDigest`; obtain Chance's approval of that exact upload.
-4. Call `pdf_upload_execute` with only the unchanged `approvalDigest` in the
-   same persistent MCP session. It uploads the captured bytes, not a reopened
-   path. New plans/restart invalidate approval; edits require a new plan.
+   expiry, `approvalDigest` and unique `approvalId`; obtain Chance's approval of that exact upload.
+4. Call `pdf_upload_execute` with the unchanged `approvalDigest` and `approvalId`.
+   It uploads the captured encrypted snapshot, never a reopened path. Same-Mac
+   reconnects and unrelated plans preserve it; changed bytes, replacement,
+   expiry or changed attested boundary require a fresh plan and approval.
 5. Require the completed receipt's provider `externalId`, exact file, filename,
    size, privacy, SHA-256, `verifiedByReadback:true` and `contentVerified:true`.
    Unknown/partial outcomes use existing receipt recovery; never reupload,

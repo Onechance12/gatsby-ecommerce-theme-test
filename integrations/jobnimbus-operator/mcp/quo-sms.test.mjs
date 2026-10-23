@@ -251,17 +251,17 @@ test("reviewed live-assignment plugin binds its owner, not a hardcoded count, an
   const f = await enabledCandidate(t, { live: true });
   assert.equal(f.scope.CHANCE_RUN_FILE_COUNT, null);
   const plan = await f.coordinator.planQuoSms(SMS);
-  const result = await f.coordinator.executeQuoSms(plan.approvalDigest);
+  const result = await f.coordinator.executeQuoSms(plan.approvalDigest, f.approvals.get(plan.approvalDigest)?.approvalId);
   assertQuoSmsReceipt(result.batch.completed[0].receipt, SMS);
   assert.equal(f.requests.filter((request) => request.body?.execute === true).length, 1);
-  await assert.rejects(f.coordinator.executeQuoSms(plan.approvalDigest), /No current/);
+  await assert.rejects(f.coordinator.executeQuoSms(plan.approvalDigest, f.approvals.get(plan.approvalDigest)?.approvalId), /No unconsumed local approval/);
 });
 
 test("live-assignment owner drift blocks execution and consumes approval", async (t) => {
   const f = await enabledCandidate(t, { live: true });
   const plan = await f.coordinator.planQuoSms(SMS);
   f.state.whoami.identity.jobNimbusOwnerId = "another-synthetic-owner";
-  await assert.rejects(f.coordinator.executeQuoSms(plan.approvalDigest), /owner/);
+  await assert.rejects(f.coordinator.executeQuoSms(plan.approvalDigest, f.approvals.get(plan.approvalDigest)?.approvalId), /owner/);
   assert.equal(f.requests.filter((request) => request.body?.execute === true).length, 0);
   assert.equal(f.approvals.size, 0);
 });
@@ -269,7 +269,7 @@ test("live-assignment owner drift blocks execution and consumes approval", async
 test("activated Quo SMS plan survives an async host handoff in one persistent coordinator, then executes once", async (t) => {
   const fixture = await enabledCandidate(t);
   const firstInvocation = () => fixture.coordinator.planQuoSms(SMS);
-  const secondInvocation = (approvalDigest) => fixture.coordinator.executeQuoSms(approvalDigest);
+  const secondInvocation = (approvalDigest) => fixture.coordinator.executeQuoSms(approvalDigest, fixture.approvals.get(approvalDigest)?.approvalId);
   const plan = await firstInvocation();
   assert.equal(JSON.stringify(plan).includes("hidden-challenge"), false);
   assert.equal(plan.operations[0].plan.plan.content, SMS.content);
@@ -280,12 +280,12 @@ test("activated Quo SMS plan survives an async host handoff in one persistent co
   assert.equal(fixture.requests.filter((request) => request.body?.execute === true).length, 1);
   assert.equal(fixture.requests.filter((request) => request.method === "GET").length, 6);
   assert.equal(fixture.approvals.size, 0);
-  await assert.rejects(fixture.coordinator.executeQuoSms(plan.approvalDigest), /No current/);
+  await assert.rejects(fixture.coordinator.executeQuoSms(plan.approvalDigest, fixture.approvals.get(plan.approvalDigest)?.approvalId), /No unconsumed local approval/);
   assert.equal(fixture.requests.filter((request) => request.body?.execute === true).length, 1);
 });
 
 for (const scenario of ["changed_text", "changed_sender", "changed_recipient", "restart", "bad_readback"]) {
-  test(`activated Quo SMS rejects ${scenario} and consumes approval`, async (t) => {
+  test(`activated Quo SMS lifecycle ${scenario} preserves the appropriate one-use boundary`, async (t) => {
     const fixture = await enabledCandidate(t);
     const plan = await fixture.coordinator.planQuoSms(SMS);
     let operations = [{ type: QUO_SMS_TYPE, payload: { ...SMS } }];
@@ -298,10 +298,16 @@ for (const scenario of ["changed_text", "changed_sender", "changed_recipient", "
         result.batch.completed[0].receipt.verifiedByReadback = false;
       };
     }
+    if (scenario === "restart") {
+      const result = await fixture.coordinator.executeQuoSms(plan.approvalDigest, plan.approvalId);
+      assert.equal(result.mode, "executed");
+      assert.equal(fixture.requests.filter(r => r.body?.execute).length, 1);
+      return;
+    }
     await assert.rejects(
       scenario === "changed_text" || scenario === "changed_sender" || scenario === "changed_recipient"
-        ? fixture.coordinator.executeActionBatch(plan.approvalDigest, operations, "assigned")
-        : fixture.coordinator.executeQuoSms(plan.approvalDigest)
+        ? fixture.coordinator.executeActionBatch(plan.approvalDigest, operations, "assigned", fixture.approvals.get(plan.approvalDigest)?.approvalId)
+        : fixture.coordinator.executeQuoSms(plan.approvalDigest, fixture.approvals.get(plan.approvalDigest)?.approvalId)
     );
     assert.equal(fixture.approvals.size, 0);
     assert.equal(

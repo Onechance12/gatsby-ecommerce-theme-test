@@ -859,7 +859,6 @@ export function createOperatorCoordinator({
   if (typeof newApprovalId !== "function") {
     throw new TypeError("createOperatorCoordinator requires an approval ID generator.");
   }
-  let approvalGeneration = 0;
   // Keep only derived exact-file stop codes/IDs, not mail or transcript bodies.
   // Switching modes must not erase a known stop from a prior failed full review.
   const knownClaimStops = new Map();
@@ -892,18 +891,69 @@ export function createOperatorCoordinator({
     return preflight;
   }
 
-  function invalidateLocalApprovals() {
-    approvals.clear();
-    approvalGeneration += 1;
-    return approvalGeneration;
+  function storeApproval(key, value, approvalId = randomUUID()) {
+    approvals.set(key, { ...value, approvalId, status: "pending" });
+    return approvalId;
   }
 
-  function requireCurrentApprovalGeneration(generation) {
-    if (generation !== approvalGeneration) {
-      throw new Error(
-        "A newer plan, restart check, or reconciliation superseded this local approval attempt."
-      );
+  function pendingApproval(key, kind, approvalId) {
+    const row = approvals.get(key);
+    if (!row || row.kind !== kind || !UUID.test(String(row.approvalId || ""))
+      || row.status !== "pending") {
+      throw new Error(`No unconsumed local approval plan exists: ${row?.reason || row?.status || "missing"}. Read receipts before preparing a replacement.`);
     }
+    if (row.approvalId !== approvalId) {
+      throw new Error("Approval ID does not match the exact displayed plan. Nothing was attempted.");
+    }
+    return row;
+  }
+
+  function transitionApproval(key, pending, from, to, reason) {
+    if (typeof approvals.transition === "function") {
+      return approvals.transition(key, pending.approvalId, from, to, reason);
+    }
+    // In-memory test adapter: deletion is synchronous and one-use. Production
+    // always injects the encrypted, cross-process compare-and-set store.
+    if (approvals.get(key)?.approvalId !== pending.approvalId) return false;
+    approvals.delete(key);
+    return true;
+  }
+
+  function claimApproval(key, pending) {
+    if (pending.expiresAt <= now()
+      || !transitionApproval(key, pending, "pending", "executing", "effect_request_claimed")) {
+      throw new Error("This exact approval expired, was replaced, or was already claimed. Read receipts; do not retry the effect.");
+    }
+  }
+
+  async function executionBoundary(pending) {
+    let verification;
+    try { verification = await verifiedBridgeSession(); }
+    catch {
+      const error = new Error("Preflight unavailable; no execution POST attempted. The same unexpired approval is retained for a later explicit attempt.");
+      error.retainApproval = true;
+      throw error;
+    }
+    // Receipt recovery is a temporary hold, not permission to discard other
+    // clients' approvals. Identity/build/policy/runtime drift still invalidates.
+    if (verification.operatorBoundaryAttested && !verification.ready
+      && pending.attestedBoundary === canonical(verification.approvalBoundary)) {
+      const error = new Error("Receipt recovery blocks execution; no execution POST attempted. The same unexpired approval is retained.");
+      error.retainApproval = true;
+      throw error;
+    }
+    const boundary = requireReadyForNormalWork(verification);
+    if (pending.attestedBoundary !== canonical(boundary)) {
+      throw new Error("The bridge boot/build/policy/runtime boundary changed after approval. Nothing was executed.");
+    }
+    return { verification, boundary };
+  }
+
+  function approvalFailure(key, pending, attempted, error, label = "local approval") {
+    if (!attempted && error?.retainApproval) return error;
+    transitionApproval(key, pending, attempted ? "executing" : "pending",
+      attempted ? "unknown" : "invalid", attempted ? "receipt_review_required" : "preflight_rejected");
+    return new Error(`${error instanceof Error ? error.message : String(error)} The ${label} was consumed; ${attempted ? "the outcome is not verified; read receipts before any retry" : "no execution POST was attempted; review a fresh plan"}.`);
   }
 
   async function verifiedBridgeSession() {
@@ -984,7 +1034,8 @@ export function createOperatorCoordinator({
   }
 
   async function restartVerifiedBridgeSession() {
-    invalidateLocalApprovals();
+    // Re-attestation is not revocation. Execute still requires the exact stored
+    // boot/build/policy/identity/runtime and an unexpired one-use approval.
     return verifiedBridgeSession();
   }
 
@@ -1011,26 +1062,19 @@ export function createOperatorCoordinator({
   }
 
   async function planClaimFilingCall(input) {
-    // Action-batch and claim-call plans share a single local approval slot.
-    // Any newer plan attempt invalidates every older hidden challenge.
-    const generation = invalidateLocalApprovals();
     const normalizedInput = normalizedClaimFilingInput(input);
     const verification = await verifiedBridgeSession();
-    requireCurrentApprovalGeneration(generation);
     const attestedBoundary = requireReadyForNormalWork(verification);
     const communicationPreflight = await reviewClaimForPlan(normalizedInput);
-    requireCurrentApprovalGeneration(generation);
     const configuration = assertClaimFilingConfiguration(
       await bridgeRequest("POST", "/claim-filing/configuration", {}),
       { requireReady: true }
     );
-    requireCurrentApprovalGeneration(generation);
     const response = await bridgeRequest(
       "POST",
       "/claim-filing/prepare",
       claimBridgeInput(normalizedInput)
     );
-    requireCurrentApprovalGeneration(generation);
     const { fileNumber, expiresAt } = assertClaimPlan(response, normalizedInput, now());
     if (normalizedInput.reviewMode === "reviewed_packet") {
       assertReviewedPacketPlan(response, normalizedInput, communicationPreflight.fileId);
@@ -1040,7 +1084,7 @@ export function createOperatorCoordinator({
       throw new Error("The local operator could not issue a unique one-use Retell approval ID.");
     }
     const planDigest = String(response.planDigest);
-    approvals.set(approvalId, {
+    storeApproval(approvalId, {
       kind: "claim_filing_call",
       challenge: String(response.approvalChallenge),
       input: canonical(normalizedInput),
@@ -1049,9 +1093,8 @@ export function createOperatorCoordinator({
       attestedBoundary: canonical(attestedBoundary),
       configuration: canonical(configuration),
       communicationDigest: communicationPreflight.digest,
-      generation,
       expiresAt
-    });
+    }, approvalId);
     return {
       ...stripApprovalSecrets(response),
       approvalId,
@@ -1062,14 +1105,8 @@ export function createOperatorCoordinator({
 
   async function executeClaimFilingCall(approvalId, planDigest, input) {
     const exactApprovalId = String(approvalId || "").trim();
-    const pending = approvals.get(exactApprovalId);
-    if (!pending || pending.kind !== "claim_filing_call") {
-      throw new Error(
-        "No unconsumed local Retell approval plan exists for this approval ID. Prepare a fresh single-file plan."
-      );
-    }
-    approvals.delete(exactApprovalId);
-
+    const pending = pendingApproval(exactApprovalId, "claim_filing_call", exactApprovalId);
+    let attempted = false;
     try {
       const normalizedInput = normalizedClaimFilingInput(input);
       if (pending.expiresAt <= now()) {
@@ -1084,16 +1121,8 @@ export function createOperatorCoordinator({
         );
       }
 
-      const verification = await verifiedBridgeSession();
-      requireCurrentApprovalGeneration(pending.generation);
-      const currentBoundary = requireReadyForNormalWork(verification);
-      if (pending.attestedBoundary !== canonical(currentBoundary)) {
-        throw new Error(
-          "The bridge boot/build/policy/runtime boundary changed after call approval. Nothing was called."
-        );
-      }
+      await executionBoundary(pending);
       const communicationPreflight = await reviewClaimForPlan(normalizedInput);
-      requireCurrentApprovalGeneration(pending.generation);
       if (pending.communicationDigest !== communicationPreflight.digest) {
         throw new Error(
           normalizedInput.reviewMode === "reviewed_packet"
@@ -1105,13 +1134,14 @@ export function createOperatorCoordinator({
         await bridgeRequest("POST", "/claim-filing/configuration", {}),
         { requireReady: true }
       );
-      requireCurrentApprovalGeneration(pending.generation);
       if (pending.configuration !== canonical(configuration)) {
         throw new Error(
           "The live Retell prompt, tools, schema, publication, or callback configuration changed after approval. Nothing was called."
         );
       }
 
+      claimApproval(exactApprovalId, pending);
+      attempted = true;
       const response = await bridgeRequest("POST", "/claim-filing/call", {
         ...claimBridgeInput(normalizedInput),
         execute: true,
@@ -1119,12 +1149,10 @@ export function createOperatorCoordinator({
         approvalChallenge: pending.challenge
       });
       assertClaimExecutionResponse(response, pending);
+      transitionApproval(exactApprovalId, pending, "executing", "verified", "provider_readback_verified");
       return stripApprovalSecrets(response);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `${message} The local Retell approval was consumed; review the call ledger/result before any retry.`
-      );
+      throw approvalFailure(exactApprovalId, pending, attempted, error, "local Retell approval");
     }
   }
 
@@ -1162,15 +1190,9 @@ export function createOperatorCoordinator({
       throw new Error("Company-scope mutations are disabled in the Chance-assigned operator lane.");
     }
 
-    // There is only one current plan in this MCP process. Starting another
-    // planning attempt invalidates every older local challenge, even when the
-    // replacement attempt later fails closed.
-    const generation = invalidateLocalApprovals();
-
     // This check is intentionally inside the action helper. Calling the public
     // restart tool earlier is not a substitute for a fresh pre-POST attestation.
     const verification = await verifiedBridgeSession();
-    requireCurrentApprovalGeneration(generation);
     const attestedBoundary = requireReadyForNormalWork(verification);
     const boundOperations = scopedOperations(operations, operatorScope);
     const response = await bridgeRequest("POST", "/ops/action-batch", {
@@ -1179,7 +1201,6 @@ export function createOperatorCoordinator({
       operations: boundOperations,
       execute: false
     });
-    requireCurrentApprovalGeneration(generation);
     const digest = String(response?.approvalDigest || "");
     const challenge = String(response?.approvalChallenge || "");
     if (!digest || !challenge) {
@@ -1196,7 +1217,7 @@ export function createOperatorCoordinator({
     if (!Number.isFinite(expiresAt) || expiresAt <= now()) {
       throw new Error("The bridge did not return a live approval expiry. Nothing was approved.");
     }
-    approvals.set(digest, {
+    const approvalId = storeApproval(digest, {
       kind: "action_batch",
       challenge,
       operations: canonical(operations),
@@ -1205,21 +1226,14 @@ export function createOperatorCoordinator({
       operatorScope,
       runPolicy: canonical(CHANCE_RUN_POLICY),
       attestedBoundary: canonical(attestedBoundary),
-      generation,
       expiresAt
     });
-    return stripApprovalSecrets(response);
+    return { ...stripApprovalSecrets(response), approvalId };
   }
 
-  async function executeActionBatch(approvalDigest, operations, expectedScope) {
-    const pending = approvals.get(approvalDigest);
-    if (!pending || pending.kind !== "action_batch") {
-      throw new Error(
-        "No unconsumed local approval plan exists for this digest. Prepare a fresh plan."
-      );
-    }
-    approvals.delete(approvalDigest);
-
+  async function executeActionBatch(approvalDigest, operations, expectedScope, approvalId) {
+    const pending = pendingApproval(approvalDigest, "action_batch", approvalId);
+    let attempted = false;
     try {
       if (pending.expiresAt <= now()) {
         throw new Error("The approval plan expired. Prepare and review a fresh plan.");
@@ -1236,16 +1250,11 @@ export function createOperatorCoordinator({
 
       // A successful plan never authorizes a later boot, build, policy, runtime,
       // identity, or capability boundary. Re-attest immediately before the POST.
-      const verification = await verifiedBridgeSession();
-      requireCurrentApprovalGeneration(pending.generation);
-      const currentBoundary = requireReadyForNormalWork(verification);
-      if (pending.attestedBoundary !== canonical(currentBoundary)) {
-        throw new Error(
-          "The bridge boot/build/policy/runtime boundary changed after approval. Nothing was executed."
-        );
-      }
+      const { boundary: currentBoundary } = await executionBoundary(pending);
 
       const boundOperations = scopedOperations(operations, expectedScope);
+      claimApproval(approvalDigest, pending);
+      attempted = true;
       const response = await bridgeRequest("POST", "/ops/action-batch", {
         operatorScope: expectedScope,
         runPolicy: CHANCE_RUN_POLICY,
@@ -1266,19 +1275,16 @@ export function createOperatorCoordinator({
         operations,
         bridgeBootId: currentBoundary.bridgeBootId
       });
+      transitionApproval(approvalDigest, pending, "executing", "verified", "provider_readback_verified");
       return stripApprovalSecrets(response);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `${message} The local approval was consumed; read the batch receipts before any retry.`
-      );
+      throw approvalFailure(approvalDigest, pending, attempted, error);
     }
   }
 
   async function reconcileActionBatch(batchId) {
-    // A receipt recovery changes the executable boundary. It must invalidate
-    // every older plan even when admission rejects this reconciliation.
-    invalidateLocalApprovals();
+    // Recovery never resumes an effect. Fresh execution attestation and the
+    // bridge's exact-file receipt/duplicate guards remain mandatory.
     const exactBatchId = String(batchId || "").trim();
     if (!UUID.test(exactBatchId)) {
       throw new Error("Reconciliation requires one exact UUID batch ID.");
@@ -1363,12 +1369,10 @@ export function createOperatorCoordinator({
   }
 
   async function planPdfUpload(input) {
-    const generation = invalidateLocalApprovals();
     if (!PDF_WORKFLOW_ENABLED) throw new Error("PDF upload is built but not activated. A reviewed coordinated release is required.");
     const payload = await readLocalPdf(input);
-    requireCurrentApprovalGeneration(generation);
-    // The immutable byte snapshot is retained only in the one-use local
-    // approval slot. No base64 or source path is returned to chat or a ledger.
+    // The immutable byte snapshot is encrypted in the one-use local store.
+    // No base64 or source path is returned to chat or a bridge ledger.
     return planActionBatch([{ type: PDF_UPLOAD_TYPE, payload }], "assigned");
   }
 
@@ -1397,48 +1401,42 @@ export function createOperatorCoordinator({
   }
 
   async function planPdfReceiptResolution(input) {
-    const generation = invalidateLocalApprovals();
     if (!PDF_RECEIPT_RESOLUTION_ENABLED) throw new Error("PDF receipt resolution is built but not activated in this native release.");
     const request = validatePdfResolutionInput(input);
     if (PINNED_LEGACY_BATCH_IDS.has(request.batchId)) throw new Error("Historical receipts may never be resolved or replayed by this lane.");
     const verification = await verifiedBridgeSession();
-    requireCurrentApprovalGeneration(generation);
     const attestedBoundary = requireReadyForNormalWork(verification);
     const { batchId, ...resolution } = request;
     const response = await bridgeRequest("POST", "/ops/action-batch-reconcile", {
       batchId, resolution, runPolicy: CHANCE_RUN_POLICY, execute: false
     });
-    requireCurrentApprovalGeneration(generation);
     assertPdfResolutionPlan(response, request, resolutionBoundary(verification));
     const expiresAt = Date.parse(response.approvalExpiresAt || "");
     if (!response.approvalChallenge || !Number.isFinite(expiresAt) || expiresAt <= now()) {
       throw new Error("The PDF resolution plan omitted its current one-use approval challenge or expiry.");
     }
     const post = await verifiedBridgeSession();
-    requireCurrentApprovalGeneration(generation);
     if (canonical(requireReadyForNormalWork(post)) !== canonical(attestedBoundary)) {
       throw new Error("The bridge boundary changed while verifying the PDF. No approval was stored.");
     }
     const plan = stripApprovalSecrets(response);
-    approvals.set(response.approvalDigest, { kind: PDF_RESOLUTION_KIND, generation, expiresAt,
+    const approvalId = storeApproval(response.approvalDigest, { kind: PDF_RESOLUTION_KIND, expiresAt,
       challenge: response.approvalChallenge, request, plan, attestedBoundary: canonical(attestedBoundary) });
-    return plan;
+    return { ...plan, approvalId };
   }
 
-  async function executePdfReceiptResolution(approvalDigest) {
-    const pending = approvals.get(approvalDigest);
+  async function executePdfReceiptResolution(approvalDigest, approvalId) {
+    const pending = pendingApproval(approvalDigest, PDF_RESOLUTION_KIND, approvalId);
     if (!PDF_RECEIPT_RESOLUTION_ENABLED || pending?.kind !== PDF_RESOLUTION_KIND) {
       throw new Error("No unconsumed exact PDF receipt-resolution plan exists. Read the receipt before preparing a fresh plan.");
     }
-    approvals.delete(approvalDigest);
+    let attempted = false;
     try {
       if (pending.expiresAt <= now()) throw new Error("The PDF resolution approval expired.");
-      const verification = await verifiedBridgeSession();
-      requireCurrentApprovalGeneration(pending.generation);
-      if (canonical(requireReadyForNormalWork(verification)) !== pending.attestedBoundary) {
-        throw new Error("The bridge boot/build/policy/runtime boundary changed after approval.");
-      }
+      await executionBoundary(pending);
       const { batchId, ...resolution } = pending.request;
+      claimApproval(approvalDigest, pending);
+      attempted = true;
       const response = await bridgeRequest("POST", "/ops/action-batch-reconcile", {
         batchId, resolution, runPolicy: CHANCE_RUN_POLICY, execute: true,
         approvalDigest, approvalChallenge: pending.challenge
@@ -1448,24 +1446,24 @@ export function createOperatorCoordinator({
       if (canonical(requireReadyForNormalWork(post)) !== pending.attestedBoundary) {
         throw new Error("The bridge boundary changed during receipt resolution.");
       }
+      transitionApproval(approvalDigest, pending, "executing", "verified", "receipt_resolution_verified");
       return stripApprovalSecrets(response);
     } catch (error) {
-      throw new Error(`${error.message} The local approval was consumed. Read the exact receipt; do not repeat automatically.`);
+      throw approvalFailure(approvalDigest, pending, attempted, error);
     }
   }
 
-  async function executePdfUpload(approvalDigest) {
-    const pending = approvals.get(approvalDigest);
+  async function executePdfUpload(approvalDigest, approvalId) {
+    const pending = pendingApproval(approvalDigest, "action_batch", approvalId);
     if (!PDF_WORKFLOW_ENABLED || pending?.kind !== "action_batch") throw new Error("No current approved PDF snapshot exists.");
     const operations = JSON.parse(pending.operations);
     if (operations.length !== 1 || operations[0].type !== PDF_UPLOAD_TYPE) throw new Error("This digest is not a sole PDF-upload plan.");
     // Never reopen a potentially changed path, accept replacement bytes, or
     // re-create an expired/lost plan. Execution uses exactly the reviewed bytes.
-    return executeActionBatch(approvalDigest, operations, "assigned");
+    return executeActionBatch(approvalDigest, operations, "assigned", approvalId);
   }
 
   async function planQuoSms(input) {
-    invalidateLocalApprovals();
     if (!QUO_SMS_ENABLED) {
       throw new Error("Quo SMS is built but not activated. A reviewed coordinated release is required.");
     }
@@ -1481,8 +1479,8 @@ export function createOperatorCoordinator({
     }], "assigned");
   }
 
-  async function executeQuoSms(approvalDigest) {
-    const pending = approvals.get(approvalDigest);
+  async function executeQuoSms(approvalDigest, approvalId) {
+    const pending = pendingApproval(approvalDigest, "action_batch", approvalId);
     if (!QUO_SMS_ENABLED || pending?.kind !== "action_batch") {
       throw new Error("No current approved Quo SMS plan exists.");
     }
@@ -1491,7 +1489,7 @@ export function createOperatorCoordinator({
       throw new Error("This digest is not a sole Quo SMS plan.");
     }
     validateQuoSmsPayload(operations[0].payload);
-    return executeActionBatch(approvalDigest, operations, "assigned");
+    return executeActionBatch(approvalDigest, operations, "assigned", approvalId);
   }
 
   async function reviewRecentCommunications(input = {}) {

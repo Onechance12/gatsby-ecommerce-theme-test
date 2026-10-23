@@ -11,12 +11,13 @@ After activation, call `quo_sms_plan` with exactly `{query,from,to,content}`.
 Use one exact numeric currently eligible file, the exact verified Wave sender in E.164,
 the exact freshly file-bound recipient in E.164, and the complete final text.
 Show Chance the file, sender, recipient, full text, content SHA-256/count,
-expiry, and approval digest. Only an explicit approval of that exact current
-plan permits `quo_sms_execute` with its digest in the same persistent process.
-Separate user turns are supported only when the native host keeps that process
-attached; never hand the digest to a new chat or delegated/cloud worker. A
-restart, newer plan, changed byte, sender/recipient change, expiry, build or
-policy drift consumes/invalidates the approval and requires a fresh plan.
+expiry, approval digest and unique `approvalId`. Only explicit approval of that
+exact plan permits `quo_sms_execute` with both identifiers. The encrypted local
+snapshot survives an unchanged same-Mac reconnect; unrelated plans coexist.
+A same-file/action replacement, changed text, sender/recipient change, expiry,
+build, boot or policy drift blocks the old approval and requires a fresh plan.
+Follow the session/approval reference for temporary preflight holds and unknown
+outcomes. Never transfer challenges or delegate execution of this approval.
 
 Accept completion only when the receipt has an exact Quo provider message ID,
 `verifiedByReadback:true`, matching sender/recipient/content hash/count, and a

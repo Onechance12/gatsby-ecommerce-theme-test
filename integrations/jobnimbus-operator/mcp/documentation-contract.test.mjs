@@ -182,7 +182,7 @@ test("plugin documentation pins build, dual lanes, runtime gates, and fresh acti
   assert.match(scope, /const ACTIVE_RELEASE = QUO_SMS_ENABLED[\s\S]*QUO_SMS_RELEASE[\s\S]*PDF_UPLOADS_ENABLED \? PDF_UPLOAD_RELEASE : APPROVED_NOTE_RELEASE/);
   assert.match(scope, /EXPECTED_OPERATOR_CAPABILITIES/);
   assert.match(coordinator, /attestedBoundary: canonical\(attestedBoundary\)/);
-  assert.match(coordinator, /pending\.attestedBoundary !== canonical\(currentBoundary\)/);
+  assert.match(coordinator, /pending\.attestedBoundary !== canonical\(boundary\)/);
   assert.match(readme, /hard-pins that HTTPS origin/i);
   assert.match(server, /const BASE_URL = "https:\/\/jobnimbus-chatgpt-bridge\.onrender\.com"/);
   assert.doesNotMatch(server, /JOBNIMBUS_OPERATOR_BASE_URL/);
@@ -218,7 +218,7 @@ test("Retell documentation and server expose only the approval-gated single-file
   }
   assert.doesNotMatch(server, /register\(\s*"retell_claim.*writeback"/);
   assert.match(coordinator, /includeCarrierBatch: false/);
-  assert.match(coordinator, /approvals\.delete\(exactApprovalId\)/);
+  assert.match(coordinator, /claimApproval\(exactApprovalId, pending\)/);
   assert.match(coordinator, /"\/claim-filing\/configuration"/);
   assert.match(coordinator, /"\/claim-filing\/prepare"/);
   assert.match(coordinator, /"\/claim-filing\/call"/);
