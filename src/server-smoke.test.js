@@ -1241,7 +1241,7 @@ test("communication repair reports repeated Gmail pages as incomplete rather tha
     gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }],
     gmailNextPageToken: "repeated-token", gmailThreads: [{ id: message.threadId, messages: [message] }]
   });
-  const response = await h.post("/gmail/search", { fileQuery: "#2739", limit: 25, completeReview: true });
+  const response = await h.post("/gmail/search", { fileQuery: "#2739", limit: 25, completeReview: true, includeCorrelationAudit: true });
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.coverage.paginationValid, false);
@@ -1249,6 +1249,7 @@ test("communication repair reports repeated Gmail pages as incomplete rather tha
   assert.equal(result.coverage.hasMore, true);
   assert.ok(result.coverage.limitationCodes.includes("provider_pagination_invalid"));
   assert.equal(h.fixture.getGmailSearchPageRequests().length, 2);
+  assert.equal(result.correlationAudit.scannedCandidates, 1);
 });
 
 test("communication repair marks the Gmail search budget rather than silently dropping page eleven", async (t) => {
@@ -1256,7 +1257,7 @@ test("communication repair marks the Gmail search budget rather than silently dr
   const pages = Array.from({ length: 11 }, (_, index) => messages.slice(index * 25, (index + 1) * 25)
     .map(({ id, threadId }) => ({ id, threadId })));
   const h = await startCommunicationRepairBridge(t, 19326, 19327, { gmailMessages: messages, gmailSearchPages: pages });
-  const response = await h.post("/gmail/search", { fileQuery: "#2739", limit: 25, completeReview: true });
+  const response = await h.post("/gmail/search", { fileQuery: "#2739", limit: 25, completeReview: true, includeCorrelationAudit: true });
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.count, 250);
@@ -1267,6 +1268,9 @@ test("communication repair marks the Gmail search budget rather than silently dr
   assert.equal(result.coverage.complete, false);
   assert.ok(result.coverage.limitationCodes.includes("provider_pagination_remaining"));
   assert.equal(h.fixture.getGmailSearchPageRequests().length, 10);
+  assert.equal(result.correlationAudit.reportedCandidates, 250);
+  // Audit completeness covers only scanned candidates, not the unread page.
+  assert.equal(result.correlationAudit.omittedCandidates, 0);
 });
 
 test("communication repair ignores malformed carrier-routing values but still holds real cross-role phone collisions", async (t) => {
@@ -4952,13 +4956,186 @@ test("Gmail formatting repair returns equivalent claims and reason-only search/t
   assert.equal(h.fixture.getCompanyNoteCreateCount(), 0);
 });
 
+test("Gmail rejection audit explains each candidate without changing search or thread admission", async (t) => {
+  const make = (id, body, subject = "Carrier update") => {
+    const message = communicationRepairMessage(id, body, "audit-thread");
+    message.snippet = "";
+    message.payload.headers = [
+      { name: "From", value: "carrier@example.test" },
+      { name: "To", value: "operator@example.test" },
+      { name: "Subject", value: subject }
+    ];
+    return message;
+  };
+  const messages = [
+    make("private-target", "Status request", "Claim#ABC123"),
+    make("private-unknown", "PRIVATE-MAIL Thank you for your message."),
+    make("private-bcc", "PRIVATE-MAIL target ABC123"),
+    make("private-late", `PRIVATE-MAIL ABC123 ${"x ".repeat(7000)} COMP-321`),
+    make("private-other", "PRIVATE-MAIL COMP-321"),
+    make("private-attachment", "PRIVATE-MAIL ABC123"),
+    make("private-html", "PRIVATE-MAIL ABC123"),
+    make("private-reference", "PRIVATE-MAIL ABC123 https://app.jobnimbus.com/contact/contact-company-other")
+  ];
+  messages[2].payload.headers.push({ name: "Bcc", value: "company-client@example.test" });
+  messages[5].payload = { ...messages[5].payload, mimeType: "multipart/mixed", parts: [
+    { partId: "0", mimeType: "text/plain", body: messages[5].payload.body },
+    { partId: "1", filename: "Claim COMP-321 evidence.pdf", mimeType: "application/pdf", body: { size: 40, attachmentId: "private-attachment-token" } }
+  ] };
+  messages[6].payload = { ...messages[6].payload, mimeType: "multipart/alternative", parts: [
+    { partId: "0", mimeType: "text/plain", body: messages[6].payload.body },
+    { partId: "1", mimeType: "text/html", body: { data: Buffer.from("<p>PRIVATE-HTML COMP-321</p>").toString("base64url") } }
+  ] };
+  const h = await startCommunicationRepairBridge(t, 19510, 19511, {
+    companyOther: true, gmailMessages: messages,
+    gmailSearchMessages: messages.map(({ id, threadId }) => ({ id, threadId })),
+    gmailThreads: [{ id: "audit-thread", messages }, { id: "unknown-only", messages: [messages[1]] }]
+  });
+  const input = { fileQuery: "#2739", completeReview: true, limit: 25 };
+  const normal = await (await h.post("/gmail/search", input)).json();
+  const readsWithoutAudit = h.fixture.getGmailEvidenceReadCount();
+  const response = await h.post("/gmail/search", { ...input, includeCorrelationAudit: true });
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const audited = await response.json();
+  const { correlationAudit: audit, ...unchanged } = audited;
+  assert.deepEqual(unchanged, normal);
+  assert.equal(h.fixture.getGmailEvidenceReadCount(), readsWithoutAudit * 2);
+  assert.equal(normal.count, 1);
+  assert.equal(normal.coverage.withheldMessages, 6);
+  assert.equal(normal.coverage.excludedOtherFileMessages, 1);
+  assert.equal(audit.reportedCandidates, 8);
+  assert.deepEqual(audit.rows.map(row => row.disposition), [
+    "matched", "withheld", "withheld", "withheld", "excluded_other_file", "withheld", "withheld", "withheld"
+  ]);
+  assert.deepEqual(audit.rows[0].target.matchedBy, ["unique_claim_identifier"]);
+  assert.deepEqual(audit.rows[0].target.observations, [{ kind: "claim_identifier", locations: ["subject"] }]);
+  assert.equal(audit.rows[1].decision, "missing_unique_target_evidence");
+  assert.deepEqual(audit.rows[1].target.observations, []);
+  assert.equal(audit.rows[2].target.match, true);
+  assert.deepEqual(audit.rows[2].conflicts, [{ kind: "client_email_header", locations: ["bcc"] }]);
+  assert.deepEqual(audit.rows[3].conflicts, [{ kind: "claim_identifier", locations: ["plain_body"] }]);
+  assert.deepEqual(audit.rows[5].conflicts, [{ kind: "claim_identifier", locations: ["attachment_name"] }]);
+  assert.deepEqual(audit.rows[6].conflicts, [{ kind: "claim_identifier", locations: ["html_body"] }]);
+  assert.deepEqual(audit.rows[7].conflicts, [{ kind: "file_reference", locations: ["plain_body"] }]);
+  assert.doesNotMatch(JSON.stringify(audit), /private-|PRIVATE-|ABC123|COMP-321|example\.test|app\.jobnimbus|contact-company-other|audit-thread/);
+
+  const threadInput = { fileQuery: "#2739", threadId: "audit-thread", completeReview: true };
+  const normalThread = await (await h.post("/gmail/thread", threadInput)).json();
+  const auditedThread = await (await h.post("/gmail/thread", { ...threadInput, includeCorrelationAudit: true })).json();
+  const { correlationAudit: threadAudit, ...unchangedThread } = auditedThread;
+  assert.deepEqual(unchangedThread, normalThread);
+  assert.equal(threadAudit.rows[4].disposition, "withheld"); // Thread policy still has no exclusion path.
+  assert.equal(normalThread.coverage.withheldMessages, 7);
+  const denied = await h.post("/gmail/thread", { ...threadInput, threadId: "unknown-only", includeCorrelationAudit: true });
+  assert.equal(denied.status, 403);
+  assert.equal((await denied.json()).correlationAudit, undefined);
+  assert.equal(h.fixture.getGmailDraftCreateCount(), 0);
+  assert.equal(h.fixture.getGmailSendCount(), 0);
+  assert.equal(h.fixture.getContactUpdateCount(), 0);
+  assert.equal(h.fixture.getCompanyNoteCreateCount(), 0);
+  assert.equal(h.fixture.getGmailAttachmentRequests().length, 0);
+});
+
+test("Gmail rejection audit is assigned Mac opt-in only and rejects invalid requests before provider reads", async (t) => {
+  const h = await startCommunicationRepairBridge(t, 19512, 19513, { companyOther: true });
+  const input = { fileQuery: "#2739", completeReview: true, includeCorrelationAudit: true };
+  for (const [body, status, token] of [
+    [{ ...input, completeReview: false }, 400],
+    [{ ...input, includeCorrelationAudit: "true" }, 400],
+    [{ ...input, operatorScope: "company" }, 403],
+    [input, 403, "fixture-codex-operator-token-1234567890"]
+  ]) {
+    const response = await h.post("/gmail/search", body, token);
+    assert.equal(response.status, status, JSON.stringify(await response.clone().json()));
+    assert.equal((await response.json()).correlationAudit, undefined);
+  }
+  assert.equal(h.fixture.getGmailEvidenceReadCount(), 0);
+  assert.equal(h.fixture.getContactPageRequests().length, 0);
+  const denied = await h.post("/gmail/search", { ...input, fileQuery: "#3901" });
+  assert.equal(denied.status, 400);
+  assert.equal((await denied.json()).correlationAudit, undefined);
+  assert.equal(h.fixture.getGmailEvidenceReadCount(), 0);
+});
+
+test("Gmail rejection audit caps thread explanations without hiding original coverage limits", async (t) => {
+  const messages = Array.from({ length: 251 }, (_, index) => communicationRepairMessage(`audit-cap-${index}`, "Claim ABC123", "audit-cap-thread"));
+  const h = await startCommunicationRepairBridge(t, 19514, 19515, { gmailThreads: [{ id: "audit-cap-thread", messages }] });
+  const response = await h.post("/gmail/thread", { fileQuery: "#2739", threadId: "audit-cap-thread", completeReview: true, includeCorrelationAudit: true });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.messageCount, 251);
+  assert.equal(result.messages.length, 100);
+  assert.equal(result.coverage.omittedMessages, 151);
+  assert.equal(result.coverage.complete, false);
+  assert.equal(result.correlationAudit.scannedCandidates, 251);
+  assert.equal(result.correlationAudit.reportedCandidates, 250);
+  assert.equal(result.correlationAudit.omittedCandidates, 1);
+});
+
+test("Gmail rejection audit explains the conservative filename boundary without relaxing the matcher", async (t) => {
+  const message = communicationRepairMessage("private-filename", "Thank you.");
+  message.snippet = "";
+  message.payload.headers = [{ name: "From", value: "carrier@example.test" }];
+  message.payload.parts = [{ partId: "1", filename: "Claim ABC-123.pdf", mimeType: "application/pdf",
+    body: { size: 40, attachmentId: "private-filename-token" } }];
+  const h = await startCommunicationRepairBridge(t, 19516, 19517, {
+    gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }]
+  });
+  const input = { fileQuery: "#2739", completeReview: true };
+  const normal = await (await h.post("/gmail/search", input)).json();
+  const response = await h.post("/gmail/search", { ...input, includeCorrelationAudit: true });
+  assert.equal(response.status, 200);
+  const { correlationAudit: audit, ...unchanged } = await response.json();
+  assert.deepEqual(unchanged, normal);
+  assert.equal(normal.count, 0);
+  assert.equal(audit.rows[0].decision, "missing_unique_target_evidence");
+  assert.deepEqual(audit.rows[0].target.claimCheck, { matched: false, reason: "longer_identifier_boundary",
+    rejectedBoundaries: [{ reason: "longer_identifier_suffix", locations: ["attachment_name"] }] });
+  assert.doesNotMatch(JSON.stringify(audit), /private-|ABC-123|example\.test/);
+  assert.equal(h.fixture.getGmailAttachmentRequests().length, 0);
+});
+
+test("Gmail rejection audit preserves policy-property proof and reports foreign references without identifiers", async (t) => {
+  const messages = [
+    "Policy HO-1234567 for 123 Main St.",
+    "Policy HO-1234567 only.",
+    "Policy HO-1234567 for 123 Main St and OTHER-7654321.",
+    "https://app.jobnimbus.com/contact/contact-chance and https://app.jobnimbus.com/contact/private-outside-index"
+  ].map((body, index) => {
+    const message = communicationRepairMessage(`policy-${index}`, body);
+    message.snippet = "";
+    message.payload.headers = [{ name: "From", value: "carrier@example.test" }];
+    return message;
+  });
+  const h = await startCommunicationRepairBridge(t, 19518, 19519, {
+    companyOther: true, chanceClaimNumber: "",
+    chanceOverrides: { email: "", address_line1: "123 Main St", cf_string_4: "HO-1234567" },
+    gmailMessages: messages, gmailSearchMessages: messages.map(({ id, threadId }) => ({ id, threadId }))
+  });
+  h.fixture.getContact("contact-company-other").cf_string_4 = "OTHER-7654321";
+  const input = { fileQuery: "#2739", completeReview: true };
+  const normal = await (await h.post("/gmail/search", input)).json();
+  const response = await h.post("/gmail/search", { ...input, includeCorrelationAudit: true });
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const { correlationAudit: audit, ...unchanged } = await response.json();
+  assert.deepEqual(unchanged, normal);
+  assert.equal(normal.count, 1);
+  assert.equal(normal.coverage.withheldMessages, 3);
+  assert.deepEqual(audit.rows[0].target.matchedBy, ["policy_property"]);
+  assert.equal(audit.rows[1].target.match, false);
+  assert.deepEqual(audit.rows[1].target.observations, [{ kind: "policy_identifier", locations: ["plain_body"] }]);
+  assert.deepEqual(audit.rows[2].conflicts, [{ kind: "policy_identifier", locations: ["plain_body"] }]);
+  assert.deepEqual(audit.rows[3].conflicts, [{ kind: "file_reference", locations: ["plain_body"] }]);
+  assert.doesNotMatch(JSON.stringify(audit), /OTHER-7654321|private-outside-index|HO-1234567|123 Main St|contact-chance/);
+});
+
 test("Gmail formatting repair keeps malformed correlation inventory withheld without leaking fields", async (t) => {
   const message = communicationRepairMessage("incomplete");
   const h = await startCommunicationRepairBridge(t, 19492, 19493, {
     companyOther: true, companyOtherEmail: { value: "private-malformed@example.test" },
     gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }]
   });
-  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true });
+  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true, includeCorrelationAudit: true });
   assert.equal(response.status, 200);
   const search = await response.json();
   assert.equal(search.count, 0);
@@ -4968,6 +5145,7 @@ test("Gmail formatting repair keeps malformed correlation inventory withheld wit
   });
   assert.equal(search.coverage.scopeVerificationComplete, false);
   assert.doesNotMatch(JSON.stringify(search), /private-malformed|repair-message-incomplete/);
+  assert.deepEqual(search.correlationAudit.rows, [{ candidateNumber: 1, disposition: "withheld", decision: "incomplete_correlation_index" }]);
 });
 
 test("Gmail formatting repair cannot bypass company-wide claim uniqueness", async (t) => {
@@ -4977,7 +5155,7 @@ test("Gmail formatting repair cannot bypass company-wide claim uniqueness", asyn
     companyOther: true, companyOtherClaimNumber: "AB C123",
     gmailMessages: [message], gmailSearchMessages: [{ id: message.id, threadId: message.threadId }]
   });
-  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true });
+  const response = await h.post("/gmail/search", { fileQuery: "2739", completeReview: true, includeCorrelationAudit: true });
   assert.equal(response.status, 200);
   const search = await response.json();
   assert.equal(search.count, 0);
@@ -4988,6 +5166,10 @@ test("Gmail formatting repair cannot bypass company-wide claim uniqueness", asyn
   });
   assert.equal(search.coverage.scopeVerificationComplete, false);
   assert.doesNotMatch(JSON.stringify(search), /contact-company-other|repair-message-collision/);
+  assert.equal(search.correlationAudit.rows[0].target.uniqueClaim, false);
+  assert.deepEqual(search.correlationAudit.rows[0].target.matchedBy, []);
+  assert.equal(search.correlationAudit.rows[0].target.observations.some(row => row.kind === "claim_identifier"), true);
+  assert.equal(search.correlationAudit.rows[0].conflicts.some(row => row.kind === "claim_identifier"), true);
 });
 
 test("Gmail exact-file reads admit shared carrier routing and withhold conflicting or identifierless thread messages", async (t) => {

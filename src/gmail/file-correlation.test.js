@@ -4,7 +4,6 @@ import {
   claimSearchVariants, createClaimIdentifierMatcher,
   emptyGmailWithheldReasonCounts, gmailCorrelationDecision
 } from "./file-correlation.js";
-
 test("claim correlation preserves exact identity across bounded formatting changes", () => {
   for (const content of [
     "Claim ABC-123", "Claim abc123", "Claim AB-C1-23", "Claim ABC 123",
@@ -68,4 +67,24 @@ test("diagnostics disclose only the first fixed failed correlation category", ()
     incomplete_correlation_index: 0, conflicting_file_evidence: 0, missing_unique_target_evidence: 0
   });
   assert.doesNotMatch(JSON.stringify(first), /synthetic-private-id/);
+});
+test("claim explanation uses the same decision and reports longer-identifier boundaries without values", () => {
+  for (const [text, reason, boundaries] of [
+    ["Claim ABC-123.pdf", "longer_identifier_boundary", ["longer_identifier_suffix"]],
+    ["OTHER#ABC123", "longer_identifier_boundary", ["longer_identifier_prefix"]],
+    ["ABC123-EXTRA", "longer_identifier_boundary", ["longer_identifier_suffix"]],
+    ["ABC\n123", "no_bounded_match", []],
+    ["XABC123", "no_bounded_match", []],
+    ["ABC-123 report.pdf", "matched", []],
+    ["OTHER#ABC123 then claim ABC123", "matched", []]
+  ]) {
+    const matcher = createClaimIdentifierMatcher(text);
+    const explanation = matcher.explain("abc123");
+    assert.equal(matcher.has("abc123"), reason === "matched", text);
+    assert.deepEqual(explanation, { matched: reason === "matched", reason, rejectedBoundaries: boundaries });
+    explanation.rejectedBoundaries.push("tampered");
+    assert.deepEqual(matcher.explain("abc123").rejectedBoundaries, boundaries);
+    assert.doesNotMatch(JSON.stringify(matcher.explain("abc123")), /ABC|abc123|OTHER|\.pdf/);
+  }
+  assert.equal(createClaimIdentifierMatcher("arbitrary").explain("x").reason, "invalid_identifier");
 });
