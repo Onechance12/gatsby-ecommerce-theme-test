@@ -145,11 +145,11 @@ test("the coordinator never stores or executes an altered note display", async (
     });
     if (mutation) {
       await assert.rejects(coordinator.planActionBatch(operations), /approval display/);
-      assert.equal(approvals.size, 0);
-      await assert.rejects(coordinator.executeActionBatch("fixture-digest", operations, "assigned"), /No unconsumed local approval/);
+      assert.equal(approvals.size, 1);
+      await assert.rejects(coordinator.executeActionBatch("fixture-digest", operations, "assigned", approvals.get("fixture-digest")?.approvalId), /No unconsumed local approval/);
     } else {
       const shown = await coordinator.planActionBatch(operations);
-      assert.equal(approvals.size, 1);
+      assert.equal(approvals.size, 2);
       assert.equal(shown.operations[0].plan.plan.note, note);
       assert.equal(Object.hasOwn(shown, "approvalChallenge"), false);
     }

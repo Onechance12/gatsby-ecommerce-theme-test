@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { approvalConflictKeys, approvalScopesConflict } from "./operations/approval-conflicts.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
@@ -16727,11 +16728,14 @@ async function issueActionApprovalChallenge(
     const ledger = await readSecurityLedger(ACTION_APPROVAL_STORE_PATH, "Action approval ledger");
     const identityHash = actionApprovalIdentityHash();
     const now = Date.now();
+    const conflictKeys = isMacCodexOperatorRequest() && !operatorCompanyScopeActive()
+      ? approvalConflictKeys(batchScope, approvalKind) : null;
     for (const row of ledger) {
       if (row.status === "active" && Number(row.expiresAtMs || 0) <= now) {
         row.status = "expired";
         row.expiredAt = new Date(now).toISOString();
-      } else if (row.status === "active" && row.identityHash === identityHash) {
+      } else if (row.status === "active" && row.identityHash === identityHash
+        && approvalScopesConflict(row.conflictKeys, conflictKeys)) {
         row.status = "superseded";
         row.supersededAt = new Date(now).toISOString();
       }
@@ -16751,6 +16755,7 @@ async function issueActionApprovalChallenge(
       approvalDigest,
       approvalKind: normalizedKind,
       operationCount,
+      conflictKeys,
       batchMode: batchScope.mode || "",
       runPolicyId: batchScope.runPolicyId || "",
       runPolicySha256: batchScope.runPolicySha256 || "",

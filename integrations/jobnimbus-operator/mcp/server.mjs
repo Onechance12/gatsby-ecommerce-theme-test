@@ -13,6 +13,7 @@ import { PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
 import { QUO_SMS_TYPE } from "./quo-sms-contract.mjs";
 import { createOperatorCoordinator, PDF_RECEIPT_RESOLUTION_ENABLED } from "./operator-coordinator.mjs";
+import { createEncryptedApprovalStore } from "./approval-store.mjs";
 import { COMMUNICATION_SWEEP_ENABLED } from "./communications-sweep-release.mjs";
 import {
   PACKET_REVIEW_SOURCES, PACKET_REVIEW_METHODS, PACKET_REVIEW_FACT_KEYS, CLAIM_STOP_SIGNAL_CODES
@@ -138,7 +139,12 @@ async function bridgeRequest(method, pathname, body) {
 
 const OPERATOR = createOperatorCoordinator({
   bridgeRequest,
-  version: VERSION
+  version: VERSION,
+  approvals: createEncryptedApprovalStore({
+    directory: path.join(os.homedir(), "Library", "Caches", KEYCHAIN_SERVICE, "approvals-v1"),
+    secret: OPERATOR_BEARER_TOKEN,
+    namespace: `${BASE_URL}|${KEYCHAIN_ACCOUNT}|${VERSION}`
+  })
 });
 
 function companyBody(input = {}) {
@@ -802,24 +808,24 @@ if (PDF_RECEIPT_RESOLUTION_ENABLED) {
   );
   register(
     "pdf_receipt_resolution_execute",
-    "Only after Chance explicitly approves the immediately preceding exact resolution plan, reverify its PDF and append one internal audited disposition. Changes no provider document/access and sends nothing. Original quarantine, intent, privacy request and approval remain unchanged and never replayable. Call directly with the digest in the same native process; restart/newer plan invalidates it. Uncertain outcome: read the receipt, never retry automatically.",
-    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/) },
-    ({ approvalDigest }) => OPERATOR.executePdfReceiptResolution(approvalDigest)
+    "Only after Chance explicitly approves the immediately preceding exact resolution plan, reverify its PDF and append one internal audited disposition. Changes no provider document/access and sends nothing. Original quarantine, intent, privacy request and approval remain unchanged and never replayable. Call with the exact approvalDigest and approvalId. Unchanged same-Mac reconnects and unrelated plans preserve the pending approval; expiry, replacement or boundary drift invalidates it. Uncertain outcome: read the receipt, never retry automatically.",
+    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/), approvalId: z.string().uuid() },
+    ({ approvalDigest, approvalId }) => OPERATOR.executePdfReceiptResolution(approvalDigest, approvalId)
   );
 }
 
 if (PDF_WORKFLOW_ENABLED) {
   register(
     "pdf_upload_plan",
-    "Snapshot one reviewed local PDF for one active Chance-manifest file. No upload yet. Show the exact client, filename, privacy, size, SHA-256 and approvalDigest to Chance. PDF contents are not printed or persisted by the bridge. A new plan invalidates older approvals. Upload approval does not approve an email draft or send.",
+    "Snapshot one reviewed local PDF for one active Chance-manifest file. No upload yet. Show the exact client, filename, privacy, size, SHA-256 and approvalDigest to Chance. PDF contents are not printed or persisted by the bridge; the local snapshot is encrypted. Show the approvalId too. Unrelated plans do not invalidate it. Upload approval does not approve an email draft or send.",
     { query: z.string().regex(/^#?\d+$/), path: z.string().min(1), filename: z.string().min(1), isPrivate: z.boolean() },
     (input) => OPERATOR.planPdfUpload(input)
   );
   register(
     "pdf_upload_execute",
-    "Upload only after Chance explicitly approves the unchanged immediately preceding PDF plan. Uses the captured immutable bytes and the one-use approvalDigest, re-attests the bridge, then verifies provider ID, client, metadata and downloaded bytes. Any uncertain outcome stops; use receipt recovery, never retry or fall back to browser/raw API. Drafting and sending remain separately approved actions.",
-    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/) },
-    ({ approvalDigest }) => OPERATOR.executePdfUpload(approvalDigest)
+    "Upload only after Chance explicitly approves the unchanged immediately preceding PDF plan. Uses the captured immutable bytes and the exact approvalDigest plus approvalId, re-attests the bridge, then verifies provider ID, client, metadata and downloaded bytes. Any uncertain outcome stops; use receipt recovery, never retry or fall back to browser/raw API. Drafting and sending remain separately approved actions.",
+    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/), approvalId: z.string().uuid() },
+    ({ approvalDigest, approvalId }) => OPERATOR.executePdfUpload(approvalDigest, approvalId)
   );
 }
 
@@ -837,9 +843,9 @@ if (QUO_SMS_ENABLED) {
   );
   register(
     "quo_sms_execute",
-    "Send only the unchanged Quo SMS that Chance explicitly approved in the immediately preceding exact plan. The hidden challenge is consumed once. The wrapper re-attests the same bridge boot/build/policy/runtime and accepts completion only with provider message-ID readback proving the exact sender, recipient and content hash. Any uncertain outcome is non-retryable and requires receipt reconciliation.",
-    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/) },
-    ({ approvalDigest }) => OPERATOR.executeQuoSms(approvalDigest)
+    "Send only the unchanged Quo SMS that Chance explicitly approved in the exact plan identified by approvalDigest and approvalId. The hidden challenge is consumed once. The wrapper re-attests the same bridge boot/build/policy/runtime and accepts completion only with provider message-ID readback proving the exact sender, recipient and content hash. Any uncertain outcome is non-retryable and requires receipt reconciliation.",
+    { approvalDigest: z.string().regex(/^[a-f0-9]{64}$/), approvalId: z.string().uuid() },
+    ({ approvalDigest, approvalId }) => OPERATOR.executeQuoSms(approvalDigest, approvalId)
   );
 }
 
@@ -852,7 +858,7 @@ register(
     + (QUO_SMS_ENABLED
       ? "Quo SMS is excluded from this generic batch tool and is available only through the dedicated exact-message plan/execute pair. "
       : "Quo SMS is not activated and remains blocked. ")
-    + "Raw sends, #2628, completions, calendar writes, backward moves, and every call outside the separate single-file Retell claim-filing lane are blocked. Show the complete returned plan and approvalDigest to Chance before execution. The ordinary user approval turn must stay on this same attached native MCP process; do not run bridge_restart_verify or start another plan before the approved execute.",
+    + "Raw sends, #2628, completions, calendar writes, backward moves, and every call outside the separate single-file Retell claim-filing lane are blocked. Show the complete returned plan, approvalDigest, approvalId and expiry to Chance before execution. Unchanged same-Mac reconnects and unrelated plans preserve pending approvals. A replacement requires fresh approval of its new ID.",
   {
     operations: z.array(operationSchema).min(1).max(15)
   },
@@ -861,15 +867,17 @@ register(
 
 register(
   "action_batch_execute",
-  "Execute only the unchanged action batch that Chance explicitly approved in the immediately preceding plan. After Chance's approval reply, call this directly in the same attached native MCP process; do not call bridge_restart_verify, reconnect, or start another plan between planning and execution. Requires that plan's approvalDigest and exact operations; the hidden challenge is consumed once and never exposed to chat. Before posting, the wrapper freshly re-attests ready:true and requires the exact same stored boot, build, policy, historical isolation, runtime, identity, and capability boundary. Existing-draft Gmail delivery is accepted only when the receipt proves the exact approved draftId, a provider Sent-message id, immutable readback, and retained source draft.",
+  "Execute only the unchanged action batch that Chance explicitly approved in the immediately preceding plan. After Chance's approval reply, use that exact plan's approvalDigest, approvalId and unchanged operations. The encrypted local snapshot can survive a same-Mac reconnect; unrelated plans coexist. No automatic retry after a possible execution POST; the hidden challenge is consumed once and never exposed to chat. Before posting, the wrapper freshly re-attests ready:true and requires the exact same stored boot, build, policy, historical isolation, runtime, identity, and capability boundary. Existing-draft Gmail delivery is accepted only when the receipt proves the exact approved draftId, a provider Sent-message id, immutable readback, and retained source draft.",
   {
     approvalDigest: z.string().min(1),
+    approvalId: z.string().uuid(),
     operations: z.array(operationSchema).min(1).max(15)
   },
-  ({ approvalDigest, operations }) => OPERATOR.executeActionBatch(
+  ({ approvalDigest, approvalId, operations }) => OPERATOR.executeActionBatch(
     approvalDigest,
     operations,
-    "assigned"
+    "assigned",
+    approvalId
   )
 );
 

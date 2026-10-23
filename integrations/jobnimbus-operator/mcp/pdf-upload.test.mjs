@@ -31,7 +31,7 @@ test("PDF activation requires complete reviewed pins and the inactive candidate 
   }
   const coordinator = createOperatorCoordinator({ version: "fixture", bridgeRequest: () => { throw new Error("MUST NOT CONNECT"); } });
   if (!PDF_UPLOADS_ENABLED) await assert.rejects(coordinator.planPdfUpload({}), /not activated/);
-  await assert.rejects(coordinator.executePdfUpload("x"), /No current/);
+  await assert.rejects(coordinator.executePdfUpload("x"), /No unconsumed local approval/);
 });
 
 test("PDF payload strictly binds content, exact file, metadata, MIME, bounds and no overrides", () => {
@@ -147,18 +147,18 @@ test("activated local snapshot executes only approved bytes, reattests, consumes
   assert.equal(JSON.stringify(result).includes(PDF.toString("base64")), false);
   assert.equal(JSON.stringify(result).includes("hidden-challenge"), false);
   await writeFile(f.input.path, Buffer.from("changed local file after approval"));
-  const executed = await f.coordinator.executePdfUpload(result.approvalDigest);
+  const executed = await f.coordinator.executePdfUpload(result.approvalDigest, f.approvals.get(result.approvalDigest)?.approvalId);
   assertPdfReceipt(executed.batch.completed[0].receipt, payload());
   const posts = f.requests.filter((r) => r.method === "POST");
   assert.equal(posts.length, 2);
   assert.equal(posts[1].body.operations[0].payload.contentBase64, PDF.toString("base64"));
   assert.equal(f.requests.filter((r) => r.method === "GET").length, 6);
   assert.equal(f.approvals.size, 0);
-  await assert.rejects(f.coordinator.executePdfUpload(result.approvalDigest));
+  await assert.rejects(f.coordinator.executePdfUpload(result.approvalDigest, f.approvals.get(result.approvalDigest)?.approvalId));
 });
 
 for (const scenario of ["boot_changed", "expanded_capabilities", "expired", "restart", "invalid_new_plan", "wrong_display", "wrong_receipt", "wrong_receipt_file_id"]) {
-  test(`activated PDF ${scenario} fails closed and consumes the approval`, async (t) => {
+  test(`activated PDF lifecycle ${scenario} retains all effect gates`, async (t) => {
     const f = await enabledCandidate(t);
     if (scenario === "wrong_display") f.state.corruptPlan = (r) => { r.operations[0].plan.plan.sha256 = "b".repeat(64); };
     if (scenario === "wrong_display") {
@@ -172,7 +172,13 @@ for (const scenario of ["boot_changed", "expanded_capabilities", "expired", "res
     if (scenario === "invalid_new_plan") await assert.rejects(f.coordinator.planPdfUpload({ ...f.input, path: "/missing.pdf" }));
     if (scenario === "wrong_receipt") f.state.corruptReceipt = (r) => { r.batch.completed[0].receipt.sha256 = "e".repeat(64); };
     if (scenario === "wrong_receipt_file_id") f.state.corruptReceipt = (r) => { r.batch.files[0].id = "wrong-file-id"; };
-    await assert.rejects(f.coordinator.executePdfUpload(result.approvalDigest));
+    if (["restart", "invalid_new_plan"].includes(scenario)) {
+      const executed = await f.coordinator.executePdfUpload(result.approvalDigest, result.approvalId);
+      assert.equal(executed.mode, "executed");
+      assert.equal(f.requests.filter(r => r.body?.execute).length, 1);
+      return;
+    }
+    await assert.rejects(f.coordinator.executePdfUpload(result.approvalDigest, f.approvals.get(result.approvalDigest)?.approvalId));
     assert.equal(f.approvals.size, 0);
     assert.equal(f.requests.filter((r) => r.body?.execute).length, scenario.startsWith("wrong_receipt") ? 1 : 0);
   });
@@ -184,7 +190,7 @@ test("activated scope verifies receipt recovery hashes and rejects mixed or wron
   assert.throws(() => f.scope.scopedOperations([...operations(), ...operations()], "assigned"));
   assert.throws(() => f.scope.scopedOperations(operations(), "company"));
   const planned = await f.coordinator.planPdfUpload(f.input);
-  const executed = await f.coordinator.executePdfUpload(planned.approvalDigest);
+  const executed = await f.coordinator.executePdfUpload(planned.approvalDigest, f.approvals.get(planned.approvalDigest)?.approvalId);
   const batch = executed.batch;
   const result = { mode: "reconciled", outcome: "applied_verified", receipt: {
     batchId: batch.id, status: "completed", batchMode: batch.batchMode, operatorScope: "assigned", current: null,

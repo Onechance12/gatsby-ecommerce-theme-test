@@ -226,11 +226,11 @@ test("native recovery retains hidden challenge, exact boundary and one-use appro
   const f = await enabled(t);
   const prepared = await f.coordinator.planPdfReceiptResolution(REQUEST);
   assert.equal(prepared.approvalChallenge, undefined);
-  const result = await f.coordinator.executePdfReceiptResolution(prepared.approvalDigest);
+  const result = await f.coordinator.executePdfReceiptResolution(prepared.approvalDigest, f.approvals.get(prepared.approvalDigest)?.approvalId);
   assertPdfResolutionReceipt(result, prepared);
   assert.equal(f.requests.filter((r) => r.body?.execute).length, 1);
   assert.equal(f.approvals.size, 0);
-  await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest), /No unconsumed/);
+  await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest, f.approvals.get(prepared.approvalDigest)?.approvalId), /No unconsumed/);
 });
 
 test("native PDF diagnosis preserves the pending approval and uses only the read-only receipt route", async (t) => {
@@ -242,7 +242,7 @@ test("native PDF diagnosis preserves the pending approval and uses only the read
   assert.deepEqual([...f.approvals.keys()], before);
   assert.equal(f.requests.filter((r) => r.route === "/ops/action-batch-receipts").length, 1);
   assert.equal(f.requests.filter((r) => r.body?.execute === true).length, 0);
-  await f.coordinator.executePdfReceiptResolution(prepared.approvalDigest);
+  await f.coordinator.executePdfReceiptResolution(prepared.approvalDigest, f.approvals.get(prepared.approvalDigest)?.approvalId);
 });
 
 test("native PDF diagnosis rejects hostile or authority-bearing response fields", async (t) => {
@@ -254,7 +254,7 @@ test("native PDF diagnosis rejects hostile or authority-bearing response fields"
 });
 
 for (const scenario of ["restart", "newer_plan", "expired", "boot", "build", "policy", "runtime", "bad_receipt", "unknown"]) {
-  test(`native recovery ${scenario} consumes/invalidates approval and never retries`, async (t) => {
+  test(`native recovery lifecycle ${scenario} never retries an effect`, async (t) => {
     const f = await enabled(t);
     const prepared = await f.coordinator.planPdfReceiptResolution(REQUEST);
     if (scenario === "restart") await f.coordinator.restartVerifiedBridgeSession();
@@ -266,11 +266,16 @@ for (const scenario of ["restart", "newer_plan", "expired", "boot", "build", "po
     if (scenario === "runtime") f.state.session.runtime.gates.gmailSend = "enabled";
     if (scenario === "bad_receipt") f.state.mutateReceipt = (r) => { r.providerWrites = true; };
     if (scenario === "unknown") f.state.failExecute = true;
-    await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest));
+    if (["restart", "newer_plan"].includes(scenario)) {
+      await f.coordinator.executePdfReceiptResolution(prepared.approvalDigest, prepared.approvalId);
+      assert.equal(f.requests.filter(r => r.body?.execute).length, 1);
+      return;
+    }
+    await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest, f.approvals.get(prepared.approvalDigest)?.approvalId));
     assert.equal(f.approvals.size, 0);
     const posts = f.requests.filter((r) => r.body?.execute).length;
     assert.equal(posts, ["bad_receipt", "unknown"].includes(scenario) ? 1 : 0);
-    await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest));
+    await assert.rejects(f.coordinator.executePdfReceiptResolution(prepared.approvalDigest, f.approvals.get(prepared.approvalDigest)?.approvalId));
     assert.equal(f.requests.filter((r) => r.body?.execute).length, posts);
   });
 }

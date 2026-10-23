@@ -111,8 +111,9 @@ async function fixture(t, options = {}) {
     await rm(root, { recursive: true, force: true });
   });
   let ready = false;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) { ready = true; break; } } catch {}
+  const startupDeadline = Date.now() + 15000;
+  while (Date.now() < startupDeadline) {
+    try { if ((await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) })).ok) { ready = true; break; } } catch {}
     if (child.exitCode !== null) break;
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
@@ -134,6 +135,37 @@ async function fixture(t, options = {}) {
 
 const operation = (note = "Paused due to license.", query = "#2739") => ({
   type: "jobnimbus.create_note", payload: { query, note }
+});
+
+test("independent assigned-file approvals survive another chat's plan over real HTTP", async (t) => {
+  const f = await fixture(t);
+  const a = [operation("Synthetic first file note")];
+  const b = [operation("Synthetic second file note", "#2741")];
+  const planA = await f.prepare(a);
+  const planB = await f.prepare(b);
+  assert.equal(planA.status, 200);
+  assert.equal(planB.status, 200);
+  assert.equal(f.state.posts, 0);
+  assert.equal((await f.execute(a, planA.body)).body.mode, "executed");
+  assert.equal((await f.execute(b, planB.body)).body.mode, "executed");
+  assert.equal(f.state.posts, 2);
+  assert.notEqual((await f.execute(a, planA.body)).status, 200);
+  assert.equal(f.state.posts, 2);
+});
+
+test("same-file replacement still supersedes the old challenge; concurrent execute writes once", async (t) => {
+  const f = await fixture(t);
+  const a = [operation("Synthetic first revision")];
+  const b = [operation("Synthetic replacement revision")];
+  const planA = await f.prepare(a);
+  const planB = await f.prepare(b);
+  const old = await f.execute(a, planA.body);
+  assert.equal(old.status, 409);
+  assert.match(old.body.error, /superseded/);
+  assert.equal(f.state.posts, 0);
+  const executions = await Promise.all([f.execute(b, planB.body), f.execute(b, planB.body)]);
+  assert.equal(executions.filter(result => result.body.mode === "executed").length, 1);
+  assert.equal(f.state.posts, 1);
 });
 
 test("a provider-reused existing activity ID cannot certify new note creation", async (t) => {

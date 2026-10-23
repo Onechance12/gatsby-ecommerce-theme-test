@@ -57,10 +57,12 @@ general filing request or development/release approval is not call approval.
 After approval, repeat every unchanged `approvedInput` field. Execution checks
 the live bridge/configuration, fresh JobNimbus snapshot, callbacks, review age
 and input binding, without starting another Gmail/Quo audit. Drift, missing
-evidence, another plan, expiry/restart or a failure consumes/invalidates approval;
-review the ledger/result before a separately approved retry. No approval secrets
-or provider content are persisted by this receipt. A fresh process requires a
-fresh plan; truthful, still-current review provenance can be reused.
+evidence, replacement, expiry or boundary drift blocks approval; review the
+ledger/result before a separately approved retry. The local pending snapshot is
+encrypted and may survive an unchanged same-Mac reconnect; the public review
+receipt contains no approval secrets. Unrelated plans do not revoke it. Follow
+the session/approval reference for temporary no-POST preflight holds. A possible
+execution request is never restored or retried automatically.
 
 Follow the existing result/transcript/guarded-completion review and separately
 approved JobNimbus writeback workflow. This mode sends no email/text, writes no

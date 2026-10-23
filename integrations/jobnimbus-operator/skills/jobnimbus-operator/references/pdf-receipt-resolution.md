@@ -72,7 +72,7 @@ hold, reassignment, incomplete inventory or provider failure retains the hold.
 
 Show Chance the returned client/file, original batch, exact document ID and
 filename, original private request versus current normal access, size,
-SHA-256, source receipt/intent hashes, expiry and `approvalDigest`. Explain
+SHA-256, source receipt/intent hashes, expiry, `approvalDigest` and `approvalId`. Explain
 that approval accepts the existing access setting without changing it and
 resolves only the internal hold. It creates/sends no email.
 
@@ -88,11 +88,12 @@ Do not invent or backfill provenance from chat. Keep the PDF itself unchanged.
 ## Execution and completion
 
 After explicit approval of that unchanged plan, call
-`pdf_receipt_resolution_execute` with only its `approvalDigest`, directly in
-the same native process. Do not restart, re-attest manually or create another
-plan between the approval reply and execute. The helper performs its own
-fresh full attestation. Restart, expiry, newer plan or boundary/proof drift
-invalidates/consumes approval; it is never recreated automatically.
+`pdf_receipt_resolution_execute` with its exact `approvalDigest` and `approvalId`.
+The helper performs its own fresh full attestation. An unchanged same-Mac
+reconnect or unrelated plan does not revoke it. Expiry, a same-file/action
+replacement or boundary/proof drift blocks execution and needs a fresh plan.
+See the session/approval reference for temporary preflight holds. Never recreate
+or retry an approval automatically after a possible execution request.
 
 Require `mode:"pdf_resolution_verified"`, `fileHoldReleased:true`,
 `providerWrites:false`, `originalUploadReplayAllowed:false`, and a verified

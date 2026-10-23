@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "bridge": "node src/server.js",
+    "test:approval-continuity": "node --test --test-concurrency=1 src/operations/approval-conflicts.test.js src/approved-notes-smoke.test.js integrations/jobnimbus-operator/mcp/*.test.mjs",
     "precheck": "node --test src/documents/research-access.test.js src/documents/research-provider.test.js src/documents/research-http.test.js && npm run test:communication-evidence && npm run test:pdf-upload && npm run test:reviewed-claim-packet && npm run test:assigned-roster",
     "test:assigned-roster": "node --test src/jobnimbus/assigned-roster.test.js src/jobnimbus/workflow-closure.test.js src/operations/thresher-policy.test.js src/approved-quo-sms-smoke.test.js integrations/jobnimbus-operator/mcp/quo-sms.test.mjs",
     "test:reviewed-claim-packet": "node --test src/reviewed-claim-packet-contract.test.js",
