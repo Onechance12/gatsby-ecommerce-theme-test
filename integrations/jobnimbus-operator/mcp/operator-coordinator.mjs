@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { COMMUNICATION_SWEEP_ENABLED, COMMUNICATION_SWEEP_ROUTE, readAttestedCommunications } from "./communications-sweep-release.mjs";
+import { GMAIL_REJECTED_REVIEW_ENABLED, GMAIL_REJECTED_REVIEW_ROUTE, readAttestedRejectedGmail } from "./gmail-rejected-review-release.mjs";
 import { assertApprovedNotePlan } from "./approved-note-plan.mjs";
 import { assertPdfPlan, PDF_UPLOAD_TYPE } from "./pdf-upload-contract.mjs";
 import { readLocalPdf } from "./local-pdf.mjs";
@@ -1504,8 +1505,20 @@ export function createOperatorCoordinator({
     });
   }
 
+  async function reviewRejectedGmail(input) {
+    if (!GMAIL_REJECTED_REVIEW_ENABLED) throw new Error("Rejected-email inspection is built but not activated. A reviewed coordinated release is required.");
+    return readAttestedRejectedGmail({ input, canonical,
+      verify: async () => {
+        const verification = await verifiedBridgeSession();
+        return { ready: verification.ready, boundary: requireReadyForNormalWork(verification) };
+      },
+      read: request => bridgeRequest("POST", GMAIL_REJECTED_REVIEW_ROUTE, request)
+    });
+  }
+
   return Object.freeze({
     reviewRecentCommunications,
+    reviewRejectedGmail,
     verifiedBridgeSession,
     restartVerifiedBridgeSession,
     readClaimFilingConfiguration,

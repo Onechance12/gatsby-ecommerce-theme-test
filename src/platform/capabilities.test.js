@@ -80,8 +80,10 @@ test("Google roles are normalized to named capabilities without wildcard authori
       .filter(({ route }) => !route.includes(" /hcn/"))
       .map(({ name }) => name)
   ).size;
-  // The own-inbox discovery route belongs exclusively to the gated Mac identity.
-  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 7);
+  // Own-inbox discovery and rejected-original inspection belong exclusively
+  // to their independently gated Mac identity, not the broad Google role.
+  assert.equal(chance.authorizedCapabilities.length, nonHcnCapabilityCount - 8);
+  assert.equal(chance.authorizedCapabilities.includes("gmail.rejected_candidates.review"), false);
   assert.equal(chance.authorizedCapabilities.includes("gmail.drafts.send"), true);
   assert.equal(chance.authorizedCapabilities.includes("claims.filing.call.place"), false);
   assert.equal(chance.authorizedCapabilities.includes("retell.agent.configure"), false);
@@ -89,6 +91,27 @@ test("Google roles are normalized to named capabilities without wildcard authori
   assert.equal(chance.authorizedCapabilities.includes("hcn.file.review"), false);
   assert.equal(JSON.stringify(chance).includes("allRoutes"), false);
   assert.equal(JSON.stringify(chance).includes('"*"'), false);
+});
+
+test("rejected-original capability activation changes only the dedicated Mac descriptor", () => {
+  const old = process.env.ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW;
+  const mac = { type: "codex_operator_token", role: "codex_operator", subject: "codex-mac-operator" };
+  try {
+    delete process.env.ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW;
+    const before = buildCapabilityDescriptor({ identity: mac });
+    assert.equal(before.authorizedCapabilities.includes("gmail.rejected_candidates.review"), false);
+    process.env.ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW = "true";
+    const after = buildCapabilityDescriptor({ identity: mac });
+    assert.deepEqual(after.authorizedCapabilities.filter(name => !before.authorizedCapabilities.includes(name)), ["gmail.rejected_candidates.review"]);
+    assert.notEqual(hashDescriptor(before), hashDescriptor(after));
+    for (const identity of [{ ...mac, subject: "codex-hp-operator" }, { type: "google_oauth", role: "chance" },
+      { type: "google_oauth", role: "administrator" }, { type: "bridge_token", role: "chance" }]) {
+      assert.equal(capabilitiesForIdentity(identity).includes("gmail.rejected_candidates.review"), false);
+    }
+  } finally {
+    if (old === undefined) delete process.env.ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW;
+    else process.env.ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW = old;
+  }
 });
 
 test("HCN browser capability metadata is intersected with the console surface", () => {

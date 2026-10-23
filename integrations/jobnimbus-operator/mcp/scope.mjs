@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { COMMUNICATION_SWEEP_ENABLED } from "./communications-sweep-release.mjs";
+import { GMAIL_REJECTED_REVIEW_ENABLED } from "./gmail-rejected-review-release.mjs";
 import {
   APPROVED_NOTE_RELEASE,
   APPROVED_NOTES_ENABLED as LEGACY_NOTES_ENABLED,
@@ -67,6 +68,7 @@ export const EXPECTED_OPERATOR_CAPABILITIES = Object.freeze([
   "gmail.attachments.review",
   "gmail.messages.search",
   "gmail.threads.read",
+  ...(GMAIL_REJECTED_REVIEW_ENABLED ? ["gmail.rejected_candidates.review"] : []),
   "identity.read",
   "jobnimbus.contacts.search",
   "jobnimbus.documents.attach_to_chat",

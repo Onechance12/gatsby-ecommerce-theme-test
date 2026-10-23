@@ -531,7 +531,7 @@ register(
   )
 );
 
-registerExactGmailReads(register, bridgeRequest);
+registerExactGmailReads(register, bridgeRequest, { reviewRejectedMessage: input => OPERATOR.reviewRejectedGmail(input) });
 
 register(
   "gmail_review_attachment_exact_file",

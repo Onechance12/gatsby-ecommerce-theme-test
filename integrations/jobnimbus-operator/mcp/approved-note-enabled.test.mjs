@@ -18,6 +18,7 @@ test("activated candidate validates exact note intent, readback and notification
     .replace(/bridgeCommit: "[a-f0-9]*"/, `bridgeCommit: "${"b".repeat(40)}"`));
   await copyFile(new URL("./scope.mjs", import.meta.url), path.join(directory, "scope.mjs"));
   await copyFile(new URL("./communications-sweep-release.mjs", import.meta.url), path.join(directory, "communications-sweep-release.mjs"));
+  await copyFile(new URL("./gmail-rejected-review-release.mjs", import.meta.url), path.join(directory, "gmail-rejected-review-release.mjs"));
   // This fixture deliberately tests the note-only candidate, regardless of
   // whether the parent package is the later coordinated PDF release.
   const pdfRelease = await readFile(new URL("./pdf-upload-release.mjs", import.meta.url), "utf8");
