@@ -25,11 +25,48 @@ test("an omitted contact closure flag comes from its exact active provider workf
   assert.equal(liveAssignedContactAllowed(verified, OWNER), true);
   assert.deepEqual(verified.closureVerification, {
     schemaVersion: 1, source: "jobnimbus_workflow_status",
-    workflowId: "1", statusId: "375", isClosed: false
+    workflowId: "1", statusId: "375", isClosed: false,
+    basis: "explicit_closed_flag"
   });
   assert.equal(Object.hasOwn(original, "is_closed"), false);
   assert.deepEqual(configuration, settings());
   assert.deepEqual(contactWithWorkflowClosure(original, configuration.workflows), verified);
+});
+
+test("modern workflow stages verify omitted closure flags without guessing from custom status names", () => {
+  for (const stage of ["Lead", "Estimating", "Sold", "In Production", "Accounts Receivable", "Completed", "Lost"]) {
+    const configuration = settings();
+    const status = configuration.workflows[0].status[0];
+    delete status.is_closed;
+    status.stage = stage;
+    const original = contact();
+    const verified = contactWithWorkflowClosure(original, configuration.workflows);
+    const closed = ["Completed", "Lost"].includes(stage);
+    assert.equal(verified.is_closed, closed);
+    assert.equal(liveAssignedContactAllowed(verified, OWNER), !closed);
+    assert.deepEqual(verified.closureVerification, {
+      schemaVersion: 1, source: "jobnimbus_workflow_status", workflowId: "1",
+      statusId: "375", isClosed: closed, basis: "workflow_stage", workflowStage: stage
+    });
+    assert.equal(Object.hasOwn(original, "is_closed"), false);
+  }
+});
+
+test("unknown stages and contradictory legacy flags never establish closure eligibility", () => {
+  for (const stage of [undefined, null, "", "None", "Unknown", "Estimating-ish", "estimating", 2, {}, []]) {
+    const configuration = settings();
+    const status = configuration.workflows[0].status[0];
+    delete status.is_closed;
+    status.stage = stage;
+    const original = contact();
+    assert.equal(contactWithWorkflowClosure(original, configuration), original);
+  }
+  for (const [is_closed, stage] of [[false, "Completed"], [false, "Lost"], [true, "Estimating"], [null, "Estimating"], ["unknown", "Estimating"], [false, "None"]]) {
+    const configuration = settings();
+    Object.assign(configuration.workflows[0].status[0], { is_closed, stage });
+    const original = contact();
+    assert.equal(contactWithWorkflowClosure(original, configuration), original);
+  }
 });
 
 test("explicit contact closure flags are never overridden, including invalid values", () => {

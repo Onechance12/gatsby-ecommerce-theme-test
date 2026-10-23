@@ -403,6 +403,37 @@ test("closure or unavailable workflow evidence after approval blocks the provide
   assert.equal(f.state.posts, 0);
 });
 
+test("modern stage-only workflow metadata verifies readback and rechecks changes after approval", async (t) => {
+  const f = await fixture(t, { live: true, workflowClosure: true });
+  const status = f.state.workflowSettings.workflows[0].status[0];
+  delete status.is_closed;
+  status.stage = "Estimating";
+  const ops = [{ type: "jobnimbus.update_contact", payload: {
+    query: "#990001", fields: { email: "synthetic-client@example.test" }
+  } }];
+  const firstPlan = await f.prepare(ops);
+  assert.equal(firstPlan.status, 200, JSON.stringify(firstPlan.body));
+  status.stage = "Completed";
+  assert.notEqual((await f.execute(ops, firstPlan.body)).status, 200);
+  assert.equal(f.state.contactPuts, 0);
+  status.stage = "Estimating";
+  const plan = await f.prepare(ops);
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  const executed = await f.execute(ops, plan.body);
+  assert.equal(executed.body.mode, "executed", JSON.stringify(executed.body));
+  assert.equal(executed.body.batch.completed[0].receipt.verifiedByReadback, true);
+  assert.equal(f.state.contactPuts, 1);
+  assert.equal(Object.hasOwn(f.contacts[0], "is_closed"), false);
+  assert.equal(Object.hasOwn(f.contacts[0], "closureVerification"), false);
+  status.stage = "None";
+  assert.notEqual((await f.prepare(ops)).status, 200);
+  status.stage = "Estimating";
+  f.contacts[0].owners = [{ id: "other-synthetic-owner" }];
+  assert.notEqual((await f.prepare(ops)).status, 200);
+  assert.equal(f.state.contactPuts, 1);
+  assert.equal(f.state.posts, 0);
+});
+
 test("post-write closure changes retain the partial-failure receipt instead of reusing pre-write metadata", async (t) => {
   const f = await fixture(t, { live: true, workflowClosure: true });
   const ops = [{ type: "jobnimbus.update_contact", payload: {
