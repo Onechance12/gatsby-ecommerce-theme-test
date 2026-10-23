@@ -11,24 +11,41 @@ export function createClaimIdentifierMatcher(value) {
     // delimiter. Do not strip arbitrary prefixes such as OTHER#ABC-123.
     .replace(/(?<![\p{L}\p{N}._/#-])claim(?:[ \t]+(?:number|no\.?))?[ \t]*#[ \t]*/gu, " ");
   const results = new Map();
-  return {
-    has(normalized) {
-      if (typeof normalized !== "string" || !/^[a-z0-9]{6,160}$/.test(normalized)) return false;
-      if (results.has(normalized)) return results.get(normalized);
-      // Whole alphanumeric identifier, allowing only known formatting changes.
-      // Never strip all punctuation from an entire email or perform fuzzy matching.
-      const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${[...normalized].join(SEPARATORS)}(?![\\p{L}\\p{N}])`, "gu");
-      let found = false;
-      for (const match of content.matchAll(pattern)) {
-        const before = content.slice(0, match.index);
-        const after = content.slice(match.index + match[0].length);
-        // Do not admit a suffix/prefix of a longer punctuated identifier.
-        if (/[\p{L}\p{N}][._/#-]+$/u.test(before) || /^[._/#-]+[\p{L}\p{N}]/u.test(after)) continue;
-        found = true;
-        break;
+  function inspect(normalized) {
+    if (typeof normalized !== "string" || !/^[a-z0-9]{6,160}$/.test(normalized)) {
+      return { matched: false, reason: "invalid_identifier", rejectedBoundaries: [] };
+    }
+    if (results.has(normalized)) return results.get(normalized);
+    // Whole alphanumeric identifier, allowing only known formatting changes.
+    // Never strip all punctuation from an entire email or perform fuzzy matching.
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${[...normalized].join(SEPARATORS)}(?![\\p{L}\\p{N}])`, "gu");
+    let found = false;
+    const rejectedBoundaries = new Set();
+    for (const match of content.matchAll(pattern)) {
+      const before = content.slice(0, match.index);
+      const after = content.slice(match.index + match[0].length);
+      // Do not admit a suffix/prefix of a longer punctuated identifier.
+      const prefix = /[\p{L}\p{N}][._/#-]+$/u.test(before);
+      const suffix = /^[._/#-]+[\p{L}\p{N}]/u.test(after);
+      if (prefix || suffix) {
+        if (prefix) rejectedBoundaries.add("longer_identifier_prefix");
+        if (suffix) rejectedBoundaries.add("longer_identifier_suffix");
+        continue;
       }
-      results.set(normalized, found);
-      return found;
+      found = true;
+      break;
+    }
+    const result = { matched: found,
+      reason: found ? "matched" : rejectedBoundaries.size ? "longer_identifier_boundary" : "no_bounded_match",
+      rejectedBoundaries: found ? [] : [...rejectedBoundaries] };
+    results.set(normalized, result);
+    return result;
+  }
+  return {
+    has(normalized) { return inspect(normalized).matched; },
+    explain(normalized) {
+      const result = inspect(normalized);
+      return { ...result, rejectedBoundaries: [...result.rejectedBoundaries] };
     }
   };
 }

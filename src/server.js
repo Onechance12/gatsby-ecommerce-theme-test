@@ -91,6 +91,7 @@ import {
 import { researchPropertyHailDates } from "./weather/dolResearch.js";
 import { createGmailAttachmentReferences } from "./gmail/attachment-reference.js";
 import { claimSearchVariants, createClaimIdentifierMatcher, emptyGmailWithheldReasonCounts, gmailCorrelationDecision } from "./gmail/file-correlation.js";
+import { createGmailCorrelationAudit, GMAIL_AUDIT_LOCATIONS, GMAIL_AUDIT_MAX_CANDIDATES } from "./gmail/correlation-audit.js";
 import { findOutboundReservationConflict } from "./gmail/reservation-policy.js";
 import { canonicalizeContactFieldAliases } from "./jobnimbus/contact-fields.js";
 import { assignedRoster, liveAssignedContactAllowed } from "./jobnimbus/assigned-roster.js";
@@ -8539,7 +8540,19 @@ async function updateCalendarEvent(input) {
   return { mode: "executed", ...(file ? { file } : {}), eventId, result, memoryCloseout };
 }
 
+function requestedGmailCorrelationAudit(input) {
+  if (input.includeCorrelationAudit === undefined || input.includeCorrelationAudit === false) return null;
+  if (input.includeCorrelationAudit !== true || input.completeReview !== true) {
+    badRequest("includeCorrelationAudit must be boolean and requires completeReview:true.");
+  }
+  if (!isMacCodexOperatorRequest() || operatorCompanyScopeActive()) {
+    operatorScopeError("Gmail correlation audit is available only for native Mac assigned exact-file reads.");
+  }
+  return createGmailCorrelationAudit();
+}
+
 async function gmailSearch(input) {
+  const audit = requestedGmailCorrelationAudit(input);
   const operatorFile = await operatorCommunicationFile(input, "Gmail search");
   const query = operatorFile
     ? buildFileGmailQuery(operatorFile, input.communicationDays)
@@ -8583,10 +8596,13 @@ async function gmailSearch(input) {
         if (String(message?.id || "") !== String(row.id)) throw new Error("Gmail returned a different message than the exact search result.");
         if (completeReview && !String(message?.threadId || "").trim()) throw new Error("Gmail did not return a thread binding for a complete exact-file message review.");
         const compact = compactGmailFullMessage(message);
-        const correlation = gmailMessageFileCorrelation(compact, operatorFile);
+        const correlation = gmailMessageFileCorrelation(compact, operatorFile, { includeAudit: Boolean(audit) });
         const decision = gmailCorrelationDecision(correlation);
+        const excludedOtherFile = decision !== "matched" && completeReview
+          && gmailMessageProvesOtherFile(compact, operatorFile, correlation);
+        audit?.record(correlation, { excludedOtherFile });
         if (decision !== "matched") {
-          if (completeReview && gmailMessageProvesOtherFile(compact, operatorFile, correlation)) excludedOtherFileMessages += 1;
+          if (excludedOtherFile) excludedOtherFileMessages += 1;
           else withheldReasonCounts[decision] += 1;
           continue;
         }
@@ -8622,11 +8638,13 @@ async function gmailSearch(input) {
     count: hydrated.length,
     messages: hydrated,
     threads: groupGmailMessagesByThread(hydrated),
-    coverage
+    coverage,
+    ...(audit ? { correlationAudit: audit.snapshot() } : {})
   };
 }
 
 async function gmailThread(input) {
+  const audit = requestedGmailCorrelationAudit(input);
   const operatorFile = await operatorCommunicationFile(input, "Gmail thread");
   const threadId = required(input.threadId, "threadId");
   const thread = await gmailApi(`/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/threads/${encodeURIComponent(threadId)}?format=full`);
@@ -8635,8 +8653,10 @@ async function gmailThread(input) {
   const candidates = Array.isArray(thread.messages) ? thread.messages.map((message) => compactGmailFullMessage(message, completeReview)) : [];
   const withheldReasonCounts = operatorFile ? emptyGmailWithheldReasonCounts() : null;
   const matched = operatorFile
-    ? candidates.filter((message) => {
-      const decision = gmailCorrelationDecision(gmailMessageFileCorrelation(message, operatorFile));
+    ? candidates.filter((message, index) => {
+      const correlation = gmailMessageFileCorrelation(message, operatorFile, { includeAudit: Boolean(audit) && index < GMAIL_AUDIT_MAX_CANDIDATES });
+      const decision = gmailCorrelationDecision(correlation);
+      audit?.record(correlation);
       if (decision === "matched") return true;
       withheldReasonCounts[decision] += 1;
       return false;
@@ -8665,6 +8685,7 @@ async function gmailThread(input) {
     messageCount: matched.length,
     messages,
     assistantRead: buildGmailAssistantRead(messages),
+    ...(audit ? { correlationAudit: audit.snapshot() } : {}),
     coverage: gmailReadCoverage({
       scanned: candidates.length,
       returned: messages.length,
@@ -8919,7 +8940,7 @@ function operatorScopeError(message) {
   throw error;
 }
 
-function gmailMessageFileCorrelation(message, file) {
+function gmailMessageFileCorrelation(message, file, { includeAudit = false } = {}) {
   const headerText = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.headers || [
     message.from,
     message.to,
@@ -8961,6 +8982,61 @@ function gmailMessageFileCorrelation(message, file) {
       || (propertyMatch && communicationIdentifierPresent(content, policyProperty.policy))
     ))
   );
+  // Observe the very same predicates used below. The trace stores only fixed
+  // evidence kinds/locations; private values stay inside this evaluation.
+  const auditConflicts = [];
+  const addAuditEvidence = (rows, kind, predicate, headersOnly = false) => {
+    if (!includeAudit) return;
+    const parts = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.parts || {};
+    const locations = GMAIL_AUDIT_LOCATIONS.filter(location => (
+      location !== "combined_content"
+      && (!headersOnly || ["from", "to", "cc", "bcc"].includes(location))
+      && predicate(String(parts[location] || ""))
+    ));
+    rows.push({ kind, locations: locations.length ? locations : ["combined_content"] });
+  };
+  const hasEmail = (text, email) => [...text.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)]
+    .some(match => match[0].toLowerCase() === email);
+  const finish = (result) => {
+    if (!includeAudit || result.complete !== true) return result;
+    const target = [];
+    const matchedBy = [];
+    const claimCheck = claimIdentifiers.explain(hcnNormalizeCorrelationClaim(claimNumber));
+    const parts = message[GMAIL_MESSAGE_CORRELATION_CONTENT]?.parts || {};
+    const rejectedBoundaries = claimCheck.rejectedBoundaries.map(reason => {
+      const locations = GMAIL_AUDIT_LOCATIONS.filter(location => location !== "combined_content"
+        && createClaimIdentifierMatcher(parts[location]).explain(hcnNormalizeCorrelationClaim(claimNumber)).rejectedBoundaries.includes(reason));
+      return { reason, locations: locations.length ? locations : ["combined_content"] };
+    });
+    if (clientEmail && headerAddresses.has(clientEmail)) {
+      addAuditEvidence(target, "client_email_header", text => hasEmail(text, clientEmail), true);
+      if (file[GMAIL_FILE_EMAIL_UNIQUE] === true) matchedBy.push("unique_client_email_header");
+    }
+    if (normalizeCompare(claimNumber).length >= 6 && claimIdentifiers.has(hcnNormalizeCorrelationClaim(claimNumber))) {
+      addAuditEvidence(target, "claim_identifier", text => createClaimIdentifierMatcher(text).has(hcnNormalizeCorrelationClaim(claimNumber)));
+      if (file[GMAIL_FILE_CLAIM_UNIQUE] === true) matchedBy.push("unique_claim_identifier");
+    }
+    if (communicationIdentifierPresent(content, file.policyNumber)) {
+      addAuditEvidence(target, "policy_identifier", text => communicationIdentifierPresent(text, file.policyNumber));
+    }
+    const targetStreet = policyProperty?.street || communicationWords(String(file.address || "").split(",")[0]);
+    if (targetStreet && ` ${communicationWords(content)} `.includes(` ${targetStreet} `)) {
+      addAuditEvidence(target, "property", text => ` ${communicationWords(text)} `.includes(` ${targetStreet} `));
+    }
+    if (exactFileRefs.has(String(file.id))) {
+      addAuditEvidence(target, "file_reference", text => communicationJobNimbusFileRefs(text).has(String(file.id)));
+      if (policyProperty) matchedBy.push("exact_file_reference_with_policy_binding");
+    }
+    if (propertyMatch && communicationIdentifierPresent(content, policyProperty.policy)) matchedBy.push("policy_property");
+    return { ...result, audit: {
+      uniqueClientEmail: file[GMAIL_FILE_EMAIL_UNIQUE] === true,
+      uniqueClaim: file[GMAIL_FILE_CLAIM_UNIQUE] === true,
+      policyPropertyBindingAvailable: Boolean(policyProperty),
+      matchedBy: result.targetMatch ? matchedBy : [],
+      claimCheck: { matched: claimCheck.matched, reason: claimCheck.reason, rejectedBoundaries },
+      target, conflicts: auditConflicts
+    } };
+  };
   const companyContacts = file[GMAIL_FILE_COMPANY_CONTACTS];
   if (!Array.isArray(companyContacts)) {
     return { complete: false, targetMatch: false, conflictingFileIds: [] };
@@ -8968,7 +9044,10 @@ function gmailMessageFileCorrelation(message, file) {
   // An explicit second file reference remains ambiguous even when that file
   // is absent from the index. Do not disclose its unknown provider identifier.
   if (policyProperty && [...exactFileRefs].some((id) => id !== String(file.id || ""))) {
-    return { complete: true, targetMatch: false, conflictingFileIds: [], conflictingFileReference: true };
+    addAuditEvidence(auditConflicts, "file_reference", text => (
+      [...communicationJobNimbusFileRefs(text)].some(id => id !== String(file.id || ""))
+    ));
+    return finish({ complete: true, targetMatch: false, conflictingFileIds: [], conflictingFileReference: true });
   }
   const conflictingFileIds = [];
   for (const contact of companyContacts) {
@@ -9002,13 +9081,25 @@ function gmailMessageFileCorrelation(message, file) {
     const exactFileMatch = isInsuranceFile(contact) && exactFileRefs.has(contactId);
     if ((emailMatch || claimMatch || policyMatch || exactFileMatch) && contactId !== String(file.id || "")) {
       conflictingFileIds.push(contactId);
+      if (includeAudit) {
+        if (emailMatch) addAuditEvidence(auditConflicts, "client_email_header", text => (
+          [...emailInventory.values].some(email => hasEmail(text, email))
+        ), true);
+        if (claimMatch) addAuditEvidence(auditConflicts, "claim_identifier", text => (
+          [...claimInventory.values].some(claim => claim.length >= 6 && createClaimIdentifierMatcher(text).has(claim))
+        ));
+        if (policyMatch) addAuditEvidence(auditConflicts, "policy_identifier", text => (
+          [...policyInventory.values].some(policy => communicationIdentifierPresent(text, policy))
+        ));
+        if (exactFileMatch) addAuditEvidence(auditConflicts, "file_reference", text => communicationJobNimbusFileRefs(text).has(contactId));
+      }
     }
   }
-  return {
+  return finish({
     complete: true,
     targetMatch,
     conflictingFileIds: [...new Set(conflictingFileIds)]
-  };
+  });
 }
 
 function gmailMessageMatchesFile(message, file) {
@@ -15382,7 +15473,13 @@ function compactGmailFullMessage(message, completeReview = false) {
       content: [
         ...Object.values(headers), plainText, htmlText,
         message.snippet, ...compact.attachments.map((row) => row.filename)
-      ].join("\n")
+      ].join("\n"),
+      parts: {
+        from: headers.from, to: headers.to, cc: headers.cc, bcc: headers.bcc,
+        subject: headers.subject, date: headers.date,
+        plain_body: plainText, html_body: htmlText, snippet: message.snippet,
+        attachment_name: compact.attachments.map(row => row.filename).join("\n")
+      }
     }
   });
   return compact;

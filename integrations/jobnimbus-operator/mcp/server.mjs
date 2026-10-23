@@ -14,6 +14,7 @@ import { QUO_SMS_ENABLED } from "./quo-sms-release.mjs";
 import { QUO_SMS_TYPE } from "./quo-sms-contract.mjs";
 import { createOperatorCoordinator, PDF_RECEIPT_RESOLUTION_ENABLED } from "./operator-coordinator.mjs";
 import { createEncryptedApprovalStore } from "./approval-store.mjs";
+import { registerExactGmailReads } from "./gmail-exact-reads.mjs";
 import { COMMUNICATION_SWEEP_ENABLED } from "./communications-sweep-release.mjs";
 import {
   PACKET_REVIEW_SOURCES, PACKET_REVIEW_METHODS, PACKET_REVIEW_FACT_KEYS, CLAIM_STOP_SIGNAL_CODES
@@ -530,28 +531,7 @@ register(
   )
 );
 
-register(
-  "gmail_search_exact_file",
-  "Search the connected Wave Gmail mailbox only through facts freshly bound to one exact Chance-assigned JobNimbus file.",
-  {
-    fileQuery: z.string().min(1),
-    communicationDays: z.number().int().min(1).max(3650).optional(),
-    completeReview: z.boolean().optional(),
-    limit: z.number().int().min(1).max(25).optional()
-  },
-  (input) => bridgeRequest("POST", "/gmail/search", input)
-);
-
-register(
-  "gmail_read_thread_exact_file",
-  "Read a Gmail thread only after the bridge verifies it belongs to one exact Chance-assigned file.",
-  {
-    fileQuery: z.string().min(1),
-    threadId: z.string().min(1),
-    completeReview: z.boolean().optional()
-  },
-  (input) => bridgeRequest("POST", "/gmail/thread", input)
-);
+registerExactGmailReads(register, bridgeRequest);
 
 register(
   "gmail_review_attachment_exact_file",

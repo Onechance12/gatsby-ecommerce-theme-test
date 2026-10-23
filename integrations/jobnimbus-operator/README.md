@@ -1,5 +1,34 @@
 # JobNimbus Operator for Mac
 
+## Read-only Gmail rejection audit candidate (2026-10-23)
+
+Local source only; not installed or deployed. The two assigned exact-file Gmail
+read tools gain an optional bounded reason trail using the same correlation
+predicates. See [auditing rejections](skills/jobnimbus-operator/references/evidence-review.md#auditing-gmail-rejections).
+No rejected content or foreign identifiers are exposed, and no admission,
+ownership, approval, receipt, write or coverage gate is relaxed. Normal reads
+do not opt in. The protocol tests use the actual registration module with a
+synthetic in-memory MCP transport, not the installed native app-host.
+
+Development approval does not deploy or activate this candidate. Release needs
+the coordinated bridge commit and a new versioned Operator package, preserving
+the current package's cumulative changes and all active pins. Never edit the
+installed cache or use customer effects as a smoke test. After release, verify
+the exposed schemas and one approved assigned-file audit; keep withheld rows
+unresolved unless their evidence has actually been verified.
+
+Local validation:
+
+- 42 Gmail unit, native-registration protocol and instruction-contract tests
+  passed; the protocol uses synthetic responses and no real app-host connection.
+- 13 focused bridge HTTP fixture tests passed, including audit-on/off parity,
+  mixed/Bcc/late-body/HTML/filename conflicts, malformed indexes, duplicate
+  identifiers, denied scopes, pagination and response limits. No customer data
+  or provider effects were used.
+- Server syntax, whitespace and Operator skill validation passed. Earlier HTTP
+  runs encountered fixture startup timeouts; the final serial run passed all
+  selected tests. No production-readiness claim follows from synthetic tests.
+
 ## Modern workflow stage closure verification (2026-10-23)
 
 Current JobNimbus workflow statuses may omit `is_closed` as well as the contact

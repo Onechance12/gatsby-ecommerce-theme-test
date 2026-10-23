@@ -33,6 +33,40 @@ window, not every historical message in the mailbox. Homeowner-number Quo
 history does not prove carrier-number conversations were reviewed. Preserve
 those limitations; empty results are not universal absence evidence.
 
+## Auditing Gmail rejections
+
+After coordinated activation, the assigned native `gmail_search_exact_file`
+and `gmail_read_thread_exact_file` accept `includeCorrelationAudit:true` with
+`completeReview:true`. Use this when investigating a rejection, not on every
+routine review. Company scope and arbitrary mailbox/message lookup are not
+supported by this diagnostic. A wholly unmatched thread still returns a denial.
+
+`correlationAudit` explains the same evaluated decisions without changing
+admission or coverage. Each response-local candidate number has a disposition
+(`matched`, `withheld`, or a proven search-only `excluded_other_file`), the first
+failed decision category, and fixed evidence kinds/locations. Target uniqueness,
+observed target evidence and conflicting evidence are separate. An incomplete
+index returns only its failure category, not later predicates. The target
+`claimCheck` reports the actual matcher's result and longer-identifier boundary
+rejections, including source location; it is not a second, more permissive matcher.
+
+The trail is bounded to 250 scanned candidates and reports omitted rows. The
+ordinary coverage flags still govern unread pages, windows, thread/body limits
+and unresolved messages. Candidate numbers and the random audit ID apply only
+to that response, are not Gmail identifiers or tokens, and cannot open messages.
+No rejected message ID, subject, sender, body, other client's identifier or
+evidence value is returned. Attachment names are inspected, not attachment bytes.
+`combined_content` means the existing combined-text predicate matched without a
+single-part location; do not invent a source location or quote.
+
+This is an explanation of the algorithm, not independent proof it was correct.
+For example, an identifier directly followed by `.pdf` currently hits the
+conservative longer-identifier suffix guard. Audit mode exposes that rejection
+but does not fix it. A missing match or a conflict is not proof the email is
+unrelated. Preserve unresolved candidates; do not conclude no carrier reply or
+clear an action gate until the relevant evidence is actually verified. Use
+synthetic reproductions for matcher corrections, never customer mail in fixtures.
+
 ## Gmail attachments
 
 Use the `attachmentRef` on the selected attachment from a freshly verified
