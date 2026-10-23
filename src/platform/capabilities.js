@@ -86,6 +86,7 @@ export const CAPABILITY_ROUTE_REGISTRY = Object.freeze([
   capability("retell.homeowner.call.review", "POST /retell/homeowner-call-result"),
   capability("gmail.messages.search", "POST /gmail/search"),
   capability("gmail.threads.read", "POST /gmail/thread"),
+  capability("gmail.rejected_candidates.review", "POST /gmail/rejected-review"),
   capability("gmail.attachments.review", "POST /gmail/attachment-review"),
   capability("gmail.drafts.create", "POST /gmail/draft"),
   capability("gmail.drafts.send", "POST /gmail/send"),

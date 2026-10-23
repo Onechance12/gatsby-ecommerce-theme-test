@@ -93,7 +93,7 @@ test("plan refuses every materially altered display; receipts require verified b
 async function enabledCandidate(t) {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "enabled-pdf-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const file of ["scope.mjs", "communications-sweep-release.mjs", "operator-coordinator.mjs", "pdf-receipt-resolution.mjs", "pdf-receipt-resolution-release.mjs", "reviewed-claim-packet.mjs", "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs", "quo-sms-release.mjs", "quo-sms-contract.mjs"]) {
+  for (const file of ["scope.mjs", "communications-sweep-release.mjs", "gmail-rejected-review-release.mjs", "operator-coordinator.mjs", "pdf-receipt-resolution.mjs", "pdf-receipt-resolution-release.mjs", "reviewed-claim-packet.mjs", "approved-note-release.mjs", "approved-note-plan.mjs", "pdf-upload-contract.mjs", "local-pdf.mjs", "quo-sms-release.mjs", "quo-sms-contract.mjs"]) {
     await copyFile(new URL(`./${file}`, import.meta.url), path.join(root, file));
   }
   const inactiveResolution = await readFile(new URL("./pdf-receipt-resolution-release.mjs", import.meta.url), "utf8");

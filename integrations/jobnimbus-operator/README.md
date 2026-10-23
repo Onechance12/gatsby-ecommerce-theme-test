@@ -1,5 +1,28 @@
 # JobNimbus Operator for Mac
 
+## Scoped rejected-email inspection release (2026-10-23)
+
+Chance approved a coordinated bridge and versioned Operator release. Complete
+assigned-file Gmail searches, threads and file packets can now include a bounded
+rejection register automatically: exact permitted message metadata, the original
+rejection reason, and a short-lived reference for independent read-only review.
+`gmail_review_rejected_message` opens only that reference, after fresh mailbox,
+file, policy, content and disclosure checks. Inspection never admits action
+evidence or removes a coverage warning. Known outside-scope, excluded, inactive
+and unidentified-file candidates remain redacted with a separate access reason.
+
+The source defaults remain inactive. Release activates only
+`ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW=true` on the bridge and the compiled
+`GMAIL_REJECTED_REVIEW_ENABLED` flag in a new versioned Operator pinned to the
+deployed commit. Preserve the existing owner/action policy, historical receipts,
+separate management/research profiles and all approval/send/CRM guards. Never
+edit an installed cache. Verify the actual installed copy has ordinary dependency
+files, then distinguish fresh-process verification from native chat activation.
+
+Targeted local validation: 24 new feature tests, 31 selected Gmail HTTP regressions
+and 156 related regressions passed. These are synthetic, not a review of live
+rejected messages or proof that the current chat loaded the new tools.
+
 ## Read-only Gmail rejection audit candidate (2026-10-23)
 
 Local source only; not installed or deployed. The two assigned exact-file Gmail

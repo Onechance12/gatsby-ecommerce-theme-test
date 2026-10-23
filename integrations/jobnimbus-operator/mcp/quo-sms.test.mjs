@@ -135,6 +135,7 @@ async function enabledCandidate(t, { live = false } = {}) {
   for (const file of [
     "scope.mjs",
     "communications-sweep-release.mjs",
+    "gmail-rejected-review-release.mjs",
     "operator-coordinator.mjs",
     "pdf-receipt-resolution.mjs",
     "pdf-receipt-resolution-release.mjs",

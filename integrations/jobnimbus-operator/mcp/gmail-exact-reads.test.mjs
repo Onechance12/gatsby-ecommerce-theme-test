@@ -7,10 +7,11 @@ import { registerExactGmailReads } from "./gmail-exact-reads.mjs";
 
 // Real SDK tool-schema/protocol wiring with synthetic bridge responses only.
 // No installed entrypoint, network, Keychain or native app-host is exercised.
-async function harness(t) {
+async function harness(t, rejectedReviewEnabled = false) {
   const server = new McpServer({ name: "synthetic-gmail-audit", version: "0.0.0" });
   const client = new Client({ name: "synthetic-audit-client", version: "0.0.0" });
   const requests = [];
+  const inspections = [];
   registerExactGmailReads((name, description, inputSchema, handler) => {
     server.registerTool(name, { description, inputSchema }, async input => ({
       content: [{ type: "text", text: JSON.stringify(await handler(input)) }]
@@ -18,11 +19,14 @@ async function harness(t) {
   }, async (method, route, body) => {
     requests.push({ method, route, body });
     return { synthetic: true, correlationAudit: { readOnly: true, changesAdmission: false } };
-  });
+  }, { rejectedReviewEnabled, reviewRejectedMessage: async input => {
+    inspections.push(input);
+    return { synthetic: true, readOnly: true, verifiedFileEvidence: false, authorizesAction: false };
+  } });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a), client.connect(b)]);
   t.after(async () => { await client.close(); await server.close(); });
-  return { client, requests };
+  return { client, requests, inspections };
 }
 
 test("native Gmail read registration exposes and forwards the opt-in audit through MCP", async t => {
@@ -42,6 +46,30 @@ test("native Gmail read registration exposes and forwards the opt-in audit throu
     { method: "POST", route: "/gmail/search", body: search },
     { method: "POST", route: "/gmail/thread", body: thread }
   ]);
+});
+
+test("activated native reads automatically request the rejected list and expose only a reference-bound inspector", async t => {
+  const { client, requests, inspections } = await harness(t, true);
+  const tools = (await client.listTools()).tools;
+  assert.deepEqual(tools.map(tool => tool.name), ["gmail_search_exact_file", "gmail_read_thread_exact_file", "gmail_review_rejected_message"]);
+  const result = await client.callTool({ name: "gmail_search_exact_file", arguments: { fileQuery: "#990001", completeReview: true } });
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  assert.deepEqual(requests[0].body, { fileQuery: "#990001", completeReview: true, includeRejectedReview: true });
+  const input = { fileQuery: "#990001", reviewRef: "synthetic.reference" };
+  assert.notEqual((await client.callTool({ name: "gmail_review_rejected_message", arguments: input })).isError, true);
+  assert.deepEqual(inspections, [input]);
+  for (const patch of [{ messageId: "arbitrary" }, { mailbox: "other@example.test" }, { execute: true }, { operatorScope: "company" }]) {
+    assert.equal((await client.callTool({ name: "gmail_review_rejected_message", arguments: { ...input, ...patch } })).isError, true);
+  }
+  assert.equal(inspections.length, 1);
+  assert.equal(requests.length, 1);
+});
+
+test("inactive native release cannot opt into rich rejected reads", async t => {
+  const { client, requests } = await harness(t);
+  const result = await client.callTool({ name: "gmail_search_exact_file", arguments: { fileQuery: "#990001", completeReview: true, includeRejectedReview: true } });
+  assert.equal(result.isError, true);
+  assert.equal(requests.length, 0);
 });
 
 test("native Gmail audit schema rejects bypass inputs before any synthetic bridge request", async t => {

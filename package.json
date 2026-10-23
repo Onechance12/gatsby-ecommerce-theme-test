@@ -12,6 +12,7 @@
     "test:assigned-roster": "node --test src/jobnimbus/assigned-roster.test.js src/jobnimbus/workflow-closure.test.js src/operations/thresher-policy.test.js src/approved-quo-sms-smoke.test.js integrations/jobnimbus-operator/mcp/quo-sms.test.mjs",
     "test:reviewed-claim-packet": "node --test src/reviewed-claim-packet-contract.test.js",
     "test:communication-evidence": "node --test src/gmail/*.test.js",
+    "test:gmail-rejected-review": "node --test src/gmail/rejected-review.test.js src/gmail-rejected-review-http.test.js integrations/jobnimbus-operator/mcp/gmail-exact-reads.test.mjs integrations/jobnimbus-operator/mcp/gmail-rejected-review.test.mjs",
     "test:communications-sweep": "node --test src/operations/recent-communications.test.js src/quo/recent-activity.test.js src/gmail/recent-activity.test.js src/communications-sweep-http.test.js integrations/jobnimbus-operator/mcp/communications-sweep.test.mjs",
     "test:pdf-upload": "node --test src/approved-pdf-smoke.test.js src/jobnimbus/approved-pdf.test.js src/jobnimbus/pdf-upload-transport.test.js integrations/jobnimbus-operator/mcp/*.test.mjs",
     "test:quo-sms": "node --test src/quo/approved-sms.test.js src/quo/client.test.js src/quo/text-receipt.test.js src/approved-quo-sms-smoke.test.js integrations/jobnimbus-operator/mcp/quo-sms.test.mjs",

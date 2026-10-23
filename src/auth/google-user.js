@@ -286,6 +286,12 @@ export async function authenticateGoogleAccessToken({
 export function routeAllowed(identity, method, pathname) {
   if (!identity) return false;
   const route = `${String(method || "").toUpperCase()} ${pathname}`;
+  if (pathname === "/gmail/rejected-review") {
+    return route === "POST /gmail/rejected-review"
+      && process.env.ALLOW_OPERATOR_GMAIL_REJECTION_REVIEW === "true"
+      && identity.type === "codex_operator_token" && identity.role === "codex_operator"
+      && identity.subject === "codex-mac-operator";
+  }
   if (pathname === "/ops/recent-communications") {
     return route === "POST /ops/recent-communications"
       && process.env.ALLOW_OPERATOR_COMMUNICATION_SWEEP === "true"

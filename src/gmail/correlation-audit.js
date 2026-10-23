@@ -85,6 +85,7 @@ export function createGmailCorrelationAudit() {
         }
       }
       rows.push(row);
+      return structuredClone(row);
     },
     snapshot() {
       return {

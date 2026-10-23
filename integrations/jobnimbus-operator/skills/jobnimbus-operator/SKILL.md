@@ -48,7 +48,7 @@ or remove a hold just to make a test pass.
 
 Before any effect, load session/approval rules plus the relevant mode:
 
-- Exact-file evidence and bounded communications:
+- Exact-file evidence, bounded communications and independent rejected-email review:
   [evidence review](references/evidence-review.md).
 - Latest missed calls, unknown callers, voicemails or recent email/activity:
   [recent communications](references/recent-communications.md). Use the
@@ -75,6 +75,9 @@ matches remain leads until exact-file review. Report all-assigned Insurance,
 active/open, returned counts and coverage separately; never assume a 58-file
 book. Current eligibility comes from the attested release: live ownership when
 that policy is active, an exact roster only for a legacy fixed-file release.
+Rejected email is not automatically irrelevant. When the separate inspection
+capability is activated, use its candidate list and permitted originals as
+described in evidence review; do not promote them to verified action evidence.
 
 Client effects require their exact current plan and explicit approval.
 Draft creation is not sending; a receipt disposition is not an upload/access
